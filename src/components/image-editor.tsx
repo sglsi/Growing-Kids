@@ -91,38 +91,6 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rotation, naturalW, naturalH])
 
-  // 绘制当前旋转后的图像到 canvas
-  useEffect(() => {
-    if (!visible || !boxW || !boxH || !naturalW) return
-    const draw = async () => {
-      const node = await getCanvasNode()
-      if (!node) return
-      const dpr = Taro.getSystemInfoSync().pixelRatio || 1
-      node.width = boxW * dpr
-      node.height = boxH * dpr
-      const ctx = node.getContext('2d')
-      ctx.scale(dpr, dpr)
-      ctx.clearRect(0, 0, boxW, boxH)
-      ctx.save()
-      ctx.translate(boxW / 2, boxH / 2)
-      ctx.rotate((rotation * Math.PI) / 180)
-      // 旋转后图像以 contain 方式完整显示在 boxW × boxH 内
-      const scale = Math.min(boxW / naturalW, boxH / naturalH)
-      const drawW = naturalW * scale
-      const drawH = naturalH * scale
-      ctx.drawImage(
-        src,
-        -drawW / 2,
-        -drawH / 2,
-        drawW,
-        drawH,
-      )
-      ctx.restore()
-    }
-    draw()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, boxW, boxH, rotation, naturalW, naturalH])
-
   const getCanvasNode = async (): Promise<any> => {
     if (canvasNodeRef.current) return canvasNodeRef.current
     return new Promise((resolve) => {
@@ -136,6 +104,45 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
         })
     })
   }
+
+  // 将旋转后的整图以 contain 方式绘制到画布（导出前务必 await 本函数以完成绘制）
+  const renderCanvas = async () => {
+    const node = await getCanvasNode()
+    if (!node) return
+    const dpr = Taro.getSystemInfoSync().pixelRatio || 1
+    node.width = boxW * dpr
+    node.height = boxH * dpr
+    const ctx = node.getContext('2d')
+    ctx.scale(dpr, dpr)
+    ctx.clearRect(0, 0, boxW, boxH)
+    // 用 canvas.createImage 加载本地/网络图片，避免传字符串在小程序真机绘制失败
+    let img: any = null
+    if (node.createImage) {
+      img = node.createImage()
+    } else {
+      img = new Image()
+    }
+    img.src = src
+    await new Promise<void>((resolve) => {
+      img.onload = () => resolve()
+      img.onerror = () => resolve()
+    })
+    ctx.save()
+    ctx.translate(boxW / 2, boxH / 2)
+    ctx.rotate((rotation * Math.PI) / 180)
+    const scale = Math.min(boxW / naturalW, boxH / naturalH)
+    const drawW = naturalW * scale
+    const drawH = naturalH * scale
+    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH)
+    ctx.restore()
+  }
+
+  // 跟随状态变化重绘
+  useEffect(() => {
+    if (!visible || !boxW || !boxH || !naturalW) return
+    renderCanvas()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, boxW, boxH, rotation, naturalW, naturalH])
 
   // ---------- 裁剪框手势 ----------
   const hitTarget = (touchX: number, touchY: number): DragTarget | null => {
@@ -197,17 +204,20 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
   const handleConfirm = async () => {
     setBusy(true)
     try {
+      await renderCanvas() // 确保绘制完成
       const node = await getCanvasNode()
-      const dpr = Taro.getSystemInfoSync().pixelRatio || 1
+      if (!node) throw new Error('canvas 未就绪')
+      const nw = node.width
+      const nh = node.height
       const out = await new Promise<string>((resolve, reject) => {
         Taro.canvasToTempFilePath({
           canvas: node,
-          x: crop.x * boxW,
-          y: crop.y * boxH,
-          width: crop.w * boxW,
-          height: crop.h * boxH,
-          destWidth: Math.round(crop.w * boxW * dpr),
-          destHeight: Math.round(crop.h * boxH * dpr),
+          x: crop.x * nw,
+          y: crop.y * nh,
+          width: crop.w * nw,
+          height: crop.h * nh,
+          destWidth: Math.round(crop.w * nw),
+          destHeight: Math.round(crop.h * nh),
           fileType: 'jpg',
           quality: 0.92,
           success: (r) => resolve(r.tempFilePath),

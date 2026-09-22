@@ -1,5 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common'
 import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
+import * as http from 'http'
+import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
 import type { RecognizedItem } from './ocr.types'
 
@@ -13,8 +15,41 @@ export class OcrService {
     this.client = new LLMClient()
   }
 
+  // 下载文件原始字节并按 UTF-8 解码（针对纯文本，避免 FetchClient 中文乱码）
+  private downloadAsUtf8(url: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const mod = url.startsWith('https:') ? https : http
+      mod
+        .get(url, (res) => {
+          const chunks: Buffer[] = []
+          res.on('data', (c: Buffer) => chunks.push(c))
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks)
+            // 优先 UTF-8；若检测到替换字符则尝试双转义修复
+            let text = buf.toString('utf-8')
+            if (buf.length && text.includes('\uFFFD') && !/^[\u0000-\u007F]+$/.test(text)) {
+              const fixed = Buffer.from(buf.toString('latin1'), 'utf-8').toString('utf-8')
+              if (!fixed.includes('\uFFFD')) text = fixed
+            }
+            resolve(text)
+          })
+        })
+        .on('error', reject)
+    })
+  }
+
   // 从文档 URL（pdf/doc/docx/txt 等）提取纯文本，供 LLM 识别
   private async extractDocumentText(fileUrl: string): Promise<string> {
+    const path = fileUrl.split('?')[0]
+    const isTextLike = /\.(txt|text|md|csv|log)$/i.test(path)
+    if (isTextLike) {
+      try {
+        const raw = await this.downloadAsUtf8(fileUrl)
+        if (raw.trim()) return raw.trim()
+      } catch (e) {
+        // 下载失败，回退到 FetchClient
+      }
+    }
     const fetchClient = new FetchClient(new Config())
     const resp = await fetchClient.fetch(fileUrl)
     const text = (resp.content || [])
