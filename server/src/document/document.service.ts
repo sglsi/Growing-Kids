@@ -10,6 +10,8 @@ interface ExportParams {
   start_date?: string
   end_date?: string
   title: string
+  /** 是否包含已掌握题目；默认 false（已掌握题目不进入汇总） */
+  include_mastered?: boolean
 }
 
 interface RawRow {
@@ -34,6 +36,7 @@ export class DocumentService {
     if (params.subject_id) q = q.eq('subject_id', params.subject_id)
     if (params.start_date) q = q.gte('recognized_at', params.start_date)
     if (params.end_date) q = q.lte('recognized_at', params.end_date)
+    if (!params.include_mastered) q = q.eq('mastered', false)
     q = q.order('recognized_at', { ascending: true })
 
     const { data, error } = await q

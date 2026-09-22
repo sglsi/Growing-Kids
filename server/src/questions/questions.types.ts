@@ -9,6 +9,8 @@ export interface Question {
   wrong_answer: string
   source: string
   status: 'answered' | 'pending'
+  mastered: boolean
+  mastered_at: string | null
   recognized_at: string
   created_at: string
   updated_at: string
@@ -28,6 +30,7 @@ export interface CreateQuestionDto {
   wrong_answer?: string
   source?: string
   status?: 'answered' | 'pending'
+  mastered?: boolean
 }
 
 export type UpdateQuestionDto = Partial<CreateQuestionDto>

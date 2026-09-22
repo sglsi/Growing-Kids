@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
+import { Switch } from '@/components/ui/switch'
 import { Network } from '@/network'
 import {
   fetchQuestionDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
@@ -23,6 +24,7 @@ export default function DetailPage() {
   const [searching, setSearching] = useState(false)
   const [saving, setSaving] = useState(false)
   const [searchHint, setSearchHint] = useState('')
+  const [mastered, setMastered] = useState(false)
 
   const load = async () => {
     const [q, subs] = await Promise.all([fetchQuestionDetail(id), fetchSubjects()])
@@ -32,6 +34,7 @@ export default function DetailPage() {
     setQContent(q.question_content)
     setAContent(q.answer_content)
     setSolution(q.solution)
+    setMastered(q.mastered)
   }
 
   useEffect(() => {
@@ -46,7 +49,8 @@ export default function DetailPage() {
         question_content: qContent,
         answer_content: aContent,
         solution,
-        status: aContent ? 'answered' : 'pending'
+        status: aContent ? 'answered' : 'pending',
+        mastered
       })
       setQuestion(prev => (prev ? { ...prev, ...updated } : prev))
       Taro.showToast({ title: '已保存', icon: 'success' })
@@ -65,7 +69,7 @@ export default function DetailPage() {
     setSearching(true)
     setSearchHint('正在联网检索解题过程…')
     try {
-      const res = await searchSolution(qContent, question?.subjects?.name)
+      const res = await searchSolution(qContent)
       setAContent(res.answer)
       setSolution(res.solution)
       setSearchHint('已找到参考解答，请核对后保存')
@@ -128,6 +132,14 @@ export default function DetailPage() {
             </Picker>
           </View>
         )}
+
+        <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
+          <View className="flex-1">
+            <Text className="block text-sm font-medium text-foreground">已掌握</Text>
+            <Text className="block text-xs text-muted-foreground">标记后默认不进入汇总，可在文档页开启开关重新纳入</Text>
+          </View>
+          <Switch checked={mastered} onCheckedChange={(v) => setMastered(v)} />
+        </View>
 
         <Text className="block text-sm font-semibold text-foreground mb-2">题目</Text>
         <Card className="rounded-2xl border-border p-4 mb-4">

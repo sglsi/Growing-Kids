@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException } from '@nestjs/common'
-import { LLMClient, type ContentPart } from 'coze-coding-dev-sdk'
+import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
 import { StorageService } from '../storage/storage.service'
 import type { RecognizedItem } from './ocr.types'
 
@@ -11,6 +11,43 @@ export class OcrService {
 
   constructor(private readonly storageService: StorageService) {
     this.client = new LLMClient()
+  }
+
+  // 从文档 URL（pdf/doc/docx/txt 等）提取纯文本，供 LLM 识别
+  private async extractDocumentText(fileUrl: string): Promise<string> {
+    const fetchClient = new FetchClient(new Config())
+    const resp = await fetchClient.fetch(fileUrl)
+    const text = (resp.content || [])
+      .filter((item) => item.type === 'text' && item.text)
+      .map((item) => item.text)
+      .join('\n')
+    if (!text.trim()) throw new BadRequestException('未能从文档中提取到文本，请确认文档内容为文字（扫描件PDF请先转成图片识别）')
+    return text.trim()
+  }
+
+  async recognizeDoc(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
+    if (!fileUrl) throw new BadRequestException('file_url 不能为空')
+
+    const rawText = await this.extractDocumentText(fileUrl)
+    const response = await this.client.invoke(
+      [
+        { role: 'system', content: this.buildJsonSystem('现在给你一份作业/试卷文档的文字内容，其中包含若干道题目，可能包含学生作答与正确答案。') },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `以下是从文档提取的原始内容，请识别其中的全部题目、学生错误作答与正确答案，按题目出现顺序输出。\n\n${rawText}`,
+            },
+          ],
+        },
+      ],
+      { model: MODEL, temperature: 0.1 },
+    )
+
+    console.log('[ocr/doc] 模型原始返回:', response.content)
+    const result = this.extractJson(response.content)
+    return { items: result.items, rawText }
   }
 
   private buildJsonSystem(task: string): string {

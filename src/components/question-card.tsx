@@ -46,6 +46,11 @@ export default function QuestionCard({ item, showSubject = true }: Props) {
                   待找答案
                 </Badge>
               )}
+              {item.mastered && (
+                <Badge className="bg-emerald-600 text-emerald-50 border border-emerald-600 rounded-full px-2 py-0 text-xs">
+                  已掌握
+                </Badge>
+              )}
             </View>
             <Text className="block text-xs text-muted-foreground">{formatDate(item.recognized_at)}</Text>
           </View>

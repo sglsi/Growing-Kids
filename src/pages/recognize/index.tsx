@@ -1,23 +1,23 @@
 import { View, Text, ScrollView, Image as TaroImage, Picker } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import {
-  fetchSubjects, recognizePaper, recognizeSeparate, createQuestion,
+  fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
   type Subject, type RecognizeResult
 } from '@/services/api'
 
-type Mode = 'paper' | 'split'
+type Mode = 'paper' | 'split' | 'doc'
 
 interface Draft extends RecognizeResult {
   subject_id: string
 }
 
 export default function RecognizePage() {
-  const [mode, setMode] = useState<Mode>('paper')
+  const [mode, setMode] = useState<Mode>(() => (Taro.getStorageSync('recog_mode') || 'paper') as Mode)
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [defaultSubject, setDefaultSubject] = useState('')
   const [drafts, setDrafts] = useState<Draft[]>([])
@@ -25,8 +25,13 @@ export default function RecognizePage() {
   const [paperImage, setPaperImage] = useState('')
   const [questionImage, setQuestionImage] = useState('')
   const [answerImage, setAnswerImage] = useState('')
+  const [docFile, setDocFile] = useState('')
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    Taro.removeStorageSync('recog_mode')
+  }, [])
 
   const ensureSubjects = async () => {
     if (subjects.length === 0) {
@@ -96,6 +101,43 @@ export default function RecognizePage() {
     }
   }
 
+  const pickDoc = async (cb: (path: string, name: string) => void) => {
+    try {
+      const res = await Taro.chooseMessageFile({
+        count: 1,
+        type: 'file',
+        extension: ['pdf', 'doc', 'docx', 'txt'],
+      })
+      const f = res.tempFiles[0]
+      cb(f.path, f.name || '')
+    } catch {
+      Taro.showToast({ title: '请在微信小程序中从聊天/文件中选择文档', icon: 'none' })
+    }
+  }
+
+  // 文档导入识别（PDF / Word / TXT 等）
+  const handleRecognizeDoc = async () => {
+    if (!docFile) {
+      Taro.showToast({ title: '请先选择文档文件', icon: 'none' })
+      return
+    }
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setLoading(true)
+    setDrafts([])
+    setUnmatched([])
+    try {
+      const result = await recognizeDocument(docFile, sid)
+      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
+    } catch (e) {
+      console.error('文档识别失败', e)
+      Taro.showToast({ title: '文档识别失败，请确认内容为文字', icon: 'none' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const updateDraft = (idx: number, patch: Partial<Draft>) => {
     setDrafts(prev => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)))
   }
@@ -134,8 +176,9 @@ export default function RecognizePage() {
       <View className="px-4 pt-4 pb-40">
         {/* 模式切换 */}
         <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
-          <ModeTab active={mode === 'paper'} onClick={() => setMode('paper')} label="整卷识别" />
+          <ModeTab active={mode === 'paper'} onClick={() => setMode('paper')} label="拍照识别" />
           <ModeTab active={mode === 'split'} onClick={() => setMode('split')} label="题目答案分传" />
+          <ModeTab active={mode === 'doc'} onClick={() => setMode('doc')} label="导入文档" />
         </View>
 
         {/* 学科选择 */}
@@ -167,7 +210,7 @@ export default function RecognizePage() {
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
           </Card>
-        ) : (
+        ) : mode === 'split' ? (
           <Card className="rounded-2xl border-border p-4 mb-4">
             <Text className="block text-xs text-muted-foreground mb-3">分别上传题目图和答案图，系统自动识别并关联</Text>
             <View className="flex flex-row gap-3 mb-3">
@@ -176,6 +219,22 @@ export default function RecognizePage() {
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleLink}>
               <Text className="block text-sm">{loading ? '识别中…' : '识别并关联'}</Text>
+            </Button>
+          </Card>
+        ) : (
+          <Card className="rounded-2xl border-border p-4 mb-4">
+            <Text className="block text-xs text-muted-foreground mb-3">支持 PDF / Word(.docx) / TXT，从手机或电脑选择文档导入并自动识别题目</Text>
+            {docFile ? (
+              <View className="w-full bg-muted bg-opacity-60 rounded-xl px-4 py-4 mb-3" onClick={() => pickDoc(setDocFile)}>
+                <Text className="block text-sm text-primary break-all">{docFile}</Text>
+              </View>
+            ) : (
+              <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={() => pickDoc(setDocFile)}>
+                <Text className="block text-sm text-muted-foreground">点击选择文档文件（PDF/Word/TXT）</Text>
+              </View>
+            )}
+            <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizeDoc}>
+              <Text className="block text-sm">{loading ? '识别中…' : '导入并识别'}</Text>
             </Button>
           </Card>
         )}

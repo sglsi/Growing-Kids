@@ -18,6 +18,8 @@ export interface Question {
   wrong_answer: string
   source: string
   status: 'answered' | 'pending'
+  mastered: boolean
+  mastered_at: string | null
   recognized_at: string
   created_at: string
   updated_at: string

@@ -15,11 +15,18 @@ async function unwrap<T>(p: Promise<Taro.request.SuccessCallbackResult<any>>): P
   return body.data
 }
 
+// 上传文件到对象存储，返回 key 与公网 url
+async function uploadFile(filePath: string): Promise<{ key: string; url: string }> {
+  const res = await Network.uploadFile({ url: '/api/upload', filePath, name: 'file' })
+  console.log('[Upload Response]', res.statusCode, res.data)
+  const body = typeof res.data === 'string' ? JSON.parse(res.data) : (res.data as ApiEnvelope<{ key: string; url: string }>)
+  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(body?.msg || '上传失败')
+  return body.data
+}
+
 // ---------- 学科 ----------
 export function fetchSubjects() {
-  return unwrap<Subject[]>(
-    Network.request({ url: '/api/subjects', method: 'GET' })
-  )
+  return unwrap<Subject[]>(Network.request({ url: '/api/subjects', method: 'GET' }))
 }
 
 // ---------- 题目 ----------
@@ -28,6 +35,7 @@ export interface QuestionQuery {
   keyword?: string
   startDate?: string
   endDate?: string
+  mastered?: boolean
   page?: number
   pageSize?: number
 }
@@ -38,6 +46,7 @@ export function fetchQuestions(q: QuestionQuery = {}) {
   if (q.keyword) data.keyword = q.keyword
   if (q.startDate) data.start_date = q.startDate
   if (q.endDate) data.end_date = q.endDate
+  if (q.mastered !== undefined) data.mastered = q.mastered
   if (q.page !== undefined) data.page = q.page
   if (q.pageSize !== undefined) data.page_size = q.pageSize
   return unwrap<{ list: QuestionWithSubject[]; total: number; page: number; page_size: number }>(
@@ -46,9 +55,7 @@ export function fetchQuestions(q: QuestionQuery = {}) {
 }
 
 export function fetchQuestionDetail(id: string) {
-  return unwrap<QuestionWithSubject>(
-    Network.request({ url: `/api/questions/${id}`, method: 'GET' })
-  )
+  return unwrap<QuestionWithSubject>(Network.request({ url: `/api/questions/${id}`, method: 'GET' }))
 }
 
 export interface QuestionPayload {
@@ -61,43 +68,22 @@ export interface QuestionPayload {
   wrong_answer?: string
   source?: string
   status?: 'answered' | 'pending'
+  mastered?: boolean
 }
 
 export function createQuestion(payload: QuestionPayload) {
-  return unwrap<Question>(
-    Network.request({ url: '/api/questions', method: 'POST', data: payload })
-  )
+  return unwrap<Question>(Network.request({ url: '/api/questions', method: 'POST', data: payload }))
 }
 
 export function updateQuestion(id: string, payload: Partial<QuestionPayload>) {
-  return unwrap<Question>(
-    Network.request({ url: `/api/questions/${id}`, method: 'PATCH', data: payload })
-  )
+  return unwrap<Question>(Network.request({ url: `/api/questions/${id}`, method: 'PUT', data: payload }))
 }
 
 export function deleteQuestion(id: string) {
-  return unwrap<{ id: string }>(
-    Network.request({ url: `/api/questions/${id}`, method: 'DELETE' })
-  )
+  return unwrap<{ id: string }>(Network.request({ url: `/api/questions/${id}`, method: 'DELETE' }))
 }
 
 // ---------- OCR 识别 ----------
-// 整卷识别：上传图片，返回结构化错题（题干/原错答/正确答案）
-export function recognizePaper(filePath: string, subjectId?: string) {
-  return new Promise<RecognizeResult[]>((resolve, reject) => {
-    Network.uploadFile({
-      url: subjectId ? `/api/recognition/paper?subject_id=${subjectId}` : '/api/recognition/paper',
-      filePath,
-      name: 'file'
-    }).then(res => {
-      console.log('[OCR Response]', res.statusCode, res.data)
-      const body = JSON.parse(res.data) as ApiEnvelope<RecognizeResult[]>
-      if (res.statusCode === 200) resolve(body.data)
-      else reject(new Error(body.msg || '识别失败'))
-    }).catch(reject)
-  })
-}
-
 export interface RecognizeResult {
   question_content: string
   wrong_answer: string
@@ -105,33 +91,19 @@ export interface RecognizeResult {
   solution: string
   source: string
   has_answer: boolean
+  question_image_keys?: string[]
 }
 
-// 题目/答案分传：一次上传两组图片，自动识别并按题号关联
-export function recognizeSeparate(questionFile: string, answerFile: string) {
-  return new Promise<SeparateResult>((resolve, reject) => {
-    // 先上传题目图
-    Network.uploadFile({ url: '/api/recognition/upload', filePath: questionFile, name: 'file' })
-      .then(r1 => {
-        const b1 = JSON.parse(r1.data) as ApiEnvelope<{ key: string }>
-        const qKey = b1.data.key
-        // 再上传答案图
-        Network.uploadFile({ url: '/api/recognition/upload', filePath: answerFile, name: 'file' })
-          .then(r2 => {
-            const b2 = JSON.parse(r2.data) as ApiEnvelope<{ key: string }>
-            const aKey = b2.data.key
-            Network.request({
-              url: '/api/recognition/associate',
-              method: 'POST',
-              data: { question_keys: [qKey], answer_keys: [aKey] }
-            }).then(r3 => {
-              console.log('[Associate Response]', r3.data)
-              const body = r3.data as ApiEnvelope<SeparateResult>
-              resolve(body.data)
-            }).catch(reject)
-          }).catch(reject)
-      }).catch(reject)
+// 整卷识别：上传图片，返回结构化错题
+export async function recognizePaper(filePath: string, subjectId: string) {
+  const { key } = await uploadFile(filePath)
+  const res = await Network.request({
+    url: '/api/ocr/recognize-exam',
+    method: 'POST',
+    data: { subject_id: subjectId, image_keys: [key] },
   })
+  const body = res.data as ApiEnvelope<RecognizeResult[]>
+  return body.data
 }
 
 export interface SeparateResult {
@@ -139,14 +111,34 @@ export interface SeparateResult {
   unmatched_questions: string[]
 }
 
+// 题目/答案分传：上传两组图片后自动关联
+export async function recognizeSeparate(questionFile: string, answerFile: string) {
+  const [q, a] = await Promise.all([uploadFile(questionFile), uploadFile(answerFile)])
+  const res = await Network.request({
+    url: '/api/ocr/recognize-pair',
+    method: 'POST',
+    data: { question_image_keys: [q.key], answer_image_keys: [a.key] },
+  })
+  const body = res.data as ApiEnvelope<SeparateResult>
+  return body.data
+}
+
+// 文档导入识别：上传 pdf/doc/docx/txt 等，后端提取文本后识别
+export async function recognizeDocument(filePath: string, subjectId: string) {
+  const { url } = await uploadFile(filePath)
+  const res = await Network.request({
+    url: '/api/ocr/recognize-doc',
+    method: 'POST',
+    data: { subject_id: subjectId, file_url: url },
+  })
+  const body = res.data as ApiEnvelope<{ items: RecognizeResult[] }>
+  return (body.data?.items || []) as RecognizeResult[]
+}
+
 // ---------- 联网搜题 ----------
-export function searchSolution(question: string, subjectName?: string) {
+export function searchSolution(question: string) {
   return unwrap<{ answer: string; solution: string; references: { title: string; url: string }[] }>(
-    Network.request({
-      url: '/api/questions/search-solution',
-      method: 'POST',
-      data: { question, subject_name: subjectName }
-    })
+    Network.request({ url: '/api/search/solve', method: 'POST', data: { question_content: question } })
   )
 }
 
@@ -155,16 +147,13 @@ export interface ExportParams {
   subject_id?: string
   start_date?: string
   end_date?: string
-  report?: boolean
+  title?: string
+  include_mastered?: boolean
 }
 
 export function exportDocument(params: ExportParams) {
-  const qs = Object.entries(params)
-    .filter(([, v]) => v !== undefined && v !== '' && v !== false)
-    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-    .join('&')
-  return unwrap<{ url: string; file_key: string; count: number }>(
-    Network.request({ url: `/api/documents/export?${qs}`, method: 'GET' })
+  return unwrap<{ url: string; file_key: string; title: string }>(
+    Network.request({ url: '/api/document/export', method: 'POST', data: params })
   )
 }
 
@@ -178,7 +167,5 @@ export interface Overview {
 }
 
 export function fetchOverview() {
-  return unwrap<Overview>(
-    Network.request({ url: '/api/questions/overview', method: 'GET' })
-  )
+  return unwrap<Overview>(Network.request({ url: '/api/questions/overview', method: 'GET' }))
 }

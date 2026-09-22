@@ -1,3 +1,3 @@
 export default typeof definePageConfig === 'function'
-  ? definePageConfig({ navigationBarTitleText: '拍照识别' })
-  : { navigationBarTitleText: '拍照识别' }
+  ? definePageConfig({ navigationBarTitleText: '识别导入' })
+  : { navigationBarTitleText: '识别导入' }

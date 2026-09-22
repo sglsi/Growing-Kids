@@ -16,6 +16,7 @@ export class QuestionsController {
     @Query('keyword') keyword?: string,
     @Query('start_date') startDate?: string,
     @Query('end_date') endDate?: string,
+    @Query('mastered') mastered?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
   ) {
@@ -24,6 +25,7 @@ export class QuestionsController {
       keyword,
       start_date: startDate,
       end_date: endDate,
+      mastered: mastered !== undefined && mastered !== '' ? mastered === 'true' : undefined,
       page: page ? Number(page) : undefined,
       page_size: pageSize ? Number(pageSize) : undefined,
     })

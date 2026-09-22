@@ -1,4 +1,4 @@
-import { pgTable, serial, varchar, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core"
+import { pgTable, serial, varchar, text, timestamp, jsonb, integer, boolean, index } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -31,6 +31,9 @@ export const questions = pgTable("questions", {
 	source: varchar("source", { length: 100 }).notNull().default(''),
 	// answered: 已有正确答案；pending: 暂无答案待联网检索
 	status: varchar("status", { length: 20 }).notNull().default('answered'),
+	// 掌握标记：true 表示已掌握，默认不进入汇总文档，可用 include_mastered 开关重新纳入
+	mastered: boolean("mastered").notNull().default(false),
+	mastered_at: timestamp("mastered_at", { withTimezone: true }),
 	recognized_at: timestamp("recognized_at", { withTimezone: true }).defaultNow().notNull(),
 	created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { Network } from '@/network'
 import QuestionCard from '@/components/question-card'
 import { exportDocument, fetchQuestions, fetchSubjects, type Subject, type QuestionWithSubject } from '@/services/api'
@@ -28,6 +29,7 @@ export default function DocumentPage() {
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [previewed, setPreviewed] = useState(false)
+  const [includeMastered, setIncludeMastered] = useState(false)
 
   useDidShow(() => {
     if (subjects.length === 0) {
@@ -43,7 +45,8 @@ export default function DocumentPage() {
       const res = await fetchQuestions({
         subjectId: activeSubject || undefined,
         startDate: start || undefined,
-        endDate: end || undefined
+        endDate: end || undefined,
+        mastered: includeMastered ? undefined : false
       })
       setQuestions(res.list)
     } catch (e) {
@@ -84,7 +87,8 @@ export default function DocumentPage() {
       const res = await exportDocument({
         subject_id: activeSubject || undefined,
         start_date: start,
-        end_date: end
+        end_date: end,
+        include_mastered: includeMastered
       })
       openDoc(res.url)
     } catch (e) {
@@ -134,6 +138,14 @@ export default function DocumentPage() {
               </View>
             )
           })}
+        </View>
+
+        <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-5">
+          <View className="flex-1">
+            <Text className="block text-sm font-medium text-foreground">包含已掌握题目</Text>
+            <Text className="block text-xs text-muted-foreground">默认仅汇总未掌握错题，开启后已掌握题一并纳入</Text>
+          </View>
+          <Switch checked={includeMastered} onCheckedChange={(v) => setIncludeMastered(v)} />
         </View>
 
         <Button variant="outline" className="w-full h-11 rounded-xl mb-5" disabled={loading} onClick={handlePreview}>

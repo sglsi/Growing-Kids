@@ -27,7 +27,18 @@ export default function IndexPage() {
     load()
   })
 
-  const goRecognize = () => Taro.navigateTo({ url: '/pages/recognize/index' })
+  const goRecognize = () => {
+    Taro.setStorageSync('recog_mode', 'paper')
+    Taro.navigateTo({ url: '/pages/recognize/index' })
+  }
+  const goSplit = () => {
+    Taro.setStorageSync('recog_mode', 'split')
+    Taro.navigateTo({ url: '/pages/recognize/index' })
+  }
+  const goDocImport = () => {
+    Taro.setStorageSync('recog_mode', 'doc')
+    Taro.navigateTo({ url: '/pages/recognize/index' })
+  }
   const goSubject = (subjectId?: string) => {
     Taro.switchTab({ url: '/pages/subject/index' }).then(() => {
       if (subjectId) {
@@ -41,20 +52,23 @@ export default function IndexPage() {
       <View className="px-4 pt-4 pb-24">
         {/* 顶部标题 */}
         <View className="mb-4">
-          <Text className="block text-xl font-bold text-foreground">错题巩固</Text>
-          <Text className="block text-xs text-muted-foreground mt-1">拍一拍，把错题整理进你的专属错题本</Text>
+          <Text className="block text-xl font-bold text-foreground">成长学伴</Text>
+          <Text className="block text-xs text-muted-foreground mt-1">拍照 / 导入，把错题整理成属于你的知识地图</Text>
         </View>
 
-        {/* 识别主操作区 */}
+        {/* 识别与导入主操作区 */}
         <Card className="rounded-2xl border-border p-4 mb-4">
-          <View className="flex flex-row gap-3">
+          <View className="flex flex-row gap-3 mb-3">
             <Button className="flex-1 h-12 rounded-xl" onClick={goRecognize}>
               <Text className="block text-sm">拍照 / 相册识别</Text>
             </Button>
-            <Button variant="outline" className="h-12 rounded-xl px-4" onClick={goRecognize}>
+            <Button variant="outline" className="flex-1 h-12 rounded-xl" onClick={goSplit}>
               <Text className="block text-sm">题目答案分传</Text>
             </Button>
           </View>
+          <Button variant="outline" className="w-full h-11 rounded-xl" onClick={goDocImport}>
+            <Text className="block text-sm">导入文档（PDF / Word / TXT）</Text>
+          </Button>
         </Card>
 
         {loading ? (

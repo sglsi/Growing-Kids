@@ -12,6 +12,7 @@ interface ListQuery {
   keyword?: string
   start_date?: string
   end_date?: string
+  mastered?: boolean
   page?: number
   page_size?: number
 }
@@ -38,6 +39,7 @@ export class QuestionsService {
 
     if (query.subject_id) supabaseQuery = supabaseQuery.eq('subject_id', query.subject_id)
     if (query.keyword) supabaseQuery = supabaseQuery.or(`question_content.ilike.%${query.keyword}%,answer_content.ilike.%${query.keyword}%`)
+    if (query.mastered !== undefined) supabaseQuery = supabaseQuery.eq('mastered', query.mastered)
     supabaseQuery = this.applyRange(supabaseQuery, query.start_date, query.end_date)
     supabaseQuery = supabaseQuery.order('recognized_at', { ascending: false }).range(from, to)
 
@@ -77,7 +79,9 @@ export class QuestionsService {
       wrong_answer: dto.wrong_answer || '',
       source: dto.source || '',
       status: dto.status || (dto.answer_content ? 'answered' : 'pending'),
+      mastered: dto.mastered ?? false,
     }
+    if (payload.mastered) payload.mastered_at = new Date().toISOString()
     if (dto.question_image_keys) payload.question_image_keys = dto.question_image_keys
     if (dto.answer_image_keys) payload.answer_image_keys = dto.answer_image_keys
 
@@ -100,6 +104,10 @@ export class QuestionsService {
     ]
     for (const f of fields) {
       if (dto[f] !== undefined) payload[f] = dto[f] as never
+    }
+    if (dto.mastered !== undefined) {
+      payload.mastered = dto.mastered
+      payload.mastered_at = dto.mastered ? new Date().toISOString() : null
     }
 
     const { data, error } = await client
