@@ -9,7 +9,7 @@ export default defineAppConfig({
   window: {
     backgroundTextStyle: 'light',
     navigationBarBackgroundColor: '#faf8f3',
-    navigationBarTitleText: '成长学伴',
+    navigationBarTitleText: '成长学童',
     navigationBarTextStyle: 'black'
   },
   tabBar: {

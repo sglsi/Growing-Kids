@@ -20,7 +20,7 @@ export class DocumentController {
   @Post('export')
   @HttpCode(200)
   async exportDocx(@Body() body: ExportBody) {
-    const title = body.title || '成长学伴·错题汇总'
+    const title = body.title || '成长学童·错题汇总'
     const buffer = await this.documentService.exportDocx({
       subject_id: body.subject_id,
       start_date: body.start_date,

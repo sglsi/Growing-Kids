@@ -52,7 +52,7 @@ export default function IndexPage() {
       <View className="px-4 pt-4 pb-24">
         {/* 顶部标题 */}
         <View className="mb-4">
-          <Text className="block text-xl font-bold text-foreground">成长学伴</Text>
+          <Text className="block text-xl font-bold text-foreground">成长学童</Text>
           <Text className="block text-xs text-muted-foreground mt-1">拍照 / 导入，把错题整理成属于你的知识地图</Text>
         </View>
 
