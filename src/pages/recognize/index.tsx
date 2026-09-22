@@ -1,0 +1,291 @@
+import { View, Text, ScrollView, Image as TaroImage, Picker } from '@tarojs/components'
+import Taro from '@tarojs/taro'
+import { useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  fetchSubjects, recognizePaper, recognizeSeparate, createQuestion,
+  type Subject, type RecognizeResult
+} from '@/services/api'
+
+type Mode = 'paper' | 'split'
+
+interface Draft extends RecognizeResult {
+  subject_id: string
+}
+
+export default function RecognizePage() {
+  const [mode, setMode] = useState<Mode>('paper')
+  const [subjects, setSubjects] = useState<Subject[]>([])
+  const [defaultSubject, setDefaultSubject] = useState('')
+  const [drafts, setDrafts] = useState<Draft[]>([])
+  const [loading, setLoading] = useState(false)
+  const [paperImage, setPaperImage] = useState('')
+  const [questionImage, setQuestionImage] = useState('')
+  const [answerImage, setAnswerImage] = useState('')
+  const [unmatched, setUnmatched] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+
+  const ensureSubjects = async () => {
+    if (subjects.length === 0) {
+      const list = await fetchSubjects()
+      setSubjects(list)
+      setDefaultSubject(list[1]?.id || list[0]?.id || '')
+      return list
+    }
+    return subjects
+  }
+
+  const chooseImage = async (cb: (path: string) => void) => {
+    try {
+      const res = await Taro.chooseMedia({
+        count: 1,
+        mediaType: ['image'],
+        sourceType: ['camera', 'album']
+      })
+      cb(res.tempFiles[0].tempFilePath)
+    } catch {
+      // 用户取消
+    }
+  }
+
+  // 整卷识别
+  const handleRecognizePaper = async () => {
+    if (!paperImage) {
+      Taro.showToast({ title: '请先拍照或选择图片', icon: 'none' })
+      return
+    }
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setLoading(true)
+    setDrafts([])
+    setUnmatched([])
+    try {
+      const result = await recognizePaper(paperImage, sid)
+      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
+    } catch (e) {
+      console.error('识别失败', e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 分传关联
+  const handleLink = async () => {
+    if (!questionImage || !answerImage) {
+      Taro.showToast({ title: '题目图和答案图都需上传', icon: 'none' })
+      return
+    }
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setLoading(true)
+    setDrafts([])
+    setUnmatched([])
+    try {
+      const res = await recognizeSeparate(questionImage, answerImage)
+      setDrafts(res.matched.map(r => ({ ...r, subject_id: sid })))
+      setUnmatched(res.unmatched_questions)
+      Taro.showToast({ title: `已关联 ${res.matched.length} 题`, icon: 'none' })
+    } catch (e) {
+      console.error('关联失败', e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const updateDraft = (idx: number, patch: Partial<Draft>) => {
+    setDrafts(prev => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)))
+  }
+
+  const removeDraft = (idx: number) => {
+    setDrafts(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  const handleSave = async () => {
+    if (!drafts.length) return
+    setSaving(true)
+    try {
+      await Promise.all(drafts.map(d => createQuestion({
+        subject_id: d.subject_id,
+        question_content: d.question_content,
+        answer_content: d.answer_content,
+        solution: d.solution,
+        wrong_answer: d.wrong_answer,
+        source: d.source,
+        status: d.has_answer || d.answer_content ? 'answered' : 'pending'
+      })))
+      Taro.showToast({ title: '已保存到错题本', icon: 'success' })
+      setTimeout(() => Taro.navigateBack(), 800)
+    } catch (e) {
+      console.error('保存失败', e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const subjectIndex = (id: string) => Math.max(0, subjects.findIndex(s => s.id === id))
+  const subjectName = (id: string) => subjects.find(s => s.id === id)?.name || '选择学科'
+
+  return (
+    <ScrollView scrollY className="h-full bg-background">
+      <View className="px-4 pt-4 pb-40">
+        {/* 模式切换 */}
+        <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
+          <ModeTab active={mode === 'paper'} onClick={() => setMode('paper')} label="整卷识别" />
+          <ModeTab active={mode === 'split'} onClick={() => setMode('split')} label="题目答案分传" />
+        </View>
+
+        {/* 学科选择 */}
+        <View className="flex flex-row items-center justify-between mb-4">
+          <Text className="block text-sm text-muted-foreground">默认归类学科</Text>
+          <Picker
+            mode="selector"
+            range={subjects}
+            rangeKey="name"
+            onChange={(e) => setDefaultSubject(subjects[Number(e.detail.value)]?.id || '')}
+          >
+            <View className="bg-muted rounded-lg px-4 py-2">
+              <Text className="block text-sm text-primary">{subjects.find(s => s.id === defaultSubject)?.name || '点击选择'}</Text>
+            </View>
+          </Picker>
+        </View>
+
+        {mode === 'paper' ? (
+          <Card className="rounded-2xl border-border p-4 mb-4">
+            <Text className="block text-xs text-muted-foreground mb-3">拍摄作业、试卷（含老师批改痕迹效果最佳）</Text>
+            {paperImage ? (
+              <TaroImage src={paperImage} mode="widthFix" className="w-full rounded-xl mb-3" onClick={() => chooseImage(setPaperImage)} />
+            ) : (
+              <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={() => chooseImage(setPaperImage)}>
+                <Text className="block text-sm text-muted-foreground">点击拍照 / 从相册选择</Text>
+              </View>
+            )}
+            <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
+              <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
+            </Button>
+          </Card>
+        ) : (
+          <Card className="rounded-2xl border-border p-4 mb-4">
+            <Text className="block text-xs text-muted-foreground mb-3">分别上传题目图和答案图，系统自动识别并关联</Text>
+            <View className="flex flex-row gap-3 mb-3">
+              <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage(setQuestionImage)} />
+              <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage(setAnswerImage)} />
+            </View>
+            <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleLink}>
+              <Text className="block text-sm">{loading ? '识别中…' : '识别并关联'}</Text>
+            </Button>
+          </Card>
+        )}
+
+        {loading && (
+          <View className="space-y-3">
+            <Skeleton className="h-32 w-full rounded-2xl" />
+            <Skeleton className="h-32 w-full rounded-2xl" />
+          </View>
+        )}
+
+        {unmatched.length > 0 && (
+          <Card className="rounded-2xl border-border p-3 mb-3 bg-amber-50 border-amber-200">
+            <Text className="block text-xs text-amber-700">有 {unmatched.length} 道题目未匹配到答案，保存后可联网搜题</Text>
+          </Card>
+        )}
+
+        {/* 识别结果草稿（可逐条编辑） */}
+        {drafts.length > 0 && (
+          <>
+            <View className="mb-3">
+              <Text className="block text-sm font-semibold text-foreground">识别结果（{drafts.length} 题，可修改）</Text>
+            </View>
+            {drafts.map((d, idx) => (
+              <Card key={idx} className="rounded-2xl border-border p-4 mb-3">
+                <View className="flex flex-row items-center justify-between mb-3">
+                  <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
+                  <View className="flex flex-row gap-3">
+                    <Picker
+                      mode="selector"
+                      range={subjects}
+                      rangeKey="name"
+                      value={subjectIndex(d.subject_id)}
+                      onChange={(e) => updateDraft(idx, { subject_id: subjects[Number(e.detail.value)]?.id || d.subject_id })}
+                    >
+                      <Text className="block text-xs text-primary">{subjectName(d.subject_id)}</Text>
+                    </Picker>
+                    <Text className="block text-xs text-muted-foreground" onClick={() => removeDraft(idx)}>删除</Text>
+                  </View>
+                </View>
+
+                <View className="bg-muted bg-opacity-60 rounded-xl p-3 mb-2">
+                  <Textarea
+                    className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                    value={d.question_content}
+                    placeholder="题目内容（可手动修改）"
+                    maxlength={2000}
+                    onInput={(e) => updateDraft(idx, { question_content: e.detail.value })}
+                  />
+                </View>
+
+                {d.wrong_answer ? (
+                  <Text className="block text-xs text-muted-foreground mb-2 line-through">原错答：{d.wrong_answer}</Text>
+                ) : null}
+
+                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190,62,45,0.04)' }}>
+                  <Textarea
+                    className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                    value={d.answer_content}
+                    placeholder="正确答案（可手动修改，无则留空后联网搜题）"
+                    maxlength={2000}
+                    onInput={(e) => updateDraft(idx, { answer_content: e.detail.value, has_answer: !!e.detail.value })}
+                  />
+                </View>
+              </Card>
+            ))}
+          </>
+        )}
+      </View>
+
+      {/* 底部保存栏 */}
+      {drafts.length > 0 && (
+        <View style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '12px',
+          padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
+        }}
+        >
+          <Text className="block text-xs text-muted-foreground shrink-0">共 {drafts.length} 题</Text>
+          <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
+            <Text className="block text-sm">{saving ? '保存中…' : '保存到错题本'}</Text>
+          </Button>
+        </View>
+      )}
+    </ScrollView>
+  )
+}
+
+function ModeTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+  return (
+    <View
+      className={`flex-1 flex items-center justify-center h-9 rounded-lg ${active ? 'bg-background shadow-sm' : ''}`}
+      onClick={onClick}
+    >
+      <Text className={`block text-sm ${active ? 'text-primary font-medium' : 'text-muted-foreground'}`}>{label}</Text>
+    </View>
+  )
+}
+
+function SplitUploader({ title, image, onPick }: { title: string; image: string; onPick: () => void }) {
+  return (
+    <View className="flex-1">
+      <Text className="block text-xs text-muted-foreground mb-2">{title}</Text>
+      {image ? (
+        <TaroImage src={image} mode="aspectFill" className="w-full h-28 rounded-xl" onClick={onPick} />
+      ) : (
+        <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={onPick}>
+          <Text className="block text-xs text-muted-foreground">上传{title}图</Text>
+        </View>
+      )}
+    </View>
+  )
+}
