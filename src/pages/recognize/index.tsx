@@ -6,9 +6,11 @@ import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import ImageEditor from '@/components/image-editor'
+import MaterialPicker from '@/components/material-picker'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
-  type Subject, type RecognizeResult
+  recognizePaperByUrl, recognizeDocumentByUrl,
+  type Subject, type RecognizeResult, type Material
 } from '@/services/api'
 
 type Mode = 'paper' | 'split' | 'doc'
@@ -32,6 +34,9 @@ export default function RecognizePage() {
 
   // 图片编辑器：{ slot, src }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string } | null>(null)
+
+  // 素材库选择
+  const [picker, setPicker] = useState<'image' | 'document' | null>(null)
 
   useEffect(() => {
     Taro.removeStorageSync('recog_mode')
@@ -113,6 +118,46 @@ export default function RecognizePage() {
     } catch (e) {
       console.error('关联失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '关联失败，请重试', icon: 'none' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 从素材库选择图片素材后直接按 URL 识别（整卷）
+  const handleSelectImageMaterial = async (m: Material) => {
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setPaperImage(m.url)
+    setLoading(true)
+    setDrafts([])
+    setUnmatched([])
+    try {
+      const result = await recognizePaperByUrl(m.url, sid)
+      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
+    } catch (e) {
+      console.error('素材识别失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 从素材库选择文档素材后直接按 URL 识别
+  const handleSelectDocMaterial = async (m: Material) => {
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setDocFile(m.name)
+    setLoading(true)
+    setDrafts([])
+    setUnmatched([])
+    try {
+      const result = await recognizeDocumentByUrl(m.url, sid)
+      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
+    } catch (e) {
+      console.error('素材文档识别失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
@@ -229,6 +274,9 @@ export default function RecognizePage() {
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
+            <View className="flex items-center justify-center mt-3" onClick={() => setPicker('image')}>
+              <Text className="block text-xs text-primary">从素材库选择图片</Text>
+            </View>
           </Card>
         ) : mode === 'split' ? (
           <Card className="rounded-2xl border-border p-4 mb-4">
@@ -256,6 +304,9 @@ export default function RecognizePage() {
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizeDoc}>
               <Text className="block text-sm">{loading ? '识别中…' : '导入并识别'}</Text>
             </Button>
+            <View className="flex items-center justify-center mt-3" onClick={() => setPicker('document')}>
+              <Text className="block text-xs text-primary">从素材库选择文档</Text>
+            </View>
           </Card>
         )}
 
@@ -346,6 +397,18 @@ export default function RecognizePage() {
         src={editor?.src || ''}
         onCancel={() => setEditor(null)}
         onConfirm={handleEditorConfirm}
+      />
+
+      {/* 从素材库选择 */}
+      <MaterialPicker
+        visible={picker !== null}
+        type={picker || 'image'}
+        title={picker === 'document' ? '从素材库选择文档' : '从素材库选择图片'}
+        onClose={() => setPicker(null)}
+        onSelect={(m) => {
+          if (m.type === 'document') void handleSelectDocMaterial(m)
+          else void handleSelectImageMaterial(m)
+        }}
       />
     </ScrollView>
   )

@@ -43,3 +43,23 @@ export const questions = pgTable("questions", {
 	index("questions_status_idx").on(table.status),
 	index("questions_subject_created_idx").on(table.subject_id, table.created_at),
 ])
+
+// 素材表：导入的图片/文档原件统一归档，供后续重复使用
+export const materials = pgTable("materials", {
+	id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+	name: varchar("name", { length: 255 }).notNull(),
+	// image: 图片素材；document: 文档素材
+	type: varchar("type", { length: 20 }).notNull().default('image'),
+	file_key: varchar("file_key", { length: 500 }).notNull(),
+	url: text("url").notNull(),
+	mime_type: varchar("mime_type", { length: 100 }).notNull().default(''),
+	size_bytes: integer("size_bytes").notNull().default(0),
+	// 可选：关联学科
+	subject_id: varchar("subject_id", { length: 36 }),
+	// 是否已被用于识别
+	used: boolean("used").notNull().default(false),
+	created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+	index("materials_type_idx").on(table.type),
+	index("materials_created_at_idx").on(table.created_at),
+])

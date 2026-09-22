@@ -150,6 +150,26 @@ export class OcrService {
     return result
   }
 
+  async recognizeExamByUrls(subjectId: string, urls: string[]): Promise<{ items: RecognizedItem[] }> {
+    if (!urls?.length) throw new BadRequestException('urls 不能为空')
+    void subjectId
+
+    const imageParts: ContentPart[] = urls.map((url) => ({
+      type: 'image_url' as const,
+      image_url: { url, detail: 'high' as const },
+    }))
+    const response = await this.client.invoke(
+      [
+        { role: 'system', content: this.buildJsonSystem('现在给你一张或多张作业/试卷图片，其中包含若干道题目，部分题目上有老师批改痕迹（如红叉、红勾、订正）。') },
+        { role: 'user', content: [...imageParts, { type: 'text', text: '请识别图片中的全部题目、学生错误作答与批改后的正确答案，按题目顺序输出。' }] },
+      ],
+      { model: MODEL, temperature: 0.1 },
+    )
+
+    console.log('[ocr/exam-url] 模型原始返回:', response.content)
+    return this.extractJson(response.content)
+  }
+
   async recognizePair(
     questionKeys: string[],
     answerKeys: string[],

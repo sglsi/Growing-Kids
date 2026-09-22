@@ -7,6 +7,7 @@ import { UploadModule } from './upload/upload.module'
 import { OcrModule } from './ocr/ocr.module'
 import { SearchModule } from './search/search.module'
 import { DocumentModule } from './document/document.module'
+import { MaterialsModule } from './materials/materials.module'
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { DocumentModule } from './document/document.module'
     OcrModule,
     SearchModule,
     DocumentModule,
+    MaterialsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

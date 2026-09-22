@@ -25,3 +25,8 @@ export interface RecognizeDocDto {
   // 文档已上传到对象存储后的公网 URL（支持 pdf/doc/docx/txt 等）
   file_url: string
 }
+
+export interface RecognizeExamUrlDto {
+  subject_id: string
+  urls: string[]
+}

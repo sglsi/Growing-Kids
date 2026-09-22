@@ -109,41 +109,51 @@ async function unwrapResponse<T>(p: Promise<Taro.request.SuccessCallbackResult<a
   return body.data as T
 }
 
+// 把后端识别项（无 has_answer 字段）规范化
+function normalizeItem(raw: RecognizeResult): RecognizeResult {
+  return {
+    question_content: raw.question_content || '',
+    wrong_answer: raw.wrong_answer || '',
+    answer_content: raw.answer_content || '',
+    solution: raw.solution || '',
+    source: raw.source || '',
+    has_answer: !!raw.answer_content,
+    question_image_keys: raw.question_image_keys || [],
+  }
+}
+
 // 整卷识别：上传图片，返回结构化错题
 export async function recognizePaper(filePath: string, subjectId: string) {
   const { key } = await uploadFile(filePath)
-  const data = await unwrapResponse<RecognizeResult[]>(
+  const data = await unwrapResponse<{ items: RecognizeResult[] }>(
     Network.request({
       url: '/api/ocr/recognize-exam',
       method: 'POST',
       data: { subject_id: subjectId, image_keys: [key] },
     }),
   )
-  if (!data || data.length === 0) {
+  const items = (data?.items || []).map(normalizeItem)
+  if (items.length === 0) {
     throw new Error('未识别到题目，请确认图片清晰、内容为题目，或裁剪后重试')
   }
-  return data
-}
-
-export interface SeparateResult {
-  matched: RecognizeResult[]
-  unmatched_questions: string[]
+  return items
 }
 
 // 题目/答案分传：上传两组图片后自动关联
 export async function recognizeSeparate(questionFile: string, answerFile: string) {
   const [q, a] = await Promise.all([uploadFile(questionFile), uploadFile(answerFile)])
-  const data = await unwrapResponse<SeparateResult>(
+  const data = await unwrapResponse<RecognizeResult>(
     Network.request({
       url: '/api/ocr/recognize-pair',
       method: 'POST',
       data: { question_image_keys: [q.key], answer_image_keys: [a.key] },
     }),
   )
-  if (!data?.matched || data.matched.length === 0) {
+  const item = normalizeItem(data)
+  if (!item.question_content) {
     throw new Error('未能将题目与答案关联，请确认两张图片内容清晰')
   }
-  return data
+  return { matched: [item], unmatched_questions: [] as string[] }
 }
 
 // 文档导入识别：上传 pdf/doc/docx/txt 等，后端提取文本后识别
@@ -156,7 +166,7 @@ export async function recognizeDocument(filePath: string, subjectId: string) {
       data: { subject_id: subjectId, file_url: url },
     }),
   )
-  const items = data?.items || []
+  const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) {
     throw new Error('未识别到题目，请确认文档内容为文字（扫描件PDF请用拍照识别）')
   }
@@ -196,4 +206,56 @@ export interface Overview {
 
 export function fetchOverview() {
   return unwrap<Overview>(Network.request({ url: '/api/questions/overview', method: 'GET' }))
+}
+
+// ---------- 素材库 ----------
+export interface Material {
+  id: string
+  name: string
+  type: 'image' | 'document'
+  file_key: string
+  url: string
+  mime_type: string
+  size_bytes: number
+  subject_id: string | null
+  used: boolean
+  created_at: string
+}
+
+export function fetchMaterials(type?: 'image' | 'document') {
+  return unwrap<{ list: Material[]; total: number }>(
+    Network.request({ url: '/api/materials', method: 'GET', data: type ? { type } : {} })
+  )
+}
+
+// 直接用对象存储 URL 走整卷识别（供素材库复用，免本地文件）
+export async function recognizePaperByUrl(url: string, subjectId: string) {
+  const data = await unwrapResponse<{ items: RecognizeResult[] }>(
+    Network.request({
+      url: '/api/ocr/recognize-exam-url',
+      method: 'POST',
+      data: { subject_id: subjectId, urls: [url] },
+    }),
+  )
+  const items = (data?.items || []).map(normalizeItem)
+  if (items.length === 0) {
+    throw new Error('未识别到题目，请确认素材内容清晰')
+  }
+  return items
+}
+
+// 直接用对象存储 URL 走文档识别（供素材库复用）
+export async function recognizeDocumentByUrl(url: string, subjectId: string) {
+  const data = await unwrapResponse<{ items: RecognizeResult[] }>(
+    Network.request({
+      url: '/api/ocr/recognize-doc',
+      method: 'POST',
+      data: { subject_id: subjectId, file_url: url },
+    }),
+  )
+  const items = (data?.items || []).map(normalizeItem)
+  if (items.length === 0) {
+    throw new Error('未识别到题目，请确认文档内容为文字')
+  }
+  return items
 }
