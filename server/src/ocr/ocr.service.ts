@@ -64,11 +64,19 @@ export class OcrService {
   }
 
   private extractJson(text: string): { items: RecognizedItem[] } {
+    if (!text || !text.trim()) {
+      throw new BadRequestException('识别服务未返回内容，请重试或更换更清晰的图片')
+    }
     let cleaned = text.trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim()
     const start = cleaned.indexOf('{')
     const end = cleaned.lastIndexOf('}')
     if (start !== -1 && end !== -1) cleaned = cleaned.slice(start, end + 1)
-    const parsed = JSON.parse(cleaned)
+    let parsed: { items?: RecognizedItem[] }
+    try {
+      parsed = JSON.parse(cleaned)
+    } catch {
+      throw new BadRequestException('识别结果解析失败，请裁剪图片或重新拍摄后重试')
+    }
     const items: RecognizedItem[] = Array.isArray(parsed.items) ? parsed.items : []
     items.forEach((it) => {
       if (!Array.isArray(it.question_image_keys)) it.question_image_keys = []

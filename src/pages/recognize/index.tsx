@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import ImageEditor from '@/components/image-editor'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
   type Subject, type RecognizeResult
@@ -29,6 +30,9 @@ export default function RecognizePage() {
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
 
+  // 图片编辑器：{ slot, src }
+  const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string } | null>(null)
+
   useEffect(() => {
     Taro.removeStorageSync('recog_mode')
   }, [])
@@ -43,17 +47,28 @@ export default function RecognizePage() {
     return subjects
   }
 
-  const chooseImage = async (cb: (path: string) => void) => {
+  const chooseImage = async (slot: 'paper' | 'question' | 'answer') => {
     try {
       const res = await Taro.chooseMedia({
         count: 1,
         mediaType: ['image'],
         sourceType: ['camera', 'album']
       })
-      cb(res.tempFiles[0].tempFilePath)
+      // 先进入裁剪/旋转编辑器
+      setEditor({ slot, src: res.tempFiles[0].tempFilePath })
     } catch {
       // 用户取消
     }
+  }
+
+  // 编辑确认：把处理后的图片写回对应槽位
+  const handleEditorConfirm = (path: string) => {
+    const slot = editor?.slot
+    setEditor(null)
+    if (!slot) return
+    if (slot === 'paper') setPaperImage(path)
+    else if (slot === 'question') setQuestionImage(path)
+    else setAnswerImage(path)
   }
 
   // 整卷识别
@@ -73,6 +88,7 @@ export default function RecognizePage() {
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('识别失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
@@ -96,6 +112,7 @@ export default function RecognizePage() {
       Taro.showToast({ title: `已关联 ${res.matched.length} 题`, icon: 'none' })
     } catch (e) {
       console.error('关联失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '关联失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
@@ -132,7 +149,10 @@ export default function RecognizePage() {
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('文档识别失败', e)
-      Taro.showToast({ title: '文档识别失败，请确认内容为文字', icon: 'none' })
+      Taro.showToast({
+        title: e instanceof Error ? e.message : '文档识别失败，请确认内容为文字',
+        icon: 'none',
+      })
     } finally {
       setLoading(false)
     }
@@ -200,9 +220,9 @@ export default function RecognizePage() {
           <Card className="rounded-2xl border-border p-4 mb-4">
             <Text className="block text-xs text-muted-foreground mb-3">拍摄作业、试卷（含老师批改痕迹效果最佳）</Text>
             {paperImage ? (
-              <TaroImage src={paperImage} mode="widthFix" className="w-full rounded-xl mb-3" onClick={() => chooseImage(setPaperImage)} />
+              <TaroImage src={paperImage} mode="widthFix" className="w-full rounded-xl mb-3" onClick={() => chooseImage('paper')} />
             ) : (
-              <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={() => chooseImage(setPaperImage)}>
+              <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={() => chooseImage('paper')}>
                 <Text className="block text-sm text-muted-foreground">点击拍照 / 从相册选择</Text>
               </View>
             )}
@@ -214,8 +234,8 @@ export default function RecognizePage() {
           <Card className="rounded-2xl border-border p-4 mb-4">
             <Text className="block text-xs text-muted-foreground mb-3">分别上传题目图和答案图，系统自动识别并关联</Text>
             <View className="flex flex-row gap-3 mb-3">
-              <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage(setQuestionImage)} />
-              <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage(setAnswerImage)} />
+              <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage('question')} />
+              <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage('answer')} />
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleLink}>
               <Text className="block text-sm">{loading ? '识别中…' : '识别并关联'}</Text>
@@ -319,6 +339,14 @@ export default function RecognizePage() {
           </Button>
         </View>
       )}
+
+      {/* 拍照/相册后的裁剪与旋转编辑 */}
+      <ImageEditor
+        visible={!!editor}
+        src={editor?.src || ''}
+        onCancel={() => setEditor(null)}
+        onConfirm={handleEditorConfirm}
+      />
     </ScrollView>
   )
 }
