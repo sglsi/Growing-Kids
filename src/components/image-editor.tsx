@@ -11,6 +11,8 @@ interface ImageEditorProps {
   src: string
   onCancel: () => void
   onConfirm: (tempFilePath: string) => void
+  /** 打开编辑器后自动执行的 AI 处理 */
+  autoAction?: ImageAction | null
 }
 
 interface Rect {
@@ -43,7 +45,7 @@ const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
   { action: 'erase', label: '去手写', icon: Eraser },
 ]
 
-export default function ImageEditor({ visible, src, onCancel, onConfirm }: ImageEditorProps) {
+export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAction = null }: ImageEditorProps) {
   // 当前展示图（可能是本地路径或 AI 处理后的远程 URL）
   const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
@@ -159,6 +161,17 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
     renderCanvas()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, boxW, boxH, rotation, naturalW, naturalH, currentSrc, aiBusy])
+
+  // 打开后自动执行指定 AI 处理
+  useEffect(() => {
+    if (!visible || !autoAction || aiBusy || busy) return
+    const cfg = AI_ACTIONS.find((a) => a.action === autoAction)
+    if (cfg) {
+      void handleAi(cfg.action, cfg.label)
+    }
+    // 仅触发一次即可（aiBusy 重置后若 autoAction 变化再触发）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, autoAction])
 
   // ---------- 裁剪框手势 ----------
   const hitTarget = (touchX: number, touchY: number): DragTarget | null => {

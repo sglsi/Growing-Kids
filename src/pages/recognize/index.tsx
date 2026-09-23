@@ -10,7 +10,7 @@ import MaterialPicker from '@/components/material-picker'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
   recognizePaperByUrl, recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
-  type Subject, type RecognizeResult, type Material
+  type Subject, type RecognizeResult, type Material, type ImageAction
 } from '@/services/api'
 
 type Mode = 'paper' | 'split' | 'doc'
@@ -32,8 +32,8 @@ export default function RecognizePage() {
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
 
-  // 图片编辑器：{ slot, src }
-  const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string } | null>(null)
+  // 图片编辑器：{ slot, src, autoAction }
+  const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
 
   // 素材库选择
   const [picker, setPicker] = useState<'image' | 'document' | null>(null)
@@ -64,6 +64,14 @@ export default function RecognizePage() {
     } catch {
       // 用户取消
     }
+  }
+
+  // 以指定 AI 动作打开编辑器：{ label: '自动调正'|'智能高清'|'去手写' }
+  const openEditorWithAction = (slot: 'paper' | 'question' | 'answer', action: ImageAction) => {
+    if (slot === 'paper' && paperImage) setEditor({ slot, src: paperImage, autoAction: action })
+    else if (slot === 'question' && questionImage) setEditor({ slot, src: questionImage, autoAction: action })
+    else if (slot === 'answer' && answerImage) setEditor({ slot, src: answerImage, autoAction: action })
+    else Taro.showToast({ title: '请先选择图片', icon: 'none' })
   }
 
   // 编辑确认：把处理后的图片写回对应槽位
@@ -293,6 +301,13 @@ export default function RecognizePage() {
                 <Text className="block text-sm text-muted-foreground">点击拍照 / 从相册选择</Text>
               </View>
             )}
+            {/* 图片处理入口 */}
+            <View className="flex flex-row items-center justify-between gap-1 mb-3">
+              <ImgActionBtn label="编辑裁剪" onClick={() => { if (paperImage) setEditor({ slot: 'paper', src: paperImage }); else chooseImage('paper') }} />
+              <ImgActionBtn label="自动调正" onClick={() => openEditorWithAction('paper', 'auto')} />
+              <ImgActionBtn label="智能高清" onClick={() => openEditorWithAction('paper', 'enhance')} />
+              <ImgActionBtn label="去手写" onClick={() => openEditorWithAction('paper', 'erase')} />
+            </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
@@ -311,6 +326,20 @@ export default function RecognizePage() {
             <View className="flex flex-row gap-3 mb-3">
               <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage('question')} />
               <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage('answer')} />
+            </View>
+            {/* 图片处理入口 */}
+            <Text className="block text-xs text-muted-foreground mb-2">图片处理（分别对题目 / 答案图生效）</Text>
+            <View className="flex flex-row items-center justify-between gap-1 mb-3">
+              <ImgActionBtn label="自动调正·题" onClick={() => openEditorWithAction('question', 'auto')} />
+              <ImgActionBtn label="自动调正·答" onClick={() => openEditorWithAction('answer', 'auto')} />
+              <ImgActionBtn label="高清·题" onClick={() => openEditorWithAction('question', 'enhance')} />
+              <ImgActionBtn label="高清·答" onClick={() => openEditorWithAction('answer', 'enhance')} />
+            </View>
+            <View className="flex flex-row items-center justify-between gap-1 mb-3">
+              <ImgActionBtn label="去手写·题" onClick={() => openEditorWithAction('question', 'erase')} />
+              <ImgActionBtn label="去手写·答" onClick={() => openEditorWithAction('answer', 'erase')} />
+              <ImgActionBtn label="编辑·题" onClick={() => { if (questionImage) setEditor({ slot: 'question', src: questionImage }) }} />
+              <ImgActionBtn label="编辑·答" onClick={() => { if (answerImage) setEditor({ slot: 'answer', src: answerImage }) }} />
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleLink}>
               <Text className="block text-sm">{loading ? '识别中…' : '识别并关联'}</Text>
@@ -422,6 +451,7 @@ export default function RecognizePage() {
       <ImageEditor
         visible={!!editor}
         src={editor?.src || ''}
+        autoAction={editor?.autoAction || null}
         onCancel={() => setEditor(null)}
         onConfirm={handleEditorConfirm}
       />
@@ -463,6 +493,14 @@ function SplitUploader({ title, image, onPick }: { title: string; image: string;
           <Text className="block text-xs text-muted-foreground">上传{title}图</Text>
         </View>
       )}
+    </View>
+  )
+}
+
+function ImgActionBtn({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <View className="flex-1 bg-muted rounded-lg py-2 flex items-center justify-center" onClick={onClick}>
+      <Text className="block text-xs text-primary text-center">{label}</Text>
     </View>
   )
 }
