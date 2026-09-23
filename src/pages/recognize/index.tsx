@@ -232,7 +232,7 @@ export default function RecognizePage() {
         source: d.source,
         status: d.has_answer || d.answer_content ? 'answered' : 'pending'
       })))
-      Taro.showToast({ title: '已保存到错题本', icon: 'success' })
+      Taro.showToast({ title: '已保存到复习本', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('保存失败', e)
@@ -442,7 +442,7 @@ export default function RecognizePage() {
         >
           <Text className="block text-xs text-muted-foreground shrink-0">共 {drafts.length} 题</Text>
           <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
-            <Text className="block text-sm">{saving ? '保存中…' : '保存到错题本'}</Text>
+            <Text className="block text-sm">{saving ? '保存中…' : '保存到复习本'}</Text>
           </Button>
         </View>
       )}

@@ -23,7 +23,7 @@ export default function MaterialPicker({
   const load = async () => {
     setLoading(true)
     try {
-      const { list } = await fetchMaterials(type)
+      const { list } = await fetchMaterials(type ? { type } : {})
       setMaterials(list)
       setLoaded(true)
     } catch (e) {

@@ -222,9 +222,15 @@ export interface Material {
   created_at: string
 }
 
-export function fetchMaterials(type?: 'image' | 'document') {
+export function fetchMaterials(opts: { type?: 'image' | 'document'; subjectId?: string; page?: number; pageSize?: number } = {}) {
+  const { type, subjectId, page = 1, pageSize = 20 } = opts
+  const data: Record<string, unknown> = {}
+  if (type) data.type = type
+  if (subjectId) data.subject_id = subjectId
+  data.page = page
+  data.page_size = pageSize
   return unwrap<{ list: Material[]; total: number }>(
-    Network.request({ url: '/api/materials', method: 'GET', data: type ? { type } : {} })
+    Network.request({ url: '/api/materials', method: 'GET', data })
   )
 }
 

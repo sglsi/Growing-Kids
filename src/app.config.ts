@@ -26,7 +26,7 @@ export default defineAppConfig({
       },
       {
         pagePath: 'pages/subject/index',
-        text: '错题本',
+        text: '复习本',
         iconPath: './assets/tabbar/notebook-pen.png',
         selectedIconPath: './assets/tabbar/notebook-pen-active.png'
       },
