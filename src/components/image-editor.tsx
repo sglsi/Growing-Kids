@@ -251,21 +251,22 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
   }
 
   // 导出当前裁剪区域为新图（本地 tempFilePath）
+  // 注意：小程序 Canvas 2D 的 canvasToTempFilePath 中 x/y/width/height 采用
+  // 逻辑像素（相对 boxW/boxH），destWidth/destHeight 才用物理像素，二者混用会导致导出区域偏移。
   const exportCrop = async (): Promise<string> => {
     await renderCanvas() // 确保绘制完成
     const node = await getCanvasNode()
     if (!node) throw new Error('canvas 未就绪')
-    const nw = node.width
-    const nh = node.height
+    const dpr = Taro.getSystemInfoSync().pixelRatio || 1
     return new Promise<string>((resolve, reject) => {
       Taro.canvasToTempFilePath({
         canvas: node,
-        x: crop.x * nw,
-        y: crop.y * nh,
-        width: crop.w * nw,
-        height: crop.h * nh,
-        destWidth: Math.round(crop.w * nw * 2),
-        destHeight: Math.round(crop.h * nh * 2),
+        x: crop.x * boxW,
+        y: crop.y * boxH,
+        width: crop.w * boxW,
+        height: crop.h * boxH,
+        destWidth: Math.round(crop.w * boxW * dpr),
+        destHeight: Math.round(crop.h * boxH * dpr),
         fileType: 'jpg',
         quality: 0.95,
         success: (r) => resolve(r.tempFilePath),
