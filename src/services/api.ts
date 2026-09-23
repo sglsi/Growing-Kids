@@ -259,3 +259,45 @@ export async function recognizeDocumentByUrl(url: string, subjectId: string) {
   }
   return items
 }
+
+// ---------- 图片处理（AI）：自动调正/智能高清/去手写 ----------
+export type ImageAction = 'auto' | 'enhance' | 'erase'
+
+// 根据文件内容自动上传到对象存储，返回公网 url（用于 AI 图片处理）
+async function ensureImageUrl(filePathOrUrl: string): Promise<string> {
+  if (/^https?:\/\//.test(filePathOrUrl)) return filePathOrUrl
+  const { url } = await uploadFile(filePathOrUrl)
+  return url
+}
+
+export async function processImage(action: ImageAction, filePathOrUrl: string) {
+  const image_url = await ensureImageUrl(filePathOrUrl)
+  const data = await unwrapResponse<{ url: string; key: string; material_id: string }>(
+    Network.request({
+      url: '/api/image/process',
+      method: 'POST',
+      data: { action, image_url },
+    }),
+  )
+  return data
+}
+
+// ---------- 图片直存 ----------
+// 上传本地图片/或已存网络图，返回 { key, url }
+export async function uploadImage(filePathOrUrl: string): Promise<{ key: string; url: string }> {
+  if (/^https?:\/\//.test(filePathOrUrl)) {
+    // 网络图：直接视为依赖素材已入库，返回可用 url（key 空，以 url 为准展示）
+    return { key: '', url: filePathOrUrl }
+  }
+  return uploadFile(filePathOrUrl)
+}
+
+// 将一张图片直接保存为错题（不依赖 OCR），question_image_keys 存图片 key 或 url
+export function saveQuestionAsImage(subjectId: string, imageKey: string, imageUrl?: string) {
+  return createQuestion({
+    subject_id: subjectId,
+    question_content: '（图片题目）',
+    question_image_keys: imageKey ? [imageKey] : (imageUrl ? [imageUrl] : []),
+    status: 'pending',
+  })
+}

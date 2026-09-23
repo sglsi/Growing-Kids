@@ -9,7 +9,7 @@ import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
-  recognizePaperByUrl, recognizeDocumentByUrl,
+  recognizePaperByUrl, recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
   type Subject, type RecognizeResult, type Material
 } from '@/services/api'
 
@@ -233,6 +233,28 @@ export default function RecognizePage() {
     }
   }
 
+  // 直接以图片形式保存为错题（不依赖 OCR），避免识别率低丢失内容
+  const handleSaveImageDirect = async () => {
+    if (!paperImage) {
+      Taro.showToast({ title: '请先拍照或选择图片', icon: 'none' })
+      return
+    }
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    setSaving(true)
+    try {
+      const { key, url } = await uploadImage(paperImage)
+      await saveQuestionAsImage(sid, key, url)
+      Taro.showToast({ title: '已以图片形式保存', icon: 'success' })
+      setTimeout(() => Taro.navigateBack(), 800)
+    } catch (e) {
+      console.error('图片直存失败', e)
+      Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const subjectIndex = (id: string) => Math.max(0, subjects.findIndex(s => s.id === id))
   const subjectName = (id: string) => subjects.find(s => s.id === id)?.name || '选择学科'
 
@@ -274,8 +296,13 @@ export default function RecognizePage() {
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
-            <View className="flex items-center justify-center mt-3" onClick={() => setPicker('image')}>
-              <Text className="block text-xs text-primary">从素材库选择图片</Text>
+            <View className="flex flex-row items-center justify-center gap-6 mt-3">
+              <View onClick={() => handleSaveImageDirect()}>
+                <Text className="block text-xs text-primary">以图片形式直接保存</Text>
+              </View>
+              <View onClick={() => setPicker('image')}>
+                <Text className="block text-xs text-muted-foreground">从素材库选择图片</Text>
+              </View>
             </View>
           </Card>
         ) : mode === 'split' ? (

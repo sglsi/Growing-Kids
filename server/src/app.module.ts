@@ -8,6 +8,7 @@ import { OcrModule } from './ocr/ocr.module'
 import { SearchModule } from './search/search.module'
 import { DocumentModule } from './document/document.module'
 import { MaterialsModule } from './materials/materials.module'
+import { ImageModule } from './image/image.module'
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { MaterialsModule } from './materials/materials.module'
     SearchModule,
     DocumentModule,
     MaterialsModule,
+    ImageModule,
   ],
   controllers: [AppController],
   providers: [AppService],

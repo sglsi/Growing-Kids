@@ -1,8 +1,10 @@
-import { View, Text, Canvas } from '@tarojs/components'
+import { View, Text, Canvas, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { RotateCw, Crop, Undo2, X } from 'lucide-react-taro'
+import { Network } from '@/network'
+import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Download } from 'lucide-react-taro'
+import { processImage, uploadImage, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
   visible: boolean
@@ -34,7 +36,16 @@ const HANDLES: { key: DragTarget; dx: number; dy: number }[] = [
 const CANVAS_ID = 'imgEditorCanvas'
 const HANDLE_HIT = 28 // px
 
+// AI 处理按钮配置
+const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
+  { action: 'auto', label: '自动调正', icon: Wand },
+  { action: 'enhance', label: '智能高清', icon: Sparkles },
+  { action: 'erase', label: '去手写', icon: Eraser },
+]
+
 export default function ImageEditor({ visible, src, onCancel, onConfirm }: ImageEditorProps) {
+  // 当前展示图（可能是本地路径或 AI 处理后的远程 URL）
+  const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
   const [naturalH, setNaturalH] = useState(0)
   const [rotation, setRotation] = useState(0)
@@ -42,6 +53,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
   const [boxW, setBoxW] = useState(0)
   const [boxH, setBoxH] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [aiBusy, setAiBusy] = useState(false)
 
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
@@ -52,24 +64,28 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
   } | null>(null)
 
   // 初始化：读取图片尺寸，按 contain 计算展示盒大小
+  const resetBox = (imgW: number, imgH: number) => {
+    setNaturalW(imgW)
+    setNaturalH(imgH)
+    const sys = Taro.getSystemInfoSync()
+    const availW = sys.windowWidth - 32
+    const availH = sys.windowHeight - 240
+    const scale = Math.min(availW / imgW, availH / imgH, 1)
+    setBoxW(imgW * scale)
+    setBoxH(imgH * scale)
+  }
+
   useEffect(() => {
     if (!visible || !src) return
+    setCurrentSrc(src)
     setRotation(0)
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
     setBusy(false)
+    setAiBusy(false)
     canvasNodeRef.current = null
 
     Taro.getImageInfo({ src })
-      .then((info) => {
-        setNaturalW(info.width)
-        setNaturalH(info.height)
-        const sys = Taro.getSystemInfoSync()
-        const availW = sys.windowWidth - 32
-        const availH = sys.windowHeight - 220
-        const scale = Math.min(availW / info.width, availH / info.height, 1)
-        setBoxW(info.width * scale)
-        setBoxH(info.height * scale)
-      })
+      .then((info) => resetBox(info.width, info.height))
       .catch(() => {
         Taro.showToast({ title: '图片读取失败', icon: 'none' })
       })
@@ -81,7 +97,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
     if (!naturalW || !naturalH || rotation === 0) return
     const sys = Taro.getSystemInfoSync()
     const availW = sys.windowWidth - 32
-    const availH = sys.windowHeight - 220
+    const availH = sys.windowHeight - 240
     // 旋转 90/270 后宽高互换
     const rw = naturalH
     const rh = naturalW
@@ -122,7 +138,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
     } else {
       img = new Image()
     }
-    img.src = src
+    img.src = currentSrc
     await new Promise<void>((resolve) => {
       img.onload = () => resolve()
       img.onerror = () => resolve()
@@ -139,10 +155,10 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
 
   // 跟随状态变化重绘
   useEffect(() => {
-    if (!visible || !boxW || !boxH || !naturalW) return
+    if (!visible || !boxW || !boxH || !naturalW || aiBusy) return
     renderCanvas()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, boxW, boxH, rotation, naturalW, naturalH])
+  }, [visible, boxW, boxH, rotation, naturalW, naturalH, currentSrc, aiBusy])
 
   // ---------- 裁剪框手势 ----------
   const hitTarget = (touchX: number, touchY: number): DragTarget | null => {
@@ -197,7 +213,80 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
 
   const handleReset = () => {
     setRotation(0)
+    setCurrentSrc(src)
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
+  }
+
+  // AI 处理：调后端图生图，得到结果 URL 后下载为本地临时图，继续编辑
+  const handleAi = async (action: ImageAction, label: string) => {
+    if (aiBusy || busy) return
+    setAiBusy(true)
+    Taro.showLoading({ title: `${label}处理中…`, mask: true })
+    try {
+      // AI 处理需要网络可访问的 URL；本地临时图先上传
+      let sourceUrl = currentSrc
+      if (!/^https?:\/\//.test(currentSrc)) {
+        const up = await uploadImage(currentSrc)
+        sourceUrl = up.url
+      }
+      const data = await processImage(action, sourceUrl)
+      // 将远程 URL 下载为本地临时文件（跨端）
+      const dl = await Network.downloadFile({ url: data.url })
+      if (dl.statusCode !== 200 || !dl.tempFilePath) {
+        throw new Error('处理结果下载失败')
+      }
+      const info = await Taro.getImageInfo({ src: dl.tempFilePath })
+      setCurrentSrc(dl.tempFilePath)
+      setRotation(0)
+      setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
+      setNaturalW(info.width)
+      setNaturalH(info.height)
+      Taro.showToast({ title: `${label}完成`, icon: 'success' })
+    } catch (e) {
+      console.error('AI 图片处理失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : `${label}失败，请重试`, icon: 'none' })
+    } finally {
+      setAiBusy(false)
+      Taro.hideLoading()
+    }
+  }
+
+  // 保存到相册
+  const handleSave = async () => {
+    setBusy(true)
+    try {
+      await renderCanvas()
+      const node = await getCanvasNode()
+      if (!node) throw new Error('canvas 未就绪')
+      const nw = node.width
+      const nh = node.height
+      const path = await new Promise<string>((resolve, reject) => {
+        Taro.canvasToTempFilePath({
+          canvas: node,
+          x: crop.x * nw,
+          y: crop.y * nh,
+          width: crop.w * nw,
+          height: crop.h * nh,
+          destWidth: Math.round(crop.w * nw),
+          destHeight: Math.round(crop.h * nh),
+          fileType: 'jpg',
+          quality: 0.92,
+          success: (r) => resolve(r.tempFilePath),
+          fail: (err) => reject(err),
+        } as any)
+      })
+      await Taro.saveImageToPhotosAlbum({ filePath: path })
+      Taro.showToast({ title: '已保存到相册', icon: 'success' })
+    } catch (err: any) {
+      console.error('保存图片失败', err)
+      if (err?.errMsg?.includes && err.errMsg.includes('auth')) {
+        Taro.showToast({ title: '请授权相册权限后重试', icon: 'none' })
+      } else {
+        Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
+      }
+    } finally {
+      setBusy(false)
+    }
   }
 
   // 确认：从旋转后画布按裁剪框导出
@@ -250,61 +339,81 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
 
       {/* 画布与裁剪框 */}
       <View className="flex-1 flex items-center justify-center px-4">
-        <View
-          style={{ width: boxW || '100%', height: boxH || 240, position: 'relative' }}
-          onTouchStart={onTouchStart}
-          onTouchMove={onTouchMove}
-          onTouchEnd={onTouchEnd}
-        >
-          <Canvas
-            type="2d"
-            id={CANVAS_ID}
-            style={{ width: boxW, height: boxH }}
-          />
-
-          {/* 半透明遮罩：用 4 个块围出裁剪区域 */}
-          <Overlay crop={crop} />
-
-          {/* 裁剪边框 */}
+        {aiBusy ? (
+          <TaroImage src={currentSrc} mode="aspectFit" className="w-full h-full" />
+        ) : (
           <View
-            className="absolute border border-white"
-            style={{
-              left: crop.x * boxW,
-              top: crop.y * boxH,
-              width: crop.w * boxW,
-              height: crop.h * boxH,
-              boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
-            }}
+            style={{ width: boxW || '100%', height: boxH || 240, position: 'relative' }}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
           >
-            {/* 九宫格辅助线 */}
-            <View className="absolute inset-0 pointer-events-none">
-              <View className="absolute left-1/3 top-0 bottom-0 border-l border-white border-opacity-40" />
-              <View className="absolute left-2/3 top-0 bottom-0 border-l border-white border-opacity-40" />
-              <View className="absolute top-1/3 left-0 right-0 border-t border-white border-opacity-40" />
-              <View className="absolute top-2/3 left-0 right-0 border-t border-white border-opacity-40" />
-            </View>
+            <Canvas
+              type="2d"
+              id={CANVAS_ID}
+              style={{ width: boxW, height: boxH }}
+            />
 
-            {/* 四角手柄 */}
-            {HANDLES.map((h) => (
-              <View
-                key={h.key}
-                className="absolute bg-white"
-                style={{
-                  width: 14,
-                  height: 14,
-                  left: h.dx * crop.w * boxW - 7,
-                  top: h.dy * crop.h * boxH - 7,
-                  borderRadius: 2,
-                }}
-              />
-            ))}
+            {/* 半透明遮罩：用 4 个块围出裁剪区域 */}
+            <Overlay crop={crop} />
+
+            {/* 裁剪边框 */}
+            <View
+              className="absolute border border-white"
+              style={{
+                left: crop.x * boxW,
+                top: crop.y * boxH,
+                width: crop.w * boxW,
+                height: crop.h * boxH,
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
+              }}
+            >
+              {/* 九宫格辅助线 */}
+              <View className="absolute inset-0 pointer-events-none">
+                <View className="absolute left-1/3 top-0 bottom-0 border-l border-white border-opacity-40" />
+                <View className="absolute left-2/3 top-0 bottom-0 border-l border-white border-opacity-40" />
+                <View className="absolute top-1/3 left-0 right-0 border-t border-white border-opacity-40" />
+                <View className="absolute top-2/3 left-0 right-0 border-t border-white border-opacity-40" />
+              </View>
+
+              {/* 四角手柄 */}
+              {HANDLES.map((h) => (
+                <View
+                  key={h.key}
+                  className="absolute bg-white"
+                  style={{
+                    width: 14,
+                    height: 14,
+                    left: h.dx * crop.w * boxW - 7,
+                    top: h.dy * crop.h * boxH - 7,
+                    borderRadius: 2,
+                  }}
+                />
+              ))}
+            </View>
           </View>
-        </View>
+        )}
       </View>
 
       {/* 底部操作 */}
-      <View className="px-4 pb-8 pt-4">
-        <View className="flex flex-row items-center justify-center gap-10 mb-6">
+      <View className="px-4 pb-8 pt-3">
+        {/* AI 处理行 */}
+        <View className="flex flex-row items-center justify-around mb-4">
+          {AI_ACTIONS.map(({ action, label, icon: Icon }) => (
+            <View
+              key={action}
+              className="flex flex-col items-center"
+              onClick={() => handleAi(action, label)}
+            >
+              <View className="w-11 h-11 rounded-full bg-white bg-opacity-15 flex items-center justify-center mb-1">
+                <Icon size={20} color="#ffffff" />
+              </View>
+              <Text className="block text-white text-opacity-80 text-xs">{label}</Text>
+            </View>
+          ))}
+        </View>
+
+        <View className="flex flex-row items-center justify-center gap-10 mb-5">
           <View className="flex flex-col items-center" onClick={handleRotate}>
             <RotateCw size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
@@ -313,10 +422,14 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm }: Image
             <Crop size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">拖动边角裁剪</Text>
           </View>
+          <View className="flex flex-col items-center" onClick={handleSave}>
+            <Download size={24} color="#ffffff" />
+            <Text className="block text-white text-opacity-80 text-xs mt-1">保存图片</Text>
+          </View>
         </View>
         <Button
           className="w-full h-11 rounded-xl bg-primary"
-          disabled={busy}
+          disabled={busy || aiBusy}
           onClick={handleConfirm}
         >
           <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图'}</Text>
