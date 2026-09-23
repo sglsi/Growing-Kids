@@ -3,7 +3,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
-import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Download } from 'lucide-react-taro'
+import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database } from 'lucide-react-taro'
 import { processImage, uploadImage, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
@@ -250,9 +250,51 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     setConfirmed(false)
   }
 
-  const handleConfirmCrop = () => {
-    setConfirmed(true)
-    Taro.showToast({ title: '已确定裁剪区域', icon: 'none' })
+  // 导出当前裁剪区域为新图（本地 tempFilePath）
+  const exportCrop = async (): Promise<string> => {
+    await renderCanvas() // 确保绘制完成
+    const node = await getCanvasNode()
+    if (!node) throw new Error('canvas 未就绪')
+    const nw = node.width
+    const nh = node.height
+    return new Promise<string>((resolve, reject) => {
+      Taro.canvasToTempFilePath({
+        canvas: node,
+        x: crop.x * nw,
+        y: crop.y * nh,
+        width: crop.w * nw,
+        height: crop.h * nh,
+        destWidth: Math.round(crop.w * nw * 2),
+        destHeight: Math.round(crop.h * nh * 2),
+        fileType: 'jpg',
+        quality: 0.95,
+        success: (r) => resolve(r.tempFilePath),
+        fail: (err) => reject(err),
+      } as any)
+    })
+  }
+
+  // 确定裁剪：真正把选区内内容导出为新图，预览只显示该区域
+  const handleConfirmCrop = async () => {
+    if (busy || aiBusy) return
+    setBusy(true)
+    try {
+      const out = await exportCrop()
+      const info = await Taro.getImageInfo({ src: out })
+      setCurrentSrc(out)
+      setRotation(0)
+      setNaturalW(info.width)
+      setNaturalH(info.height)
+      setCrop({ x: 0, y: 0, w: 1, h: 1 })
+      setConfirmed(true)
+      resetBox(info.width, info.height)
+      Taro.showToast({ title: '已裁剪，仅显示选中区域', icon: 'success' })
+    } catch (err) {
+      console.error('裁剪失败', err)
+      Taro.showToast({ title: '裁剪失败，请重试', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
   }
 
   // AI 处理：调后端图生图，得到结果 URL 后下载为本地临时图，继续编辑
@@ -289,72 +331,29 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     }
   }
 
-  // 保存到相册
+  // 保存到小程序数据库（上传素材并入库）
   const handleSave = async () => {
+    if (busy || aiBusy) return
     setBusy(true)
     try {
-      await renderCanvas()
-      const node = await getCanvasNode()
-      if (!node) throw new Error('canvas 未就绪')
-      const nw = node.width
-      const nh = node.height
-      const path = await new Promise<string>((resolve, reject) => {
-        Taro.canvasToTempFilePath({
-          canvas: node,
-          x: crop.x * nw,
-          y: crop.y * nh,
-          width: crop.w * nw,
-          height: crop.h * nh,
-          destWidth: Math.round(crop.w * nw),
-          destHeight: Math.round(crop.h * nh),
-          fileType: 'jpg',
-          quality: 0.92,
-          success: (r) => resolve(r.tempFilePath),
-          fail: (err) => reject(err),
-        } as any)
-      })
-      await Taro.saveImageToPhotosAlbum({ filePath: path })
-      Taro.showToast({ title: '已保存到相册', icon: 'success' })
+      // 若已确定裁剪则导出裁剪结果，否则用当前编辑态整图
+      const imgSrc = confirmed ? await exportCrop() : currentSrc
+      await uploadImage(imgSrc)
+      Taro.showToast({ title: '已保存到素材库', icon: 'success' })
     } catch (err: any) {
       console.error('保存图片失败', err)
-      if (err?.errMsg?.includes && err.errMsg.includes('auth')) {
-        Taro.showToast({ title: '请授权相册权限后重试', icon: 'none' })
-      } else {
-        Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
-      }
+      Taro.showToast({ title: err?.message ? err.message : '保存失败，请重试', icon: 'none' })
     } finally {
       setBusy(false)
     }
   }
 
-  // 确认：从旋转后画布按裁剪框导出
+  // 确认使用：导出最终图片并回传给识别页
   const handleConfirm = async () => {
-    if (!confirmed) {
-      Taro.showToast({ title: '请先点击“确定裁剪”锁定选区', icon: 'none' })
-      return
-    }
+    if (busy || aiBusy) return
     setBusy(true)
     try {
-      await renderCanvas() // 确保绘制完成
-      const node = await getCanvasNode()
-      if (!node) throw new Error('canvas 未就绪')
-      const nw = node.width
-      const nh = node.height
-      const out = await new Promise<string>((resolve, reject) => {
-        Taro.canvasToTempFilePath({
-          canvas: node,
-          x: crop.x * nw,
-          y: crop.y * nh,
-          width: crop.w * nw,
-          height: crop.h * nh,
-          destWidth: Math.round(crop.w * nw),
-          destHeight: Math.round(crop.h * nh),
-          fileType: 'jpg',
-          quality: 0.92,
-          success: (r) => resolve(r.tempFilePath),
-          fail: (err) => reject(err),
-        } as any)
-      })
+      const out = await exportCrop()
       onConfirm(out)
     } catch (err) {
       console.error('导出裁剪图失败', err)
@@ -478,7 +477,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
             <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
           </View>
           <View className="flex flex-col items-center" onClick={handleSave}>
-            <Download size={24} color="#ffffff" />
+            <Database size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">保存图片</Text>
           </View>
         </View>
