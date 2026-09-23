@@ -56,6 +56,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
   const [boxH, setBoxH] = useState(0)
   const [busy, setBusy] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
+  const [confirmed, setConfirmed] = useState(false)
 
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
@@ -64,6 +65,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     startY: number
     start: Rect
   } | null>(null)
+  const canvasRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
 
   // 初始化：读取图片尺寸，按 contain 计算展示盒大小
   const resetBox = (imgW: number, imgH: number) => {
@@ -84,6 +86,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
     setBusy(false)
     setAiBusy(false)
+    setConfirmed(false)
     canvasNodeRef.current = null
 
     Taro.getImageInfo({ src })
@@ -91,6 +94,16 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
       .catch(() => {
         Taro.showToast({ title: '图片读取失败', icon: 'none' })
       })
+    // 测量画布相对可见区域偏移，用于把触摸坐标换算为容器内坐标
+    setTimeout(() => {
+      Taro.createSelectorQuery()
+        .select(`#${CANVAS_ID}`)
+        .boundingClientRect((rect) => {
+          const r = Array.isArray(rect) ? rect[0] : rect
+          if (r) canvasRectRef.current = { left: r.left, top: r.top }
+        })
+        .exec()
+    }, 60)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, src])
 
@@ -196,12 +209,14 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
 
   const onTouchStart = (e: any) => {
     const t = e.touches[0]
-    const target = hitTarget(t.clientX, t.clientY)
+    const rx = t.clientX - canvasRectRef.current.left
+    const ry = t.clientY - canvasRectRef.current.top
+    const target = hitTarget(rx, ry)
     if (!target) return
     dragRef.current = {
       target,
-      startX: t.clientX,
-      startY: t.clientY,
+      startX: rx,
+      startY: ry,
       start: { ...crop },
     }
   }
@@ -210,8 +225,11 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     const drag = dragRef.current
     if (!drag) return
     const t = e.touches[0]
-    const dx = (t.clientX - drag.startX) / boxW
-    const dy = (t.clientY - drag.startY) / boxH
+    const rx = t.clientX - canvasRectRef.current.left
+    const ry = t.clientY - canvasRectRef.current.top
+    const dx = (rx - drag.startX) / boxW
+    const dy = (ry - drag.startY) / boxH
+    setConfirmed(false)
     setCrop(clampCrop(applyDrag(drag.start, drag.target, dx, dy)))
   }
 
@@ -222,12 +240,19 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
   const handleRotate = () => {
     setRotation((r) => (r + 90) % 360)
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
+    setConfirmed(false)
   }
 
   const handleReset = () => {
     setRotation(0)
     setCurrentSrc(src)
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
+    setConfirmed(false)
+  }
+
+  const handleConfirmCrop = () => {
+    setConfirmed(true)
+    Taro.showToast({ title: '已确定裁剪区域', icon: 'none' })
   }
 
   // AI 处理：调后端图生图，得到结果 URL 后下载为本地临时图，继续编辑
@@ -304,6 +329,10 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
 
   // 确认：从旋转后画布按裁剪框导出
   const handleConfirm = async () => {
+    if (!confirmed) {
+      Taro.showToast({ title: '请先点击“确定裁剪”锁定选区', icon: 'none' })
+      return
+    }
     setBusy(true)
     try {
       await renderCanvas() // 确保绘制完成
@@ -357,22 +386,22 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
         ) : (
           <View
             style={{ width: boxW || '100%', height: boxH || 240, position: 'relative' }}
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
           >
             <Canvas
               type="2d"
               id={CANVAS_ID}
               style={{ width: boxW, height: boxH }}
+              onTouchStart={onTouchStart}
+              onTouchMove={onTouchMove}
+              onTouchEnd={onTouchEnd}
             />
 
-            {/* 半透明遮罩：用 4 个块围出裁剪区域 */}
+            {/* 半透明遮罩：用 4 个块围出裁剪区域（纯视觉，不拦截触摸） */}
             <Overlay crop={crop} />
 
-            {/* 裁剪边框 */}
+            {/* 裁剪边框（纯视觉，不拦截触摸） */}
             <View
-              className="absolute border border-white"
+              className="absolute border border-white pointer-events-none"
               style={{
                 left: crop.x * boxW,
                 top: crop.y * boxH,
@@ -393,16 +422,23 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
               {HANDLES.map((h) => (
                 <View
                   key={h.key}
-                  className="absolute bg-white"
+                  className="absolute pointer-events-none"
                   style={{
-                    width: 14,
-                    height: 14,
-                    left: h.dx * crop.w * boxW - 7,
-                    top: h.dy * crop.h * boxH - 7,
-                    borderRadius: 2,
+                    width: 16,
+                    height: 16,
+                    left: h.dx * crop.w * boxW - 8,
+                    top: h.dy * crop.h * boxH - 8,
+                    borderWidth: 3,
+                    borderStyle: 'solid',
+                    borderColor: '#ffffff',
                   }}
                 />
               ))}
+              {/* 四边中点手柄 */}
+              <View key="edge-t" className="absolute pointer-events-none" style={{ left: (crop.w * boxW) / 2 - 14, top: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
+              <View key="edge-b" className="absolute pointer-events-none" style={{ left: (crop.w * boxW) / 2 - 14, bottom: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
+              <View key="edge-l" className="absolute pointer-events-none" style={{ top: (crop.h * boxH) / 2 - 14, left: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
+              <View key="edge-r" className="absolute pointer-events-none" style={{ top: (crop.h * boxH) / 2 - 14, right: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
             </View>
           </View>
         )}
@@ -431,9 +467,15 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
             <RotateCw size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
           </View>
-          <View className="flex flex-col items-center">
-            <Crop size={24} color="#ffffff" />
-            <Text className="block text-white text-opacity-80 text-xs mt-1">拖动边角裁剪</Text>
+          <View className="flex flex-col items-center" onClick={handleConfirmCrop}>
+            <View
+              className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
+                confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'
+              }`}
+            >
+              <Crop size={20} color="#ffffff" />
+            </View>
+            <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
           </View>
           <View className="flex flex-col items-center" onClick={handleSave}>
             <Download size={24} color="#ffffff" />
