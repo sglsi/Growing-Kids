@@ -10,6 +10,7 @@ import { DocumentModule } from './document/document.module'
 import { MaterialsModule } from './materials/materials.module'
 import { ImageModule } from './image/image.module'
 import { PdfModule } from './pdf/pdf.module'
+import { DocumentsModule } from './documents/documents.module'
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { PdfModule } from './pdf/pdf.module'
     MaterialsModule,
     ImageModule,
     PdfModule,
+    DocumentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

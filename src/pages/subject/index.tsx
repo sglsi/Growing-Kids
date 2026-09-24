@@ -25,7 +25,7 @@ export default function SubjectPage() {
   const loadMaterials = async (subjectId: string) => {
     setLoading(true)
     try {
-      const res = await fetchMaterials(subjectId ? { subjectId, pageSize: 100 } : { pageSize: 100 })
+      const res = await fetchMaterials({ type: 'image', subjectId: subjectId || undefined, pageSize: 100 })
       setMaterials(res.list)
       setTotal(res.total)
     } catch (e) {

@@ -248,6 +248,42 @@ export function combineToPdf(ids: string[]) {
   )
 }
 
+export interface DocItem {
+  id: string
+  title: string
+  type: string
+  file_key: string
+  url: string
+  mime_type: string
+  size_bytes: number
+  created_at: string
+}
+
+// 查询我的文档（docx / pdf）
+export function fetchDocuments(opts: { type?: string; keyword?: string; page?: number; pageSize?: number } = {}) {
+  const { type, keyword, page = 1, pageSize = 30 } = opts
+  const data: Record<string, unknown> = {}
+  if (type) data.type = type
+  if (keyword) data.keyword = keyword
+  data.page = page
+  data.page_size = pageSize
+  return unwrap<{ total: number; list: DocItem[] }>(
+    Network.request({ url: '/api/documents', method: 'GET', data })
+  )
+}
+
+// 批量删除文档
+export function batchDeleteDocuments(ids: string[]) {
+  return unwrap<{ removed: number }>(
+    Network.request({ url: '/api/documents/batch-delete', method: 'POST', data: { ids } })
+  )
+}
+
+// 删除单个文档
+export function deleteDocument(id: string) {
+  return unwrap<{ id: string }>(Network.request({ url: `/api/documents/${id}`, method: 'DELETE' }))
+}
+
 // 直接用对象存储 URL 走整卷识别（供素材库复用，免本地文件）
 export async function recognizePaperByUrl(url: string, subjectId: string) {
   const data = await unwrapResponse<{ items: RecognizeResult[] }>(

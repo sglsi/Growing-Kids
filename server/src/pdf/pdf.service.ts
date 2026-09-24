@@ -4,6 +4,7 @@ import * as http from 'http'
 import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
 import { MaterialsService } from '../materials/materials.service'
+import { DocumentsService } from '../documents/documents.service'
 import type { Material } from '../materials/materials.types'
 
 const A4_PT = { width: 595.28, height: 841.89 }
@@ -13,6 +14,7 @@ export class PdfService {
   constructor(
     private readonly storageService: StorageService,
     private readonly materialsService: MaterialsService,
+    private readonly documentsService: DocumentsService,
   ) {}
 
   private download(url: string): Promise<Buffer> {
@@ -108,6 +110,19 @@ export class PdfService {
       materialId = material.id
     } catch (e) {
       console.error('[pdf] 生成素材归档失败（不影响返回）', e)
+    }
+
+    try {
+      await this.documentsService.create({
+        title: `复习资料-${new Date().toLocaleDateString('zh-CN')}.pdf`,
+        type: 'pdf',
+        file_key: key,
+        url,
+        mime_type: 'application/pdf',
+        size_bytes: pdfBuffer.length,
+      })
+    } catch (e) {
+      console.error('[pdf] 文档记录入库失败（不影响返回）', e)
     }
 
     return { url, key, material_id: materialId, pages }

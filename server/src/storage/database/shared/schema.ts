@@ -63,3 +63,18 @@ export const materials = pgTable("materials", {
 	index("materials_type_idx").on(table.type),
 	index("materials_created_at_idx").on(table.created_at),
 ])
+
+// 文档表：生成的汇总文档（Word/PDF）统一归档，供文档页展示
+export const documents = pgTable("documents", {
+	id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+	title: varchar("title", { length: 255 }).notNull(),
+	// docx: Word 汇总；pdf: 合成 PDF
+	type: varchar("type", { length: 20 }).notNull().default('docx'),
+	file_key: varchar("file_key", { length: 500 }).notNull(),
+	url: text("url").notNull(),
+	mime_type: varchar("mime_type", { length: 100 }).notNull().default(''),
+	size_bytes: integer("size_bytes").notNull().default(0),
+	created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+	index("documents_created_at_idx").on(table.created_at),
+])
