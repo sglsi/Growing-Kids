@@ -164,7 +164,7 @@ export default function SubjectPage() {
   }
 
   return (
-    <View className="h-full bg-background flex flex-col">
+    <View className="h-screen bg-background flex flex-col" style={{ height: '100vh' }}>
       {/* 固定顶部：科目筛选 + 批量选择 */}
       <View className="flex-shrink-0 bg-background border-b border-border">
         <ScrollView scrollX className="whitespace-nowrap pt-3" enhanced showScrollbar={false}>
@@ -379,13 +379,20 @@ function MaterialPreview({ material, onClose, onDelete }: { material: Material; 
         {/* 内容区：可滚动 + 缩放 */}
         <ScrollView scrollY scrollX className="flex-1" enhanced>
           {isImage ? (
-            <View className="p-4 flex items-center justify-center min-w-full" style={{ width: 'auto' }}>
+            <View
+              className="flex items-center justify-center"
+              style={{
+                width: `${zoom * 100}%`,
+                height: `${zoom * 60}vh`,
+                minWidth: zoom === 1 ? '100%' : `${zoom * 100}%`,
+              }}
+            >
               <Image
                 src={material.url}
                 mode="aspectFit"
                 style={{
                   width: zoom === 1 ? '100%' : `${zoom * 100}%`,
-                  height: '60vh',
+                  height: zoom === 1 ? '60vh' : `${zoom * 60}vh`,
                 }}
                 onClick={() => {
                   // 调起微信原生图片预览，支持双指捏合缩放
