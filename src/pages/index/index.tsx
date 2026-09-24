@@ -53,7 +53,7 @@ export default function IndexPage() {
         {/* 顶部标题 */}
         <View className="mb-4">
           <Text className="block text-xl font-bold text-foreground">成长学童</Text>
-          <Text className="block text-xs text-muted-foreground mt-1">拍照 / 导入，把错题整理成属于你的知识地图</Text>
+          <Text className="block text-xs text-muted-foreground mt-1">拍照 / 导入，把题目整理成属于你的知识地图</Text>
         </View>
 
         {/* 识别与导入主操作区 */}
@@ -82,7 +82,7 @@ export default function IndexPage() {
             {/* 数据统计 */}
             <View className="flex flex-row gap-3 mb-4">
               <StatCard label="本周新增" value={overview?.week_total ?? 0} highlight />
-              <StatCard label="累计错题" value={overview?.total ?? 0} />
+              <StatCard label="累计题目" value={overview?.total ?? 0} />
               <StatCard label="待找答案" value={overview?.pending ?? 0} />
             </View>
 
@@ -108,9 +108,9 @@ export default function IndexPage() {
               })}
             </View>
 
-            {/* 最近错题 */}
+            {/* 最近题目 */}
             <View className="mb-2">
-              <Text className="block text-sm font-semibold text-foreground">最近错题</Text>
+              <Text className="block text-sm font-semibold text-foreground">最近题目</Text>
             </View>
             {overview?.recent?.length ? (
               <View className="space-y-3">
@@ -142,7 +142,7 @@ function StatCard({ label, value, highlight }: { label: string; value: number; h
 function EmptyState({ onAction }: { onAction: () => void }) {
   return (
     <Card className="rounded-2xl border-border p-8 flex flex-col items-center">
-      <Text className="block text-sm text-muted-foreground mb-4 text-center">还没有错题记录{'\n'}拍下第一张试卷开始整理吧</Text>
+      <Text className="block text-sm text-muted-foreground mb-4 text-center">还没有题目记录{'\n'}拍下第一张试卷开始整理吧</Text>
       <Button size="sm" className="rounded-lg" onClick={onAction}>
         <Text className="block text-xs">去拍照识别</Text>
       </Button>

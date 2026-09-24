@@ -122,7 +122,7 @@ function normalizeItem(raw: RecognizeResult): RecognizeResult {
   }
 }
 
-// 整卷识别：上传图片，返回结构化错题
+// 整卷识别：上传图片，返回结构化题目
 export async function recognizePaper(filePath: string, subjectId: string) {
   const { key } = await uploadFile(filePath)
   const data = await unwrapResponse<{ items: RecognizeResult[] }>(
@@ -312,7 +312,7 @@ export async function uploadImage(filePathOrUrl: string): Promise<{ key: string;
   return uploadFile(filePathOrUrl)
 }
 
-// 将一张图片直接保存为错题（不依赖 OCR），question_image_keys 存图片 key 或 url
+// 将一张图片直接保存为题目（不依赖 OCR），question_image_keys 存图片 key 或 url
 export function saveQuestionAsImage(subjectId: string, imageKey: string, imageUrl?: string) {
   return createQuestion({
     subject_id: subjectId,

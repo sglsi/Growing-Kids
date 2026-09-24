@@ -18,7 +18,7 @@ export const subjects = pgTable("subjects", {
 	index("subjects_sort_order_idx").on(table.sort_order),
 ])
 
-// 题目表：一道错题及其正确答案/解析
+// 题目表：一道题目及其正确答案/解析
 export const questions = pgTable("questions", {
 	id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
 	subject_id: varchar("subject_id", { length: 36 }).notNull().references(() => subjects.id, { onDelete: "cascade" }),

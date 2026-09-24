@@ -143,7 +143,7 @@ export default function DocumentPage() {
         <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-5">
           <View className="flex-1">
             <Text className="block text-sm font-medium text-foreground">包含已掌握题目</Text>
-            <Text className="block text-xs text-muted-foreground">默认仅汇总未掌握错题，开启后已掌握题一并纳入</Text>
+            <Text className="block text-xs text-muted-foreground">默认仅汇总未掌握题目，开启后已掌握题一并纳入</Text>
           </View>
           <Switch checked={includeMastered} onCheckedChange={(v) => setIncludeMastered(v)} />
         </View>

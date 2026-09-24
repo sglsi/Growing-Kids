@@ -241,7 +241,7 @@ export default function RecognizePage() {
     }
   }
 
-  // 直接以图片形式保存为错题（不依赖 OCR），避免识别率低丢失内容
+  // 直接以图片形式保存为题目（不依赖 OCR），避免识别率低丢失内容
   const handleSaveImageDirect = async () => {
     if (!paperImage) {
       Taro.showToast({ title: '请先拍照或选择图片', icon: 'none' })
