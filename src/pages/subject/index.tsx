@@ -88,6 +88,15 @@ export default function SubjectPage() {
     setPreview(m)
   }
 
+  const handleLongPress = (m: Material) => {
+    if (selecting) return
+    const next = new Set<string>()
+    next.add(m.id)
+    setSelected(next)
+    setSelecting(true)
+    Taro.vibrateShort?.({ type: 'light' }).catch(() => {})
+  }
+
   const handleDelete = async () => {
     if (!selected.size) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
     const ok = await new Promise<boolean>(resolve =>
@@ -156,57 +165,63 @@ export default function SubjectPage() {
 
   return (
     <View className="h-full bg-background flex flex-col">
-      <ScrollView scrollX className="whitespace-nowrap py-3" enhanced showScrollbar={false}>
-        <View className="flex flex-row px-4 gap-2">
-          <SubjectPill active={activeSubject === ''} label="全部" onClick={() => switchSubject('')} />
-          {subjects.map(s => (
-            <SubjectPill
-              key={s.id}
-              active={activeSubject === s.id}
-              label={s.name}
-              color={getSubjectColor(s.color).dot}
-              onClick={() => switchSubject(s.id)}
-            />
-          ))}
+      {/* 固定顶部：科目筛选 + 批量选择 */}
+      <View className="flex-shrink-0 bg-background border-b border-border">
+        <ScrollView scrollX className="whitespace-nowrap pt-3" enhanced showScrollbar={false}>
+          <View className="flex flex-row px-4 gap-2">
+            <SubjectPill active={activeSubject === ''} label="全部" onClick={() => switchSubject('')} />
+            {subjects.map(s => (
+              <SubjectPill
+                key={s.id}
+                active={activeSubject === s.id}
+                label={s.name}
+                color={getSubjectColor(s.color).dot}
+                onClick={() => switchSubject(s.id)}
+              />
+            ))}
+          </View>
+        </ScrollView>
+
+        <View className="flex flex-row items-center justify-between px-4 pt-2 pb-3">
+          <Text className="block text-sm text-muted-foreground">共 {total} 份学习资料</Text>
+          {!selecting ? (
+            <Text className="block text-sm text-primary" onClick={enterSelect}>批量选择</Text>
+          ) : (
+            <View className="flex flex-row items-center gap-3">
+              {selected.size > 0 && (
+                <>
+                  <Text className="block text-sm text-foreground">已选 {selected.size}</Text>
+                  <Text className="block text-sm text-muted-foreground" onClick={() => setSelected(new Set())}>清空</Text>
+                </>
+              )}
+              <Text className="block text-sm text-primary" onClick={exitSelect}>取消</Text>
+            </View>
+          )}
         </View>
-      </ScrollView>
+      </View>
 
       <ScrollView scrollY className="flex-1">
-        <View className="px-4 pb-28">
+        <View className="px-4 pb-28 pt-3">
           {loading ? (
             <View className="space-y-3">
               <Skeleton className="h-36 w-full rounded-2xl" />
               <Skeleton className="h-36 w-full rounded-2xl" />
             </View>
           ) : materials.length ? (
-            <>
-              <View className="flex flex-row items-center justify-between mb-3">
-                <Text className="block text-xs text-muted-foreground">共 {total} 份学习资料</Text>
-                {!selecting ? (
-                  <Text className="block text-xs text-primary" onClick={enterSelect}>批量选择</Text>
-                ) : (
-                  <View className="flex flex-row items-center gap-3">
-                    <Text className="block text-xs text-primary" onClick={exitSelect}>
-                      {selected.size ? `已选 ${selected.size}` : '取消'}
-                    </Text>
-                    {selected.size > 0 && <Text className="block text-xs text-destructive" onClick={() => setSelected(new Set())}>清空</Text>}
-                  </View>
-                )}
-              </View>
-              <View className="space-y-1">
-                {materials.map(m => (
-                  <MaterialRow
-                    key={m.id}
-                    item={m}
-                    subjectName={getSubjectName(m.subject_id)}
-                    subjectDot={getSubjectDot(m.subject_id)}
-                    selecting={selecting}
-                    checked={selected.has(m.id)}
-                    onOpen={() => handleItemOpen(m)}
-                  />
-                ))}
-              </View>
-            </>
+            <View className="space-y-1">
+              {materials.map(m => (
+                <MaterialRow
+                  key={m.id}
+                  item={m}
+                  subjectName={getSubjectName(m.subject_id)}
+                  subjectDot={getSubjectDot(m.subject_id)}
+                  selecting={selecting}
+                  checked={selected.has(m.id)}
+                  onOpen={() => handleItemOpen(m)}
+                  onLongPress={() => handleLongPress(m)}
+                />
+              ))}
+            </View>
           ) : (
             <Card className="rounded-2xl border-border p-8 flex flex-col items-center mt-8">
               <Text className="block text-sm text-muted-foreground text-center mb-4">暂无学习资料{'\n'}去拍照或导入添加</Text>
@@ -276,12 +291,16 @@ function SubjectPill({ active, label, color, onClick }: { active: boolean; label
   )
 }
 
-function MaterialRow({ item, subjectName, subjectDot, selecting, checked, onOpen }: {
-  item: Material; subjectName: string; subjectDot: string; selecting: boolean; checked: boolean; onOpen: () => void
+function MaterialRow({ item, subjectName, subjectDot, selecting, checked, onOpen, onLongPress }: {
+  item: Material; subjectName: string; subjectDot: string; selecting: boolean; checked: boolean; onOpen: () => void; onLongPress: () => void
 }) {
   const formatted = formatTime(item.created_at)
   return (
-    <View className={`flex flex-row items-center gap-3 rounded-xl border p-3 mb-2 ${checked ? 'border-primary bg-primary' : 'border-border bg-card'}`} onClick={onOpen}>
+    <View
+      className={`flex flex-row items-center gap-3 rounded-xl border p-3 mb-2 ${checked ? 'border-primary bg-muted' : 'border-border bg-card'}`}
+      onClick={onOpen}
+      onLongPress={onLongPress}
+    >
       {selecting && (
         <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
           {checked && <Check size={14} color="#fff" />}
@@ -322,35 +341,78 @@ function MaterialRow({ item, subjectName, subjectDot, selecting, checked, onOpen
 
 function MaterialPreview({ material, onClose, onDelete }: { material: Material; onClose: () => void; onDelete: (id: string) => void }) {
   const isImage = material.type === 'image'
+  const [zoom, setZoom] = useState(1)
+  const minZoom = 0.5
+  const maxZoom = 4
+  const changeZoom = (delta: number) => {
+    setZoom(z => {
+      const next = Math.round((z + delta) * 100) / 100
+      if (next < minZoom) return minZoom
+      if (next > maxZoom) return maxZoom
+      return next
+    })
+  }
+  const resetZoom = () => setZoom(1)
+
   return (
-    <View
-      className="fixed inset-0 z-50 flex flex-col bg-background"
-      style={{ backgroundColor: 'rgba(40,36,30,0.4)' }}
-      onClick={onClose}
-    >
-      <View className="rounded-t-2xl bg-background flex flex-col" style={{ height: '85%' }} onClick={(e) => e.stopPropagation()}>
-        <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border">
+    <View className="fixed inset-0 z-50 flex flex-col bg-background" onClick={onClose}>
+      <View className="bg-background flex flex-col h-full" onClick={(e) => e.stopPropagation()}>
+        {/* 顶部栏 */}
+        <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
           <Text className="block text-sm font-semibold text-foreground flex-1 pr-2 truncate">
             {material.name || (isImage ? '图片资料' : '文档资料')}
           </Text>
-          <Text className="block text-sm text-muted-foreground" onClick={onClose}>关闭</Text>
+          <Text className="block text-sm text-muted-foreground flex-shrink-0" onClick={onClose}>关闭</Text>
         </View>
 
-        <ScrollView scrollY className="flex-1" style={{ maxHeight: '65vh' }}>
+        {/* 缩放控制条 */}
+        <View className="flex flex-row items-center justify-center gap-5 px-4 py-2 border-b border-border flex-shrink-0">
+          <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => changeZoom(-0.25)}>
+            <Text className="block text-lg text-foreground leading-none">−</Text>
+          </View>
+          <Text className="block text-sm text-foreground w-16 text-center" onClick={resetZoom}>{Math.round(zoom * 100)}%</Text>
+          <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => changeZoom(0.25)}>
+            <Text className="block text-lg text-foreground leading-none">+</Text>
+          </View>
+        </View>
+
+        {/* 内容区：可滚动 + 缩放 */}
+        <ScrollView scrollY scrollX className="flex-1" enhanced>
           {isImage ? (
-            <Image src={material.url} mode="widthFix" style={{ width: '100%' }} />
+            <View className="p-4 flex items-center justify-center min-w-full" style={{ width: 'auto' }}>
+              <Image
+                src={material.url}
+                mode="aspectFit"
+                style={{
+                  width: zoom === 1 ? '100%' : `${zoom * 100}%`,
+                  height: '60vh',
+                }}
+                onClick={() => {
+                  // 调起微信原生图片预览，支持双指捏合缩放
+                  Taro.previewImage({ current: material.url, urls: [material.url] })
+                }}
+              />
+            </View>
           ) : (
             <View className="p-8 flex flex-col items-center">
-              <FileText size={48} color="#999" />
-              <Text className="block text-sm text-muted-foreground mt-3 text-center">该素材为文档/PDF 类型{'\n'}可在选择后「合成 PDF」打印，或通过识别页复用</Text>
+              <View style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}>
+                <FileText size={48} color="#999" />
+              </View>
+              <Text className="block text-sm text-muted-foreground mt-4 text-center">
+                该素材为文档/PDF 类型{'\n'}点击下方按钮可打开原件，支持双指缩放查看
+              </Text>
+              <View className="rounded-lg bg-primary px-4 py-2 mt-4" onClick={() => openOriginalDocument(material.url)}>
+                <Text className="block text-xs text-primary-foreground">打开文档原件</Text>
+              </View>
             </View>
           )}
-          <View className="px-4 py-3">
-            <Text className="block text-xs text-muted-foreground">保存时间：{formatTime(material.created_at)}</Text>
-          </View>
         </ScrollView>
 
-        <View className="p-4 flex flex-row gap-3" style={{ display: 'flex', flexDirection: 'row', gap: '12px' }}>
+        <View className="px-4 py-2 flex-shrink-0">
+          <Text className="block text-xs text-muted-foreground">保存时间：{formatTime(material.created_at)}</Text>
+        </View>
+
+        <View className="p-4 flex flex-row gap-3 flex-shrink-0" style={{ display: 'flex', flexDirection: 'row', gap: '12px' }}>
           <View style={{ flex: 1 }}>
             <ActionBtn icon={<Trash2 size={16} color="#fff" />} label="删除此资料" danger onClick={() => onDelete(material.id)} />
           </View>
@@ -358,6 +420,29 @@ function MaterialPreview({ material, onClose, onDelete }: { material: Material; 
       </View>
     </View>
   )
+}
+
+function openOriginalDocument(url: string) {
+  Taro.showLoading({ title: '加载文档…' })
+  Network.downloadFile({
+    url,
+    success: (d) => {
+      Taro.hideLoading()
+      Taro.openDocument({
+        filePath: d.tempFilePath,
+        showMenu: true,
+        fail: () => {
+          Taro.setClipboardData({ data: url })
+          Taro.showToast({ title: '无法打开，地址已复制', icon: 'none' })
+        },
+      })
+    },
+    fail: () => {
+      Taro.hideLoading()
+      Taro.setClipboardData({ data: url })
+      Taro.showToast({ title: '加载失败，地址已复制', icon: 'none' })
+    },
+  })
 }
 
 function formatTime(iso: string) {
