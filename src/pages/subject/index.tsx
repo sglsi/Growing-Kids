@@ -164,22 +164,22 @@ export default function SubjectPage() {
   }
 
   return (
-    <View className="h-screen bg-background flex flex-col" style={{ height: '100vh' }}>
+    <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
       {/* 固定顶部：科目筛选 + 批量选择 */}
-      <View className="flex-shrink-0 bg-background border-b border-border">
+      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', borderBottom: '1px solid #ecefe3' }}>
         <ScrollView scrollX className="whitespace-nowrap pt-3" enhanced showScrollbar={false}>
-          <View className="flex flex-row px-4 gap-2">
-            <SubjectPill active={activeSubject === ''} label="全部" onClick={() => switchSubject('')} />
-            {subjects.map(s => (
-              <SubjectPill
-                key={s.id}
-                active={activeSubject === s.id}
-                label={s.name}
-                color={getSubjectColor(s.color).dot}
-                onClick={() => switchSubject(s.id)}
-              />
-            ))}
-          </View>
+        <View className="flex flex-row px-4 gap-2">
+          <SubjectPill active={activeSubject === ''} label="全部" onClick={() => switchSubject('')} />
+          {subjects.map(s => (
+            <SubjectPill
+              key={s.id}
+              active={activeSubject === s.id}
+              label={s.name}
+              color={getSubjectColor(s.color).dot}
+              onClick={() => switchSubject(s.id)}
+            />
+          ))}
+        </View>
         </ScrollView>
 
         <View className="flex flex-row items-center justify-between px-4 pt-2 pb-3">
@@ -200,7 +200,7 @@ export default function SubjectPage() {
         </View>
       </View>
 
-      <ScrollView scrollY className="flex-1">
+      <ScrollView scrollY style={{ height: '100vh', paddingTop: 84 }}>
         <View className="px-4 pb-28 pt-3">
           {loading ? (
             <View className="space-y-3">
@@ -235,7 +235,7 @@ export default function SubjectPage() {
 
       {selecting && (
         <View style={{
-          position: 'fixed', bottom: 0, left: 0, right: 0,
+          position: 'fixed', bottom: 50, left: 0, right: 0,
           display: 'flex', flexDirection: 'row', gap: '12px',
           padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
         }}

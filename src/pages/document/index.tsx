@@ -59,7 +59,7 @@ function openDocument(rawUrl: string, isPdf: boolean) {
 }
 
 export default function DocumentPage() {
-  const [tab, setTab] = useState<Tab>('generate')
+  const [tab, setTab] = useState<Tab>('library')
 
   // —— 生成相关 ——
   const [range, setRange] = useState<Range>('week')
@@ -193,10 +193,10 @@ export default function DocumentPage() {
   }
 
   return (
-    <View className="h-screen bg-background flex flex-col" style={{ height: '100vh' }}>
-      {/* 顶部标签切换 */}
-      <View className="flex-shrink-0 bg-background border-b border-border">
-        <View className="flex flex-row bg-muted rounded-xl p-1 m-4 mb-0">
+    <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
+      {/* 固定顶部标签 */}
+      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', padding: '12px 16px 0', borderBottom: '1px solid #ecefe3' }}>
+        <View className="flex flex-row bg-muted rounded-xl p-1 mb-2">
           <View
             className={`flex-1 flex items-center justify-center h-9 rounded-lg ${tab === 'generate' ? 'bg-background shadow-sm' : ''}`}
             onClick={() => setTab('generate')}
@@ -213,7 +213,7 @@ export default function DocumentPage() {
       </View>
 
       {tab === 'generate' ? (
-        <ScrollView scrollY className="flex-1">
+        <ScrollView scrollY style={{ height: '100vh', paddingTop: 60 }}>
           <View className="px-4 pt-4 pb-32">
             <Text className="block text-sm font-semibold text-foreground mb-2">汇总时间段</Text>
             <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
@@ -287,7 +287,7 @@ export default function DocumentPage() {
           </View>
 
           <View style={{
-            position: 'fixed', bottom: 0, left: 0, right: 0,
+            position: 'fixed', bottom: 50, left: 0, right: 0,
             display: 'flex', flexDirection: 'row', gap: '12px',
             padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
           }}
@@ -299,7 +299,7 @@ export default function DocumentPage() {
         </ScrollView>
       ) : (
         <>
-          <View className="flex-shrink-0 bg-background border-b border-border px-4 pt-2 pb-2">
+          <View style={{ position: 'fixed', top: 60, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
               <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份文档</Text>
               {!selecting ? (
@@ -329,7 +329,7 @@ export default function DocumentPage() {
             </View>
           </View>
 
-          <ScrollView scrollY className="flex-1">
+          <ScrollView scrollY style={{ height: '100vh', paddingTop: 136 }}>
             <View className="px-4 pb-28 pt-3">
               {docsLoading ? (
                 <View className="space-y-3">
@@ -377,7 +377,7 @@ export default function DocumentPage() {
 
           {selecting && (
             <View style={{
-              position: 'fixed', bottom: 0, left: 0, right: 0,
+              position: 'fixed', bottom: 50, left: 0, right: 0,
               display: 'flex', flexDirection: 'row', gap: '12px',
               padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
             }}
