@@ -9,6 +9,7 @@ import { SearchModule } from './search/search.module'
 import { DocumentModule } from './document/document.module'
 import { MaterialsModule } from './materials/materials.module'
 import { ImageModule } from './image/image.module'
+import { PdfModule } from './pdf/pdf.module'
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { ImageModule } from './image/image.module'
     DocumentModule,
     MaterialsModule,
     ImageModule,
+    PdfModule,
   ],
   controllers: [AppController],
   providers: [AppService],

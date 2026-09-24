@@ -61,4 +61,24 @@ export class MaterialsService {
     if (error) throw new Error(error.message)
     return { id }
   }
+
+  async removeMany(ids: string[]): Promise<{ removed: number }> {
+    const client = getSupabaseClient()
+    if (!ids.length) return { removed: 0 }
+    const { data, error } = await client.from('materials').delete().in('id', ids).select('id')
+    if (error) throw new Error(error.message)
+    return { removed: (data || []).length }
+  }
+
+  async listByIds(ids: string[]): Promise<Material[]> {
+    const client = getSupabaseClient()
+    if (!ids.length) return []
+    const { data, error } = await client
+      .from('materials')
+      .select('*')
+      .in('id', ids)
+      .order('created_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    return (data || []) as Material[]
+  }
 }

@@ -234,6 +234,20 @@ export function fetchMaterials(opts: { type?: 'image' | 'document'; subjectId?: 
   )
 }
 
+// 批量删除素材
+export function batchDeleteMaterials(ids: string[]) {
+  return unwrap<{ removed: number }>(
+    Network.request({ url: '/api/materials/batch-delete', method: 'POST', data: { ids } })
+  )
+}
+
+// 把选中的素材合成标准 A4 PDF，返回转存到素材库的 PDF 地址
+export function combineToPdf(ids: string[]) {
+  return unwrap<{ url: string; key: string; material_id: string; pages: number }>(
+    Network.request({ url: '/api/pdf/combine', method: 'POST', data: { ids } })
+  )
+}
+
 // 直接用对象存储 URL 走整卷识别（供素材库复用，免本地文件）
 export async function recognizePaperByUrl(url: string, subjectId: string) {
   const data = await unwrapResponse<{ items: RecognizeResult[] }>(

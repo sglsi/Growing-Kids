@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Delete, Body, Param, Query, HttpCode,
+  Controller, Get, Post, Delete, Body, Param, Query, HttpCode, BadRequestException,
 } from '@nestjs/common'
 import { MaterialsService } from './materials.service'
 import type { MaterialQuery, MaterialType } from './materials.types'
@@ -36,6 +36,14 @@ export class MaterialsController {
   @HttpCode(200)
   async remove(@Param('id') id: string) {
     const data = await this.materialsService.remove(id)
+    return { code: 200, msg: 'success', data }
+  }
+
+  @Post('batch-delete')
+  @HttpCode(200)
+  async removeMany(@Body() body: { ids: string[] }) {
+    if (!body || !Array.isArray(body.ids)) throw new BadRequestException('ids 必须是数组')
+    const data = await this.materialsService.removeMany(body.ids)
     return { code: 200, msg: 'success', data }
   }
 }
