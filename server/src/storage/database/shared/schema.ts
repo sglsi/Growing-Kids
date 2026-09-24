@@ -7,7 +7,7 @@ export const healthCheck = pgTable("health_check", {
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 });
 
-// 学科表：错题本上的学科索引
+// 学科表：复习本上的学科索引
 export const subjects = pgTable("subjects", {
 	id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
 	name: varchar("name", { length: 50 }).notNull().unique(),
