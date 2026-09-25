@@ -3,9 +3,9 @@ import { PDFDocument } from 'pdf-lib'
 import * as http from 'http'
 import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
-import { MaterialsService } from '../materials/materials.service'
+import { TimelineService } from '../timeline/timeline.service'
 import { DocumentsService } from '../documents/documents.service'
-import type { Material } from '../materials/materials.types'
+import type { TimelineItem } from '../timeline/timeline.types'
 
 const A4_PT = { width: 595.28, height: 841.89 }
 
@@ -13,7 +13,7 @@ const A4_PT = { width: 595.28, height: 841.89 }
 export class PdfService {
   constructor(
     private readonly storageService: StorageService,
-    private readonly materialsService: MaterialsService,
+    private readonly timelineService: TimelineService,
     private readonly documentsService: DocumentsService,
   ) {}
 
@@ -42,28 +42,30 @@ export class PdfService {
   }
 
   /**
-   * 把选中的素材（图片为主，文档则合并其已归档图片等）合成标准 A4 PDF，
-   * 每个素材一页，图片等比缩放留白居中放置。结果转存 TOS 并归档为文档素材。
+   * 把选中的图片（timeline_items kind=image）合成标准 A4 PDF，每图一页，等比留白居中。
+   * 结果转存 TOS 并归档进 documents（文档页）。
    */
-  async combineIntoPdf(ids: string[]): Promise<{ url: string; key: string; material_id: string; pages: number }> {
+  async combineIntoPdf(
+    userId: string,
+    ids: string[],
+  ): Promise<{ url: string; key: string; doc_id: string; pages: number }> {
     if (!ids || !ids.length) throw new BadRequestException('请选择要合成的素材')
-    const materials: Material[] = await this.materialsService.listByIds(ids)
-    if (!materials.length) throw new BadRequestException('未找到所选素材')
+    const items: (TimelineItem & { url?: string })[] = await this.timelineService.listByIdsWithUrls(userId, ids)
+    if (!items.length) throw new BadRequestException('未找到所选素材')
 
     const pdf = await PDFDocument.create()
 
-    for (const m of materials) {
-      if (m.type !== 'image' || !m.url) continue
+    for (const it of items) {
+      if (it.kind !== 'image' || !it.url) continue
       let buffer: Buffer
       try {
-        buffer = await this.download(m.url)
+        buffer = await this.download(it.url)
       } catch (e) {
-        console.error('[pdf] 素材下载失败，跳过', m.id, e)
+        console.error('[pdf] 素材下载失败，跳过', it.id, e)
         continue
       }
       let image
       try {
-        // 用魔数自动探测真实图片格式，兼容 mime_type 标注不准确的情况
         const isPng = buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
         try {
           image = isPng ? await pdf.embedPng(buffer) : await pdf.embedJpg(buffer)
@@ -71,7 +73,7 @@ export class PdfService {
           image = isPng ? await pdf.embedJpg(buffer) : await pdf.embedPng(buffer)
         }
       } catch (e) {
-        console.error('[pdf] 图片解码失败，跳过', m.id, e)
+        console.error('[pdf] 图片解码失败，跳过', it.id, e)
         continue
       }
 
@@ -93,38 +95,26 @@ export class PdfService {
     if (!pages) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const pdfBuffer = Buffer.from(await pdf.save())
-
+    const title = `复习资料-${new Date().toLocaleDateString('zh-CN')}.pdf`
     const key = await this.storageService.uploadBuffer(pdfBuffer, `复习资料-${Date.now()}.pdf`, 'application/pdf')
     const url = await this.storageService.getPublicUrl(key)
 
-    let materialId = ''
+    // 归档进文档页
+    let docId = ''
     try {
-      const material = await this.materialsService.createMaterial({
-        name: `复习资料-${new Date().toLocaleDateString('zh-CN')}.pdf`,
-        type: 'document',
-        file_key: key,
-        url,
-        mime_type: 'application/pdf',
-        size_bytes: pdfBuffer.length,
-      })
-      materialId = material.id
-    } catch (e) {
-      console.error('[pdf] 生成素材归档失败（不影响返回）', e)
-    }
-
-    try {
-      await this.documentsService.create({
-        title: `复习资料-${new Date().toLocaleDateString('zh-CN')}.pdf`,
+      const doc = await this.documentsService.create(userId, {
+        title,
         type: 'pdf',
         file_key: key,
-        url,
         mime_type: 'application/pdf',
         size_bytes: pdfBuffer.length,
+        meta: { source_ids: ids },
       })
+      docId = doc.id
     } catch (e) {
       console.error('[pdf] 文档记录入库失败（不影响返回）', e)
     }
 
-    return { url, key, material_id: materialId, pages }
+    return { url, key, doc_id: docId, pages }
   }
 }

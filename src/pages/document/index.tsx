@@ -2,17 +2,18 @@ import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { Network } from '@/network'
-import QuestionCard from '@/components/question-card'
+import ReviewItemCard from '@/components/review-item-card'
+import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
+import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
-  exportDocument, fetchQuestions, fetchSubjects, fetchDocuments, batchDeleteDocuments,
-  type Subject, type QuestionWithSubject, type DocItem,
+  fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument,
+  type Subject, type TimelineItem, type DocItem,
 } from '@/services/api'
-import { getSubjectColor } from '@/types'
-import { FileText, Check } from 'lucide-react-taro'
+import { getSubjectColor, formatTime } from '@/types'
+import { openStorageFile, isPdfFile } from '@/services/net'
+import { FileText, Check, FolderOpen } from 'lucide-react-taro'
 
 type Range = 'week' | 'month' | 'all'
 type Tab = 'generate' | 'library'
@@ -26,38 +27,6 @@ function getDateRange(r: Range): { start: string; end: string } {
   return { start, end }
 }
 
-function formatTime(iso: string) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function openDocument(rawUrl: string, isPdf: boolean) {
-  Taro.showLoading({ title: '打开文档…' })
-  Network.downloadFile({
-    url: rawUrl,
-    success: (d) => {
-      Taro.hideLoading()
-      Taro.openDocument({
-        filePath: d.tempFilePath,
-        fileType: isPdf ? 'pdf' : 'docx',
-        showMenu: true,
-        fail: () => {
-          Taro.setClipboardData({ data: rawUrl })
-          Taro.showToast({ title: '无法打开，地址已复制', icon: 'none' })
-        },
-      })
-    },
-    fail: () => {
-      Taro.hideLoading()
-      Taro.setClipboardData({ data: rawUrl })
-      Taro.showToast({ title: '加载失败，地址已复制', icon: 'none' })
-    },
-  })
-}
-
 export default function DocumentPage() {
   const [tab, setTab] = useState<Tab>('library')
 
@@ -65,7 +34,7 @@ export default function DocumentPage() {
   const [range, setRange] = useState<Range>('week')
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [activeSubject, setActiveSubject] = useState('')
-  const [questions, setQuestions] = useState<QuestionWithSubject[]>([])
+  const [questions, setQuestions] = useState<TimelineItem[]>([])
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [previewed, setPreviewed] = useState(false)
@@ -74,14 +43,15 @@ export default function DocumentPage() {
   // —— 文档库 ——
   const [docs, setDocs] = useState<DocItem[]>([])
   const [docsLoading, setDocsLoading] = useState(true)
-  const [selecting, setSelecting] = useState(false)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
   const [docFilter, setDocFilter] = useState<'all' | 'docx' | 'pdf'>('all')
+  const [busy, setBusy] = useState(false)
+  const sel = useSelection()
 
   useDidShow(() => {
     if (subjects.length === 0) {
-      fetchSubjects().then(setSubjects)
+      fetchSubjects().then(setSubjects).catch(() => {})
     }
+    sel.exit()
     loadDocs()
   })
 
@@ -101,14 +71,18 @@ export default function DocumentPage() {
     setLoading(true)
     setPreviewed(true)
     try {
+      // v4：汇总数据源为 timeline（kind=question），已掌握过滤与时间/学科筛选均在后端
       const { start, end } = getDateRange(range)
-      const res = await fetchQuestions({
+      const res = await fetchTimeline({
+        scope: 'recent',
         subjectId: activeSubject || undefined,
-        startDate: start || undefined,
-        endDate: end || undefined,
-        mastered: includeMastered ? undefined : false,
+        pageSize: 100,
       })
-      setQuestions(res.list)
+      let list = res.list.filter((it) => it.kind === 'question')
+      if (!includeMastered) list = list.filter((it) => !it.mastered)
+      if (start) list = list.filter((it) => it.created_at >= start)
+      if (end) list = list.filter((it) => it.created_at <= end)
+      setQuestions(list)
     } catch (e) {
       console.error('预览失败', e)
     } finally {
@@ -130,7 +104,7 @@ export default function DocumentPage() {
         end_date: end,
         include_mastered: includeMastered,
       })
-      openDocument(res.url, false)
+      openStorageFile(res.url, false)
       loadDocs()
     } catch (e) {
       console.error('导出失败', e)
@@ -140,57 +114,32 @@ export default function DocumentPage() {
     }
   }
 
-  // —— 文档库操作 ——
-  const filteredDocs = docs.filter(d => docFilter === 'all' || d.type === docFilter)
+  const filteredDocs = docs.filter((d) => docFilter === 'all' || d.type === docFilter)
 
   const handleItemOpen = (d: DocItem) => {
-    if (selecting) { toggleSelect(d.id); return }
-    openDocument(d.url, d.type === 'pdf')
-  }
-
-  const toggleSelect = (id: string) => {
-    const next = new Set(selected)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setSelected(next)
-  }
-
-  const handleLongPress = (d: DocItem) => {
-    if (selecting) return
-    const next = new Set<string>()
-    next.add(d.id)
-    setSelected(next)
-    setSelecting(true)
-    Taro.vibrateShort?.({ type: 'light' }).catch(() => {})
-  }
-
-  const exitSelect = () => {
-    setSelecting(false)
-    setSelected(new Set())
+    if (sel.selecting) { sel.toggle(d.id); return }
+    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type))
   }
 
   const handleDelete = async () => {
-    if (!selected.size) { Taro.showToast({ title: '请先选择文档', icon: 'none' }); return }
-    const ok = await new Promise<boolean>(resolve =>
-      Taro.showModal({
-        title: '确认删除',
-        content: `将删除选中的 ${selected.size} 份文档，是否继续？`,
-        success: (r) => resolve(!!r.confirm),
-        fail: () => resolve(false),
-      }),
-    )
+    if (sel.isEmpty) { Taro.showToast({ title: '请先选择文档', icon: 'none' }); return }
+    const ok = await confirmDelete(sel.count, '份文档')
     if (!ok) return
+    setBusy(true)
     try {
-      await batchDeleteDocuments(Array.from(selected))
+      await batchDeleteDocuments(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
-      setSelected(new Set())
-      setSelecting(false)
+      sel.exit()
       loadDocs()
     } catch (e) {
       console.error('删除失败', e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
+    } finally {
+      setBusy(false)
     }
   }
+
+  const goLibrary = () => Taro.navigateTo({ url: '/pages/library/index' })
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
@@ -208,6 +157,12 @@ export default function DocumentPage() {
             onClick={() => setTab('library')}
           >
             <Text className={`block text-sm ${tab === 'library' ? 'text-primary font-medium' : 'text-muted-foreground'}`}>我的文档</Text>
+          </View>
+          <View
+            className="flex-1 flex items-center justify-center h-9 rounded-lg"
+            onClick={goLibrary}
+          >
+            <Text className="block text-sm text-muted-foreground">资料库</Text>
           </View>
         </View>
       </View>
@@ -238,7 +193,7 @@ export default function DocumentPage() {
               >
                 <Text className={`block text-xs ${activeSubject === '' ? 'text-primary-foreground' : ''}`}>全部</Text>
               </View>
-              {subjects.map(s => {
+              {subjects.map((s) => {
                 const active = activeSubject === s.id
                 const c = getSubjectColor(s.color)
                 return (
@@ -275,13 +230,11 @@ export default function DocumentPage() {
                 <>
                   <Text className="block text-xs text-muted-foreground mb-3">共 {questions.length} 题，按录入时间排列</Text>
                   <View className="space-y-3 mb-5">
-                    {questions.map(q => <QuestionCard key={q.id} item={q} showSubject />)}
+                    {questions.map((q) => <ReviewItemCard key={q.id} item={q} showSubject />)}
                   </View>
                 </>
               ) : (
-                <Card className="rounded-2xl border-border p-8 flex items-center justify-center">
-                  <Text className="block text-sm text-muted-foreground">所选条件下暂无题目</Text>
-                </Card>
+                <EmptyCard title="所选条件下暂无题目" />
               )
             )}
           </View>
@@ -302,17 +255,17 @@ export default function DocumentPage() {
           <View style={{ position: 'fixed', top: 60, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
               <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份文档</Text>
-              {!selecting ? (
-                <Text className="block text-sm text-primary" onClick={() => setSelecting(true)}>批量选择</Text>
+              {!sel.selecting ? (
+                <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
               ) : (
                 <View className="flex flex-row items-center gap-3">
-                  {selected.size > 0 && (
+                  {sel.count > 0 && (
                     <>
-                      <Text className="block text-sm text-foreground">已选 {selected.size}</Text>
-                      <Text className="block text-sm text-muted-foreground" onClick={() => setSelected(new Set())}>清空</Text>
+                      <Text className="block text-sm text-foreground">已选 {sel.count}</Text>
+                      <Text className="block text-sm text-muted-foreground" onClick={sel.clear}>清空</Text>
                     </>
                   )}
-                  <Text className="block text-sm text-primary" onClick={exitSelect}>取消</Text>
+                  <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
                 </View>
               )}
             </View>
@@ -321,7 +274,7 @@ export default function DocumentPage() {
                 <View
                   key={v}
                   className={`rounded-full border px-3 py-2 ${docFilter === v ? 'bg-primary border-primary' : 'bg-background border-border'}`}
-                  onClick={() => { setDocFilter(v); setSelected(new Set()) }}
+                  onClick={() => { setDocFilter(v); sel.clear() }}
                 >
                   <Text className={`block text-xs ${docFilter === v ? 'text-primary-foreground' : ''}`}>{label}</Text>
                 </View>
@@ -338,16 +291,16 @@ export default function DocumentPage() {
                 </View>
               ) : filteredDocs.length ? (
                 <View className="space-y-2">
-                  {filteredDocs.map(d => (
+                  {filteredDocs.map((d) => (
                     <View
                       key={d.id}
-                      className={`flex flex-row items-center gap-3 rounded-xl border p-3 ${selected.has(d.id) ? 'border-primary bg-muted' : 'border-border bg-card'}`}
+                      className={`flex flex-row items-center gap-3 rounded-xl border p-3 ${sel.selected.has(d.id) ? 'border-primary bg-muted' : 'border-border bg-card'}`}
                       onClick={() => handleItemOpen(d)}
-                      onLongPress={() => handleLongPress(d)}
+                      onLongPress={() => sel.longPress(d.id)}
                     >
-                      {selecting && (
-                        <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${selected.has(d.id) ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-                          {selected.has(d.id) && <Check size={14} color="#fff" />}
+                      {sel.selecting && (
+                        <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${sel.selected.has(d.id) ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
+                          {sel.selected.has(d.id) && <Check size={14} color="#fff" />}
                         </View>
                       )}
                       <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
@@ -368,29 +321,28 @@ export default function DocumentPage() {
                   ))}
                 </View>
               ) : (
-                <Card className="rounded-2xl border-border p-8 flex items-center justify-center mt-8">
-                  <Text className="block text-sm text-muted-foreground text-center">暂无文档{'\n'}在「汇总生成」中导出 Word，或到复习本合成 PDF 后会自动归档到这里</Text>
-                </Card>
+                <EmptyCard
+                  title="暂无文档"
+                  hint="在「汇总生成」导出 Word，或在复习本合成 PDF，会自动归档到这里"
+                  actionLabel="去资料库"
+                  onAction={goLibrary}
+                />
               )}
             </View>
           </ScrollView>
 
-          {selecting && (
-            <View style={{
-              position: 'fixed', bottom: 50, left: 0, right: 0,
-              display: 'flex', flexDirection: 'row', gap: '12px',
-              padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
-            }}
-            >
+          {sel.selecting && (
+            <BottomActionBar>
               <View style={{ flex: 1 }}>
-                <View
-                  className={`flex flex-row items-center justify-center gap-2 h-11 rounded-xl ${!selected.size ? 'opacity-50' : ''} bg-red-600`}
-                  onClick={() => { if (selected.size) handleDelete() }}
-                >
-                  <Text className="block text-sm text-white">删除选中</Text>
-                </View>
+                <ActionBtn
+                  icon={<FolderOpen size={16} color="#fff" />}
+                  label="删除选中"
+                  danger
+                  disabled={sel.isEmpty || busy}
+                  onClick={handleDelete}
+                />
               </View>
-            </View>
+            </BottomActionBar>
           )}
         </>
       )}

@@ -13,20 +13,16 @@ export interface RecognizeExamDto {
   image_keys: string[]
 }
 
-export interface RecognizePairDto {
+export interface RecognizeExamUrlDto {
   subject_id: string
+  urls: string[]
+}
+
+export interface RecognizePairDto {
   question_image_keys: string[]
   answer_image_keys: string[]
 }
 
 export interface RecognizeDocDto {
-  subject_id: string
-  file_type?: string
-  // 文档已上传到对象存储后的公网 URL（支持 pdf/doc/docx/txt 等）
   file_url: string
-}
-
-export interface RecognizeExamUrlDto {
-  subject_id: string
-  urls: string[]
 }

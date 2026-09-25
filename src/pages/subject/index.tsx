@@ -1,122 +1,133 @@
-import { View, Text, ScrollView, Image } from '@tarojs/components'
+import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { FileText, Image as ImageIcon, Trash2, FileSearch, Check } from 'lucide-react-taro'
-import { Card } from '@/components/ui/card'
+import { FileSearch, Trash2, FolderMinus } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
+import ReviewItemCard from '@/components/review-item-card'
+import FilterHeader, {
+  TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
+} from '@/components/filter-header'
+import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
-  fetchSubjects, fetchMaterials, batchDeleteMaterials, combineToPdf,
-  type Subject, type Material,
+  fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
+  type Subject, type TimelineItem,
 } from '@/services/api'
-import { getSubjectColor } from '@/types'
-import { Network } from '@/network'
+import { openStorageFile } from '@/services/net'
+
+const PAGE_SIZE = 20
 
 export default function SubjectPage() {
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [activeSubject, setActiveSubject] = useState('')
-  const [materials, setMaterials] = useState<Material[]>([])
+  const [keyword, setKeyword] = useState('')
+  const [activeTag, setActiveTag] = useState('')
+  const [items, setItems] = useState<TimelineItem[]>([])
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
-  const [selecting, setSelecting] = useState(false)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [preview, setPreview] = useState<Material | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState(false)
+  const sel = useSelection()
 
-  const loadMaterials = async (subjectId: string) => {
-    setLoading(true)
+  // 从当前页数据里汇总出现过的标签，供筛选
+  const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
+
+  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; append?: boolean }) => {
+    const { subjectId, keyword: kw, tag, page: p, append } = opts
+    if (append) setLoadingMore(true)
+    else setLoading(true)
     try {
-      const res = await fetchMaterials({ type: 'image', subjectId: subjectId || undefined, pageSize: 100 })
-      setMaterials(res.list)
+      const res = await fetchTimeline({
+        scope: 'review',
+        subjectId: subjectId || undefined,
+        keyword: kw || undefined,
+        tag: tag || undefined,
+        page: p,
+        pageSize: PAGE_SIZE,
+      })
+      setItems((prev) => (append ? [...prev, ...res.list] : res.list))
       setTotal(res.total)
+      setPage(res.page)
     } catch (e) {
-      console.error('加载资料失败', e)
+      console.error('加载复习本失败', e)
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
   }
 
   const init = async () => {
-    const subs = await fetchSubjects()
-    setSubjects(subs)
+    try {
+      if (subjects.length === 0) {
+        const subs = await fetchSubjects()
+        setSubjects(subs)
+      }
+    } catch (e) {
+      console.error('加载学科失败', e)
+    }
     const preset = Taro.getStorageSync('filter_subject_id') || ''
     if (preset) Taro.removeStorageSync('filter_subject_id')
     setActiveSubject(preset)
-    loadMaterials(preset)
+    setKeyword('')
+    setActiveTag('')
+    sel.exit()
+    await load({ subjectId: preset, keyword: '', tag: '', page: 1 })
   }
 
   useDidShow(() => {
     init()
   })
 
-  const switchSubject = (id: string) => {
-    setActiveSubject(id)
-    setSelected(new Set())
-    loadMaterials(id)
+  const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string }>) => {
+    const next = {
+      subjectId: patch.subjectId !== undefined ? patch.subjectId : activeSubject,
+      keyword: patch.keyword !== undefined ? patch.keyword : keyword,
+      tag: patch.tag !== undefined ? patch.tag : activeTag,
+    }
+    if (patch.subjectId !== undefined) setActiveSubject(patch.subjectId)
+    if (patch.keyword !== undefined) setKeyword(patch.keyword)
+    if (patch.tag !== undefined) setActiveTag(patch.tag)
+    sel.exit()
+    load({ ...next, page: 1 })
   }
 
-  const goRecognize = () => Taro.navigateTo({ url: '/pages/recognize/index' })
-
-  const getSubjectName = (id: string | null) => {
-    if (!id) return ''
-    return subjects.find(s => s.id === id)?.name || ''
+  const handleOpen = (item: TimelineItem) => {
+    if (sel.selecting) { sel.toggle(item.id); return }
+    if (item.kind === 'image') {
+      Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })
+      return
+    }
+    Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
   }
 
-  const getSubjectDot = (id: string | null) => {
-    if (!id) return ''
-    const s = subjects.find(x => x.id === id)
-    return s ? getSubjectColor(s.color).dot : ''
-  }
-
-  const toggleSelect = (id: string) => {
-    const next = new Set(selected)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setSelected(next)
-  }
-
-  const enterSelect = () => {
-    setSelected(new Set())
-    setSelecting(true)
-  }
-  const exitSelect = () => {
-    setSelecting(false)
-    setSelected(new Set())
-  }
-
-  const handleItemOpen = (m: Material) => {
-    if (selecting) { toggleSelect(m.id); return }
-    setPreview(m)
-  }
-
-  const handleLongPress = (m: Material) => {
-    if (selecting) return
-    const next = new Set<string>()
-    next.add(m.id)
-    setSelected(next)
-    setSelecting(true)
-    Taro.vibrateShort?.({ type: 'light' }).catch(() => {})
+  const handleRemoveFromReview = async () => {
+    if (sel.isEmpty) return
+    setBusy(true)
+    try {
+      await removeFromReviewBook(Array.from(sel.selected))
+      Taro.showToast({ title: '已移出复习本', icon: 'success' })
+      sel.exit()
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1 })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleDelete = async () => {
-    if (!selected.size) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
-    const ok = await new Promise<boolean>(resolve =>
-      Taro.showModal({
-        title: '确认删除',
-        content: `将删除选中的 ${selected.size} 份资料，是否继续？`,
-        success: (r) => resolve(!!r.confirm),
-        fail: () => resolve(false),
-      }),
-    )
+    if (sel.isEmpty) return
+    const ok = await confirmDelete(sel.count, '条')
     if (!ok) return
     setBusy(true)
     try {
-      await batchDeleteMaterials(Array.from(selected))
+      await batchDeleteTimeline(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
-      setSelected(new Set())
-      setSelecting(false)
-      loadMaterials(activeSubject)
+      sel.exit()
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1 })
     } catch (e) {
-      console.error('删除失败', e)
+      console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
     } finally {
       setBusy(false)
@@ -124,338 +135,136 @@ export default function SubjectPage() {
   }
 
   const handleCombinePdf = async () => {
-    if (!selected.size) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
+    const imageIds = items.filter((it) => sel.selected.has(it.id) && it.kind === 'image').map((it) => it.id)
+    if (!imageIds.length) {
+      Taro.showToast({ title: '请选择图片资料', icon: 'none' })
+      return
+    }
     setBusy(true)
     try {
-      const res = await combineToPdf(Array.from(selected))
-      Taro.hideLoading()
-      openPdf(res.url, res.pages)
+      const res = await combineToPdf(imageIds)
+      openStorageFile(res.url, true)
     } catch (e) {
       console.error('合成 PDF 失败', e)
-      Taro.hideLoading()
-      Taro.showToast({ title: '合成 PDF 失败，请确认所选含图片素材', icon: 'none' })
+      Taro.showToast({ title: '合成失败，请确认所选为图片', icon: 'none' })
     } finally {
       setBusy(false)
     }
   }
 
-  const openPdf = (url: string, pages?: number) => {
-    Taro.showLoading({ title: '打开 PDF…' })
-    Network.downloadFile({
-      url,
-      success: (d) => {
-        Taro.hideLoading()
-        Taro.openDocument({
-          filePath: d.tempFilePath,
-          fileType: 'pdf',
-          showMenu: true,
-          fail: () => {
-            Taro.showToast({ title: '打开失败，地址已复制', icon: 'none' })
-            Taro.setClipboardData({ data: url })
-          },
-        })
-      },
-      fail: () => {
-        Taro.hideLoading()
-        Taro.setClipboardData({ data: url })
-        Taro.showToast({ title: pages ? `已生成 ${pages} 页 PDF，地址已复制` : 'PDF 地址已复制', icon: 'none' })
-      },
-    })
-  }
+  const canLoadMore = items.length < total
+  const goRecognize = () => Taro.navigateTo({ url: '/pages/recognize/index' })
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
-      {/* 固定顶部：科目筛选 + 批量选择 */}
+      {/* 固定顶部：学科 + 搜索 + 标签 + 操作 */}
       <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', borderBottom: '1px solid #ecefe3' }}>
-        <ScrollView scrollX className="whitespace-nowrap pt-3" enhanced showScrollbar={false}>
-        <View className="flex flex-row px-4 gap-2">
-          <SubjectPill active={activeSubject === ''} label="全部" onClick={() => switchSubject('')} />
-          {subjects.map(s => (
-            <SubjectPill
-              key={s.id}
-              active={activeSubject === s.id}
-              label={s.name}
-              color={getSubjectColor(s.color).dot}
-              onClick={() => switchSubject(s.id)}
-            />
-          ))}
-        </View>
-        </ScrollView>
-
-        <View className="flex flex-row items-center justify-between px-4 pt-2 pb-3">
-          <Text className="block text-sm text-muted-foreground">共 {total} 份学习资料</Text>
-          {!selecting ? (
-            <Text className="block text-sm text-primary" onClick={enterSelect}>批量选择</Text>
-          ) : (
-            <View className="flex flex-row items-center gap-3">
-              {selected.size > 0 && (
-                <>
-                  <Text className="block text-sm text-foreground">已选 {selected.size}</Text>
-                  <Text className="block text-sm text-muted-foreground" onClick={() => setSelected(new Set())}>清空</Text>
-                </>
-              )}
-              <Text className="block text-sm text-primary" onClick={exitSelect}>取消</Text>
-            </View>
-          )}
-        </View>
+        <FilterHeader
+          subjects={subjects}
+          activeSubject={activeSubject}
+          onSubjectChange={(id) => resetAndLoad({ subjectId: id })}
+          keyword={keyword}
+          onKeywordChange={(kw) => setKeyword(kw)}
+          onSearch={() => resetAndLoad({ keyword: keyword })}
+          countText={`复习本 · 共 ${total} 条`}
+          placeholder="搜索题干 / 答案关键词，回车确认"
+          right={
+            !sel.selecting ? (
+              <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
+            ) : (
+              <View className="flex flex-row items-center gap-3">
+                {sel.count > 0 && (
+                  <>
+                    <Text className="block text-sm text-foreground">已选 {sel.count}</Text>
+                    <Text className="block text-sm text-muted-foreground" onClick={sel.clear}>清空</Text>
+                  </>
+                )}
+                <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
+              </View>
+            )
+          }
+        >
+          <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
+        </FilterHeader>
       </View>
 
-      <ScrollView scrollY style={{ height: '100vh', paddingTop: 84 }}>
+      <ScrollView
+        scrollY
+        style={{ height: '100vh', paddingTop: 168 }}
+        onScrollToLower={() => {
+          if (canLoadMore && !loadingMore && !loading) {
+            load({ subjectId: activeSubject, keyword, tag: activeTag, page: page + 1, append: true })
+          }
+        }}
+      >
         <View className="px-4 pb-28 pt-3">
           {loading ? (
             <View className="space-y-3">
-              <Skeleton className="h-36 w-full rounded-2xl" />
-              <Skeleton className="h-36 w-full rounded-2xl" />
+              <Skeleton className="h-24 w-full rounded-2xl" />
+              <Skeleton className="h-24 w-full rounded-2xl" />
+              <Skeleton className="h-24 w-full rounded-2xl" />
             </View>
-          ) : materials.length ? (
-            <View className="space-y-1">
-              {materials.map(m => (
-                <MaterialRow
-                  key={m.id}
-                  item={m}
-                  subjectName={getSubjectName(m.subject_id)}
-                  subjectDot={getSubjectDot(m.subject_id)}
-                  selecting={selecting}
-                  checked={selected.has(m.id)}
-                  onOpen={() => handleItemOpen(m)}
-                  onLongPress={() => handleLongPress(m)}
-                />
-              ))}
-            </View>
-          ) : (
-            <Card className="rounded-2xl border-border p-8 flex flex-col items-center mt-8">
-              <Text className="block text-sm text-muted-foreground text-center mb-4">暂无学习资料{'\n'}去拍照或导入添加</Text>
-              <View className="rounded-lg bg-primary px-4 py-2" onClick={goRecognize}>
-                <Text className="block text-xs text-primary-foreground">去拍照识别</Text>
+          ) : items.length ? (
+            <>
+              <View className="space-y-3">
+                {items.map((it) => (
+                  <ReviewItemCard
+                    key={it.id}
+                    item={it}
+                    selecting={sel.selecting}
+                    checked={sel.selected.has(it.id)}
+                    onOpen={handleOpen}
+                    onLongPress={(x) => sel.longPress(x.id)}
+                    timeField="added_to_review_at"
+                  />
+                ))}
               </View>
-            </Card>
+              <View className="py-4 flex items-center justify-center">
+                <Text className="block text-xs text-muted-foreground">
+                  {loadingMore ? '加载中…' : canLoadMore ? `上拉加载更多（${items.length}/${total}）` : '已经到底啦'}
+                </Text>
+              </View>
+            </>
+          ) : (
+            <EmptyCard
+              title="复习本还是空的"
+              hint="到收件箱长按选择题目，点「加入复习本」即可归档到这里"
+              actionLabel="去拍照识别"
+              onAction={goRecognize}
+            />
           )}
         </View>
       </ScrollView>
 
-      {selecting && (
-        <View style={{
-          position: 'fixed', bottom: 50, left: 0, right: 0,
-          display: 'flex', flexDirection: 'row', gap: '12px',
-          padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
-        }}
-        >
+      {sel.selecting && (
+        <BottomActionBar>
           <View style={{ flex: 1 }}>
-            <ActionBtn icon={<FileSearch size={16} color="#fff" />} label="合成PDF" disabled={!selected.size || busy} onClick={handleCombinePdf} />
+            <ActionBtn
+              icon={<FileSearch size={16} color="#fff" />}
+              label="合成PDF"
+              disabled={sel.isEmpty || busy}
+              onClick={handleCombinePdf}
+            />
           </View>
           <View style={{ flex: 1 }}>
-            <ActionBtn icon={<Trash2 size={16} color="#fff" />} label="删除" danger disabled={!selected.size || busy} onClick={handleDelete} />
+            <ActionBtn
+              icon={<FolderMinus size={16} color="#fff" />}
+              label="移出复习本"
+              disabled={sel.isEmpty || busy}
+              onClick={handleRemoveFromReview}
+            />
           </View>
-        </View>
-      )}
-
-      {preview && (
-        <MaterialPreview
-          material={preview}
-          onClose={() => setPreview(null)}
-          onDelete={async (id) => {
-            await batchDeleteMaterials([id])
-            Taro.showToast({ title: '已删除', icon: 'success' })
-            setPreview(null)
-            loadMaterials(activeSubject)
-          }}
-        />
-      )}
-    </View>
-  )
-}
-
-function ActionBtn({ icon, label, danger, disabled, onClick }: { icon: React.ReactNode; label: string; danger?: boolean; disabled?: boolean; onClick: () => void }) {
-  return (
-    <View
-      className={`flex flex-row items-center justify-center gap-2 h-11 rounded-xl ${disabled ? 'opacity-50' : ''} ${danger ? 'bg-red-600' : 'bg-primary'}`}
-      onClick={() => { if (!disabled) onClick() }}
-    >
-      {icon}
-      <Text className="block text-sm text-primary-foreground">{label}</Text>
-    </View>
-  )
-}
-
-function SubjectPill({ active, label, color, onClick }: { active: boolean; label: string; color?: string; onClick: () => void }) {
-  return (
-    <View
-      className={`flex flex-row items-center gap-2 rounded-full px-4 py-2 border ${
-        active ? 'bg-primary border-primary' : 'bg-background border-border'
-      }`}
-      onClick={onClick}
-    >
-      {color && !active && <View className={`w-2 h-2 rounded-full ${color}`} />}
-      <Text className={`block text-sm whitespace-nowrap ${active ? 'text-primary-foreground' : 'text-foreground'}`}>{label}</Text>
-    </View>
-  )
-}
-
-function MaterialRow({ item, subjectName, subjectDot, selecting, checked, onOpen, onLongPress }: {
-  item: Material; subjectName: string; subjectDot: string; selecting: boolean; checked: boolean; onOpen: () => void; onLongPress: () => void
-}) {
-  const formatted = formatTime(item.created_at)
-  return (
-    <View
-      className={`flex flex-row items-center gap-3 rounded-xl border p-3 mb-2 ${checked ? 'border-primary bg-muted' : 'border-border bg-card'}`}
-      onClick={onOpen}
-      onLongPress={onLongPress}
-    >
-      {selecting && (
-        <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-          {checked && <Check size={14} color="#fff" />}
-        </View>
-      )}
-      {item.type === 'image' ? (
-        <View className="w-20 h-24 flex-shrink-0 overflow-hidden rounded-lg bg-muted">
-          <Image
-            src={item.url}
-            mode="aspectFill"
-            style={{ width: '100%', height: '100%' }}
-            onClick={e => e.stopPropagation?.()}
-          />
-        </View>
-      ) : (
-        <View className="w-20 h-24 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-          <FileText size={26} color="#888" />
-        </View>
-      )}
-      <View className="flex-1 min-w-0">
-        <View className="flex flex-row items-center gap-2">
-          {subjectDot ? <View className={`w-2 h-2 rounded-full flex-shrink-0 ${subjectDot}`} /> : null}
-          <Text className="block text-sm font-medium text-foreground truncate">
-            {item.name || (item.type === 'image' ? '图片资料' : '文档资料')}
-          </Text>
-        </View>
-        <View className="flex flex-row items-center gap-2 mt-1">
-          <ImageIcon size={13} color="#999" />
-          <Text className="block text-xs text-muted-foreground truncate">
-            {item.type === 'image' ? '图片' : '文档'}{subjectName ? ` · ${subjectName}` : ''}
-          </Text>
-        </View>
-        <Text className="block text-xs text-muted-foreground mt-1">{formatted}</Text>
-      </View>
-    </View>
-  )
-}
-
-function MaterialPreview({ material, onClose, onDelete }: { material: Material; onClose: () => void; onDelete: (id: string) => void }) {
-  const isImage = material.type === 'image'
-  const [zoom, setZoom] = useState(1)
-  const minZoom = 0.5
-  const maxZoom = 4
-  const changeZoom = (delta: number) => {
-    setZoom(z => {
-      const next = Math.round((z + delta) * 100) / 100
-      if (next < minZoom) return minZoom
-      if (next > maxZoom) return maxZoom
-      return next
-    })
-  }
-  const resetZoom = () => setZoom(1)
-
-  return (
-    <View className="fixed inset-0 z-50 flex flex-col bg-background" onClick={onClose}>
-      <View className="bg-background flex flex-col h-full" onClick={(e) => e.stopPropagation()}>
-        {/* 顶部栏 */}
-        <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
-          <Text className="block text-sm font-semibold text-foreground flex-1 pr-2 truncate">
-            {material.name || (isImage ? '图片资料' : '文档资料')}
-          </Text>
-          <Text className="block text-sm text-muted-foreground flex-shrink-0" onClick={onClose}>关闭</Text>
-        </View>
-
-        {/* 缩放控制条 */}
-        <View className="flex flex-row items-center justify-center gap-5 px-4 py-2 border-b border-border flex-shrink-0">
-          <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => changeZoom(-0.25)}>
-            <Text className="block text-lg text-foreground leading-none">−</Text>
-          </View>
-          <Text className="block text-sm text-foreground w-16 text-center" onClick={resetZoom}>{Math.round(zoom * 100)}%</Text>
-          <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => changeZoom(0.25)}>
-            <Text className="block text-lg text-foreground leading-none">+</Text>
-          </View>
-        </View>
-
-        {/* 内容区：可滚动 + 缩放 */}
-        <ScrollView scrollY scrollX className="flex-1" enhanced>
-          {isImage ? (
-            <View
-              className="flex items-center justify-center"
-              style={{
-                width: `${zoom * 100}%`,
-                height: `${zoom * 60}vh`,
-                minWidth: zoom === 1 ? '100%' : `${zoom * 100}%`,
-              }}
-            >
-              <Image
-                src={material.url}
-                mode="aspectFit"
-                style={{
-                  width: zoom === 1 ? '100%' : `${zoom * 100}%`,
-                  height: zoom === 1 ? '60vh' : `${zoom * 60}vh`,
-                }}
-                onClick={() => {
-                  // 调起微信原生图片预览，支持双指捏合缩放
-                  Taro.previewImage({ current: material.url, urls: [material.url] })
-                }}
-              />
-            </View>
-          ) : (
-            <View className="p-8 flex flex-col items-center">
-              <View style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}>
-                <FileText size={48} color="#999" />
-              </View>
-              <Text className="block text-sm text-muted-foreground mt-4 text-center">
-                该素材为文档/PDF 类型{'\n'}点击下方按钮可打开原件，支持双指缩放查看
-              </Text>
-              <View className="rounded-lg bg-primary px-4 py-2 mt-4" onClick={() => openOriginalDocument(material.url)}>
-                <Text className="block text-xs text-primary-foreground">打开文档原件</Text>
-              </View>
-            </View>
-          )}
-        </ScrollView>
-
-        <View className="px-4 py-2 flex-shrink-0">
-          <Text className="block text-xs text-muted-foreground">保存时间：{formatTime(material.created_at)}</Text>
-        </View>
-
-        <View className="p-4 flex flex-row gap-3 flex-shrink-0" style={{ display: 'flex', flexDirection: 'row', gap: '12px' }}>
           <View style={{ flex: 1 }}>
-            <ActionBtn icon={<Trash2 size={16} color="#fff" />} label="删除此资料" danger onClick={() => onDelete(material.id)} />
+            <ActionBtn
+              icon={<Trash2 size={16} color="#fff" />}
+              label="删除"
+              danger
+              disabled={sel.isEmpty || busy}
+              onClick={handleDelete}
+            />
           </View>
-        </View>
-      </View>
+        </BottomActionBar>
+      )}
     </View>
   )
-}
-
-function openOriginalDocument(url: string) {
-  Taro.showLoading({ title: '加载文档…' })
-  Network.downloadFile({
-    url,
-    success: (d) => {
-      Taro.hideLoading()
-      Taro.openDocument({
-        filePath: d.tempFilePath,
-        showMenu: true,
-        fail: () => {
-          Taro.setClipboardData({ data: url })
-          Taro.showToast({ title: '无法打开，地址已复制', icon: 'none' })
-        },
-      })
-    },
-    fail: () => {
-      Taro.hideLoading()
-      Taro.setClipboardData({ data: url })
-      Taro.showToast({ title: '加载失败，地址已复制', icon: 'none' })
-    },
-  })
-}
-
-function formatTime(iso: string) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }

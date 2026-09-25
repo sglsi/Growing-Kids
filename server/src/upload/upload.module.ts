@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common'
 import { UploadController } from './upload.controller'
-import { StorageService } from '../storage/storage.service'
-import { MaterialsModule } from '../materials/materials.module'
+import { StorageModule } from '../storage/storage.module'
+import { TimelineModule } from '../timeline/timeline.module'
+import { LibraryModule } from '../library/library.module'
 
 @Module({
-  imports: [MaterialsModule],
+  imports: [StorageModule, TimelineModule, LibraryModule],
   controllers: [UploadController],
-  providers: [StorageService],
 })
 export class UploadModule {}

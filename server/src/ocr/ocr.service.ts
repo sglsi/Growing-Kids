@@ -25,7 +25,6 @@ export class OcrService {
           res.on('data', (c: Buffer) => chunks.push(c))
           res.on('end', () => {
             const buf = Buffer.concat(chunks)
-            // 优先 UTF-8；若检测到替换字符则尝试双转义修复
             let text = buf.toString('utf-8')
             if (buf.length && text.includes('\uFFFD') && !/^[\u0000-\u007F]+$/.test(text)) {
               const fixed = Buffer.from(buf.toString('latin1'), 'utf-8').toString('utf-8')
@@ -38,7 +37,6 @@ export class OcrService {
     })
   }
 
-  // 从文档 URL（pdf/doc/docx/txt 等）提取纯文本，供 LLM 识别
   private async extractDocumentText(fileUrl: string): Promise<string> {
     const path = fileUrl.split('?')[0]
     const isTextLike = /\.(txt|text|md|csv|log)$/i.test(path)
@@ -144,7 +142,6 @@ export class OcrService {
     console.log('[ocr/exam] 模型原始返回:', response.content)
     const result = this.extractJson(response.content)
     result.items.forEach((it) => {
-      // 整卷模式下图片 key 不在前端回填单题图片
       void subjectId
     })
     return result
