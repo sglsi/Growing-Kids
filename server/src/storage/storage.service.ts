@@ -27,4 +27,12 @@ export class StorageService {
   async getPublicUrl(key: string): Promise<string> {
     return this.storage.generatePresignedUrl({ key, expireTime: 86400 })
   }
+
+  async deleteObject(key: string): Promise<boolean> {
+    const storage = this.storage as unknown as {
+      deleteFile: (options: { fileKey: string }) => Promise<boolean> | boolean
+    }
+    const res = await storage.deleteFile({ fileKey: key })
+    return !!res
+  }
 }

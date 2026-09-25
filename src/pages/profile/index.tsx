@@ -1,10 +1,11 @@
-import { View, Text, Image, ScrollView, Input } from '@tarojs/components'
+import { View, Text, Image, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { CircleUser, LogIn, LogOut, Pencil } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
+import { Input } from '@/components/ui/input'
 import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
   type AuthState,
