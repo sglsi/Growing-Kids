@@ -1,11 +1,14 @@
 import {
-  Controller, Post, HttpCode, UseInterceptors,
+  Controller, Post, Req, HttpCode, UseInterceptors,
   UploadedFile, BadRequestException,
 } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { memoryStorage } from 'multer'
+import { createHash } from 'crypto'
 import { StorageService } from '../storage/storage.service'
-import { MaterialsService } from '../materials/materials.service'
+import { TimelineService } from '../timeline/timeline.service'
+import { LibraryService } from '../library/library.service'
+import { requireUserId, type RequestWithUser } from '../shared/user-context'
 
 const IMAGE_MIME_PREFIX = 'image/'
 
@@ -13,7 +16,8 @@ const IMAGE_MIME_PREFIX = 'image/'
 export class UploadController {
   constructor(
     private readonly storageService: StorageService,
-    private readonly materialsService: MaterialsService,
+    private readonly timelineService: TimelineService,
+    private readonly libraryService: LibraryService,
   ) {}
 
   @Post()
@@ -24,7 +28,8 @@ export class UploadController {
       limits: { fileSize: 20 * 1024 * 1024 },
     }),
   )
-  async upload(@UploadedFile() file: Express.Multer.File) {
+  async upload(@Req() req: RequestWithUser, @UploadedFile() file: Express.Multer.File) {
+    const userId = requireUserId(req)
     if (!file) {
       throw new BadRequestException('未接收到文件（字段名必须为 file）')
     }
@@ -32,7 +37,6 @@ export class UploadController {
     if (file.buffer) {
       buffer = file.buffer
     } else if (file.path) {
-      // 极少数走磁盘的情况
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const fs = require('fs')
       buffer = await fs.promises.readFile(file.path)
@@ -44,33 +48,56 @@ export class UploadController {
     const ext = (nameParts.length > 1 ? nameParts.pop()! : 'jpg').toLowerCase()
     const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
     const contentType = file.mimetype || 'application/octet-stream'
+    const fileHash = createHash('sha256').update(buffer).digest('hex')
     const key = await this.storageService.uploadBuffer(buffer, fileName, contentType)
-    const url = await this.storageService.getPublicUrl(key)
-    const materialType = contentType.startsWith(IMAGE_MIME_PREFIX) ? 'image' : 'document'
+    const isImage = contentType.startsWith(IMAGE_MIME_PREFIX)
 
-    // 导入的文件/图片统一作为素材入库，供后续复用
-    let materialId = ''
-    try {
-      const material = await this.materialsService.createMaterial({
-        name: file.originalname || fileName,
-        type: materialType,
-        file_key: key,
-        url,
-        mime_type: contentType,
-        size_bytes: buffer.length,
-      })
-      materialId = material.id
-    } catch (e) {
-      console.error('[upload] 素材入库失败（不影响识别）', e)
+    let timelineId = ''
+    let libraryId = ''
+
+    if (isImage) {
+      // 图片 → 统一收件箱（最近题目）
+      try {
+        const item = await this.timelineService.create(userId, {
+          kind: 'image',
+          title: file.originalname || fileName,
+          file_key: key,
+          mime_type: contentType,
+          size_bytes: buffer.length,
+          file_hash: fileHash,
+          source: 'album',
+        })
+        timelineId = item.id
+      } catch (e) {
+        console.error('[upload] 图片入 timeline 失败（不影响返回）', e)
+      }
+    } else {
+      // 文档 → 资料库
+      try {
+        const doc = await this.libraryService.create(userId, {
+          name: file.originalname || fileName,
+          file_key: key,
+          mime_type: contentType,
+          size_bytes: buffer.length,
+          source: 'upload',
+        })
+        libraryId = doc.id
+      } catch (e) {
+        console.error('[upload] 文档入资料库失败（不影响返回）', e)
+      }
     }
 
-    console.log('[upload] 上传成功', {
-      fileName: file.originalname, mimetype: file.mimetype, key, materialId,
-    })
+    console.log('[upload] 上传成功', { userId, key, timelineId, libraryId })
     return {
       code: 200,
       msg: 'success',
-      data: { key, url, material_id: materialId, type: materialType },
+      data: {
+        key,
+        url: await this.storageService.getPublicUrl(key),
+        type: isImage ? 'image' : 'document',
+        timeline_id: timelineId,
+        library_id: libraryId,
+      },
     }
   }
 }

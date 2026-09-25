@@ -1,21 +1,22 @@
-import { View, Text, ScrollView, Picker } from '@tarojs/components'
+import { View, Text, ScrollView, Picker, Image } from '@tarojs/components'
 import Taro, { useRouter } from '@tarojs/taro'
 import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
-import { Network } from '@/network'
 import {
-  fetchQuestionDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
-  type Subject, type QuestionWithSubject
+  fetchTimelineDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
+  addToReviewBook, removeFromReviewBook, deleteTimeline,
+  type Subject, type TimelineItem,
 } from '@/services/api'
-import { getSubjectColor } from '@/types'
+import { getSubjectColor, formatTime } from '@/types'
+import { openStorageFile } from '@/services/net'
 
 export default function DetailPage() {
   const router = useRouter()
   const id = router.params.id || ''
-  const [question, setQuestion] = useState<QuestionWithSubject | null>(null)
+  const [item, setItem] = useState<TimelineItem | null>(null)
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [subjectId, setSubjectId] = useState('')
   const [qContent, setQContent] = useState('')
@@ -27,14 +28,14 @@ export default function DetailPage() {
   const [mastered, setMastered] = useState(false)
 
   const load = async () => {
-    const [q, subs] = await Promise.all([fetchQuestionDetail(id), fetchSubjects()])
-    setQuestion(q)
+    const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
+    setItem(it)
     setSubjects(subs)
-    setSubjectId(q.subject_id)
-    setQContent(q.question_content)
-    setAContent(q.answer_content)
-    setSolution(q.solution)
-    setMastered(q.mastered)
+    setSubjectId(it.subject_id || '')
+    setQContent(it.content?.question || '')
+    setAContent(it.content?.answer || '')
+    setSolution(it.content?.solution || '')
+    setMastered(it.mastered)
   }
 
   useEffect(() => {
@@ -50,12 +51,13 @@ export default function DetailPage() {
         answer_content: aContent,
         solution,
         status: aContent ? 'answered' : 'pending',
-        mastered
+        mastered,
       })
-      setQuestion(prev => (prev ? { ...prev, ...updated } : prev))
+      setItem(updated)
       Taro.showToast({ title: '已保存', icon: 'success' })
     } catch (e) {
       console.error('保存失败', e)
+      Taro.showToast({ title: '保存失败', icon: 'none' })
     } finally {
       setSaving(false)
     }
@@ -83,53 +85,140 @@ export default function DetailPage() {
 
   const handlePrint = async () => {
     try {
-      const res = await exportDocument({ start_date: '', end_date: '' })
-      openDoc(res.url)
+      const res = await exportDocument({ subject_id: subjectId || undefined })
+      openStorageFile(res.url, false)
     } catch (e) {
       console.error('导出失败', e)
+      Taro.showToast({ title: '导出失败', icon: 'none' })
     }
   }
 
-  const openDoc = (url: string) => {
-    Taro.showLoading({ title: '打开文档…' })
-    Network.downloadFile({
-      url,
-      success: (d) => {
-        Taro.hideLoading()
-        Taro.openDocument({
-          filePath: d.tempFilePath,
-          fileType: 'docx',
-          showMenu: true,
-          fail: () => Taro.setClipboardData({ data: url })
-        })
-      },
-      fail: () => {
-        Taro.hideLoading()
-        Taro.setClipboardData({ data: url })
+  // 加入 / 移出复习本
+  const toggleReviewBook = async () => {
+    if (!item) return
+    try {
+      if (item.in_review_book) {
+        await removeFromReviewBook([item.id])
+      } else {
+        await addToReviewBook([item.id])
       }
-    })
+      await load()
+      Taro.showToast({ title: item.in_review_book ? '已移出复习本' : '已加入复习本', icon: 'success' })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    }
   }
 
-  const color = getSubjectColor(question?.subjects?.color || 'gray-500')
+  const handleDelete = async () => {
+    const ok = await new Promise<boolean>((resolve) =>
+      Taro.showModal({
+        title: '确认删除',
+        content: '删除后不可恢复，是否继续？',
+        success: (r) => resolve(!!r.confirm),
+        fail: () => resolve(false),
+      }),
+    )
+    if (!ok) return
+    try {
+      await deleteTimeline(id)
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      setTimeout(() => Taro.navigateBack(), 700)
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    }
+  }
 
-  return (
-    <ScrollView scrollY className="h-full bg-background">
-      <View className="px-4 pt-4 pb-32">
-        {question && (
+  const color = getSubjectColor(item?.subjects?.color)
+
+  // 图片资料（kind=image）：只展示图片 + 归属学科，不做题目编辑
+  if (item && item.kind === 'image') {
+    return (
+      <ScrollView scrollY className="h-full bg-background">
+        <View className="px-4 pt-4 pb-32">
           <View className="flex flex-row items-center gap-2 mb-4">
             <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
               <View className={`w-2 h-2 rounded-full ${color.dot}`} />
-              <Text className="block text-xs">{question.subjects?.name}</Text>
+              <Text className="block text-xs">{item.subjects?.name || '未分类'}</Text>
+            </View>
+            <Text className="block text-xs text-muted-foreground">{formatTime(item.created_at)}</Text>
+          </View>
+
+          <Card className="rounded-2xl border-border overflow-hidden mb-4">
+            <Image
+              src={item.url || ''}
+              mode="widthFix"
+              style={{ width: '100%' }}
+              onClick={() => Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })}
+            />
+          </Card>
+
+          <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
+            <View className="flex-1">
+              <Text className="block text-sm font-medium text-foreground">归属学科</Text>
+              <Text className="block text-xs text-muted-foreground">用于归档与筛选</Text>
             </View>
             <Picker
               mode="selector"
               range={subjects}
               rangeKey="name"
-              value={Math.max(0, subjects.findIndex(s => s.id === subjectId))}
-              onChange={(e) => setSubjectId(subjects[Number(e.detail.value)]?.id || subjectId)}
+              value={Math.max(0, subjects.findIndex((s) => s.id === subjectId))}
+              onChange={async (e) => {
+                const sid = subjects[Number(e.detail.value)]?.id || subjectId
+                setSubjectId(sid)
+                try {
+                  await updateQuestion(id, { subject_id: sid })
+                } catch (err) {
+                  console.error(err)
+                }
+              }}
             >
-              <Text className="block text-xs text-muted-foreground">切换学科</Text>
+              <Text className="block text-sm text-primary">
+                {subjects.find((s) => s.id === subjectId)?.name || '选择学科'}
+              </Text>
             </Picker>
+          </View>
+
+          <View className="flex flex-row gap-3">
+            <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={toggleReviewBook}>
+              <Text className="block text-sm">{item.in_review_book ? '移出复习本' : '加入复习本'}</Text>
+            </Button>
+            <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={handleDelete}>
+              <Text className="block text-sm" style={{ color: '#BE3E2D' }}>删除</Text>
+            </Button>
+          </View>
+        </View>
+      </ScrollView>
+    )
+  }
+
+  return (
+    <ScrollView scrollY className="h-full bg-background">
+      <View className="px-4 pt-4 pb-32">
+        {item && (
+          <View className="flex flex-row items-center justify-between mb-4">
+            <View className="flex flex-row items-center gap-2">
+              <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
+                <View className={`w-2 h-2 rounded-full ${color.dot}`} />
+                <Text className="block text-xs">{item.subjects?.name || '未分类'}</Text>
+              </View>
+              <Picker
+                mode="selector"
+                range={subjects}
+                rangeKey="name"
+                value={Math.max(0, subjects.findIndex((s) => s.id === subjectId))}
+                onChange={(e) => setSubjectId(subjects[Number(e.detail.value)]?.id || subjectId)}
+              >
+                <Text className="block text-xs text-muted-foreground">切换学科</Text>
+              </Picker>
+            </View>
+            <Text
+              className="block text-xs text-primary"
+              onClick={toggleReviewBook}
+            >
+              {item.in_review_book ? '★ 已加入复习本' : '☆ 加入复习本'}
+            </Text>
           </View>
         )}
 
@@ -151,6 +240,21 @@ export default function DetailPage() {
             onInput={(e) => setQContent(e.detail.value)}
           />
         </Card>
+
+        {item?.image_urls?.length ? (
+          <View className="flex flex-row flex-wrap gap-2 mb-4">
+            {item.image_urls.map((u) => (
+              <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                <Image
+                  src={u}
+                  mode="aspectFill"
+                  style={{ width: '100%', height: '100%' }}
+                  onClick={() => Taro.previewImage({ current: u, urls: item.image_urls || [u] })}
+                />
+              </View>
+            ))}
+          </View>
+        ) : null}
 
         <View className="flex flex-row items-center justify-between mb-2">
           <Text className="block text-sm font-semibold" style={{ color: '#BE3E2D' }}>正确答案 / 解题过程</Text>
@@ -179,6 +283,12 @@ export default function DetailPage() {
           />
         </Card>
         {searchHint && <Text className="block text-xs text-muted-foreground mb-4">{searchHint}</Text>}
+
+        <View className="mt-6">
+          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: '#BE3E2D' }}>
+            删除这条记录
+          </Text>
+        </View>
       </View>
 
       <View style={{

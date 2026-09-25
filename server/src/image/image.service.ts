@@ -6,8 +6,9 @@ import {
 } from 'coze-coding-dev-sdk'
 import * as http from 'http'
 import * as https from 'https'
+import { createHash } from 'crypto'
 import { StorageService } from '../storage/storage.service'
-import { MaterialsService } from '../materials/materials.service'
+import { TimelineService } from '../timeline/timeline.service'
 import type { ImageAction, ProcessImageDto, ImageProcessResult } from './image.types'
 
 const PROMPTS: Record<ImageAction, { prompt: string; desc: string }> = {
@@ -32,14 +33,13 @@ const PROMPTS: Record<ImageAction, { prompt: string; desc: string }> = {
 export class ImageService {
   constructor(
     private readonly storageService: StorageService,
-    private readonly materialsService: MaterialsService,
+    private readonly timelineService: TimelineService,
   ) {}
 
   private download(url: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const mod = url.startsWith('https:') ? https : http
       const req = mod.get(url, (res) => {
-        // 图生图服务可能返回 3xx 缩短链接
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           this.download(res.headers.location).then(resolve, reject)
           res.resume()
@@ -61,10 +61,14 @@ export class ImageService {
   }
 
   /**
-   * 用图生图模型处理图片（自动调正 / 智能高清 / 去手写），
-   * 结果转存项目 TOS 得到持久 URL，并归档为素材，返回新图地址。
+   * 图生图处理（自动调正 / 智能高清 / 去手写），结果转存并归档进 timeline_items(kind=image)。
+   * userId 由控制器从请求上下文传入（service_role 下必须显式隔离）。
    */
-  async process(dto: ProcessImageDto, forwardHeaders: Record<string, string>): Promise<ImageProcessResult> {
+  async process(
+    userId: string,
+    dto: ProcessImageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<ImageProcessResult> {
     const action: ImageAction = dto.action || 'enhance'
     const prompt = PROMPTS[action]?.prompt
     if (!prompt) throw new BadRequestException('action 仅支持 auto / enhance / erase')
@@ -87,26 +91,28 @@ export class ImageService {
     if (!resultUrl) throw new BadRequestException('处理服务未返回图片')
 
     const buffer = await this.download(resultUrl)
+    const fileHash = createHash('sha256').update(buffer).digest('hex')
 
     const key = await this.storageService.uploadBuffer(buffer, `processed-${Date.now()}.png`, 'image/png')
     const url = await this.storageService.getPublicUrl(key)
 
-    // 归档为素材，供后续复用
-    let materialId = ''
+    // 归档进 timeline（最近题目）
+    let timelineId = ''
     try {
-      const material = await this.materialsService.createMaterial({
-        name: `${PROMPTS[action].desc}-${Date.now()}.png`,
-        type: 'image',
+      const item = await this.timelineService.create(userId, {
+        kind: 'image',
+        title: `${PROMPTS[action].desc}-${Date.now()}.png`,
         file_key: key,
-        url,
         mime_type: 'image/png',
         size_bytes: buffer.length,
+        file_hash: fileHash,
+        source: 'album',
       })
-      materialId = material.id
+      timelineId = item.id
     } catch (e) {
-      console.error('[image] 素材归档失败（不影响处理）', e)
+      console.error('[image] 归档进 timeline 失败（不影响处理）', e)
     }
 
-    return { url, key, material_id: materialId }
+    return { url, key, timeline_id: timelineId }
   }
 }

@@ -9,8 +9,8 @@ import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
-  recognizePaperByUrl, recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
-  type Subject, type RecognizeResult, type Material, type ImageAction
+  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
+  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction,
 } from '@/services/api'
 
 type Mode = 'paper' | 'split' | 'doc'
@@ -35,8 +35,7 @@ export default function RecognizePage() {
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
 
-  // 素材库选择
-  const [picker, setPicker] = useState<'image' | 'document' | null>(null)
+  const [picker, setPicker] = useState(false)
 
   useEffect(() => {
     Taro.removeStorageSync('recog_mode')
@@ -57,16 +56,14 @@ export default function RecognizePage() {
       const res = await Taro.chooseMedia({
         count: 1,
         mediaType: ['image'],
-        sourceType: ['camera', 'album']
+        sourceType: ['camera', 'album'],
       })
-      // 先进入裁剪/旋转编辑器
       setEditor({ slot, src: res.tempFiles[0].tempFilePath })
     } catch {
       // 用户取消
     }
   }
 
-  // 以指定 AI 动作打开编辑器：{ label: '自动调正'|'智能高清'|'去手写' }
   const openEditorWithAction = (slot: 'paper' | 'question' | 'answer', action: ImageAction) => {
     if (slot === 'paper' && paperImage) setEditor({ slot, src: paperImage, autoAction: action })
     else if (slot === 'question' && questionImage) setEditor({ slot, src: questionImage, autoAction: action })
@@ -74,7 +71,6 @@ export default function RecognizePage() {
     else Taro.showToast({ title: '请先选择图片', icon: 'none' })
   }
 
-  // 编辑确认：把处理后的图片写回对应槽位
   const handleEditorConfirm = (path: string) => {
     const slot = editor?.slot
     setEditor(null)
@@ -84,7 +80,6 @@ export default function RecognizePage() {
     else setAnswerImage(path)
   }
 
-  // 整卷识别
   const handleRecognizePaper = async () => {
     if (!paperImage) {
       Taro.showToast({ title: '请先拍照或选择图片', icon: 'none' })
@@ -97,7 +92,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const result = await recognizePaper(paperImage, sid)
-      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('识别失败', e)
@@ -107,7 +102,6 @@ export default function RecognizePage() {
     }
   }
 
-  // 分传关联
   const handleLink = async () => {
     if (!questionImage || !answerImage) {
       Taro.showToast({ title: '题目图和答案图都需上传', icon: 'none' })
@@ -120,7 +114,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const res = await recognizeSeparate(questionImage, answerImage)
-      setDrafts(res.matched.map(r => ({ ...r, subject_id: sid })))
+      setDrafts(res.matched.map((r) => ({ ...r, subject_id: sid })))
       setUnmatched(res.unmatched_questions)
       Taro.showToast({ title: `已关联 ${res.matched.length} 题`, icon: 'none' })
     } catch (e) {
@@ -131,45 +125,28 @@ export default function RecognizePage() {
     }
   }
 
-  // 从素材库选择图片素材后直接按 URL 识别（整卷）
-  const handleSelectImageMaterial = async (m: Material) => {
+  // 从资料库选择后按 URL 识别
+  const handleSelectDoc = async (d: LibraryDoc) => {
     const subs = await ensureSubjects()
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
-    setPaperImage(m.url)
+    setDocFile(d.name)
     setLoading(true)
     setDrafts([])
     setUnmatched([])
     try {
-      const result = await recognizePaperByUrl(m.url, sid)
-      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      const result = await recognizeDocumentByUrl(d.url || '', sid)
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
-      console.error('素材识别失败', e)
+      console.error('资料识别失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
   }
 
-  // 从素材库选择文档素材后直接按 URL 识别
-  const handleSelectDocMaterial = async (m: Material) => {
-    const subs = await ensureSubjects()
-    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
-    setDocFile(m.name)
-    setLoading(true)
-    setDrafts([])
-    setUnmatched([])
-    try {
-      const result = await recognizeDocumentByUrl(m.url, sid)
-      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
-      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
-    } catch (e) {
-      console.error('素材文档识别失败', e)
-      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
-    } finally {
-      setLoading(false)
-    }
-  }
+  // 最近题目里的图片 → 按 URL 整卷识别（供未来从收件箱直接识别复用）
+  // 目前入口：资料库选文档；图片识别走拍照/相册
 
   const pickDoc = async (cb: (path: string, name: string) => void) => {
     try {
@@ -185,7 +162,6 @@ export default function RecognizePage() {
     }
   }
 
-  // 文档导入识别（PDF / Word / TXT 等）
   const handleRecognizeDoc = async () => {
     if (!docFile) {
       Taro.showToast({ title: '请先选择文档文件', icon: 'none' })
@@ -198,7 +174,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const result = await recognizeDocument(docFile, sid)
-      setDrafts(result.map(r => ({ ...r, subject_id: sid })))
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('文档识别失败', e)
@@ -212,36 +188,36 @@ export default function RecognizePage() {
   }
 
   const updateDraft = (idx: number, patch: Partial<Draft>) => {
-    setDrafts(prev => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)))
+    setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)))
   }
 
   const removeDraft = (idx: number) => {
-    setDrafts(prev => prev.filter((_, i) => i !== idx))
+    setDrafts((prev) => prev.filter((_, i) => i !== idx))
   }
 
   const handleSave = async () => {
     if (!drafts.length) return
     setSaving(true)
     try {
-      await Promise.all(drafts.map(d => createQuestion({
+      await Promise.all(drafts.map((d) => createQuestion({
         subject_id: d.subject_id,
         question_content: d.question_content,
         answer_content: d.answer_content,
         solution: d.solution,
         wrong_answer: d.wrong_answer,
         source: d.source,
-        status: d.has_answer || d.answer_content ? 'answered' : 'pending'
+        status: d.has_answer || d.answer_content ? 'answered' : 'pending',
       })))
-      Taro.showToast({ title: '已保存到复习本', icon: 'success' })
+      Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('保存失败', e)
+      Taro.showToast({ title: '保存失败', icon: 'none' })
     } finally {
       setSaving(false)
     }
   }
 
-  // 直接以图片形式保存为题目（不依赖 OCR），避免识别率低丢失内容
   const handleSaveImageDirect = async () => {
     if (!paperImage) {
       Taro.showToast({ title: '请先拍照或选择图片', icon: 'none' })
@@ -251,9 +227,10 @@ export default function RecognizePage() {
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
     setSaving(true)
     try {
-      const { key, url } = await uploadImage(paperImage)
-      await saveQuestionAsImage(sid, key, url)
-      Taro.showToast({ title: '已以图片形式保存', icon: 'success' })
+      const up = await uploadImage(paperImage)
+      // 后端 /api/upload 已为图片自动建立 timeline(kind=image) 条目，直接用其 id 补学科
+      await saveQuestionAsImage(sid, up.key, up.url, up.timeline_id)
+      Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('图片直存失败', e)
@@ -263,8 +240,8 @@ export default function RecognizePage() {
     }
   }
 
-  const subjectIndex = (id: string) => Math.max(0, subjects.findIndex(s => s.id === id))
-  const subjectName = (id: string) => subjects.find(s => s.id === id)?.name || '选择学科'
+  const subjectIndex = (id: string) => Math.max(0, subjects.findIndex((s) => s.id === id))
+  const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || '选择学科'
 
   return (
     <ScrollView scrollY className="h-full bg-background">
@@ -286,7 +263,7 @@ export default function RecognizePage() {
             onChange={(e) => setDefaultSubject(subjects[Number(e.detail.value)]?.id || '')}
           >
             <View className="bg-muted rounded-lg px-4 py-2">
-              <Text className="block text-sm text-primary">{subjects.find(s => s.id === defaultSubject)?.name || '点击选择'}</Text>
+              <Text className="block text-sm text-primary">{subjects.find((s) => s.id === defaultSubject)?.name || '点击选择'}</Text>
             </View>
           </Picker>
         </View>
@@ -301,7 +278,6 @@ export default function RecognizePage() {
                 <Text className="block text-sm text-muted-foreground">点击拍照 / 从相册选择</Text>
               </View>
             )}
-            {/* 图片处理入口 */}
             <View className="flex flex-row items-center justify-between gap-1 mb-3">
               <ImgActionBtn label="编辑裁剪" onClick={() => { if (paperImage) setEditor({ slot: 'paper', src: paperImage }); else chooseImage('paper') }} />
               <ImgActionBtn label="自动调正" onClick={() => openEditorWithAction('paper', 'auto')} />
@@ -311,12 +287,9 @@ export default function RecognizePage() {
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
-            <View className="flex flex-row items-center justify-center gap-6 mt-3">
+            <View className="flex flex-row items-center justify-center mt-3">
               <View onClick={() => handleSaveImageDirect()}>
-                <Text className="block text-xs text-primary">以图片形式直接保存</Text>
-              </View>
-              <View onClick={() => setPicker('image')}>
-                <Text className="block text-xs text-muted-foreground">从素材库选择图片</Text>
+                <Text className="block text-xs text-primary">以图片形式直接保存到最近题目</Text>
               </View>
             </View>
           </Card>
@@ -327,7 +300,6 @@ export default function RecognizePage() {
               <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage('question')} />
               <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage('answer')} />
             </View>
-            {/* 图片处理入口 */}
             <Text className="block text-xs text-muted-foreground mb-2">图片处理（分别对题目 / 答案图生效）</Text>
             <View className="flex flex-row items-center justify-between gap-1 mb-3">
               <ImgActionBtn label="自动调正·题" onClick={() => openEditorWithAction('question', 'auto')} />
@@ -349,7 +321,7 @@ export default function RecognizePage() {
           <Card className="rounded-2xl border-border p-4 mb-4">
             <Text className="block text-xs text-muted-foreground mb-3">支持 PDF / Word(.docx) / TXT，从手机或电脑选择文档导入并自动识别题目</Text>
             {docFile ? (
-              <View className="w-full bg-muted bg-opacity-60 rounded-xl px-4 py-4 mb-3" onClick={() => pickDoc(setDocFile)}>
+              <View className="w-full bg-muted rounded-xl px-4 py-4 mb-3" onClick={() => pickDoc(setDocFile)}>
                 <Text className="block text-sm text-primary break-all">{docFile}</Text>
               </View>
             ) : (
@@ -360,8 +332,8 @@ export default function RecognizePage() {
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizeDoc}>
               <Text className="block text-sm">{loading ? '识别中…' : '导入并识别'}</Text>
             </Button>
-            <View className="flex items-center justify-center mt-3" onClick={() => setPicker('document')}>
-              <Text className="block text-xs text-primary">从素材库选择文档</Text>
+            <View className="flex items-center justify-center mt-3" onClick={() => setPicker(true)}>
+              <Text className="block text-xs text-primary">从资料库选择文档</Text>
             </View>
           </Card>
         )}
@@ -379,7 +351,6 @@ export default function RecognizePage() {
           </Card>
         )}
 
-        {/* 识别结果草稿（可逐条编辑） */}
         {drafts.length > 0 && (
           <>
             <View className="mb-3">
@@ -403,7 +374,7 @@ export default function RecognizePage() {
                   </View>
                 </View>
 
-                <View className="bg-muted bg-opacity-60 rounded-xl p-3 mb-2">
+                <View className="bg-muted rounded-xl p-3 mb-2">
                   <Textarea
                     className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.question_content}
@@ -432,7 +403,6 @@ export default function RecognizePage() {
         )}
       </View>
 
-      {/* 底部保存栏 */}
       {drafts.length > 0 && (
         <View style={{
           position: 'fixed', bottom: 0, left: 0, right: 0,
@@ -442,12 +412,11 @@ export default function RecognizePage() {
         >
           <Text className="block text-xs text-muted-foreground shrink-0">共 {drafts.length} 题</Text>
           <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
-            <Text className="block text-sm">{saving ? '保存中…' : '保存到复习本'}</Text>
+            <Text className="block text-sm">{saving ? '保存中…' : '保存到最近题目'}</Text>
           </Button>
         </View>
       )}
 
-      {/* 拍照/相册后的裁剪与旋转编辑 */}
       <ImageEditor
         visible={!!editor}
         src={editor?.src || ''}
@@ -456,16 +425,11 @@ export default function RecognizePage() {
         onConfirm={handleEditorConfirm}
       />
 
-      {/* 从素材库选择 */}
       <MaterialPicker
-        visible={picker !== null}
-        type={picker || 'image'}
-        title={picker === 'document' ? '从素材库选择文档' : '从素材库选择图片'}
-        onClose={() => setPicker(null)}
-        onSelect={(m) => {
-          if (m.type === 'document') void handleSelectDocMaterial(m)
-          else void handleSelectImageMaterial(m)
-        }}
+        visible={picker}
+        title="从资料库选择文档"
+        onClose={() => setPicker(false)}
+        onSelect={(d) => void handleSelectDoc(d)}
       />
     </ScrollView>
   )

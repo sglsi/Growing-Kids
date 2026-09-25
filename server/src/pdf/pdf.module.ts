@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common'
 import { PdfController } from './pdf.controller'
 import { PdfService } from './pdf.service'
-import { StorageService } from '../storage/storage.service'
-import { MaterialsModule } from '../materials/materials.module'
+import { StorageModule } from '../storage/storage.module'
+import { TimelineModule } from '../timeline/timeline.module'
 import { DocumentsModule } from '../documents/documents.module'
 
 @Module({
-  imports: [MaterialsModule, DocumentsModule],
+  imports: [StorageModule, TimelineModule, DocumentsModule],
   controllers: [PdfController],
-  providers: [PdfService, StorageService],
+  providers: [PdfService],
 })
 export class PdfModule {}

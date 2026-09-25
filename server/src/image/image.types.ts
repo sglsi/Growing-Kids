@@ -10,5 +10,5 @@ export interface ProcessImageDto {
 export interface ImageProcessResult {
   url: string
   key: string
-  material_id: string
+  timeline_id: string
 }

@@ -27,6 +27,8 @@ async function bootstrap() {
   app.enableCors({
     origin: true,
     credentials: true,
+    // 允许前端读取匿名身份回传头
+    exposedHeaders: ['X-User-Id'],
   });
   app.setGlobalPrefix('api');
   app.use(express.json({ limit: '50mb' }));

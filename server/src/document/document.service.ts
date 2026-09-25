@@ -16,28 +16,34 @@ interface ExportParams {
 
 interface RawRow {
   id: string
-  question_content: string
-  answer_content: string
-  solution: string
-  wrong_answer: string
-  source: string
-  recognized_at: string
+  content: {
+    question?: string
+    answer?: string
+    solution?: string
+    wrong_answer?: string
+  }
+  source: string | null
+  created_at: string
   subjects: { id: string; name: string } | null
 }
 
 @Injectable()
 export class DocumentService {
-  private async queryRows(params: ExportParams): Promise<RawRow[]> {
+  /** 数据源：timeline_items 中 kind=question 的条目（content jsonb） */
+  private async queryRows(userId: string, params: ExportParams): Promise<RawRow[]> {
     const client = getSupabaseClient()
     let q = client
-      .from('questions')
-      .select('id, question_content, answer_content, solution, wrong_answer, source, recognized_at, subjects:subject_id(id, name)')
+      .from('timeline_items')
+      .select('id, content, source, created_at, subjects:subject_id(id, name)')
+      .eq('user_id', userId)
+      .eq('kind', 'question')
+      .is('deleted_at', null)
 
     if (params.subject_id) q = q.eq('subject_id', params.subject_id)
-    if (params.start_date) q = q.gte('recognized_at', params.start_date)
-    if (params.end_date) q = q.lte('recognized_at', params.end_date)
+    if (params.start_date) q = q.gte('created_at', params.start_date)
+    if (params.end_date) q = q.lte('created_at', params.end_date)
     if (!params.include_mastered) q = q.eq('mastered', false)
-    q = q.order('recognized_at', { ascending: true })
+    q = q.order('created_at', { ascending: true })
 
     const { data, error } = await q
     if (error) throw new Error(error.message)
@@ -63,10 +69,9 @@ export class DocumentService {
     )
   }
 
-  async exportDocx(params: ExportParams): Promise<Buffer> {
-    const rows = await this.queryRows(params)
+  async exportDocx(userId: string, params: ExportParams): Promise<Buffer> {
+    const rows = await this.queryRows(userId, params)
 
-    // 按学科分组（subject_id 指定时也走分组逻辑，保持结构统一）
     const groupMap = new Map<string, { name: string; rows: RawRow[] }>()
     rows.forEach((row) => {
       const sid = row.subjects?.id || 'none'
@@ -77,7 +82,6 @@ export class DocumentService {
 
     const children: Paragraph[] = []
 
-    // 封面标题
     children.push(
       new Paragraph({
         heading: HeadingLevel.TITLE,
@@ -110,31 +114,32 @@ export class DocumentService {
 
       group.rows.forEach((row) => {
         questionNo += 1
+        const c = row.content || {}
         children.push(
           new Paragraph({
             spacing: { before: 120, after: 80 },
             children: [new TextRun({ text: `${questionNo}. `, bold: true, size: 24, font: '宋体' })],
           }),
         )
-        children.push(...this.textParagraphs(row.question_content, { size: 22 }))
+        children.push(...this.textParagraphs(c.question || '', { size: 22 }))
 
-        if (row.wrong_answer) {
+        if (c.wrong_answer) {
           children.push(
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '我的错误作答：', size: 20, color: '9A948A', font: '宋体' })] }),
           )
-          children.push(...this.textParagraphs(row.wrong_answer, { size: 20, color: '9A948A' }))
+          children.push(...this.textParagraphs(c.wrong_answer, { size: 20, color: '9A948A' }))
         }
 
         children.push(
           new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '正确答案：', bold: true, size: 22, color: 'BE3E2D', font: '宋体' })] }),
         )
-        children.push(...this.textParagraphs(row.answer_content || '（暂无答案，待补充）', { size: 22 }))
+        children.push(...this.textParagraphs(c.answer || '（暂无答案，待补充）', { size: 22 }))
 
-        if (row.solution) {
+        if (c.solution) {
           children.push(
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '解析：', bold: true, size: 22, font: '宋体' })] }),
           )
-          children.push(...this.textParagraphs(row.solution, { size: 22 }))
+          children.push(...this.textParagraphs(c.solution, { size: 22 }))
         }
 
         if (row.source) {
