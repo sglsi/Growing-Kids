@@ -160,7 +160,6 @@ export function deleteSubject(id: string) {
 /**
  * 把 LLM 识别出的学科名（中文，可能不规范，如「初中物理」「数学题」）匹配到用户已有的某个学科，返回 subject_id。
  * 匹配不到返回 null，调用方再回退到默认学科。
- * 匹配优先级：精确(忽略大小写) → 互相包含 → 常见别名归一（处理学段化/口语化表述）。
  */
 export function matchSubject(name: string, subjects: Subject[]): string | null {
   if (!name || !subjects?.length) return null
@@ -364,6 +363,39 @@ export function batchDeleteTimeline(ids: string[]) {
   return unwrap<{ removed: number }>(
     Network.request({ url: '/api/timeline/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
   )
+}
+
+/**
+ * 用「编辑后的图片」替换「最近题目」里的一条已有图片条目。
+ *
+ * 场景（用户反馈 #3）：首页点开已加入最近题目的图片，再做裁剪 / 智能高清 / 去手写。
+ * 做法：把编辑结果以 purpose='save' 上传 → 生成新的 image 条目 → 继承原条目的学科 →
+ *       软删旧条目。全程复用既有、已被验证的接口，不新增后端路由。
+ *
+ * @returns 新条目的 id（前端可直接用它刷新列表）
+ */
+export async function replaceTimelineImage(
+  oldItem: { id: string; subject_id?: string | null },
+  editedFileOrUrl: string,
+): Promise<{ id: string }> {
+  const up = await uploadImage(editedFileOrUrl, { purpose: 'save' })
+  const newId = up.timeline_id
+  if (!newId) throw new Error('编辑结果保存失败，请重试')
+  // 继承原分类，避免编辑后掉回「未分类」
+  if (oldItem.subject_id) {
+    try {
+      await updateTimeline(newId, { subject_id: oldItem.subject_id })
+    } catch {
+      /* 分类继承失败不阻断主流程 */
+    }
+  }
+  // 旧条目软删（保留历史，不出现在列表）
+  try {
+    await batchDeleteTimeline([oldItem.id])
+  } catch {
+    /* 删除失败不阻断，用户可手动删 */
+  }
+  return { id: newId }
 }
 
 /** 加入复习本 */
@@ -661,11 +693,6 @@ export async function processImage(action: ImageAction, filePathOrUrl: string, o
 // ============================================================
 /**
  * 把一张图片直接保存为「最近题目」条目（不依赖 OCR）。
- *
- * v4 语义说明：
- *  - 上传时带 purpose=save，后端 /api/upload 才会把图片归档进「最近题目」；
- *    其余上传（如 AI 处理前的中间上传） deliberately 不落库。
- *  - 若调用方已持有 timeline_id（推荐路径），直接透传即可，避免重复建档。
  */
 export async function saveQuestionAsImage(
   subjectId: string,

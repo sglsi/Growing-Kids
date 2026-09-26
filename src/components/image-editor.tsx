@@ -13,6 +13,11 @@ interface ImageEditorProps {
   onConfirm: (tempFilePath: string) => void
   /** 打开编辑器后自动执行的 AI 处理 */
   autoAction?: ImageAction | null
+  /**
+   * true = 「保存图片」按钮保存到「最近题目」（识别页/首页复用）；
+   * false/省略 = 只做编辑并把结果回传（onConfirm），不直接落库。
+   */
+  enableSaveToInbox?: boolean
 }
 
 interface Rect {
@@ -50,18 +55,22 @@ const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
   { action: 'erase', label: '去手写', icon: Eraser },
 ]
 
-export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAction = null }: ImageEditorProps) {
+export default function ImageEditor({
+  visible, src, onCancel, onConfirm, autoAction = null, enableSaveToInbox = true,
+}: ImageEditorProps) {
   // 当前展示图（可能是本地路径或 AI 处理后的远程 URL）
   const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
   const [naturalH, setNaturalH] = useState(0)
   const [rotation, setRotation] = useState(0)
   const [crop, setCrop] = useState<Rect>({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
-  const [boxW, setBoxW] = useState(0)
-  const [boxH, setBoxH] = useState(0)
+  const [imgW, setImgW] = useState(0)
+  const [imgH, setImgH] = useState(0)
   const [busy, setBusy] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
+  // 预览是否可显示（用于在加载失败时给出提示，而不是整屏黑）
+  const [previewError, setPreviewError] = useState(false)
 
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
@@ -70,18 +79,52 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     startY: number
     start: Rect
   } | null>(null)
-  const canvasRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
+  const boxRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
 
-  // 初始化：读取图片尺寸，按 contain 计算展示盒大小
-  const resetBox = (imgW: number, imgH: number) => {
-    setNaturalW(imgW)
-    setNaturalH(imgH)
+  // 容器的屏幕位置（用于把触摸坐标换算为容器内坐标）
+  const measureBox = () => {
+    setTimeout(() => {
+      Taro.createSelectorQuery()
+        .select('#imgEditorBox')
+        .boundingClientRect((rect) => {
+          const r = Array.isArray(rect) ? rect[0] : rect
+          if (r) boxRectRef.current = { left: r.left, top: r.top }
+        })
+        .exec()
+    }, 60)
+  }
+
+  /**
+   * 依据原图尺寸，按 contain 计算「显示尺寸」imgW/imgH。
+   * ⚠️ 这里只算展示尺寸，不碰 Canvas —— 预览直接用 <TaroImage>，
+   * 从根本上避开 Canvas 2D 加载网络图失败导致的「黑屏」。
+   */
+  const resetBox = (w: number, h: number) => {
+    setNaturalW(w)
+    setNaturalH(h)
     const sys = Taro.getSystemInfoSync()
     const availW = sys.windowWidth - 32
-    const availH = sys.windowHeight - 240
-    const scale = Math.min(availW / imgW, availH / imgH, 1)
-    setBoxW(imgW * scale)
-    setBoxH(imgH * scale)
+    const availH = sys.windowHeight - 260
+    const scale = Math.min(availW / w, availH / h, 1)
+    setImgW(Math.round(w * scale))
+    setImgH(Math.round(h * scale))
+    measureBox()
+  }
+
+  // 打开/换图：读取尺寸并复位
+  const loadImage = async (target: string) => {
+    setPreviewError(false)
+    try {
+      const info = await Taro.getImageInfo({ src: target })
+      resetBox(info.width, info.height)
+    } catch {
+      Taro.showToast({ title: '图片读取失败', icon: 'none' })
+      setPreviewError(true)
+      // 兜底：给一个不至于为 0 的展示盒，避免完全空白
+      const sys = Taro.getSystemInfoSync()
+      setImgW(sys.windowWidth - 32)
+      setImgH(Math.round((sys.windowWidth - 32) * 0.75))
+    }
   }
 
   useEffect(() => {
@@ -93,126 +136,16 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     setAiBusy(false)
     setConfirmed(false)
     canvasNodeRef.current = null
-
-    Taro.getImageInfo({ src })
-      .then((info) => resetBox(info.width, info.height))
-      .catch(() => {
-        Taro.showToast({ title: '图片读取失败', icon: 'none' })
-      })
-    // 测量画布相对可见区域偏移，用于把触摸坐标换算为容器内坐标
-    setTimeout(() => {
-      Taro.createSelectorQuery()
-        .select(`#${CANVAS_ID}`)
-        .boundingClientRect((rect) => {
-          const r = Array.isArray(rect) ? rect[0] : rect
-          if (r) canvasRectRef.current = { left: r.left, top: r.top }
-        })
-        .exec()
-    }, 60)
+    void loadImage(src)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, src])
 
-  // 旋转后按新的朝向重算展示盒
+  // 容器尺寸变化时重算（如从 AI 处理返回后图片尺寸变化）
   useEffect(() => {
-    if (!naturalW || !naturalH || rotation === 0) return
-    const sys = Taro.getSystemInfoSync()
-    const availW = sys.windowWidth - 32
-    const availH = sys.windowHeight - 240
-    // 旋转 90/270 后宽高互换
-    const rw = naturalH
-    const rh = naturalW
-    const scale = Math.min(availW / rw, availH / rh, 1)
-    setBoxW(rw * scale)
-    setBoxH(rh * scale)
+    if (!visible || !naturalW || !naturalH) return
+    resetBox(naturalW, naturalH)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rotation, naturalW, naturalH])
-
-  const getCanvasNode = async (): Promise<any> => {
-    if (canvasNodeRef.current) return canvasNodeRef.current
-    return new Promise((resolve) => {
-      Taro.createSelectorQuery()
-        .select(`#${CANVAS_ID}`)
-        .fields({ node: true } as any)
-        .exec((res) => {
-          const node = res?.[0]?.node
-          canvasNodeRef.current = node || null
-          resolve(node)
-        })
-    })
-  }
-
-  /**
-   * 画布绘制用的图片来源。
-   * 关键修复（黑屏）：小程序 Canvas 2D 的 createImage 对「远程 https 图」在小程序
-   * 真机/开发者工具中常常加载失败（跨域 / 未下载完成 / 未加入下载域名白名单），
-   * 此时 img.width 为 0，之前会清空画布后 return → 整屏黑色。
-   * 解决：远程图先下载成本地临时文件，再交给 createImage 绘制；下载失败则回退原 URL。
-   */
-  const resolveDrawSrc = async (srcForDraw: string): Promise<string> => {
-    if (!/^https?:\/\//.test(srcForDraw)) return srcForDraw
-    try {
-      const dl: any = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('draw-download-timeout')), 20000)
-        Network.downloadFile({
-          url: srcForDraw,
-          success: (r: any) => { clearTimeout(timer); resolve(r) },
-          fail: (e: any) => { clearTimeout(timer); reject(e) },
-        })
-      })
-      return dl?.tempFilePath || srcForDraw
-    } catch {
-      return srcForDraw
-    }
-  }
-
-  // 将旋转后的整图以 contain 方式绘制到画布（导出前务必 await 本函数以完成绘制）
-  const renderCanvas = async () => {
-    const node = await getCanvasNode()
-    if (!node) return
-    const dpr = Taro.getSystemInfoSync().pixelRatio || 1
-    node.width = boxW * dpr
-    node.height = boxH * dpr
-    const ctx = node.getContext('2d')
-    ctx.scale(dpr, dpr)
-    // 先把远程图落到本地，规避 Canvas 2D 加载网络图失败导致的「黑屏」
-    const drawSrc = await resolveDrawSrc(currentSrc)
-    // 用 canvas.createImage 加载本地/网络图片，避免传字符串在小程序真机绘制失败
-    let img: any = null
-    if (node.createImage) {
-      img = node.createImage()
-    } else {
-      img = new Image()
-    }
-    img.src = drawSrc
-    await new Promise<void>((resolve) => {
-      let done = false
-      const finish = () => { if (!done) { done = true; resolve() } }
-      img.onload = finish
-      img.onerror = finish
-      // 兜底超时：避免个别机型 onload/onerror 都不触发导致一直挂起
-      setTimeout(finish, 8000)
-    })
-    // 载入失败则【不清空画布】——clearRect 放在成功判定的后面，
-    // 这样失败时保留上一帧内容，不会整屏变黑。
-    if (!img.width || !img.height) return
-    ctx.clearRect(0, 0, boxW, boxH)
-    ctx.save()
-
-    ctx.translate(boxW / 2, boxH / 2)
-    ctx.rotate((rotation * Math.PI) / 180)
-    const scale = Math.min(boxW / naturalW, boxH / naturalH)
-    const drawW = naturalW * scale
-    const drawH = naturalH * scale
-    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH)
-    ctx.restore()
-  }
-
-  // 跟随状态变化重绘
-  useEffect(() => {
-    if (!visible || !boxW || !boxH || !naturalW || aiBusy) return
-    renderCanvas()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, boxW, boxH, rotation, naturalW, naturalH, currentSrc, aiBusy])
+  }, [rotation])
 
   // 打开后自动执行指定 AI 处理
   useEffect(() => {
@@ -221,19 +154,17 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     if (cfg) {
       void handleAi(cfg.action, cfg.label)
     }
-    // 仅触发一次即可（aiBusy 重置后若 autoAction 变化再触发）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, autoAction])
 
   // ---------- 裁剪框手势 ----------
   const hitTarget = (touchX: number, touchY: number): DragTarget | null => {
-    const left = crop.x * boxW
-    const top = crop.y * boxH
-    const right = (crop.x + crop.w) * boxW
-    const bottom = (crop.y + crop.h) * boxH
+    const left = crop.x * imgW
+    const top = crop.y * imgH
+    const right = (crop.x + crop.w) * imgW
+    const bottom = (crop.y + crop.h) * imgH
     const near = (v: number, edge: number) => Math.abs(v - edge) <= HANDLE_HIT
 
-    // 角点优先
     if (near(touchX, left) && near(touchY, top)) return 'tl'
     if (near(touchX, right) && near(touchY, top)) return 'tr'
     if (near(touchX, left) && near(touchY, bottom)) return 'bl'
@@ -248,26 +179,21 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
 
   const onTouchStart = (e: any) => {
     const t = e.touches[0]
-    const rx = t.clientX - canvasRectRef.current.left
-    const ry = t.clientY - canvasRectRef.current.top
+    const rx = t.clientX - boxRectRef.current.left
+    const ry = t.clientY - boxRectRef.current.top
     const target = hitTarget(rx, ry)
     if (!target) return
-    dragRef.current = {
-      target,
-      startX: rx,
-      startY: ry,
-      start: { ...crop },
-    }
+    dragRef.current = { target, startX: rx, startY: ry, start: { ...crop } }
   }
 
   const onTouchMove = (e: any) => {
     const drag = dragRef.current
     if (!drag) return
     const t = e.touches[0]
-    const rx = t.clientX - canvasRectRef.current.left
-    const ry = t.clientY - canvasRectRef.current.top
-    const dx = (rx - drag.startX) / boxW
-    const dy = (ry - drag.startY) / boxH
+    const rx = t.clientX - boxRectRef.current.left
+    const ry = t.clientY - boxRectRef.current.top
+    const dx = (rx - drag.startX) / imgW
+    const dy = (ry - drag.startY) / imgH
     setConfirmed(false)
     setCrop(clampCrop(applyDrag(drag.start, drag.target, dx, dy)))
   }
@@ -287,25 +213,96 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     setCurrentSrc(src)
     setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
     setConfirmed(false)
+    void loadImage(src)
   }
 
-  // 导出当前裁剪区域为新图（本地 tempFilePath）
-  // 注意：小程序 Canvas 2D 的 canvasToTempFilePath 中 x/y/width/height 采用
-  // 逻辑像素（相对 boxW/boxH），destWidth/destHeight 才用物理像素，二者混用会导致导出区域偏移。
-  const exportCrop = async (): Promise<string> => {
-    await renderCanvas() // 确保绘制完成
-    const node = await getCanvasNode()
-    if (!node) throw new Error('canvas 未就绪')
+  const getCanvasNode = async (): Promise<any> => {
+    if (canvasNodeRef.current) return canvasNodeRef.current
+    return new Promise((resolve) => {
+      Taro.createSelectorQuery()
+        .select(`#${CANVAS_ID}`)
+        .fields({ node: true } as any)
+        .exec((res) => {
+          const node = res?.[0]?.node
+          canvasNodeRef.current = node || null
+          resolve(node)
+        })
+    })
+  }
+
+  /** 等待 Canvas node 就绪（最多重试若干次），避免首次取不到就永久空白 */
+  const waitCanvasNode = async (retry = 10): Promise<any> => {
+    for (let i = 0; i < retry; i++) {
+      const node = await getCanvasNode()
+      if (node) return node
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return null
+  }
+
+  /** 远程图先下载到本地（Canvas 无法可靠加载网络图） */
+  const toLocalIfRemote = async (u: string): Promise<string> => {
+    if (!/^https?:\/\//.test(u)) return u
+    try {
+      const dl: any = await downloadWithTimeout(u, 30000)
+      return dl?.tempFilePath || u
+    } catch {
+      return u
+    }
+  }
+
+  /**
+   * 用「离屏 Canvas」把当前编辑态（旋转 + 裁剪）导出为本地图片。
+   * 关键点：
+   *  - Canvas 只用于导出，不用于预览 —— 预览用 <TaroImage>，杜绝黑屏；
+   *  - 导出前把远程图落到本地，避免 Canvas 加载网络图失败；
+   *  - Canvas node 未就绪时轮询重试，不再「一次取不到就放弃」。
+   */
+  const exportEdited = async (): Promise<string> => {
+    const node = await waitCanvasNode()
+    if (!node) throw new Error('画布未就绪，请稍后重试')
     const dpr = Taro.getSystemInfoSync().pixelRatio || 1
+    // 导出区域按原图像素计算（naturalW/H），保证清晰度
+    const localSrc = await toLocalIfRemote(currentSrc)
+    const outW = naturalW
+    const outH = naturalH
+    node.width = outW
+    node.height = outH
+    const ctx = node.getContext('2d')
+    ctx.clearRect(0, 0, outW, outH)
+
+    let img: any = null
+    if (node.createImage) img = node.createImage()
+    else img = new Image()
+    img.src = localSrc
+    await new Promise<void>((resolve) => {
+      let done = false
+      const finish = () => { if (!done) { done = true; resolve() } }
+      img.onload = finish
+      img.onerror = finish
+      setTimeout(finish, 8000)
+    })
+    if (!img.width || !img.height) throw new Error('图片加载失败，无法导出')
+
+    // 旋转绘制（围绕中心）
+    ctx.save()
+    ctx.translate((crop.x + crop.w / 2) * outW, (crop.y + crop.h / 2) * outH)
+    ctx.rotate((rotation * Math.PI) / 180)
+    const drawW = (rotation % 180 === 0 ? outW : outH)
+    const drawH = (rotation % 180 === 0 ? outH : outW)
+    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH)
+    ctx.restore()
+
+    // 再按裁剪区域截取
     return new Promise<string>((resolve, reject) => {
       Taro.canvasToTempFilePath({
         canvas: node,
-        x: crop.x * boxW,
-        y: crop.y * boxH,
-        width: crop.w * boxW,
-        height: crop.h * boxH,
-        destWidth: Math.round(crop.w * boxW * dpr),
-        destHeight: Math.round(crop.h * boxH * dpr),
+        x: crop.x * outW,
+        y: crop.y * outH,
+        width: crop.w * outW,
+        height: crop.h * outH,
+        destWidth: Math.round(crop.w * outW * dpr),
+        destHeight: Math.round(crop.h * outH * dpr),
         fileType: 'jpg',
         quality: 0.95,
         success: (r) => resolve(r.tempFilePath),
@@ -314,35 +311,30 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     })
   }
 
-  // 确定裁剪：真正把选区内内容导出为新图，预览只显示该区域
+  // 确定裁剪：把选区内内容导出为新图，预览切到裁剪结果
   const handleConfirmCrop = async () => {
     if (busy || aiBusy) return
     setBusy(true)
     try {
-      const out = await exportCrop()
+      const out = await exportEdited()
       const info = await Taro.getImageInfo({ src: out })
       setCurrentSrc(out)
       setRotation(0)
-      setNaturalW(info.width)
-      setNaturalH(info.height)
+      resetBox(info.width, info.height)
       setCrop({ x: 0, y: 0, w: 1, h: 1 })
       setConfirmed(true)
-      resetBox(info.width, info.height)
       Taro.showToast({ title: '已裁剪，点「使用此图」返回', icon: 'none' })
     } catch (err) {
       console.error('裁剪失败', err)
-      Taro.showToast({ title: '裁剪失败，请重试', icon: 'none' })
+      Taro.showToast({ title: (err as any)?.message || '裁剪失败，请重试', icon: 'none' })
     } finally {
       setBusy(false)
     }
   }
 
-  /**
-   * 把原图压缩到 MAX_SIDE 以内，缩短上传 + AI 处理耗时（解决「处理太久」）。
-   * 压缩失败则退回原图，不影响后续流程。
-   */
+  /** 压缩到 MAX_SIDE 以内，缩短上传 + AI 处理耗时 */
   const compressImage = async (filePath: string): Promise<string> => {
-    if (/^https?:\/\//.test(filePath)) return filePath // 远程图由后端下载，不在此压缩
+    if (/^https?:\/\//.test(filePath)) return filePath
     try {
       const info = await Taro.getImageInfo({ src: filePath })
       const longSide = Math.max(info.width, info.height)
@@ -362,52 +354,43 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     }
   }
 
-  // 给下载任务加超时，避免卡死在「一直转圈」
   const downloadWithTimeout = (url: string, ms: number): Promise<any> => {
     return new Promise((resolve, reject) => {
-      const task = Network.downloadFile({ url })
-      const timer = setTimeout(() => {
-        try { (task as any).abort?.() } catch { /* ignore */ }
-        reject(new Error('处理结果下载超时'))
-      }, ms)
-      Promise.resolve(task as any).then(
-        (r: any) => {
-          clearTimeout(timer)
-          resolve(r)
-        },
-        (e: any) => {
-          clearTimeout(timer)
-          reject(e)
-        },
-      )
+      const timer = setTimeout(() => reject(new Error('下载超时')), ms)
+      Network.downloadFile({
+        url,
+        success: (r: any) => { clearTimeout(timer); resolve(r) },
+        fail: (e: any) => { clearTimeout(timer); reject(e) },
+      })
     })
   }
 
-  // AI 处理：调后端图生图；全程带超时与「结果校验」，失败绝不把坏图塞给画布（解决黑屏）
+  /**
+   * AI 处理：调后端图生图。
+   * 修复「处理后不能正常显示」：成功后把结果【下载成本地文件】再作为 currentSrc
+   * （本地图由 <TaroImage> 直接显示，稳定不黑屏）；同时重算展示盒。
+   */
   const handleAi = async (action: ImageAction, label: string) => {
     if (aiBusy || busy) return
     setAiBusy(true)
     Taro.showLoading({ title: `${label}处理中…`, mask: true })
-    let lastGoodSrc = currentSrc // 失败兜底：保留上一张有效图
+    let lastGoodSrc = currentSrc
     try {
-      // 1) 预处理：压缩原图，显著缩短上传与 AI 处理耗时
       const sourceForProcess = await compressImage(currentSrc)
       lastGoodSrc = sourceForProcess
 
-      // 2) 上传（purpose=temp，不落库）拿到可访问 URL
       let sourceUrl = sourceForProcess
       if (!/^https?:\/\//.test(sourceForProcess)) {
         const up = await uploadImage(sourceForProcess, { purpose: 'temp' })
         sourceUrl = up.url
       }
 
-      // 3) 调后端（processImage 自带 90s 超时，不会无限转圈）
       const data = await processImage(action, sourceUrl)
-
-      // 4) 下载结果并严格校验：只有确认是有效图片才替换，否则保留原图，杜绝黑屏
       if (!data?.url) throw new Error('处理服务未返回图片')
-      const dl = await downloadWithTimeout(data.url, 30000)
-      if (dl.statusCode !== 200 || !dl.tempFilePath) {
+
+      // 关键：立刻下载成本地文件，后续预览/裁剪/保存都用它
+      const dl: any = await downloadWithTimeout(data.url, 30000)
+      if (!dl || dl.statusCode !== 200 || !dl.tempFilePath) {
         throw new Error('处理结果下载失败，请重试')
       }
       const info = await Taro.getImageInfo({ src: dl.tempFilePath })
@@ -415,38 +398,35 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
         throw new Error('处理结果不是有效图片')
       }
 
-      // 校验通过 → 应用结果
       setCurrentSrc(dl.tempFilePath)
       setRotation(0)
       setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
-      setNaturalW(info.width)
-      setNaturalH(info.height)
+      resetBox(info.width, info.height) // ← 修复：AI 结果尺寸变化后必须重算展示盒
       Taro.showToast({ title: `${label}完成`, icon: 'success' })
     } catch (e) {
       console.error('AI 图片处理失败', e)
       const msg = e instanceof Error ? e.message : `${label}失败，请重试`
       Taro.showToast({ title: msg, icon: 'none' })
-      // 关键：失败不清空 currentSrc，回到上一张有效图（避免整屏变黑）
+      // 失败回退到上一张有效图（本地图，保证可显示）
       setCurrentSrc(lastGoodSrc)
+      try {
+        const info = await Taro.getImageInfo({ src: lastGoodSrc })
+        resetBox(info.width, info.height)
+      } catch { /* ignore */ }
     } finally {
       setAiBusy(false)
       Taro.hideLoading()
     }
   }
 
-  // 保存到小程序数据库（仅显式点击时归档进「最近题目」）
+  // 保存到「最近题目」（仅显式点击时归档）
   const handleSave = async () => {
     if (busy || aiBusy) return
     setBusy(true)
     Taro.showLoading({ title: '保存中…', mask: true })
     try {
-      // 若已确定裁剪则导出裁剪结果，否则用当前编辑态整图
-      const imgSrc = confirmed ? await exportCrop() : currentSrc
-      // purpose=save → 后端归档进「最近题目」。
-      // 注意：若 imgSrc 是 AI 处理后的远程 URL，uploadImage 会先下载再上传，
-      // 确保后端真的收到上传请求并落库（修复「提示已保存但列表无记录」）。
+      const imgSrc = confirmed ? currentSrc : await exportEdited()
       const up = await uploadImage(imgSrc, { purpose: 'save' })
-      // 以真实结果为准：必须拿到 timeline_id 或 key 才算入库成功
       const saved = !!(up && (up.timeline_id || up.key))
       if (!saved) throw new Error('保存未生效，请重试')
       Taro.hideLoading()
@@ -460,16 +440,16 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     }
   }
 
-  // 确认使用：导出最终图片并回传给识别页（这一步也是「退出裁剪」）
+  // 确认使用：导出最终图片并回传（这一步也是「退出裁剪」）
   const handleConfirm = async () => {
     if (busy || aiBusy) return
     setBusy(true)
     try {
-      const out = await exportCrop()
+      const out = confirmed ? currentSrc : await exportEdited()
       onConfirm(out)
-    } catch (err) {
-      console.error('导出裁剪图失败', err)
-      Taro.showToast({ title: '图片处理失败，请重试', icon: 'none' })
+    } catch (err: any) {
+      console.error('导出失败', err)
+      Taro.showToast({ title: err?.message || '图片处理失败，请重试', icon: 'none' })
     } finally {
       setBusy(false)
     }
@@ -491,69 +471,82 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
         </View>
       </View>
 
-      {/* 画布与裁剪框 */}
+      {/* 预览区：直接用 <TaroImage> 显示，稳定不黑屏；Canvas 仅离屏用于导出 */}
       <View className="flex-1 flex items-center justify-center px-4">
-        {aiBusy ? (
-          <TaroImage src={currentSrc} mode="aspectFit" className="w-full h-full" />
-        ) : (
-          <View
-            style={{ width: boxW || '100%', height: boxH || 240, position: 'relative' }}
-          >
-            <Canvas
-              type="2d"
-              id={CANVAS_ID}
-              style={{ width: boxW, height: boxH }}
+        <View
+          id="imgEditorBox"
+          style={{ width: imgW || '100%', height: imgH || 240, position: 'relative' }}
+        >
+          {previewError ? (
+            <View className="w-full h-full flex items-center justify-center">
+              <Text className="block text-white text-sm text-opacity-80">图片加载失败，请退出重试</Text>
+            </View>
+          ) : (
+            <TaroImage
+              src={currentSrc}
+              mode="aspectFit"
+              style={{ width: '100%', height: '100%', transform: `rotate(${rotation}deg)` }}
+              onError={() => setPreviewError(true)}
+            />
+          )}
+
+          {/* 半透明遮罩 + 裁剪框（纯视觉，不拦截触摸） */}
+          {!aiBusy && (
+            <>
+              <Overlay crop={crop} />
+              <View
+                className="absolute border border-white pointer-events-none"
+                style={{
+                  left: crop.x * imgW,
+                  top: crop.y * imgH,
+                  width: crop.w * imgW,
+                  height: crop.h * imgH,
+                  boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
+                }}
+              >
+                <View className="absolute inset-0 pointer-events-none">
+                  <View className="absolute left-1/3 top-0 bottom-0 border-l border-white border-opacity-40" />
+                  <View className="absolute left-2/3 top-0 bottom-0 border-l border-white border-opacity-40" />
+                  <View className="absolute top-1/3 left-0 right-0 border-t border-white border-opacity-40" />
+                  <View className="absolute top-2/3 left-0 right-0 border-t border-white border-opacity-40" />
+                </View>
+                {HANDLES.map((h) => (
+                  <View
+                    key={h.key}
+                    className="absolute pointer-events-none"
+                    style={{
+                      width: 16, height: 16,
+                      left: h.dx * crop.w * imgW - 8,
+                      top: h.dy * crop.h * imgH - 8,
+                      borderWidth: 3, borderStyle: 'solid', borderColor: '#ffffff',
+                    }}
+                  />
+                ))}
+                <View key="edge-t" className="absolute pointer-events-none" style={{ left: (crop.w * imgW) / 2 - 14, top: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
+                <View key="edge-b" className="absolute pointer-events-none" style={{ left: (crop.w * imgW) / 2 - 14, bottom: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
+                <View key="edge-l" className="absolute pointer-events-none" style={{ top: (crop.h * imgH) / 2 - 14, left: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
+                <View key="edge-r" className="absolute pointer-events-none" style={{ top: (crop.h * imgH) / 2 - 14, right: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
+              </View>
+            </>
+          )}
+
+          {/* 触摸层：只捕获裁剪框拖动 */}
+          {!aiBusy && (
+            <View
+              className="absolute inset-0"
               onTouchStart={onTouchStart}
               onTouchMove={onTouchMove}
               onTouchEnd={onTouchEnd}
             />
+          )}
 
-            {/* 半透明遮罩：用 4 个块围出裁剪区域（纯视觉，不拦截触摸） */}
-            <Overlay crop={crop} />
-
-            {/* 裁剪边框（纯视觉，不拦截触摸） */}
-            <View
-              className="absolute border border-white pointer-events-none"
-              style={{
-                left: crop.x * boxW,
-                top: crop.y * boxH,
-                width: crop.w * boxW,
-                height: crop.h * boxH,
-                boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
-              }}
-            >
-              {/* 九宫格辅助线 */}
-              <View className="absolute inset-0 pointer-events-none">
-                <View className="absolute left-1/3 top-0 bottom-0 border-l border-white border-opacity-40" />
-                <View className="absolute left-2/3 top-0 bottom-0 border-l border-white border-opacity-40" />
-                <View className="absolute top-1/3 left-0 right-0 border-t border-white border-opacity-40" />
-                <View className="absolute top-2/3 left-0 right-0 border-t border-white border-opacity-40" />
-              </View>
-
-              {/* 四角手柄 */}
-              {HANDLES.map((h) => (
-                <View
-                  key={h.key}
-                  className="absolute pointer-events-none"
-                  style={{
-                    width: 16,
-                    height: 16,
-                    left: h.dx * crop.w * boxW - 8,
-                    top: h.dy * crop.h * boxH - 8,
-                    borderWidth: 3,
-                    borderStyle: 'solid',
-                    borderColor: '#ffffff',
-                  }}
-                />
-              ))}
-              {/* 四边中点手柄 */}
-              <View key="edge-t" className="absolute pointer-events-none" style={{ left: (crop.w * boxW) / 2 - 14, top: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
-              <View key="edge-b" className="absolute pointer-events-none" style={{ left: (crop.w * boxW) / 2 - 14, bottom: -7, width: 28, height: 2, backgroundColor: '#ffffff' }} />
-              <View key="edge-l" className="absolute pointer-events-none" style={{ top: (crop.h * boxH) / 2 - 14, left: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
-              <View key="edge-r" className="absolute pointer-events-none" style={{ top: (crop.h * boxH) / 2 - 14, right: -7, width: 2, height: 28, backgroundColor: '#ffffff' }} />
-            </View>
-          </View>
-        )}
+          {/* 离屏 Canvas：仅用于导出编辑结果，尺寸固定但仍需挂载以获得 node */}
+          <Canvas
+            type="2d"
+            id={CANVAS_ID}
+            style={{ position: 'absolute', left: '-9999px', top: 0, width: naturalW || 1, height: naturalH || 1 }}
+          />
+        </View>
       </View>
 
       {/* 底部操作 */}
@@ -561,11 +554,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
         {/* AI 处理行 */}
         <View className="flex flex-row items-center justify-around mb-4">
           {AI_ACTIONS.map(({ action, label, icon: Icon }) => (
-            <View
-              key={action}
-              className="flex flex-col items-center"
-              onClick={() => handleAi(action, label)}
-            >
+            <View key={action} className="flex flex-col items-center" onClick={() => handleAi(action, label)}>
               <View className="w-11 h-11 rounded-full bg-white bg-opacity-15 flex items-center justify-center mb-1">
                 <Icon size={20} color="#ffffff" />
               </View>
@@ -580,25 +569,19 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
           </View>
           <View className="flex flex-col items-center" onClick={handleConfirmCrop}>
-            <View
-              className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'
-              }`}
-            >
+            <View className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'}`}>
               <Crop size={20} color="#ffffff" />
             </View>
             <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
           </View>
-          <View className="flex flex-col items-center" onClick={handleSave}>
-            <Database size={24} color="#ffffff" />
-            <Text className="block text-white text-opacity-80 text-xs mt-1">保存图片</Text>
-          </View>
+          {enableSaveToInbox && (
+            <View className="flex flex-col items-center" onClick={handleSave}>
+              <Database size={24} color="#ffffff" />
+              <Text className="block text-white text-opacity-80 text-xs mt-1">保存图片</Text>
+            </View>
+          )}
         </View>
-        <Button
-          className="w-full h-11 rounded-xl bg-primary"
-          disabled={busy || aiBusy}
-          onClick={handleConfirm}
-        >
+        <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
           <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图（返回）'}</Text>
         </Button>
       </View>
@@ -629,57 +612,42 @@ function applyDrag(r: Rect, target: DragTarget, dx: number, dy: number): Rect {
   const next = { ...r }
   switch (target) {
     case 'tl':
-      next.x = r.x + dx
-      next.y = r.y + dy
-      next.w = r.w - dx
-      next.h = r.h - dy
+      next.x = r.x + dx; next.y = r.y + dy; next.w = r.w - dx; next.h = r.h - dy
       break
     case 'tr':
-      next.y = r.y + dy
-      next.w = r.w + dx
-      next.h = r.h - dy
+      next.y = r.y + dy; next.w = r.w + dx; next.h = r.h - dy
       break
     case 'bl':
-      next.x = r.x + dx
-      next.w = r.w - dx
-      next.h = r.h + dy
+      next.x = r.x + dx; next.w = r.w - dx; next.h = r.h + dy
       break
     case 'br':
-      next.w = r.w + dx
-      next.h = r.h + dy
+      next.w = r.w + dx; next.h = r.h + dy
       break
     case 'l':
-      next.x = r.x + dx
-      next.w = r.w - dx
+      next.x = r.x + dx; next.w = r.w - dx
       break
     case 'r':
       next.w = r.w + dx
       break
     case 't':
-      next.y = r.y + dy
-      next.h = r.h - dy
+      next.y = r.y + dy; next.h = r.h - dy
       break
     case 'b':
       next.h = r.h + dy
       break
     case 'move':
-      next.x = r.x + dx
-      next.y = r.y + dy
+      next.x = r.x + dx; next.y = r.y + dy
       break
   }
   return next
 }
 
-// 归一化约束，保证裁剪框合法且不越界
 function clampCrop(r: Rect): Rect {
   let { x, y, w, h } = r
-
-  // 尺寸下限
   if (w < MIN_SIZE) w = MIN_SIZE
   if (h < MIN_SIZE) h = MIN_SIZE
   if (w > 1) w = 1
   if (h > 1) h = 1
-
   x = clamp(x, 0, 1 - w)
   y = clamp(y, 0, 1 - h)
   return { x, y, w, h }

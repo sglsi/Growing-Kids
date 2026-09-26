@@ -141,6 +141,19 @@ export class TimelineService {
   }
 
   // ---------- 更新 ----------
+  /**
+   * 更新条目。
+   *
+   * ⚠️ 根因修复（「更新失败，请重试」）：
+   * 之前写成 `.update(payload).select('*, subjects:subject_id(...)').maybeSingle()`。
+   * PostgREST 在 **UPDATE + 嵌入关联资源** 时，返回体经常会丢掉嵌入对象，
+   * 导致 `.maybeSingle()` 拿不到行（data=null）→ 这里误抛 NotFoundException('内容不存在')，
+   * 前端就显示「更新失败，请重试」；而由于写入其实已发生/或部分发生的语义不一致，
+   * 用户刷新后看到的又可能是旧值，体验为「改了没生效」。
+   *
+   * 修复策略：先把更新写下去（**不带** select，只看是否报错、是否命中行），
+   * 再用带嵌入的 findOne 单独查一遍返回完整记录。两次都是最朴素、最稳的调用。
+   */
   async update(userId: string, id: string, dto: UpdateTimelineDto): Promise<TimelineItem> {
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
@@ -153,16 +166,21 @@ export class TimelineService {
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null
     }
 
-    const { data, error } = await client
+    // 1) 执行更新（只 select id，不带任何嵌入，避免关联解析失败导致 0 行）
+    const { data: updated, error } = await client
       .from(TABLE)
       .update(payload)
       .eq('user_id', userId)
       .eq('id', id)
-      .select(SELECT_COLS)
-      .maybeSingle()
+      .select('id')
     if (error) throw new Error(error.message)
-    if (!data) throw new NotFoundException('内容不存在')
-    return data as unknown as TimelineItem
+    // 更新命中 0 行 = 该 id 不属于当前用户 / 已软删 / 不存在
+    if (!updated || updated.length === 0) {
+      throw new NotFoundException('内容不存在或无权修改')
+    }
+
+    // 2) 单独查询返回完整记录（此时嵌入 subjects 走的是普通 SELECT，稳定返回）
+    return this.findOne(userId, id)
   }
 
   // ---------- 删除（软删） ----------
