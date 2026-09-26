@@ -38,6 +38,11 @@ const HANDLES: { key: DragTarget; dx: number; dy: number }[] = [
 const CANVAS_ID = 'imgEditorCanvas'
 const HANDLE_HIT = 28 // px
 
+// AI 处理前的最大边长（px）与压缩质量。手机原图常 3000~4000px，
+// 压到 1280 左右即可满足识别/高清需求，又能把上传与 AI 处理耗时降低一个数量级。
+const MAX_SIDE = 1280
+const COMPRESS_QUALITY = 80
+
 // AI 处理按钮配置
 const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
   { action: 'auto', label: '自动调正', icon: Wand },
@@ -51,7 +56,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
   const [naturalW, setNaturalW] = useState(0)
   const [naturalH, setNaturalH] = useState(0)
   const [rotation, setRotation] = useState(0)
-  const [crop, setCrop] = useState<Rect>({ x: 0.05, y: 0.08, w: 0.9, h: 0.84})
+  const [crop, setCrop] = useState<Rect>({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
   const [boxW, setBoxW] = useState(0)
   const [boxH, setBoxH] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -158,6 +163,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
       img.onload = () => resolve()
       img.onerror = () => resolve()
     })
+    if (!img.width || !img.height) return // 载入失败则保持空白，避免画出黑块
     ctx.save()
     ctx.translate(boxW / 2, boxH / 2)
     ctx.rotate((rotation * Math.PI) / 180)
@@ -289,7 +295,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
       setCrop({ x: 0, y: 0, w: 1, h: 1 })
       setConfirmed(true)
       resetBox(info.width, info.height)
-      Taro.showToast({ title: '已裁剪，仅显示选中区域', icon: 'success' })
+      Taro.showToast({ title: '已裁剪，点「使用此图」返回', icon: 'none' })
     } catch (err) {
       console.error('裁剪失败', err)
       Taro.showToast({ title: '裁剪失败，请重试', icon: 'none' })
@@ -298,25 +304,85 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     }
   }
 
-  // AI 处理：调后端图生图，得到结果 URL 后下载为本地临时图，继续编辑
+  /**
+   * 把原图压缩到 MAX_SIDE 以内，缩短上传 + AI 处理耗时（解决「处理太久」）。
+   * 压缩失败则退回原图，不影响后续流程。
+   */
+  const compressImage = async (filePath: string): Promise<string> => {
+    if (/^https?:\/\//.test(filePath)) return filePath // 远程图由后端下载，不在此压缩
+    try {
+      const info = await Taro.getImageInfo({ src: filePath })
+      const longSide = Math.max(info.width, info.height)
+      if (longSide <= MAX_SIDE) return filePath
+      const ratio = MAX_SIDE / longSide
+      const w = Math.max(1, Math.round(info.width * ratio))
+      const h = Math.max(1, Math.round(info.height * ratio))
+      const res = await Taro.compressImage({
+        src: filePath,
+        quality: COMPRESS_QUALITY,
+        compressedWidth: w,
+        compressedHeight: h,
+      })
+      return res.tempFilePath || filePath
+    } catch {
+      return filePath
+    }
+  }
+
+  // 给下载任务加超时，避免卡死在「一直转圈」
+  const downloadWithTimeout = (url: string, ms: number): Promise<any> => {
+    return new Promise((resolve, reject) => {
+      const task = Network.downloadFile({ url })
+      const timer = setTimeout(() => {
+        try { (task as any).abort?.() } catch { /* ignore */ }
+        reject(new Error('处理结果下载超时'))
+      }, ms)
+      Promise.resolve(task as any).then(
+        (r: any) => {
+          clearTimeout(timer)
+          resolve(r)
+        },
+        (e: any) => {
+          clearTimeout(timer)
+          reject(e)
+        },
+      )
+    })
+  }
+
+  // AI 处理：调后端图生图；全程带超时与「结果校验」，失败绝不把坏图塞给画布（解决黑屏）
   const handleAi = async (action: ImageAction, label: string) => {
     if (aiBusy || busy) return
     setAiBusy(true)
     Taro.showLoading({ title: `${label}处理中…`, mask: true })
+    let lastGoodSrc = currentSrc // 失败兜底：保留上一张有效图
     try {
-      // AI 处理需要网络可访问的 URL；本地临时图先上传
-      let sourceUrl = currentSrc
-      if (!/^https?:\/\//.test(currentSrc)) {
-        const up = await uploadImage(currentSrc)
+      // 1) 预处理：压缩原图，显著缩短上传与 AI 处理耗时
+      const sourceForProcess = await compressImage(currentSrc)
+      lastGoodSrc = sourceForProcess
+
+      // 2) 上传（purpose=temp，不落库）拿到可访问 URL
+      let sourceUrl = sourceForProcess
+      if (!/^https?:\/\//.test(sourceForProcess)) {
+        const up = await uploadImage(sourceForProcess, { purpose: 'temp' })
         sourceUrl = up.url
       }
+
+      // 3) 调后端（processImage 自带 90s 超时，不会无限转圈）
       const data = await processImage(action, sourceUrl)
-      // 将远程 URL 下载为本地临时文件（跨端）
-      const dl = await Network.downloadFile({ url: data.url })
+
+      // 4) 下载结果并严格校验：只有确认是有效图片才替换，否则保留原图，杜绝黑屏
+      if (!data?.url) throw new Error('处理服务未返回图片')
+      const dl = await downloadWithTimeout(data.url, 30000)
       if (dl.statusCode !== 200 || !dl.tempFilePath) {
-        throw new Error('处理结果下载失败')
+        throw new Error('处理结果下载失败，请重试')
       }
       const info = await Taro.getImageInfo({ src: dl.tempFilePath })
+      if (!info || !info.width || !info.height) {
+        throw new Error('处理结果不是有效图片')
+      }
+
+      // 校验通过 → 应用结果
       setCurrentSrc(dl.tempFilePath)
       setRotation(0)
       setCrop({ x: 0.05, y: 0.08, w: 0.9, h: 0.84 })
@@ -325,22 +391,26 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
       Taro.showToast({ title: `${label}完成`, icon: 'success' })
     } catch (e) {
       console.error('AI 图片处理失败', e)
-      Taro.showToast({ title: e instanceof Error ? e.message : `${label}失败，请重试`, icon: 'none' })
+      const msg = e instanceof Error ? e.message : `${label}失败，请重试`
+      Taro.showToast({ title: msg, icon: 'none' })
+      // 关键：失败不清空 currentSrc，回到上一张有效图（避免整屏变黑）
+      setCurrentSrc(lastGoodSrc)
     } finally {
       setAiBusy(false)
       Taro.hideLoading()
     }
   }
 
-  // 保存到小程序数据库（上传素材并入库）
+  // 保存到小程序数据库（仅显式点击时归档进「最近题目」）
   const handleSave = async () => {
     if (busy || aiBusy) return
     setBusy(true)
     try {
       // 若已确定裁剪则导出裁剪结果，否则用当前编辑态整图
       const imgSrc = confirmed ? await exportCrop() : currentSrc
-      await uploadImage(imgSrc)
-      Taro.showToast({ title: '已保存到素材库', icon: 'success' })
+      // purpose=save → 后端归档进「最近题目」（不会自动发生，只有点了这里才会）
+      await uploadImage(imgSrc, { purpose: 'save' })
+      Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
     } catch (err: any) {
       console.error('保存图片失败', err)
       Taro.showToast({ title: err?.message ? err.message : '保存失败，请重试', icon: 'none' })
@@ -349,7 +419,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     }
   }
 
-  // 确认使用：导出最终图片并回传给识别页
+  // 确认使用：导出最终图片并回传给识别页（这一步也是「退出裁剪」）
   const handleConfirm = async () => {
     if (busy || aiBusy) return
     setBusy(true)
@@ -370,11 +440,12 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     <View className="fixed inset-0 bg-black z-[200] flex flex-col">
       {/* 顶部栏 */}
       <View className="flex flex-row items-center justify-between px-4 h-14">
-        <View className="w-8" onClick={onCancel}>
+        <View className="flex items-center gap-1" onClick={onCancel}>
           <X size={22} color="#ffffff" />
+          <Text className="block text-white text-sm">退出</Text>
         </View>
         <Text className="block text-white text-sm font-medium">裁剪与调整</Text>
-        <View className="w-8 flex items-center" onClick={handleReset}>
+        <View className="w-8 flex items-center justify-end" onClick={handleReset}>
           <Undo2 size={19} color="#ffffff" />
         </View>
       </View>
@@ -487,7 +558,7 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
           disabled={busy || aiBusy}
           onClick={handleConfirm}
         >
-          <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图'}</Text>
+          <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图（返回）'}</Text>
         </Button>
       </View>
     </View>

@@ -1,11 +1,13 @@
 // ============================================================
 // v4 API 层
-// 依据：server-v4/MIGRATION.md §2 接口映射表
-// 变化要点：
-//  1. 全部接口按用户隔离：首次请求后端会建匿名用户并回传 X-User-Id，
-//     本层自动捕获并持久化（Taro storage），后续请求带上续用同一身份。
-//  2. questions / materials 双接口 → timeline / library
-//  3. 新增复习本：scope=review、/timeline/review-book
+// 依据：server-v4/src/auth/auth.controller.ts
+//
+// 关键点（务必遵守微信规范）：
+//  - 前端只用 wx.login() 拿 code，绝不直接调 api.weixin.qq.com（该域名不可加入
+//    request 合法域名，且 AppSecret 必须仅存服务端）
+//  - code 一次性、5 分钟有效，拿到后立刻 POST 给 /api/auth/login
+//  - 登录成功后后端返回正式用户 user.id，覆盖本地 X-User-Id（原匿名 id 失效之
+//    前已在后端完成数据迁移）
 // ============================================================
 
 import Taro from '@tarojs/taro'
@@ -40,25 +42,6 @@ async function unwrap<T>(p: Promise<ReqResult>): Promise<T> {
   return body.data
 }
 
-// 上传文件到对象存储，返回 key 与公网 url（后端会一并归档到 timeline / library）
-export async function uploadFile(
-  filePath: string,
-): Promise<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }> {
-  const res = await Network.uploadFile({
-    url: '/api/upload',
-    filePath,
-    name: 'file',
-    header: authHeaders(),
-  })
-  captureUserId(res)
-  console.log('[Upload Response]', res.statusCode, res.data)
-  const body = typeof res.data === 'string'
-    ? JSON.parse(res.data)
-    : (res.data as ApiEnvelope<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }>)
-  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(body?.msg || '上传失败')
-  return body.data
-}
-
 // 校验并解包识别类接口响应（不允许静默失败）
 async function unwrapResponse<T>(p: Promise<ReqResult>): Promise<T> {
   const res = await p
@@ -73,6 +56,61 @@ async function unwrapResponse<T>(p: Promise<ReqResult>): Promise<T> {
     throw new Error(body.msg || '识别失败，请重试')
   }
   return body.data as T
+}
+
+/**
+ * 给一个 Promise 加超时：超时则 reject（附带友好文案），避免智能处理/网络请求无限转圈。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(msg)), ms)
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
+}
+
+// ============================================================
+// 文件上传
+//   purpose='save'  → 让后端把图片/文档归档进「最近题目 / 资料库」
+//   purpose='temp' 或省略 → 仅返回可访问 URL，不落库（用于 AI 处理前的中间上传）
+// ============================================================
+export interface UploadOpts {
+  purpose?: 'save' | 'temp'
+}
+
+export async function uploadFile(
+  filePath: string,
+  opts: UploadOpts = {},
+): Promise<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }> {
+  const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : '/api/upload'
+  const res = await Network.uploadFile({
+    url,
+    filePath,
+    name: 'file',
+    header: authHeaders(),
+  })
+  captureUserId(res)
+  console.log('[Upload Response]', res.statusCode, res.data)
+  const body = typeof res.data === 'string'
+    ? JSON.parse(res.data)
+    : (res.data as ApiEnvelope<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }>)
+  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(body?.msg || '上传失败')
+  return body.data
+}
+
+export function uploadImage(filePathOrUrl: string, opts: UploadOpts = {}): Promise<{ key: string; url: string; timeline_id?: string }> {
+  if (/^https?:\/\//.test(filePathOrUrl)) {
+    return Promise.resolve({ key: '', url: filePathOrUrl })
+  }
+  return uploadFile(filePathOrUrl, opts)
 }
 
 // ============================================================
@@ -92,6 +130,46 @@ export function updateSubject(id: string, payload: { name?: string; color?: stri
 
 export function deleteSubject(id: string) {
   return unwrap<{ id: string }>(Network.request({ url: `/api/subjects/${id}`, method: 'DELETE', header: authHeaders() }))
+}
+
+/**
+ * 把 LLM 识别出的学科名（中文，可能不规范，如「初中物理」「数学题」）匹配到用户已有的某个学科，返回 subject_id。
+ * 匹配不到返回 null，调用方再回退到默认学科。
+ * 匹配优先级：精确(忽略大小写) → 互相包含 → 常见别名归一（处理学段化/口语化表述）。
+ */
+export function matchSubject(name: string, subjects: Subject[]): string | null {
+  if (!name || !subjects?.length) return null
+  const lower = name.trim().toLowerCase()
+  if (!lower) return null
+  // 1. 精确匹配
+  let hit = subjects.find((s) => s.name.toLowerCase() === lower)
+  if (hit) return hit.id
+  // 2. 互相包含
+  hit = subjects.find((s) => {
+    const sn = s.name.toLowerCase()
+    return sn.includes(lower) || lower.includes(sn)
+  })
+  if (hit) return hit.id
+  // 3. 常见别名归一
+  const aliases: Record<string, string[]> = {
+    语文: ['语文', '中文', '汉语', '文言文', '作文'],
+    数学: ['数学', '代数', '几何', '数学校'],
+    英语: ['英语', '英文'],
+    物理: ['物理'],
+    化学: ['化学'],
+    生物: ['生物'],
+    历史: ['历史'],
+    地理: ['地理'],
+    政治: ['政治', '道法', '思想品德', '道德与法治', '法治'],
+    生活: ['生活', '生活常识', '常识', '其他', '其它', '综合', '通用', '未分类'],
+  }
+  for (const canon of Object.keys(aliases)) {
+    if (aliases[canon].some((k) => lower.includes(k))) {
+      hit = subjects.find((s) => s.name === canon)
+      if (hit) return hit.id
+    }
+  }
+  return null
 }
 
 // ============================================================
@@ -353,6 +431,8 @@ export interface RecognizeResult {
   source: string
   has_answer: boolean
   question_image_keys?: string[]
+  /** LLM 自动识别出的学科名称（中文，可能不规范），用于自动归类 */
+  subject?: string
 }
 
 function normalizeItem(raw: RecognizeResult): RecognizeResult {
@@ -364,6 +444,7 @@ function normalizeItem(raw: RecognizeResult): RecognizeResult {
     source: raw.source || '',
     has_answer: !!raw.answer_content,
     question_image_keys: raw.question_image_keys || [],
+    subject: raw.subject || '',
   }
 }
 
@@ -522,39 +603,43 @@ export type ImageAction = 'auto' | 'enhance' | 'erase'
 
 async function ensureImageUrl(filePathOrUrl: string): Promise<string> {
   if (/^https?:\/\//.test(filePathOrUrl)) return filePathOrUrl
-  const { url } = await uploadFile(filePathOrUrl)
+  // AI 处理前的中间上传：用 purpose=temp，不要落库（避免自动进「最近题目」）
+  const { url } = await uploadFile(filePathOrUrl, { purpose: 'temp' })
   return url
 }
 
-export async function processImage(action: ImageAction, filePathOrUrl: string) {
+export interface ProcessImageOpts {
+  /** true=处理完成后归档进「最近题目」；默认 false=仅预览 */
+  save?: boolean
+  /** 整体超时（毫秒），到点直接失败而不无限转圈，默认 90s */
+  timeout?: number
+}
+
+export async function processImage(action: ImageAction, filePathOrUrl: string, opts: ProcessImageOpts = {}) {
   const image_url = await ensureImageUrl(filePathOrUrl)
-  return unwrapResponse<{ url: string; key: string; timeline_id: string }>(
-    Network.request({
-      url: '/api/image/process',
-      method: 'POST',
-      data: { action, image_url },
-      header: authHeaders(),
-    }),
+  return withTimeout(
+    unwrapResponse<{ url: string; key: string; timeline_id: string }>(
+      Network.request({
+        url: '/api/image/process',
+        method: 'POST',
+        data: { action, image_url, save: opts.save === true },
+        header: authHeaders(),
+      }),
+    ),
+    opts.timeout || 90000,
+    '图片处理超时（90s），可能是原图过大或网络较慢。建议先用「编辑裁剪」缩小图片后重试。',
   )
 }
 
 // ============================================================
 // 图片直存
 // ============================================================
-export async function uploadImage(filePathOrUrl: string): Promise<{ key: string; url: string; timeline_id?: string }> {
-  if (/^https?:\/\//.test(filePathOrUrl)) {
-    return { key: '', url: filePathOrUrl }
-  }
-  return uploadFile(filePathOrUrl)
-}
-
 /**
  * 把一张图片直接保存为「最近题目」条目（不依赖 OCR）。
  *
  * v4 语义说明：
- *  - 后端 /api/upload 检测到图片时，**已自动**建好 kind=image 的 timeline 条目，
- *    并在响应里返回 timeline_id —— 因此这里只需用 uploadImage 拿到的 key 直接建档，
- *    不再靠「翻页找 file_key」那种脆弱匹配。
+ *  - 上传时带 purpose=save，后端 /api/upload 才会把图片归档进「最近题目」；
+ *    其余上传（如 AI 处理前的中间上传） deliberately 不落库。
  *  - 若调用方已持有 timeline_id（推荐路径），直接透传即可，避免重复建档。
  */
 export async function saveQuestionAsImage(

@@ -61,7 +61,13 @@ export class ImageService {
   }
 
   /**
-   * 图生图处理（自动调正 / 智能高清 / 去手写），结果转存并归档进 timeline_items(kind=image)。
+   * 图生图处理（自动调正 / 智能高清 / 去手写），结果转存并返回可访问 URL。
+   *
+   * 关于落库（最近题目）：
+   *  - 默认【不】写入 timeline，仅返回 url/key 供前端预览；
+   *  - 仅当 dto.save === true（用户显式点「保存图片」时）才归档进最近题目。
+   * 这样「智能高清 / 去手写」预览、裁剪都不会在用户不知情的情况下自动产生最近题目记录。
+   *
    * userId 由控制器从请求上下文传入（service_role 下必须显式隔离）。
    */
   async process(
@@ -85,7 +91,7 @@ export class ImageService {
 
     const helper = client.getResponseHelper(response)
     if (!helper.success) {
-      throw new BadRequestException(helper.errorMessages.join(';') || `${PROMPTS[action].desc}处理失败`)
+      throw new BadRequestException(helper.errorMessages.join('；') || `${PROMPTS[action].desc}处理失败`)
     }
     const resultUrl = helper.imageUrls[0]
     if (!resultUrl) throw new BadRequestException('处理服务未返回图片')
@@ -96,21 +102,23 @@ export class ImageService {
     const key = await this.storageService.uploadBuffer(buffer, `processed-${Date.now()}.png`, 'image/png')
     const url = await this.storageService.getPublicUrl(key)
 
-    // 归档进 timeline（最近题目）
+    // 仅在用户显式保存时才归档进 timeline（最近题目）
     let timelineId = ''
-    try {
-      const item = await this.timelineService.create(userId, {
-        kind: 'image',
-        title: `${PROMPTS[action].desc}-${Date.now()}.png`,
-        file_key: key,
-        mime_type: 'image/png',
-        size_bytes: buffer.length,
-        file_hash: fileHash,
-        source: 'album',
-      })
-      timelineId = item.id
-    } catch (e) {
-      console.error('[image] 归档进 timeline 失败（不影响处理）', e)
+    if (dto.save === true) {
+      try {
+        const item = await this.timelineService.create(userId, {
+          kind: 'image',
+          title: `${PROMPTS[action].desc}-${Date.now()}.png`,
+          file_key: key,
+          mime_type: 'image/png',
+          size_bytes: buffer.length,
+          file_hash: fileHash,
+          source: 'album',
+        })
+        timelineId = item.id
+      } catch (e) {
+        console.error('[image] 归档进 timeline 失败（不影响处理）', e)
+      }
     }
 
     return { url, key, timeline_id: timelineId }

@@ -10,7 +10,8 @@ import { ActionBtn, BottomActionBar, EmptyCard } from '@/components/filter-heade
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
-  type Overview, type TimelineItem,
+  fetchSubjects, updateTimeline,
+  type Overview, type TimelineItem, type Subject,
 } from '@/services/api'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import { getSubjectColor } from '@/types'
@@ -24,19 +25,25 @@ export default function IndexPage() {
   const [busy, setBusy] = useState(false)
   // 登录态（顶部入口展示）
   const [auth, setAuth] = useState<AuthState | null>(getAuthState())
+  // 学科列表（用于「最近题目」里手动改分类）
+  const [subjects, setSubjects] = useState<Subject[]>([])
+  // 当前正在改分类的条目（弹层状态）
+  const [pickerItem, setPickerItem] = useState<TimelineItem | null>(null)
   const sel = useSelection()
 
   const load = async () => {
     setLoading(true)
     setAuth(getAuthState())
     try {
-      const [ov, list] = await Promise.all([
+      const [ov, list, subs] = await Promise.all([
         fetchOverview(),
         fetchTimeline({ scope: 'recent', pageSize: 20 }),
+        fetchSubjects().catch(() => [] as Subject[]),
       ])
       setOverview(ov)
       setInbox(list.list)
       setInboxTotal(list.total)
+      setSubjects(subs)
     } catch (e) {
       console.error('加载概览失败', e)
     } finally {
@@ -80,6 +87,25 @@ export default function IndexPage() {
     }
     const ok = await promptLogin()
     if (ok) load()
+  }
+
+  // 手动改分类：弹出学科选择器（自定义弹层，规避 showActionSheet 最多 6 项限制）
+  const openSubjectPicker = (item: TimelineItem) => setPickerItem(item)
+  const closePicker = () => setPickerItem(null)
+  const applySubject = async (sub: Subject | null) => {
+    const item = pickerItem
+    if (!item) return
+    const next = sub
+      ? { subject_id: sub.id, subjects: { id: sub.id, name: sub.name, color: sub.color } }
+      : { subject_id: null as string | null, subjects: null as null }
+    setInbox((prev) => prev.map((it) => it.id === item.id ? { ...it, ...next } : it))
+    closePicker()
+    try {
+      await updateTimeline(item.id, { subject_id: sub ? sub.id : null })
+      Taro.showToast({ title: sub ? `已归为「${sub.name}」` : '已设为未分类', icon: 'none' })
+    } catch {
+      Taro.showToast({ title: '更新失败，请重试', icon: 'none' })
+    }
   }
 
   const handleOpen = (item: TimelineItem) => {
@@ -214,7 +240,7 @@ export default function IndexPage() {
               {/* 最近题目（统一收件箱） */}
               <View className="mb-2 flex flex-row items-center justify-between">
                 <Text className="block text-sm font-semibold text-foreground">
-                  最近题目 <Text className="block text-xs text-muted-foreground">（共 {inboxTotal} 条）</Text>
+                  最近题目 <Text className="block text-xs text-muted-foreground">（共 {inboxTotal} 条 · 点学科标签可改分类）</Text>
                 </Text>
                 {!sel.selecting ? (
                   <Text className="block text-xs text-primary" onClick={sel.enter}>批量选择</Text>
@@ -241,6 +267,7 @@ export default function IndexPage() {
                       checked={sel.selected.has(item.id)}
                       onOpen={handleOpen}
                       onLongPress={(it) => sel.longPress(it.id)}
+                      onChangeSubject={openSubjectPicker}
                     />
                   ))}
                 </View>
@@ -278,6 +305,32 @@ export default function IndexPage() {
             />
           </View>
         </BottomActionBar>
+      )}
+      {pickerItem && (
+        <View className="z-50" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)' }} onClick={closePicker}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '70vh' }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">选择分类</Text>
+            <View className="overflow-y-auto">
+              {subjects.map((s) => {
+                const c = getSubjectColor(s.color)
+                return (
+                  <View key={s.id} className={`flex flex-row items-center gap-2 rounded-xl border px-3 py-3 mb-2 ${c.badge}`} onClick={() => applySubject(s)}>
+                    <View className={`w-2 h-2 rounded-full ${c.dot}`} />
+                    <Text className="block text-sm">{s.name}</Text>
+                  </View>
+                )
+              })}
+              <View className="flex flex-row items-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 mb-2" onClick={() => applySubject(null)}>
+                <Text className="block text-sm text-muted-foreground">未分类 / 清除</Text>
+              </View>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closePicker}>
+                <Text className="block text-sm">取消</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
       )}
     </View>
   )

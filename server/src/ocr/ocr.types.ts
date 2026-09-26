@@ -6,6 +6,8 @@ export interface RecognizedItem {
   source: string
   status: 'answered' | 'pending'
   question_image_keys: string[]
+  /** LLM 自动识别出的学科名称（中文，如「数学」），前端据此匹配用户学科 */
+  subject?: string
 }
 
 export interface RecognizeExamDto {

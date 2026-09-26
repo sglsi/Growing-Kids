@@ -52,42 +52,49 @@ export class UploadController {
     const key = await this.storageService.uploadBuffer(buffer, fileName, contentType)
     const isImage = contentType.startsWith(IMAGE_MIME_PREFIX)
 
+    // purpose=save 才写入「最近题目 / 资料库」；其余（如 AI 处理前的中间上传）仅返回可访问 URL，不落库。
+    // 这避免了「用智能高清/去手写后图片被自动塞进最近题目」「裁剪/识别时源图也生成一条废记录」等问题。
+    const purpose = (req.body && (req.body as Record<string, unknown>).purpose) || ''
+    const archive = purpose === 'save'
+
     let timelineId = ''
     let libraryId = ''
 
-    if (isImage) {
-      // 图片 → 统一收件箱（最近题目）
-      try {
-        const item = await this.timelineService.create(userId, {
-          kind: 'image',
-          title: file.originalname || fileName,
-          file_key: key,
-          mime_type: contentType,
-          size_bytes: buffer.length,
-          file_hash: fileHash,
-          source: 'album',
-        })
-        timelineId = item.id
-      } catch (e) {
-        console.error('[upload] 图片入 timeline 失败（不影响返回）', e)
-      }
-    } else {
-      // 文档 → 资料库
-      try {
-        const doc = await this.libraryService.create(userId, {
-          name: file.originalname || fileName,
-          file_key: key,
-          mime_type: contentType,
-          size_bytes: buffer.length,
-          source: 'upload',
-        })
-        libraryId = doc.id
-      } catch (e) {
-        console.error('[upload] 文档入资料库失败（不影响返回）', e)
+    if (archive) {
+      if (isImage) {
+        // 图片 → 统一收件箱（最近题目）
+        try {
+          const item = await this.timelineService.create(userId, {
+            kind: 'image',
+            title: file.originalname || fileName,
+            file_key: key,
+            mime_type: contentType,
+            size_bytes: buffer.length,
+            file_hash: fileHash,
+            source: 'album',
+          })
+          timelineId = item.id
+        } catch (e) {
+          console.error('[upload] 图片入 timeline 失败（不影响返回）', e)
+        }
+      } else {
+        // 文档 → 资料库
+        try {
+          const doc = await this.libraryService.create(userId, {
+            name: file.originalname || fileName,
+            file_key: key,
+            mime_type: contentType,
+            size_bytes: buffer.length,
+            source: 'upload',
+          })
+          libraryId = doc.id
+        } catch (e) {
+          console.error('[upload] 文档入资料库失败（不影响返回）', e)
+        }
       }
     }
 
-    console.log('[upload] 上传成功', { userId, key, timelineId, libraryId })
+    console.log('[upload] 上传成功', { userId, key, purpose, archive, timelineId, libraryId })
     return {
       code: 200,
       msg: 'success',

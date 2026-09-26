@@ -92,8 +92,9 @@ export class OcrService {
 4. 答案缺失（没有红笔批改、没有标准答案）时 status 必须为 "pending"，否则为 "answered"。
 5. source 填写能识别到的来源，如试卷名/作业名/页码，没有则留空。
 6. question_image_keys 一律返回空数组 []。
+7. subject 填写该题目所属的学科（只填一个最适合的主科，如 语文/数学/英语/物理/化学/生物/历史/地理/政治/生活；跨学科综合题按占比最大的主科填；完全无法判断填"其他"）。
 只输出 JSON，不要输出任何解释或 markdown 代码块标记。JSON 结构：
-{"items":[{"question_content":"","wrong_answer":"","answer_content":"","solution":"","source":"","status":"answered|pending","question_image_keys":[]}]}`
+{"items":[{"question_content":"","wrong_answer":"","answer_content":"","solution":"","source":"","status":"answered|pending","question_image_keys":[],"subject":""}]}`
   }
 
   private extractJson(text: string): { items: RecognizedItem[] } {
@@ -114,6 +115,8 @@ export class OcrService {
     items.forEach((it) => {
       if (!Array.isArray(it.question_image_keys)) it.question_image_keys = []
       it.status = it.answer_content ? 'answered' : 'pending'
+      const rawSubject = (it as any).subject
+      it.subject = typeof rawSubject === 'string' ? rawSubject.trim() : ''
     })
     return { items }
   }
@@ -140,11 +143,8 @@ export class OcrService {
     )
 
     console.log('[ocr/exam] 模型原始返回:', response.content)
-    const result = this.extractJson(response.content)
-    result.items.forEach((it) => {
-      void subjectId
-    })
-    return result
+    // 学科由 LLM 在识别时自动判定（见 buildJsonSystem 的 subject 字段），不再依赖入参 subjectId
+    return this.extractJson(response.content)
   }
 
   async recognizeExamByUrls(subjectId: string, urls: string[]): Promise<{ items: RecognizedItem[] }> {

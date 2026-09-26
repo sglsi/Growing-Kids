@@ -14,6 +14,8 @@ interface Props {
   checked?: boolean
   onOpen?: (item: TimelineItem) => void
   onLongPress?: (item: TimelineItem) => void
+  /** 点击学科徽章时触发（用于「最近题目」里手动改分类）；不传则徽章不响应点击 */
+  onChangeSubject?: (item: TimelineItem) => void
   /** 复习本里展示「加入时间」而非创建时间 */
   timeField?: 'created_at' | 'added_to_review_at'
 }
@@ -24,7 +26,7 @@ interface Props {
  */
 export default function ReviewItemCard({
   item, showSubject = true, selecting = false, checked = false,
-  onOpen, onLongPress, timeField = 'created_at',
+  onOpen, onLongPress, timeField = 'created_at', onChangeSubject,
 }: Props) {
   const color = getSubjectColor(item.subjects?.color)
   const subjectName = item.subjects?.name || '未分类'
@@ -74,9 +76,17 @@ export default function ReviewItemCard({
             <View className="flex-1 min-w-0">
               <View className="flex flex-row items-center gap-2 mb-1">
                 {showSubject && (
-                  <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
-                    {subjectName}
-                  </Badge>
+                  onChangeSubject ? (
+                    <View onClick={(e) => { e.stopPropagation?.(); onChangeSubject(item) }}>
+                      <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                        {subjectName} ›
+                      </Badge>
+                    </View>
+                  ) : (
+                    <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                      {subjectName}
+                    </Badge>
+                  )
                 )}
                 {item.in_review_book && (
                   <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
@@ -116,9 +126,17 @@ export default function ReviewItemCard({
           <View className="flex flex-row items-center justify-between mb-2">
             <View className="flex flex-row items-center gap-2">
               {showSubject && (
-                <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
-                  {subjectName}
-                </Badge>
+                onChangeSubject ? (
+                  <View onClick={(e) => { e.stopPropagation?.(); onChangeSubject(item) }}>
+                    <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                      {subjectName} ›
+                    </Badge>
+                  </View>
+                ) : (
+                  <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                    {subjectName}
+                  </Badge>
+                )
               )}
               {status === 'pending' && (
                 <Badge className="bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0 text-xs">
