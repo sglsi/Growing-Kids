@@ -233,14 +233,19 @@ export default function RecognizePage() {
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
     setSaving(true)
     try {
+      // purpose=save：后端 /api/upload 会为图片建立 timeline(kind=image) 条目。
+      // 若 paperImage 为远程 URL，uploadImage 会先下载再上传，确保真的落库。
       const up = await uploadImage(paperImage, { purpose: 'save' })
-      // 后端 /api/upload(purpose=save) 已为图片自动建立 timeline(kind=image) 条目，直接补学科
+      if (!(up && (up.timeline_id || up.key))) {
+        throw new Error('保存未生效，请重试')
+      }
+      // 后端已建档则只补学科；否则按 key/url 兜底建档
       await saveQuestionAsImage(sid, up.key, up.url, up.timeline_id)
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('图片直存失败', e)
-      Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
+      Taro.showToast({ title: e instanceof Error ? e.message : '保存失败，请重试', icon: 'none' })
     } finally {
       setSaving(false)
     }

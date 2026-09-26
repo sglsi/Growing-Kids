@@ -1,11 +1,29 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common'
-import { getSupabaseClient } from '../storage/database/supabase-client'
+import { getSupabaseClient, loadEnv } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
 import type { LoginResult, WechatSession } from './auth.types'
 
 const WX_CODE2SESSION = 'https://api.weixin.qq.com/sns/jscode2session'
 const TABLES_WITH_USER = ['subjects', 'timeline_items', 'library_docs', 'documents'] as const
+
+/** 读取微信配置：兼容多种变量命名，避免因命名差异导致「未配置」。 */
+function readWxConfig(): { appid: string; secret: string } {
+  const appid =
+    process.env.WX_APPID ||
+    process.env.WX_MINIPROGRAM_APPID ||
+    process.env.WECHAT_APPID ||
+    process.env.MP_APPID ||
+    ''
+  const secret =
+    process.env.WX_SECRET ||
+    process.env.WX_APPSECRET ||
+    process.env.WX_MINIPROGRAM_SECRET ||
+    process.env.WECHAT_SECRET ||
+    process.env.MP_SECRET ||
+    ''
+  return { appid: appid.trim(), secret: secret.trim() }
+}
 
 @Injectable()
 export class AuthService {
@@ -51,12 +69,30 @@ export class AuthService {
     return { user: finalUser, migrated }
   }
 
-  /** 调微信 code2session（服务端调用，AppSecret 不上前端） */
+  /**
+   * 调微信 code2session（服务端调用，AppSecret 不上前端）
+   *
+   * 关键修复：在读取 process.env 之前先 loadEnv()。
+   * 平台（Coze）注入的环境变量可能只存在于工作负载变量中，需要 loadEnv()
+   * 才会被写入 process.env。此前直接读 process.env 会在部分部署环境下拿不到，
+   * 从而误报「服务端未配置 WX_APPID / WX_SECRET」。
+   */
   private async code2Session(code: string): Promise<WechatSession> {
-    const appid = process.env.WX_APPID
-    const secret = process.env.WX_SECRET
+    // 先把平台/本地的环境变量加载进 process.env（幂等，已加载则跳过）
+    try {
+      loadEnv()
+    } catch {
+      /* loadEnv 内部已吞异常，这里仅兜底 */
+    }
+
+    const { appid, secret } = readWxConfig()
     if (!appid || !secret) {
-      throw new BadRequestException('服务端未配置 WX_APPID / WX_SECRET，无法完成微信登录')
+      this.logger.error(
+        '[auth] 缺少微信小程序配置：请在后端环境变量中配置 WX_APPID / WX_SECRET（或 WX_MINIPROGRAM_APPID / WX_APPSECRET）',
+      )
+      throw new BadRequestException(
+        '服务端未配置微信小程序的 AppID / AppSecret。请在部署环境添加 WX_APPID 与 WX_SECRET 后重试。',
+      )
     }
 
     const url =
@@ -74,9 +110,22 @@ export class AuthService {
       throw new BadRequestException('微信服务暂时不可用，请稍后重试')
     }
 
+    // 微信返回业务错误时，把 errcode/errmsg 透传出来，便于排查（如 40013 appid 非法、40125 secret 错误）
     if (json.errcode) {
       this.logger.warn(`[auth] code2session 返回错误 ${json.errcode}: ${json.errmsg}`)
+      const hint =
+        json.errcode === 40013
+          ? '（AppID 不正确，请核对 WX_APPID）'
+          : json.errcode === 40125
+            ? '（AppSecret 不正确，请核对 WX_SECRET）'
+            : json.errcode === 40029
+              ? '（code 无效或已使用，请重试）'
+              : ''
+      throw new BadRequestException(
+        `微信登录失败：${json.errmsg || ''}${hint}（errcode=${json.errcode}）`,
+      )
     }
+
     return json
   }
 

@@ -53,9 +53,18 @@ export class UploadController {
     const isImage = contentType.startsWith(IMAGE_MIME_PREFIX)
 
     // purpose=save 才写入「最近题目 / 资料库」；其余（如 AI 处理前的中间上传）仅返回可访问 URL，不落库。
-    // 这避免了「用智能高清/去手写后图片被自动塞进最近题目」「裁剪/识别时源图也生成一条废记录」等问题。
-    const purpose = (req.body && (req.body as Record<string, unknown>).purpose) || ''
-    const archive = purpose === 'save'
+    //
+    // ⚠️ 关键修复：purpose 可能来自两处，必须都读——
+    //   - query string：`/api/upload?purpose=save`（旧前端写法）
+    //   - multipart 表单字段：formData.purpose（新前端写法）
+    // 之前只读 req.body.purpose，而前端把 purpose 放在 URL 查询串里（multer 解析
+    // multipart 后 req.body 不含它），导致 archive 恒为 false → 图片/文档永不落库，
+    // 表现为「点了保存图片提示已保存，但最近题目/资料库中无记录」。
+    const q = (req.query || {}) as Record<string, unknown>
+    const b = (req.body || {}) as Record<string, unknown>
+    const purposeRaw = b.purpose ?? q.purpose ?? ''
+    const purpose = String(Array.isArray(purposeRaw) ? purposeRaw[0] : purposeRaw).trim()
+    const archive = purpose === 'save' || purpose === '1' || purpose === 'true'
 
     let timelineId = ''
     let libraryId = ''
@@ -63,34 +72,26 @@ export class UploadController {
     if (archive) {
       if (isImage) {
         // 图片 → 统一收件箱（最近题目）
-        try {
-          const item = await this.timelineService.create(userId, {
-            kind: 'image',
-            title: file.originalname || fileName,
-            file_key: key,
-            mime_type: contentType,
-            size_bytes: buffer.length,
-            file_hash: fileHash,
-            source: 'album',
-          })
-          timelineId = item.id
-        } catch (e) {
-          console.error('[upload] 图片入 timeline 失败（不影响返回）', e)
-        }
+        const item = await this.timelineService.create(userId, {
+          kind: 'image',
+          title: file.originalname || fileName,
+          file_key: key,
+          mime_type: contentType,
+          size_bytes: buffer.length,
+          file_hash: fileHash,
+          source: 'album',
+        })
+        timelineId = item.id
       } else {
         // 文档 → 资料库
-        try {
-          const doc = await this.libraryService.create(userId, {
-            name: file.originalname || fileName,
-            file_key: key,
-            mime_type: contentType,
-            size_bytes: buffer.length,
-            source: 'upload',
-          })
-          libraryId = doc.id
-        } catch (e) {
-          console.error('[upload] 文档入资料库失败（不影响返回）', e)
-        }
+        const doc = await this.libraryService.create(userId, {
+          name: file.originalname || fileName,
+          file_key: key,
+          mime_type: contentType,
+          size_bytes: buffer.length,
+          source: 'upload',
+        })
+        libraryId = doc.id
       }
     }
 

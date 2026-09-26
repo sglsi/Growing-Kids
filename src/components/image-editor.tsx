@@ -141,6 +141,30 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     })
   }
 
+  /**
+   * 画布绘制用的图片来源。
+   * 关键修复（黑屏）：小程序 Canvas 2D 的 createImage 对「远程 https 图」在小程序
+   * 真机/开发者工具中常常加载失败（跨域 / 未下载完成 / 未加入下载域名白名单），
+   * 此时 img.width 为 0，之前会清空画布后 return → 整屏黑色。
+   * 解决：远程图先下载成本地临时文件，再交给 createImage 绘制；下载失败则回退原 URL。
+   */
+  const resolveDrawSrc = async (srcForDraw: string): Promise<string> => {
+    if (!/^https?:\/\//.test(srcForDraw)) return srcForDraw
+    try {
+      const dl: any = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('draw-download-timeout')), 20000)
+        Network.downloadFile({
+          url: srcForDraw,
+          success: (r: any) => { clearTimeout(timer); resolve(r) },
+          fail: (e: any) => { clearTimeout(timer); reject(e) },
+        })
+      })
+      return dl?.tempFilePath || srcForDraw
+    } catch {
+      return srcForDraw
+    }
+  }
+
   // 将旋转后的整图以 contain 方式绘制到画布（导出前务必 await 本函数以完成绘制）
   const renderCanvas = async () => {
     const node = await getCanvasNode()
@@ -150,7 +174,8 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     node.height = boxH * dpr
     const ctx = node.getContext('2d')
     ctx.scale(dpr, dpr)
-    ctx.clearRect(0, 0, boxW, boxH)
+    // 先把远程图落到本地，规避 Canvas 2D 加载网络图失败导致的「黑屏」
+    const drawSrc = await resolveDrawSrc(currentSrc)
     // 用 canvas.createImage 加载本地/网络图片，避免传字符串在小程序真机绘制失败
     let img: any = null
     if (node.createImage) {
@@ -158,13 +183,21 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
     } else {
       img = new Image()
     }
-    img.src = currentSrc
+    img.src = drawSrc
     await new Promise<void>((resolve) => {
-      img.onload = () => resolve()
-      img.onerror = () => resolve()
+      let done = false
+      const finish = () => { if (!done) { done = true; resolve() } }
+      img.onload = finish
+      img.onerror = finish
+      // 兜底超时：避免个别机型 onload/onerror 都不触发导致一直挂起
+      setTimeout(finish, 8000)
     })
-    if (!img.width || !img.height) return // 载入失败则保持空白，避免画出黑块
+    // 载入失败则【不清空画布】——clearRect 放在成功判定的后面，
+    // 这样失败时保留上一帧内容，不会整屏变黑。
+    if (!img.width || !img.height) return
+    ctx.clearRect(0, 0, boxW, boxH)
     ctx.save()
+
     ctx.translate(boxW / 2, boxH / 2)
     ctx.rotate((rotation * Math.PI) / 180)
     const scale = Math.min(boxW / naturalW, boxH / naturalH)
@@ -405,13 +438,21 @@ export default function ImageEditor({ visible, src, onCancel, onConfirm, autoAct
   const handleSave = async () => {
     if (busy || aiBusy) return
     setBusy(true)
+    Taro.showLoading({ title: '保存中…', mask: true })
     try {
       // 若已确定裁剪则导出裁剪结果，否则用当前编辑态整图
       const imgSrc = confirmed ? await exportCrop() : currentSrc
-      // purpose=save → 后端归档进「最近题目」（不会自动发生，只有点了这里才会）
-      await uploadImage(imgSrc, { purpose: 'save' })
+      // purpose=save → 后端归档进「最近题目」。
+      // 注意：若 imgSrc 是 AI 处理后的远程 URL，uploadImage 会先下载再上传，
+      // 确保后端真的收到上传请求并落库（修复「提示已保存但列表无记录」）。
+      const up = await uploadImage(imgSrc, { purpose: 'save' })
+      // 以真实结果为准：必须拿到 timeline_id 或 key 才算入库成功
+      const saved = !!(up && (up.timeline_id || up.key))
+      if (!saved) throw new Error('保存未生效，请重试')
+      Taro.hideLoading()
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
     } catch (err: any) {
+      Taro.hideLoading()
       console.error('保存图片失败', err)
       Taro.showToast({ title: err?.message ? err.message : '保存失败，请重试', icon: 'none' })
     } finally {

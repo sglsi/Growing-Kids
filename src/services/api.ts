@@ -91,11 +91,16 @@ export async function uploadFile(
   opts: UploadOpts = {},
 ): Promise<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }> {
   const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : '/api/upload'
+  // purpose 同时放进 query（url）与 multipart 表单字段（formData），双保险：
+  // 部分容器/中间层会丢弃 query，部分会丢弃表单字段，两端都读即可确保后端拿到。
+  const formData: Record<string, string> = {}
+  if (opts.purpose) formData.purpose = opts.purpose
   const res = await Network.uploadFile({
     url,
     filePath,
     name: 'file',
     header: authHeaders(),
+    formData,
   })
   captureUserId(res)
   console.log('[Upload Response]', res.statusCode, res.data)
@@ -106,11 +111,31 @@ export async function uploadFile(
   return body.data
 }
 
-export function uploadImage(filePathOrUrl: string, opts: UploadOpts = {}): Promise<{ key: string; url: string; timeline_id?: string }> {
-  if (/^https?:\/\//.test(filePathOrUrl)) {
-    return Promise.resolve({ key: '', url: filePathOrUrl })
+/**
+ * 上传图片并返回可访问 URL / key。
+ *
+ * ⚠️ 关键修复：当入参是远程 URL（例如「智能高清 / 去手写」处理后的结果图）时，
+ * 若 purpose='save' 需要落库，则必须先把它下载成本地临时文件再真正上传，
+ * 否则直接返回原 URL 会导致后端完全没有收到上传请求 → 永不落库，
+ * 表现为「提示已保存，但最近题目/资料库无记录」。
+ * 对 purpose!=='save'（仅取 URL 作中间态）仍可沿用原 URL，无需重复上传。
+ */
+export async function uploadImage(
+  filePathOrUrl: string,
+  opts: UploadOpts = {},
+): Promise<{ key: string; url: string; timeline_id?: string }> {
+  const isRemote = /^https?:\/\//.test(filePathOrUrl)
+  if (!isRemote) return uploadFile(filePathOrUrl, opts)
+
+  // 远程图：只有在需要落库（save）时才下载再上传；否则直接复用 URL
+  if (opts.purpose !== 'save') {
+    return { key: '', url: filePathOrUrl }
   }
-  return uploadFile(filePathOrUrl, opts)
+  const dl = await Network.downloadFile({ url: filePathOrUrl })
+  const localPath = (dl as any)?.tempFilePath
+  if (!localPath) throw new Error('处理结果下载失败，无法保存')
+  const up = await uploadFile(localPath, opts)
+  return { key: up.key, url: up.url, timeline_id: up.timeline_id }
 }
 
 // ============================================================
