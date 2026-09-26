@@ -187,7 +187,14 @@ export async function promptLogin(): Promise<boolean> {
   } catch (e) {
     Taro.hideLoading()
     const msg = e instanceof Error ? e.message : '登录失败'
-    Taro.showToast({ title: msg, icon: 'none' })
+    // 关键修复：登录报错常含「未配置 WX_APPID」等较长说明，showToast 会被截断成
+    // 「……」导致看不到根因。改用 showModal 完整展示，便于直接定位部署配置问题。
+    Taro.showModal({
+      title: '微信登录失败',
+      content: msg,
+      showCancel: false,
+      confirmText: '知道了',
+    })
     return false
   }
 }

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { getSupabaseClient, loadEnv } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
@@ -13,14 +13,22 @@ const TABLES_WITH_USER = ['subjects', 'timeline_items', 'library_docs', 'documen
 /**
  * 微信小程序配置的候选变量名（大小写/命名差异都覆盖）。
  * 按顺序取第一个非空值。
+ *
+ * ⚠️ 历史教训（第 5 次修复）：部署文档与部分 README 曾把变量写成
+ * `WX_APP_ID` / `WX_APP_SECRET`（带下划线），与代码实际读取的 `WX_APPID`
+ * 不一致，导致「明明配了却仍报未配置」。这里把这批「常见误拼写」也纳入候选，
+ * 避免再因命名差一个下划线而反复踩坑。
  */
 const APPID_KEYS = [
   'WX_APPID',
+  'WX_APP_ID', // 常见误拼写（带下划线）—— 兼容，避免第 5 次式反复
   'WX_MINIPROGRAM_APPID',
   'WX_MINI_APPID',
   'WECHAT_APPID',
+  'WECHAT_APP_ID',
   'WECHAT_MINIPROGRAM_APPID',
   'MP_APPID',
+  'MP_APP_ID',
   'MINIPROGRAM_APPID',
   'APPID',
   'COZE_WX_APPID',
@@ -29,12 +37,15 @@ const APPID_KEYS = [
 
 const SECRET_KEYS = [
   'WX_SECRET',
+  'WX_APP_SECRET', // 常见误拼写（带下划线）
   'WX_APPSECRET',
-  'WX_APP_SECRET',
   'WX_MINIPROGRAM_SECRET',
+  'WX_MINIPROGRAM_APP_SECRET',
   'WECHAT_SECRET',
+  'WECHAT_APP_SECRET',
   'WECHAT_APPSECRET',
   'MP_SECRET',
+  'MP_APP_SECRET',
   'MINIPROGRAM_SECRET',
   'APPSECRET',
   'SECRET',
@@ -123,8 +134,21 @@ function pickFromTable(table: Record<string, string>, keys: readonly string[]): 
 
 /**
  * 读取微信配置：兼容多种变量命名，并叠加 .env / 平台变量兜底。
+ * 结果做进程级缓存（环境变量在运行期内稳定），避免每次登录都 spawn 一次
+ * python 子进程去读平台变量，既慢又容易在异常时静默失败。
  */
-function readWxConfig(): { appid: string; secret: string; source: string; availableKeys: string[] } {
+interface WxConfig {
+  appid: string
+  secret: string
+  source: string
+  availableKeys: string[]
+  ts: number
+}
+
+let wxConfigCache: WxConfig | null = null
+
+function readWxConfig(force = false): WxConfig {
+  if (wxConfigCache && !force) return wxConfigCache
   // 先触发一次平台加载（幂等）
   try {
     loadEnv()
@@ -148,14 +172,45 @@ function readWxConfig(): { appid: string; secret: string; source: string; availa
     else source = '.env/platform'
   }
 
-  return { appid, secret, source, availableKeys }
+  wxConfigCache = { appid, secret, source, availableKeys, ts: Date.now() }
+  return wxConfigCache
+}
+
+/** 部署自检：返回两端是否就绪（绝不回传密钥本身） */
+function wxConfigStatus(force = false) {
+  const c = readWxConfig(force)
+  return {
+    appidConfigured: !!c.appid,
+    secretConfigured: !!c.secret,
+    source: c.source,
+  }
 }
 
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
   private readonly logger = new Logger(AuthService.name)
 
   constructor(private readonly usersService: UsersService) {}
+
+  /** 启动即自检一次微信配置，把「配了没」直接打进日志，避免上线后登录才发现问题 */
+  onModuleInit() {
+    const status = wxConfigStatus(true)
+    if (status.appidConfigured && status.secretConfigured) {
+      this.logger.log(`[auth] 微信配置自检通过（来源=${status.source}）`)
+    } else {
+      this.logger.warn(
+        `[auth] ⚠️ 微信配置自检未通过：APPID=${status.appidConfigured ? '✔' : '✘'} ` +
+        `SECRET=${status.secretConfigured ? '✔' : '✘'}（来源=${status.source}）。` +
+        `登录将报「服务端未配置微信小程序的 AppID/AppSecret」。请在部署环境设置 ` +
+        `WX_APPID 与 WX_SECRET（或 WX_APP_ID / WX_APP_SECRET 等兼容写法）。`,
+      )
+    }
+  }
+
+  /** 配置状态（供 /api/auth/config 自检端点调用，绝不回传密钥） */
+  configStatus() {
+    return wxConfigStatus(true)
+  }
 
   /**
    * 微信登录：code → openid → 找/建正式用户 → 迁移匿名数据 → 返回身份

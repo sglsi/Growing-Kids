@@ -31,6 +31,17 @@ export class AuthController {
     return { code: 200, msg: 'success', data }
   }
 
+  /**
+   * 微信配置自检端点（部署验证用）。
+   * 只回传「是否配置就绪」，绝不返回 AppID/Secret 本身，避免密钥泄露。
+   */
+  @Get('config')
+  @HttpCode(200)
+  async config() {
+    const data = await this.authService.configStatus()
+    return { code: 200, msg: 'success', data }
+  }
+
   /** 更新昵称 / 头像 */
   @Patch('profile')
   @HttpCode(200)

@@ -150,6 +150,7 @@ export default function IndexPage() {
   const handleEditorConfirm = async (tempFilePath: string) => {
     const item = editorItem
     setEditorItem(null)
+    setEditorSrc('')
     if (!item) return
     setSavingEdit(true)
     Taro.showLoading({ title: '保存中…', mask: true })
@@ -483,7 +484,7 @@ export default function IndexPage() {
         src={editorSrc}
         autoAction={editorAction}
         enableSaveToInbox={false}
-        onCancel={() => { setEditorItem(null); setEditorAction(null) }}
+        onCancel={() => { setEditorItem(null); setEditorAction(null); setEditorSrc('') }}
         onConfirm={handleEditorConfirm}
       />
 
