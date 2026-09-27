@@ -130,6 +130,15 @@ export default function ImageEditor({
   // 当前拖拽中的角点索引（用于高亮）
   const [activeCorner, setActiveCorner] = useState<number | null>(null)
 
+  /**
+   * 离屏 Canvas 的「布局尺寸」= 本次导出的缓冲尺寸（含旋转互换）。
+   *
+   * ⚠️ 必须与 node.width/height（缓冲）严格一致，否则 canvasToTempFilePath 会按
+   * CSS 布局尺寸理解导出区域 → 旋转 90°/270° 时四周被裁（详见 工程教训录 L7-补充）。
+   * 因此它由 drawAndExport 里的同一个 fit/swap 计算派生，而不是由 naturalW/H 派生。
+   */
+  const [canvasBox, setCanvasBox] = useState({ w: 1, h: 1 })
+
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
     target: DragTarget
@@ -394,6 +403,21 @@ export default function ImageEditor({
   }
 
   /**
+   * 等待一次布局落地（让 React 把新的 canvas CSS 尺寸写进 DOM）。
+   * 用「双 requestAnimationFrame + 短延时兜底」：无 rAF 环境降级为 30ms 延时。
+   */
+  const waitLayout = async (): Promise<void> => {
+    const g: any = globalThis as any
+    const raf: any = g.requestAnimationFrame
+    if (typeof raf === 'function') {
+      await new Promise<void>((r) => raf(() => r()))
+      await new Promise<void>((r) => raf(() => r()))
+      return
+    }
+    await new Promise((r) => setTimeout(r, 30))
+  }
+
+  /**
    * 用离屏 Canvas 把「当前编辑态（旋转 + 裁剪）」导出为本地图片。
    *
    * 规范做法（微信 Canvas 2D + canvasToTempFilePath）：
@@ -422,17 +446,24 @@ export default function ImageEditor({
     const swap = rot % 180 !== 0
     const canvasW = swap ? bufH : bufW
     const canvasH = swap ? bufW : bufH
+
+    // ★ 关键：先把「布局尺寸」同步为本次缓冲尺寸，等微信完成一次布局后再绘制/导出。
+    //   否则 canvasToTempFilePath 按旧 CSS 尺寸理解导出区域 → 旋转 90° 时四周被裁。
+    //   （useState 是异步的，须 await 到布局落地，故用双 rAF/短延时兜底。）
+    setCanvasBox((prev) => (prev.w === canvasW && prev.h === canvasH ? prev : { w: canvasW, h: canvasH }))
+    await waitLayout()
+
     node.width = canvasW
     node.height = canvasH
     const ctx = node.getContext('2d')
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvasW, canvasH)
 
-    const localSrc = await toLocalIfRemote(currentSrc)
+    const srcData = await toLocalIfRemote(currentSrc)
     let img: any = null
     if (node.createImage) img = node.createImage()
     else img = new Image()
-    img.src = localSrc
+    img.src = srcData
     await new Promise<void>((resolve) => {
       let done = false
       const finish = () => { if (!done) { done = true; resolve() } }
@@ -882,8 +913,10 @@ export default function ImageEditor({
             />
           )}
 
-          {/* 离屏 Canvas：仅用于导出编辑结果。CSS 尺寸也封顶到 MAX_CANVAS_SIDE，
-              避免原图 5000px+ 时生成超大布局盒；导出缓冲在 drawAndExport 内同样封顶。 */}
+          {/* 离屏 Canvas：仅用于导出编辑结果。
+              ★ CSS 尺寸必须 == 导出缓冲尺寸（由 drawAndExport 同步到 canvasBox），
+                否则 canvasToTempFilePath 会按 CSS 尺寸理解导出区域 → 旋转 90°/270° 时四周被裁。
+                缓冲与 CSS 都用同一套 fit/swap 计算，两者恒等，彻底消除旋转裁边。 */}
           <Canvas
             type="2d"
             id={CANVAS_ID}
@@ -891,8 +924,8 @@ export default function ImageEditor({
               position: 'absolute',
               left: '-9999px',
               top: 0,
-              width: Math.min(naturalW || 1, MAX_CANVAS_SIDE),
-              height: Math.min(naturalH || 1, MAX_CANVAS_SIDE),
+              width: canvasBox.w,
+              height: canvasBox.h,
             }}
           />
         </View>

@@ -24,8 +24,10 @@ export class ImageController {
       return { code: 200, msg: 'success', data }
     }
 
-    // 阶段三(Phase 1)：auto 走几何纠偏（本地，100% 保真），受 IMG_PIPELINE_MODE 灰度控制
-    const MODE = (process.env.IMG_PIPELINE_MODE || 'gen').toLowerCase()
+    // 阶段三(Phase 1)：auto 走几何纠偏（本地，100% 保真），受 IMG_PIPELINE_MODE 灰度控制。
+    // 默认 hybrid：新管线优先，任何异常自动回退到 process() 图生图兜底 —— 既不硬失败，
+    // 又保证 Phase 1-3 功能**开箱可用**（旧默认 'gen' 会让新功能静默失效，表现为「点了没反应」）。
+    const MODE = (process.env.IMG_PIPELINE_MODE || 'hybrid').toLowerCase()
     if ((MODE === 'new' || MODE === 'hybrid') && dto.action === 'auto') {
       try {
         const data = await this.imageService.straighten(userId, dto, headers)
