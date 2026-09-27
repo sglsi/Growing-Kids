@@ -76,9 +76,16 @@ const MIN_QUAD_AREA = 0.05
 // 压到 1280 左右即可满足识别/高清需求，又能把上传与 AI 处理耗时降低一个数量级。
 const MAX_SIDE = 1280
 const COMPRESS_QUALITY = 80
-// 离屏 Canvas 缓冲/显示的硬上限（微信 Canvas2D iOS 约 4096，安卓设备相关）。
-// 超出即报 set width out of range 11000>8192；导出缓冲与离屏 canvas 的 CSS 尺寸都以此封顶。
-const MAX_CANVAS_SIDE = 4096
+// 离屏 Canvas 的尺寸硬上限（px）。
+// 依据微信官方文档（canvas 组件 Bug & Tip 07）：
+//   「Canvas 2D（新接口）需要显式设置画布宽高，默认 300*150，最大 1365*1365；
+//     避免设置过大的宽高，在安卓下会有 crash 的问题」。
+// 故取 1365 为安全上限：超过此值在部分机型会 crash / 报 set width out of range。
+// ⚠️ 离屏 canvas 的 CSS 显示尺寸恒为 MAX_CANVAS_SIDE × MAX_CANVAS_SIDE（见 OffscreenCanvas 渲染），
+//    缓冲尺寸 ≤ 此值，导出时显式传 width/height（≤ CSS），语义确定、不依赖布局时序。
+const MAX_CANVAS_SIDE = 1365
+// 离屏 canvas 的固定 CSS 显示边长（方框，永不随旋转/图片尺寸变化）。
+const CANVAS_CSS_SIDE = MAX_CANVAS_SIDE
 
 const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
   { action: 'auto', label: '自动调正', icon: Wand },
@@ -129,15 +136,6 @@ export default function ImageEditor({
   const [quad, setQuad] = useState<Corner[]>(DEFAULT_QUAD)
   // 当前拖拽中的角点索引（用于高亮）
   const [activeCorner, setActiveCorner] = useState<number | null>(null)
-
-  /**
-   * 离屏 Canvas 的「布局尺寸」= 本次导出的缓冲尺寸（含旋转互换）。
-   *
-   * ⚠️ 必须与 node.width/height（缓冲）严格一致，否则 canvasToTempFilePath 会按
-   * CSS 布局尺寸理解导出区域 → 旋转 90°/270° 时四周被裁（详见 工程教训录 L7-补充）。
-   * 因此它由 drawAndExport 里的同一个 fit/swap 计算派生，而不是由 naturalW/H 派生。
-   */
-  const [canvasBox, setCanvasBox] = useState({ w: 1, h: 1 })
 
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
@@ -241,11 +239,18 @@ export default function ImageEditor({
 
   // 打开后自动执行指定 AI 处理（等图片尺寸就绪后再跑，避免基于空图）
   useEffect(() => {
-    if (!visible || !autoAction || aiBusy || busy || !naturalW) return
+    if (!visible || !autoAction || aiBusy || busy) return
+    if (!naturalW) {
+      // 图未就绪不静默吞掉：若是「无法读取尺寸」,给用户明确提示,避免「点了没反应」的错觉
+      if (previewError) {
+        Taro.showToast({ title: '图片未就绪，请重新选择图片', icon: 'none' })
+      }
+      return
+    }
     const cfg = AI_ACTIONS.find((a) => a.action === autoAction)
     if (cfg) void handleAi(cfg.action, cfg.label)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, autoAction, naturalW])
+  }, [visible, autoAction, naturalW, previewError])
 
   // ---------- 裁剪框手势 ----------
   const hitTarget = (touchX: number, touchY: number): DragTarget | null => {
@@ -359,7 +364,10 @@ export default function ImageEditor({
       resetBox(info.width, info.height)
       setCrop(DEFAULT_CROP)
       setQuad(DEFAULT_QUAD)
-      setConfirmed(false)
+      // 旋转结果已是「成品」：confirmed=true + framing=false 表示干净预览态。
+      // ⚠️ 若置 confirmed=false，则「保存」会误判为「未确认的主动裁剪」而按 crop 再裁一刀
+      //   （且 crop 刚被 reset 成 DEFAULT_CROP，内缩 5%~8%）→ 四周被裁。详见 工程教训录 L7-补充。
+      setConfirmed(true)
       setFraming(false)
     } catch (err) {
       console.error('旋转失败', err)
@@ -403,18 +411,16 @@ export default function ImageEditor({
   }
 
   /**
-   * 等待一次布局落地（让 React 把新的 canvas CSS 尺寸写进 DOM）。
-   * 用「双 requestAnimationFrame + 短延时兜底」：无 rAF 环境降级为 30ms 延时。
+   * 等待一次布局/绘制落地。
+   *
+   * ⚠️ 不再依赖 requestAnimationFrame：
+   *   离屏 canvas 位于 `left:-9999px`，部分渲染器会对其**节流甚至不触发** rAF，
+   *   一旦 `await new Promise(r => raf(r))` 的 rAF 永不回调，整个导出流程会**永久挂起**
+   *   （表现为点旋转/保存后卡死无响应）。因此这里只用「宏任务让出一帧 + 短延时」，
+   *   保证**一定会 resolve**（确定性优先于极致紧凑）。
    */
   const waitLayout = async (): Promise<void> => {
-    const g: any = globalThis as any
-    const raf: any = g.requestAnimationFrame
-    if (typeof raf === 'function') {
-      await new Promise<void>((r) => raf(() => r()))
-      await new Promise<void>((r) => raf(() => r()))
-      return
-    }
-    await new Promise((r) => setTimeout(r, 30))
+    await new Promise((r) => setTimeout(r, 32))
   }
 
   /**
@@ -434,11 +440,10 @@ export default function ImageEditor({
    */
   // 真正执行「绘制 + 导出」；exportEdited 负责节点获取与失败重试
   const drawAndExport = async (node: any, rot: number, fullFrame: boolean): Promise<string> => {
-    // 导出缓冲直接使用「原图逻辑尺寸 × fit」，不乘 dpr：
-    //  - 微信 Canvas2D 缓冲有硬上限（iOS 4096 / 安卓设备相关，超限即报
-    //    set width out of range 11000>8192）；乘 dpr 会把 4000px 原图撑到 12000px 触发该错；
-    //  - canvasToTempFilePath 的 x/y/width/destWidth 单位即缓冲像素，缓冲=逻辑尺寸时单位无歧义，
-    //    跨微信版本行为一致，彻底消除「框选范围≠导出范围」的漂移。
+    // 导出缓冲 = 原图逻辑尺寸 × fit（不乘 dpr），并封顶到 MAX_CANVAS_SIDE（1365，官方安全值）。
+    //  - 微信 Canvas2D 缓冲有硬上限，官方文档给出 1365×1365；超限安卓可能 crash；
+    //  - canvasToTempFilePath 的 x/y/width/destWidth 单位即「显示尺寸」口径，
+    //    缓冲与「导出时显式传入的 width/height」一致时单位无歧义，跨微信版本行为一致。
     const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
     const bufW = Math.max(1, Math.round(naturalW * fit))
     const bufH = Math.max(1, Math.round(naturalH * fit))
@@ -447,10 +452,9 @@ export default function ImageEditor({
     const canvasW = swap ? bufH : bufW
     const canvasH = swap ? bufW : bufH
 
-    // ★ 关键：先把「布局尺寸」同步为本次缓冲尺寸，等微信完成一次布局后再绘制/导出。
-    //   否则 canvasToTempFilePath 按旧 CSS 尺寸理解导出区域 → 旋转 90° 时四周被裁。
-    //   （useState 是异步的，须 await 到布局落地，故用双 rAF/短延时兜底。）
-    setCanvasBox((prev) => (prev.w === canvasW && prev.h === canvasH ? prev : { w: canvasW, h: canvasH }))
+    // 离屏 canvas 的 CSS 显示尺寸恒为 CANVAS_CSS_SIDE × CANVAS_CSS_SIDE（见 JSX），
+    // 不需要随本次缓冲变化 —— 因此没有「CSS 与缓冲失配」的窗口，也就无需等待 React 布局。
+    // 仅让出一帧，确保节点查询拿到的是最新节点。
     await waitLayout()
 
     node.width = canvasW
@@ -484,10 +488,14 @@ export default function ImageEditor({
     // cropToBufferRect 把归一化裁剪框直接映射到缓冲像素，与预览框共用同一套分数 → 零偏移。
     const r: Rect = fullFrame ? { x: 0, y: 0, w: 1, h: 1 } : crop
     const { x, y, w, h } = cropToBufferRect(r, canvasW, canvasH)
+    // 显式传 width/height/destWidth/destHeight：
+    //  - width/height 是「从 canvas 显示尺寸中取的区域」。CSS 恒为 1365×1365 ≥ canvasW/canvasH，
+    //    故此处取的区域合法且正好等于本次缓冲尺寸 → 导出内容完整、无裁切；
+    //  - destWidth/destHeight 决定输出像素，与 width/height 相同即 1:1，无额外缩放。
     return new Promise<string>((resolve, reject) => {
       Taro.canvasToTempFilePath({
         canvas: node,
-        x, y, width: w, height: h,
+        x: Math.round(x), y: Math.round(y), width: Math.round(w), height: Math.round(h),
         destWidth: Math.round(w),
         destHeight: Math.round(h),
         fileType: 'jpg',
@@ -707,8 +715,11 @@ export default function ImageEditor({
       setQuad(DEFAULT_QUAD)
       setCornerMode('rect')
       resetBox(info.width, info.height)
-      setConfirmed(false) // ← 修复：AI 后清除「已裁剪」态
-      setFraming(false)   // ← 修复：AI 后回到干净预览（不再显示裁剪框）
+      // AI 结果是「成品」：confirmed=true + framing=false 表示干净预览态。
+      // ⚠️ 必须 confirmed=true：否则「保存」会误判为「未确认的主动裁剪」，
+      //   用刚 reset 的 DEFAULT_CROP 再裁一刀 → 四周被裁（与旋转同一坑，见 L7-补充）。
+      setConfirmed(true)
+      setFraming(false)   // 干净预览（不再显示裁剪框）
       Taro.showToast({ title: `${label}完成`, icon: 'success' })
     } catch (e) {
       console.error('AI 图片处理失败', e)
@@ -738,7 +749,14 @@ export default function ImageEditor({
     setBusy(true)
     Taro.showLoading({ title: '保存中…', mask: true })
     try {
-      const imgSrc = confirmed ? currentSrc : await exportEdited()
+      // ★ 与 handleConfirm 共用同一套判断（此前 handleSave 缺此判断，导致「旋转/AI 后保存」
+      //   又按 crop 默认框裁了一刀 → 四周被裁。这正是「旋转预览正常、保存后才裁」的根因）：
+      //   仅当「处于主动裁剪模式且尚未确认」时，才按当前框选裁剪；
+      //   其余情况（旋转/AI 处理的结果、已确认裁剪、原图直存）currentSrc 已是最终成品，**直接使用**，
+      //   绝不再用 crop（尤其不要用被 reset 的 DEFAULT_CROP）二次裁剪。
+      const pendingCrop = showFrame && !confirmed
+      const imgSrc = pendingCrop ? await exportEdited() : await toLocalIfRemote(currentSrc)
+      if (!imgSrc) throw new Error('图片处理失败，请重试')
       const up = await uploadImage(imgSrc, { purpose: 'save' })
       const saved = !!(up && (up.timeline_id || up.key))
       if (!saved) throw new Error('保存未生效，请重试')
@@ -914,9 +932,10 @@ export default function ImageEditor({
           )}
 
           {/* 离屏 Canvas：仅用于导出编辑结果。
-              ★ CSS 尺寸必须 == 导出缓冲尺寸（由 drawAndExport 同步到 canvasBox），
-                否则 canvasToTempFilePath 会按 CSS 尺寸理解导出区域 → 旋转 90°/270° 时四周被裁。
-                缓冲与 CSS 都用同一套 fit/swap 计算，两者恒等，彻底消除旋转裁边。 */}
+              ★ CSS 显示尺寸恒为 CANVAS_CSS_SIDE × CANVAS_CSS_SIDE（方框，永不变化）。
+                缓冲尺寸 ≤ 该值，导出时显式传 width/height（≤ CSS），语义确定。
+                这样从根上消除「CSS 与缓冲失配 → 旋转 90°/270° 四周被裁」，
+                也不依赖 React 异步布局（离屏元素 rAF 可能被节流，等布局不可靠）。 */}
           <Canvas
             type="2d"
             id={CANVAS_ID}
@@ -924,8 +943,8 @@ export default function ImageEditor({
               position: 'absolute',
               left: '-9999px',
               top: 0,
-              width: canvasBox.w,
-              height: canvasBox.h,
+              width: CANVAS_CSS_SIDE,
+              height: CANVAS_CSS_SIDE,
             }}
           />
         </View>
@@ -1012,7 +1031,7 @@ export default function ImageEditor({
                     onClick={() => setSrScale(s.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{s.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{s.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-xs mt-1">{s.hint}</Text>
                   </View>
                 )
               })}
@@ -1036,7 +1055,7 @@ export default function ImageEditor({
                     onClick={() => setSrMode(m.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-xs mt-1">{m.hint}</Text>
                   </View>
                 )
               })}
