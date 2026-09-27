@@ -3,7 +3,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
-import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
+import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2, Check } from 'lucide-react-taro'
 import { processImage, uploadImage, ApiError, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
@@ -84,7 +84,7 @@ const COMPRESS_QUALITY = 80
 // ⚠️ 离屏 canvas 的 CSS 显示尺寸恒为 MAX_CANVAS_SIDE × MAX_CANVAS_SIDE（见 OffscreenCanvas 渲染），
 //    缓冲尺寸 ≤ 此值，导出时显式传 width/height（≤ CSS），语义确定、不依赖布局时序。
 const MAX_CANVAS_SIDE = 1365
-// 离屏 canvas 的固定 CSS 显示边长（方框，永不随旋转/图片尺寸变化）。
+// CSS 尺寸上限（css 永远 == 本次导出缓冲，不会超过此值）
 const CANVAS_CSS_SIDE = MAX_CANVAS_SIDE
 
 const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
@@ -136,6 +136,9 @@ export default function ImageEditor({
   const [quad, setQuad] = useState<Corner[]>(DEFAULT_QUAD)
   // 当前拖拽中的角点索引（用于高亮）
   const [activeCorner, setActiveCorner] = useState<number | null>(null)
+  // 离屏 canvas 的 CSS 显示尺寸：**每次导出前同步为本次缓冲尺寸**（见 waitCanvasCss 说明）。
+  // 初始为上限方框，导出时会被覆盖为 bufW×bufH。
+  const [canvasCss, setCanvasCss] = useState<{ w: number; h: number }>({ w: CANVAS_CSS_SIDE, h: CANVAS_CSS_SIDE })
 
   const canvasNodeRef = useRef<any>(null)
   const dragRef = useRef<{
@@ -424,50 +427,43 @@ export default function ImageEditor({
   }
 
   /**
-   * 用离屏 Canvas 把「当前编辑态（旋转 + 裁剪）」导出为本地图片。
+   * 轮询等待 canvas 的 CSS 尺寸变为目标值，**确定性 resolve**（永不挂起）。
+   * 返回实测 CSS 尺寸（超时也返回实测值，调用方按实测值导出，仍可保证正确）。
    *
-   * 规范做法（微信 Canvas 2D + canvasToTempFilePath）：
-   *  - 画布缓冲设为 输出尺寸 × dpr，并用 ctx.scale(dpr, dpr) 后以「逻辑像素」绘制；
-   *  - 90°/270° 旋转后宽高互换，故输出画布尺寸要相应交换，否则旋转图放不下会被裁掉；
-   *  - canvasToTempFilePath 的 x/y/width/height 用「缓冲像素」= 逻辑 × dpr；
-   *  - destWidth/destHeight 同样用「逻辑 × dpr」，输出即高清且区域零偏移。
-   *
-   * 旋转「烘焙」：把整张图以画布中心为轴旋转（只旋转、不缩放），整张铺满输出画布，
-   * 再按需裁出选区。rotate 烘焙时必须 fullFrame=true 取整张，否则会把旋转图四边切掉。
-   *
-   * @param rot      旋转角度（度）
-   * @param fullFrame true=导出整张（用于旋转烘焙）；false=按 crop 选区导出（用于确定裁剪/保存）
+   * ★ 为什么必须 CSS == 缓冲（血泪教训，勿删）：
+   *   canvasToTempFilePath 的 x/y/width/height 是「CSS 显示尺寸」口径
+   *   （官方默认值 width=canvasWidth-x 即 CSS 宽；社区/PC 端实测截取宽度=屏宽×pixelRatio）。
+   *   旧实现 CSS 固定 1365×1365 方框而缓冲动态（如 768×1365）→ 两者失配：
+   *   传「缓冲口径的坐标」被按「CSS 口径」解释 → 裁剪区域错位跑飞（飞到框选范围外）、
+   *   旋转烘焙输出被拉伸放大且逐次累积（转一次放大一次）。
+   *   修复 = 每次导出前把 CSS 同步为缓冲尺寸（1:1，无歧义）+ 轮询实测确认。
    */
-  // 真正执行「绘制 + 导出」；exportEdited 负责节点获取与失败重试
-  const drawAndExport = async (node: any, rot: number, fullFrame: boolean): Promise<string> => {
-    // 导出缓冲 = 原图逻辑尺寸 × fit（不乘 dpr），并封顶到 MAX_CANVAS_SIDE（1365，官方安全值）。
-    //  - 微信 Canvas2D 缓冲有硬上限，官方文档给出 1365×1365；超限安卓可能 crash；
-    //  - canvasToTempFilePath 的 x/y/width/destWidth 单位即「显示尺寸」口径，
-    //    缓冲与「导出时显式传入的 width/height」一致时单位无歧义，跨微信版本行为一致。
-    const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
-    const bufW = Math.max(1, Math.round(naturalW * fit))
-    const bufH = Math.max(1, Math.round(naturalH * fit))
-    // 90°/270° 旋转后宽高互换，输出画布尺寸需相应交换
-    const swap = rot % 180 !== 0
-    const canvasW = swap ? bufH : bufW
-    const canvasH = swap ? bufW : bufH
+  const waitCanvasCss = async (targetW: number, targetH: number, retry = 20): Promise<{ w: number; h: number }> => {
+    let measured = { w: 0, h: 0 }
+    for (let i = 0; i < retry; i++) {
+      const rect: any = await new Promise((resolve) => {
+        Taro.createSelectorQuery()
+          .select(`#${CANVAS_ID}`)
+          .boundingClientRect((r: any) => resolve(Array.isArray(r) ? r[0] : r))
+          .exec()
+      })
+      if (rect && rect.width > 0 && rect.height > 0) {
+        measured = { w: Math.round(rect.width), h: Math.round(rect.height) }
+        if (Math.abs(measured.w - targetW) <= 2 && Math.abs(measured.h - targetH) <= 2) return measured
+      }
+      await new Promise((r) => setTimeout(r, 48))
+    }
+    return measured
+  }
 
-    // 离屏 canvas 的 CSS 显示尺寸恒为 CANVAS_CSS_SIDE × CANVAS_CSS_SIDE（见 JSX），
-    // 不需要随本次缓冲变化 —— 因此没有「CSS 与缓冲失配」的窗口，也就无需等待 React 布局。
-    // 仅让出一帧，确保节点查询拿到的是最新节点。
-    await waitLayout()
-
-    node.width = canvasW
-    node.height = canvasH
-    const ctx = node.getContext('2d')
-    ctx.setTransform(1, 0, 0, 1, 0, 0)
-    ctx.clearRect(0, 0, canvasW, canvasH)
-
-    const srcData = await toLocalIfRemote(currentSrc)
+  /**
+   * 加载图片（node.createImage），返回 Image 对象。
+   */
+  const loadImageOnCanvas = async (node: any, imgSrc: string): Promise<any> => {
     let img: any = null
     if (node.createImage) img = node.createImage()
     else img = new Image()
-    img.src = srcData
+    img.src = imgSrc
     await new Promise<void>((resolve) => {
       let done = false
       const finish = () => { if (!done) { done = true; resolve() } }
@@ -476,28 +472,144 @@ export default function ImageEditor({
       setTimeout(finish, 8000)
     })
     if (!img.width || !img.height) throw new Error('图片加载失败，无法导出')
+    return img
+  }
 
-    // 整张图烘焙进缓冲（不缩放），90°/270° 以中心旋转，旋转后整张铺满输出画布
-    ctx.save()
-    ctx.translate(canvasW / 2, canvasH / 2)
-    ctx.rotate((rot * Math.PI) / 180)
-    ctx.drawImage(img, -bufW / 2, -bufH / 2, bufW, bufH)
-    ctx.restore()
+  /**
+   * 真正执行「绘制 + 导出」。
+   *
+   * ★ 核心设计（对 canvasToTempFilePath 的坐标口径**完全免疫**）：
+   *  1. 缓冲 = 成品：把「最终要输出的内容」直接画满整个缓冲——
+   *     - 裁剪：ctx.drawImage 九参形式 (sx,sy,sw,sh → 0,0,outW,outH)，源矩形→目标矩形，
+   *       是 Canvas 规范保证的精确映射，数学上零偏移；
+   *     - 旋转烘焙：整图以缓冲中心为轴旋转铺满（宽高已交换）。
+   *     这样导出只需「取整个缓冲」，不再依赖 canvasToTempFilePath 做任何区域换算。
+   *  2. CSS == 缓冲：导出前把 canvas CSS 尺寸同步为缓冲尺寸并轮询实测确认（waitCanvasCss），
+   *     使「显示区域 = 缓冲区域」严格 1:1。
+   *  3. 全区域导出：x=0, y=0, width/height=实测 CSS，destWidth/destHeight=缓冲尺寸。
+   *     无论微信内部按 CSS / 缓冲 / CSS×dpr 哪种口径解释 x/y/width/height，
+   *     「原点 + 全尺寸区域」都覆盖整个缓冲（超出部分被 clamp 到边界），
+   *     输出像素由 destWidth/destHeight 显式决定 —— 三种口径殊途同归，全部正确。
+   *
+   * @param rot      旋转角度（度，顺时针 90 的倍数）
+   * @param fullFrame true=导出整张（用于旋转烘焙）；false=按 crop 选区导出（用于确定裁剪/保存）
+   */
+  const drawAndExport = async (node: any, rot: number, fullFrame: boolean): Promise<string> => {
+    const norm = ((rot % 360) + 360) % 360
+    if (!fullFrame && norm !== 0) {
+      // 运行时裁剪恒 rot=0（旋转按钮会先把旋转烘焙进图片再归零 rotation）。
+      // 此分支是安全网：避免「旋转+裁剪」复合坐标系换算出错（宁可明确报错也不输出错图）。
+      throw new Error('请先点「旋转90°」完成旋转，再进行裁剪')
+    }
+    const swap = norm === 90 || norm === 270
 
-    // 裁剪区域：fullFrame（旋转烘焙）取整张；否则用框选 crop。
-    // cropToBufferRect 把归一化裁剪框直接映射到缓冲像素，与预览框共用同一套分数 → 零偏移。
-    const r: Rect = fullFrame ? { x: 0, y: 0, w: 1, h: 1 } : crop
-    const { x, y, w, h } = cropToBufferRect(r, canvasW, canvasH)
-    // 显式传 width/height/destWidth/destHeight：
-    //  - width/height 是「从 canvas 显示尺寸中取的区域」。CSS 恒为 1365×1365 ≥ canvasW/canvasH，
-    //    故此处取的区域合法且正好等于本次缓冲尺寸 → 导出内容完整、无裁切；
-    //  - destWidth/destHeight 决定输出像素，与 width/height 相同即 1:1，无额外缩放。
+    await waitLayout()
+
+    const localSrc = await toLocalIfRemote(currentSrc)
+
+    // 输出缓冲尺寸计算（先按 state 估算，加载实际图片后再校正，见下方防御分支）
+    const fitWhole = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
+    const wholeW = Math.max(1, Math.round(naturalW * fitWhole))
+    const wholeH = Math.max(1, Math.round(naturalH * fitWhole))
+
+    let outW: number
+    let outH: number
+    let sx = 0
+    let sy = 0
+    let sw = 0
+    let sh = 0
+
+    if (fullFrame) {
+      outW = swap ? wholeH : wholeW
+      outH = swap ? wholeW : wholeH
+      sw = naturalW
+      sh = naturalH
+    } else {
+      const selW = crop.w * naturalW
+      const selH = crop.h * naturalH
+      const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(selW, selH, 1))
+      outW = Math.max(1, Math.round(selW * fit))
+      outH = Math.max(1, Math.round(selH * fit))
+      sx = crop.x * naturalW
+      sy = crop.y * naturalH
+      sw = selW
+      sh = selH
+    }
+
+    // CSS 同步为缓冲尺寸（1:1）—— 消除「CSS 口径 vs 缓冲口径」歧义的根基
+    setCanvasCss({ w: outW, h: outH })
+    const css = await waitCanvasCss(outW, outH)
+
+    node.width = outW
+    node.height = outH
+    const ctx = node.getContext('2d')
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, outW, outH)
+
+    const img = await loadImageOnCanvas(node, localSrc)
+
+    // ★ 防御：state 尺寸与实际文件不符时，以实际文件为准重算（源坐标/输出尺寸全部按实际）。
+    //   不一致常见于：远程图 EXIF 旋转、getImageInfo 与 Image 解码差异、异步替换竞态。
+    if (Math.abs(img.width - naturalW) > 2 || Math.abs(img.height - naturalH) > 2) {
+      const f2 = Math.min(1, MAX_CANVAS_SIDE / Math.max(img.width, img.height, 1))
+      const w2 = Math.max(1, Math.round(img.width * f2))
+      const h2 = Math.max(1, Math.round(img.height * f2))
+      if (fullFrame) {
+        outW = swap ? h2 : w2
+        outH = swap ? w2 : h2
+        sw = img.width
+        sh = img.height
+      } else {
+        const selW2 = crop.w * img.width
+        const selH2 = crop.h * img.height
+        const f3 = Math.min(1, MAX_CANVAS_SIDE / Math.max(selW2, selH2, 1))
+        outW = Math.max(1, Math.round(selW2 * f3))
+        outH = Math.max(1, Math.round(selH2 * f3))
+        sx = crop.x * img.width
+        sy = crop.y * img.height
+        sw = selW2
+        sh = selH2
+      }
+      setCanvasCss({ w: outW, h: outH })
+      const css2 = await waitCanvasCss(outW, outH)
+      node.width = outW
+      node.height = outH
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.clearRect(0, 0, outW, outH)
+      // css2 覆盖 css（后续导出用最新实测）
+      css.w = css2.w || outW
+      css.h = css2.h || outH
+    }
+
+    // 绘制「成品内容」铺满缓冲
+    if (fullFrame && norm !== 0) {
+      // 整图旋转烘焙：以缓冲中心为轴旋转，整张铺满（不缩放、不裁边）
+      ctx.save()
+      ctx.translate(outW / 2, outH / 2)
+      ctx.rotate((norm * Math.PI) / 180)
+      ctx.drawImage(img, -sw / 2, -sh / 2, sw, sh)
+      ctx.restore()
+    } else if (norm === 0 && !fullFrame) {
+      // 纯裁剪：九参 drawImage 把选区精确画满缓冲（Canvas 规范保证的源矩形→目标矩形映射）
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH)
+    } else {
+      // fullFrame 且无旋转：整图原样铺满
+      ctx.drawImage(img, 0, 0, sw, sh, 0, 0, outW, outH)
+    }
+
+    // 全区域导出：无论内部口径（CSS / 缓冲 / CSS×dpr）如何解释，
+    // 「原点 + 全尺寸区域」都覆盖整个缓冲；输出像素由 destWidth/destHeight 显式决定。
+    const expW = css.w > 0 ? css.w : outW
+    const expH = css.h > 0 ? css.h : outH
     return new Promise<string>((resolve, reject) => {
       Taro.canvasToTempFilePath({
         canvas: node,
-        x: Math.round(x), y: Math.round(y), width: Math.round(w), height: Math.round(h),
-        destWidth: Math.round(w),
-        destHeight: Math.round(h),
+        x: 0,
+        y: 0,
+        width: expW,
+        height: expH,
+        destWidth: outW,
+        destHeight: outH,
         fileType: 'jpg',
         quality: 0.95,
         success: (res: any) => resolve(res.tempFilePath),
@@ -681,7 +793,7 @@ export default function ImageEditor({
           setCornerMode('quad')
           setFraming(true)
           setConfirmed(false)
-          Taro.showToast({ title: '请拖动四个圆点框住试卷四角', icon: 'none', duration: 2500 })
+          Taro.showToast({ title: '拖动四个圆点框住试卷四角，拉完点「确认四角」', icon: 'none', duration: 2500 })
         } else {
           // 用户放弃：把后端返回的原图（内容保真）落到当前预览
           const dl: any = await downloadWithTimeout(data.url, 30000)
@@ -826,10 +938,23 @@ export default function ImageEditor({
     if (next === 'quad') setQuad(DEFAULT_QUAD)
     else setCrop(DEFAULT_CROP)
     Taro.showToast({
-      title: next === 'quad' ? '拖动四个圆点框住试卷四角' : '已切回矩形裁剪',
+      title: next === 'quad'
+        ? '拖动四个圆点框住试卷四角，拉完点「确认四角」'
+        : '已切回矩形裁剪',
       icon: 'none',
-      duration: 2000,
+      duration: 2500,
     })
+  }
+
+  /**
+   * 四角模式下的「确认四角」：把手拉的四角（归一化，相对原图）直接提交「自动调正」，
+   * 后端按四角做透视压平（100% 保真，不重画）。
+   * ★ 此前 quad 模式拉完四角没有任何确认入口（用户不知道下一步做什么）——
+   *   现在把「确定裁剪」按钮在四角模式下替换为「确认四角」，交互闭环。
+   */
+  const confirmQuad = () => {
+    if (aiBusy || busy) return
+    void handleAi('auto', '自动调正', { manual_corners: quad })
   }
 
   // 面板里点「开始处理」：带上所选倍率/模式调用后端
@@ -932,10 +1057,10 @@ export default function ImageEditor({
           )}
 
           {/* 离屏 Canvas：仅用于导出编辑结果。
-              ★ CSS 显示尺寸恒为 CANVAS_CSS_SIDE × CANVAS_CSS_SIDE（方框，永不变化）。
-                缓冲尺寸 ≤ 该值，导出时显式传 width/height（≤ CSS），语义确定。
-                这样从根上消除「CSS 与缓冲失配 → 旋转 90°/270° 四周被裁」，
-                也不依赖 React 异步布局（离屏元素 rAF 可能被节流，等布局不可靠）。 */}
+              ★ CSS 尺寸 = 本次导出缓冲尺寸（canvasCss state，drawAndExport 每次同步+轮询确认）。
+                CSS 与缓冲 1:1 → canvasToTempFilePath 的「CSS 口径」坐标无歧义；
+                配合「选区直接画满缓冲 + 全区域导出」，裁剪/旋转输出数学上零偏移。
+                （旧方案 CSS 固定方框与动态缓冲失配 → 裁剪跑飞、旋转逐次放大，勿回退。） */}
           <Canvas
             type="2d"
             id={CANVAS_ID}
@@ -943,8 +1068,8 @@ export default function ImageEditor({
               position: 'absolute',
               left: '-9999px',
               top: 0,
-              width: CANVAS_CSS_SIDE,
-              height: CANVAS_CSS_SIDE,
+              width: canvasCss.w,
+              height: canvasCss.h,
             }}
           />
         </View>
@@ -969,16 +1094,26 @@ export default function ImageEditor({
             <RotateCw size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
           </View>
-          <View className="flex flex-col items-center" onClick={handleConfirmCrop}>
-            <View
-              className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'
-              }`}
-            >
-              <Crop size={20} color="#ffffff" />
+          {/* 矩形模式=确定裁剪；四角模式=确认四角（拉完四角后的唯一确认入口） */}
+          {cornerMode === 'quad' ? (
+            <View className="flex flex-col items-center" onClick={confirmQuad}>
+              <View className="w-11 h-11 rounded-full bg-primary flex items-center justify-center mb-1">
+                <Check size={20} color="#ffffff" />
+              </View>
+              <Text className="block text-white text-opacity-80 text-xs">确认四角</Text>
             </View>
-            <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
-          </View>
+          ) : (
+            <View className="flex flex-col items-center" onClick={handleConfirmCrop}>
+              <View
+                className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
+                  confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'
+                }`}
+              >
+                <Crop size={20} color="#ffffff" />
+              </View>
+              <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
+            </View>
+          )}
           {/* 四角透视拉框：与「确定裁剪」互斥切换，专用于把斜拍试卷拉平 */}
           <View className="flex flex-col items-center" onClick={toggleCornerMode}>
             <View
@@ -1031,7 +1166,7 @@ export default function ImageEditor({
                     onClick={() => setSrScale(s.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{s.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-xs mt-1">{s.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-xs mt-px">{s.hint}</Text>
                   </View>
                 )
               })}
@@ -1055,7 +1190,7 @@ export default function ImageEditor({
                     onClick={() => setSrMode(m.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-xs mt-1">{m.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-xs mt-px">{m.hint}</Text>
                   </View>
                 )
               })}
@@ -1209,19 +1344,11 @@ function isValidQuad(pts: Corner[]): boolean {
 }
 
 /**
- * 纯函数：归一化裁剪框 → 缓冲像素矩形。
- * 预览框与导出共用同一组归一化坐标（crop.x/y/w/h ∈ [0,1]），
- * 因此屏上框选区域与导出区域一一对应。导出缓冲=原图逻辑尺寸（见 exportEdited），
- * 故这里用到的 canvasW/canvasH 即缓冲像素，与 canvasToTempFilePath 的坐标单位一致。
+ * 【已废弃 cropToBufferRect】旧方案把归一化裁剪框映射到缓冲像素再让 canvasToTempFilePath
+ * 按区域截取 —— 该 API 的 x/y/width/height 实为「CSS 显示尺寸」口径，CSS 与缓冲一旦失配
+ * 就会整体错位（裁剪跑飞/旋转累积放大）。新方案改为：九参 drawImage 把选区直接画满缓冲
+ * （Canvas 规范保证的精确映射）+ CSS 同步为缓冲 + 全区域导出，对口径完全免疫。
  */
-function cropToBufferRect(r: Rect, canvasW: number, canvasH: number) {
-  return {
-    x: r.x * canvasW,
-    y: r.y * canvasH,
-    w: r.w * canvasW,
-    h: r.h * canvasH,
-  }
-}
 
 const MIN_SIZE = 0.12
 

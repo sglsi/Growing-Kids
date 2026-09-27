@@ -1,12 +1,64 @@
 # 修复说明 · 旋转裁边 & 图像功能点了不能用
 
-> **重要更正**：本文档早期版本把问题 1 归因于"canvas 尺寸失配"，并推断"改错了目录"。
-> 经用户反馈「**旋转预览正常，保存后才裁**」后重新定位，**真根因在保存链路的状态机**（见下）。
-> 对应教训录：**L7-补充**（旋转裁边）、**L12**（灰度开关默认值）、**L14**（预览对 ≠ 保存对）。
+> **⚠️ v3 紧急更正（2026-09-27 晚）**：v2 的「CSS 固定 1365 方框」方案被用户实测**证伪**——
+> 裁剪跑飞（飞到框选范围之外）、旋转逐次放大（转一次放大一次）。
+> 真根因：**微信 `canvasToTempFilePath` 的 x/y/width/height 是「CSS 显示尺寸」口径**，
+> CSS(固定1365) ≠ 缓冲(动态) 时，传缓冲口径坐标被按 CSS 口径解释 → 区域错位 + 拉伸。
+> v3 方案：**选区直接画满缓冲（九参 drawImage）+ CSS 同步为缓冲（轮询实测确认）+ 全区域导出**，
+> 对坐标口径完全免疫（仿真验证：三种候选口径下输出全部正确，详见 `run-issue-crop-geom.cjs`）。
+> 对应教训录：**L15**（CSS≠缓冲=一切错位的根源）、L14（预览对≠保存对）、L13（发布链）。
 
 ---
 
-## 一、问题 1：旋转 90° 后**保存的图**四周被裁
+## 〇、v3 修复：裁剪跑飞 / 旋转逐次放大 / 四角拉框无确认按钮
+
+### 1. 裁剪跑飞（「飞到框选范围之外，随意裁一块」）
+
+| 版本 | 方案 | 实测结果 |
+| --- | --- | --- |
+| v1 | CSS 动态 + rAF 等布局 | 时序挂起 → 旋转四周被裁 |
+| v2 | CSS 固定 1365 方框 + 按缓冲口径传区域 | **CSS 口径解释 → 错位跑飞**（仿真复现：只取到 56.3% 宽） |
+| **v3** | **选区画满缓冲 + CSS=缓冲 + 全区域导出** | **三种口径仿真下输出全部正确** ✅ |
+
+v3 关键改动（`drawAndExport` 重写）：
+```ts
+// 1) 缓冲 = 成品：九参 drawImage 把选区精确画满缓冲（Canvas 规范保证，数学零偏移）
+ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH)
+// 2) CSS 同步为缓冲（setCanvasCss + waitCanvasCss 轮询 boundingClientRect 实测确认）
+// 3) 全区域导出：无论内部按 CSS / CSS×dpr / 缓冲哪种口径解释，都收敛到全缓冲
+Taro.canvasToTempFilePath({ canvas, x: 0, y: 0, width: expW, height: expH,
+                             destWidth: outW, destHeight: outH, ... })
+```
+
+### 2. 旋转逐次放大（「转一次放大一次」）
+
+与 1 同根因：v2 每次旋转烘焙的输出被 CSS/缓冲失配拉伸，`getImageInfo` 读回更大尺寸 → 下次旋转基于更大图 → **累积放大**。
+v3 下仿真验证：连续 4 次旋转 `1080×1920 → 1365×768 → 768×1365 → 1365×768 → 768×1365`，**尺寸稳定交替、面积从不增大**。
+
+另加两道防御：
+- **img 实际尺寸校正**：`drawImage` 源坐标以 `img.width/height`（实际文件）为准，state 漂移（EXIF/解码差异/竞态）时自动重算；
+- **复合场景安全网**：`rot≠0 且裁剪` 时明确报错（运行时不会发生：旋转按钮会把旋转烘焙进图片再归零），宁可报错不出错图。
+
+### 3. 四角拉框没有确认按钮
+
+v2 的 quad 模式拉完四角**没有任何确认入口**（用户不知道下一步）。
+v3：quad 模式下把「确定裁剪」按钮**替换为「确认四角」**（Check 图标 + 主色高亮），点击即带 `manual_corners` 提交「自动调正」做透视压平；切回矩形模式则恢复「确定裁剪」。引导文案同步更新：「拖动四个圆点框住试卷四角，拉完点『确认四角』」。
+
+**四角拉框使用方法**：
+1. 点底部「四角拉框」进入四角模式（按钮变主色，四个红点默认内缩 8%）；
+2. 拖动四个圆点，分别对准**试卷/纸张的四个角**；
+3. 点「确认四角」→ 自动提交后端做透视压平（100% 保真，不重画）；
+4. 想放弃拉框就再点一次「四角拉框」切回矩形模式。
+
+### 验证
+
+- `dynamic-tests/run-issue-crop-geom.cjs` —— **40/40**：三种口径仿真全区域导出正确；反向复现 v2 跑飞（56.3%）；4 组图尺寸×crop 的映射数学；旋转 4 次无放大；源码一致性。
+- `dynamic-tests/run-issue-rotate.cjs` —— **20/20**：几何复算 + 边界 + v3 源码断言。
+- `dynamic-tests/run-issue-save-crop.cjs` —— **15/15**（保存链路状态机，不受本轮影响）。
+
+---
+
+## 一、问题 1：旋转 90° 后**保存的图**四周被裁（v2 已修复，v3 保留）
 
 ### 关键线索（用户提供，是定位的转折点）
 
@@ -135,7 +187,10 @@ const DEFAULT_CROP: Rect = { x: 0.05, y: 0.08, w: 0.9, h: 0.84 }   // 内缩框�
 
 ### 3. 真机回归
 
-- [ ] 旋转 90° ×4 → **保存** → 打开保存的图：四边完整
+- [ ] 框选裁剪：拖框到图片某个明显位置（如题目角落）→「确定裁剪」→ 裁出的**就是框里的内容**（不跑飞）
+- [ ] 旋转 90° ×4 → 图片尺寸稳定交替、**不逐次放大**、内容完整
+- [ ] 旋转 1~2 次后**保存** → 打开保存的图：四边完整、内容与预览一致
+- [ ] 点「四角拉框」→ 拖四个圆点对准纸张四角 → 点「确认四角」→ 出纠偏结果
 - [ ] 点「自动调整」→ 出结果（或提示手动拉四角）
 - [ ] 点「智能高清」→ 选 x2 → 出结果
 - [ ] 点「去手写」→ 出结果，非手写区域保持原样
@@ -146,12 +201,30 @@ const DEFAULT_CROP: Rect = { x: 0.05, y: 0.08, w: 0.9, h: 0.84 }   // 内缩框�
 
 | 文件 | 变更 |
 | --- | --- |
-| `push-ready/src/components/image-editor.tsx` | **handleSave 统一判断（真根因修复）**；旋转/AI 后 `confirmed=true`；canvas 加固（固定 1365 方框、显式导出、去 rAF） |
-| `push-ready/server/src/image/image.controller.ts` | `IMG_PIPELINE_MODE` 默认 `'gen'` → `'hybrid'` |
-| `dynamic-tests/run-issue-save-crop.cjs` | **新增**（问题 1 真根因，15 断言） |
-| `dynamic-tests/run-issue-rotate.cjs` | 重写（canvas 加固，15 断言） |
-| `dynamic-tests/run-issue-pipeline-e2e.ts` | 新增（问题 2 端到端，14 断言） |
+| `push-ready/src/components/image-editor.tsx` | **v3：drawAndExport 重写**（选区画满缓冲 + CSS 同步缓冲 + 全区域导出）；waitCanvasCss 轮询确认；img 实际尺寸防御校正；quad 模式「确认四角」按钮；handleSave 统一判断（v2 修复保留） |
+| `push-ready/server/src/image/image.controller.ts` | `IMG_PIPELINE_MODE` 默认 `'gen'` → `'hybrid'`（v2 修复保留） |
+| `dynamic-tests/run-issue-crop-geom.cjs` | **新增（v3 核心）**：口径仿真 + 反向复现跑飞 + 映射数学 + 旋转无放大，40 断言 |
+| `dynamic-tests/run-issue-rotate.cjs` | 重写（v3：CSS 动态同步断言，20 断言） |
+| `dynamic-tests/run-issue-save-crop.cjs` | 保留（保存链路状态机，15 断言） |
+| `dynamic-tests/run-issue-pipeline-e2e.ts` | 保留（问题 2 端到端，14 断言） |
 | `dynamic-tests/run-issue-rotate-pipeline.cjs` | 保留（问题 2 静态检查，7 断言） |
-| `工程教训录.md` | 修正 **L7-补充**；新增 **L13**（改错目录）、**L14**（预览对≠保存对） |
+| `工程教训录.md` | 新增 **L15**（CSS≠缓冲=一切错位的根源；连错两次的复盘） |
 
-**总回归**：241/241 passed（9 个测试文件）。
+**本轮总回归**：见文末「五、回归汇总」。
+
+---
+
+## 五、回归汇总（v3，全绿）
+
+| 测试 | 断言 | 覆盖 |
+| --- | --- | --- |
+| `run-issue-crop-geom.cjs` | 40 | 三种口径仿真、反向复现跑飞、映射数学、旋转无放大、v3 源码一致性 |
+| `run-issue-rotate.cjs` | 20 | 旋转几何复算、边界、v3 源码一致性 |
+| `run-issue-save-crop.cjs` | 15 | 保存链路状态机（五条路径 + 反向复现） |
+| `run-issue-rotate-pipeline.cjs` | 7 | 问题 2 静态检查 |
+| `run-issue-pipeline-e2e.ts` | 14 | 问题 2 路由分流 + 真跑 straighten |
+| `run-issue-nochange-e2e.ts` | 8 | 三条「图片没变」路径真跑 |
+| `run-issue-autodetect.ts` | 4 | 自动四角检测真跑 |
+| **合计** | **108** | **全部通过** |
+
+> 另有历史回归（识别/登录/PDF/配额/存储等）沿用 `dynamic-tests/` 其余脚本，本轮未触碰对应代码。
