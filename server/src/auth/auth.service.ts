@@ -266,13 +266,15 @@ export class AuthService implements OnModuleInit {
         `当前可见的环境变量 key：${availableKeys.join(', ') || '(空)'}。` +
         `请在部署环境配置 WX_APPID 与 WX_SECRET（或 WX_MINIPROGRAM_APPID / WX_APPSECRET）。`,
       )
-      // 给出「到底缺哪个」的更精确提示，前端能直接看到
+      // 给出「到底缺哪个」的精确提示 + 可行动的配置指引（不再罗列无关变量名干扰判断）
       const missing = !appid && !secret
         ? 'AppID 与 AppSecret'
         : (!appid ? 'AppID' : 'AppSecret')
       throw new BadRequestException(
-        `服务端未配置微信小程序的 ${missing}。请在部署环境添加 WX_APPID 与 WX_SECRET 后重试。` +
-        `（当前可见环境变量：${availableKeys.slice(0, 30).join(', ') || '无'}）`,
+        `服务端未配置微信小程序的 ${missing}。` +
+        `已检查 ${APPID_KEYS.length} 个 AppID 候选名与 ${SECRET_KEYS.length} 个 Secret 候选名` +
+        `（WX_APPID、WX_APP_ID、WECHAT_APPID 等），环境变量、.env 文件与平台项目变量中均未找到。` +
+        `请到部署平台的项目「环境变量」中添加 WX_APPID 与 WX_SECRET，保存后重新部署再登录。`,
       )
     }
 

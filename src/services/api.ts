@@ -86,10 +86,45 @@ export interface UploadOpts {
   purpose?: 'save' | 'temp'
 }
 
+// ============================================================
+// 上传前客户端粗压（复习本与项目设计.md §11.3 策略 1）
+//
+// 作用：省**上传流量**与时间。服务端仍会用 sharp 精压一遍（权威压缩点），
+// 所以这里即使失败/被跳过，最终存储体积依然受控 —— 是「优化」不是「依赖」。
+// 参数与 image-editor.tsx 的 MAX_SIDE/COMPRESS_QUALITY 保持一致。
+// ============================================================
+const UPLOAD_MAX_SIDE = 1600
+const UPLOAD_COMPRESS_QUALITY = 80
+
+/** 把本地图片压到长边 ≤1600 / q80；非图片、已足够小、或压缩失败时原样返回 */
+async function compressForUpload(filePath: string): Promise<string> {
+  if (!filePath || /^https?:\/\//.test(filePath)) return filePath
+  // 只压图片扩展名，避免把 PDF/docx 交给 getImageInfo 报错
+  if (!/\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(filePath)) return filePath
+  try {
+    const info = await Taro.getImageInfo({ src: filePath })
+    const longSide = Math.max(info.width || 0, info.height || 0)
+    if (!longSide || longSide <= UPLOAD_MAX_SIDE) return filePath
+    const ratio = UPLOAD_MAX_SIDE / longSide
+    const res = await Taro.compressImage({
+      src: filePath,
+      quality: UPLOAD_COMPRESS_QUALITY,
+      compressedWidth: Math.max(1, Math.round(info.width * ratio)),
+      compressedHeight: Math.max(1, Math.round(info.height * ratio)),
+    })
+    return res.tempFilePath || filePath
+  } catch {
+    // 任何异常都回退原路径：宁可多传点流量，也不能让上传失败
+    return filePath
+  }
+}
+
 export async function uploadFile(
   filePath: string,
   opts: UploadOpts = {},
-): Promise<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }> {
+): Promise<{ key: string; url: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
+  // 上传前先在本机粗压（省流量）；服务端还会再精压一次
+  const srcPath = await compressForUpload(filePath)
   const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : '/api/upload'
   // purpose 同时放进 query（url）与 multipart 表单字段（formData），双保险：
   // 部分容器/中间层会丢弃 query，部分会丢弃表单字段，两端都读即可确保后端拿到。
@@ -97,7 +132,7 @@ export async function uploadFile(
   if (opts.purpose) formData.purpose = opts.purpose
   const res = await Network.uploadFile({
     url,
-    filePath,
+    filePath: srcPath,
     name: 'file',
     header: authHeaders(),
     formData,
@@ -106,8 +141,16 @@ export async function uploadFile(
   console.log('[Upload Response]', res.statusCode, res.data)
   const body = typeof res.data === 'string'
     ? JSON.parse(res.data)
-    : (res.data as ApiEnvelope<{ key: string; url: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string }>)
-  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(body?.msg || '上传失败')
+    : (res.data as ApiEnvelope<{ key: string; url: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }>)
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    // 配额超限（413）时把 code 带出去，便于 UI 区分「空间满」与「张数满」并引导清理/升级
+    const err = new Error(body?.msg || '上传失败') as Error & { quotaCode?: string; quota?: unknown }
+    if (body?.code === 'QUOTA_BYTES' || body?.code === 'QUOTA_COUNT') {
+      err.quotaCode = body.code
+      err.quota = body.data
+    }
+    throw err
+  }
   return body.data
 }
 
@@ -379,7 +422,17 @@ export async function replaceTimelineImage(
   editedFileOrUrl: string,
 ): Promise<{ id: string }> {
   const up = await uploadImage(editedFileOrUrl, { purpose: 'save' })
-  const newId = up.timeline_id
+  let newId = up.timeline_id
+  // 兜底：后端 save 未直接返回 timeline_id 时，用已上传的 key/url 显式建一个 image 条目，
+  // 避免「后端未返回 id → 直接抛错 → 用户看到保存失败」的静默不入库。
+  if (!newId) {
+    try {
+      const created = await saveQuestionAsImage(oldItem.subject_id ?? '', up.key, up.url, '')
+      newId = (created as any)?.id
+    } catch (e) {
+      console.error('replaceTimelineImage 兜底建条目失败', e)
+    }
+  }
   if (!newId) throw new Error('编辑结果保存失败，请重试')
   // 继承原分类，避免编辑后掉回「未分类」
   if (oldItem.subject_id) {
@@ -475,6 +528,38 @@ export function fetchOverview() {
   return unwrap<Overview>(
     Network.request({ url: '/api/timeline/overview', method: 'GET', header: authHeaders() }),
   )
+}
+
+// ============================================================
+// 存储配额（策略 6）
+// ============================================================
+
+export interface StorageUsage {
+  used_bytes: number
+  used_count: number
+  quota_bytes: number
+  quota_count: number
+  tier: string
+  pct: number
+}
+
+/** 当前存储用量与档位；失败返回 null（前端降级为不展示，不阻断页面） */
+export async function fetchStorageUsage(): Promise<StorageUsage | null> {
+  try {
+    return await unwrap<StorageUsage>(
+      Network.request({ url: '/api/quota/usage', method: 'GET', header: authHeaders() }),
+    )
+  } catch {
+    return null
+  }
+}
+
+/** 把字节格式化成人类可读（MB/GB） */
+export function formatBytes(bytes: number): string {
+  const b = Number(bytes) || 0
+  if (b >= 1024 * 1024 * 1024) return `${(b / 1024 / 1024 / 1024).toFixed(1)} GB`
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(0)} MB`
+  return `${Math.round(b / 1024)} KB`
 }
 
 // ============================================================
@@ -648,7 +733,7 @@ export function deleteDocument(id: string) {
 // 图片合成 PDF（素材 id 现指 timeline item id）
 // ============================================================
 export function combineToPdf(ids: string[]) {
-  return unwrap<{ url: string; key: string; doc_id: string; pages: number }>(
+  return unwrap<{ url: string; key: string; doc_id: string; pages: number; fillRatio: number }>(
     Network.request({ url: '/api/pdf/combine', method: 'POST', data: { ids }, header: authHeaders() }),
   )
 }

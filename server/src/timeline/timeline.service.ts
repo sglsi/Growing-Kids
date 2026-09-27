@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
+import { BlobService } from '../storage/blob.service'
 import type {
   TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto,
 } from './timeline.types'
@@ -16,7 +17,10 @@ const MAX_PAGE_SIZE = 100
  */
 @Injectable()
 export class TimelineService {
-  constructor(private readonly storageService: StorageService) {}
+  constructor(
+    private readonly storageService: StorageService,
+    private readonly blobService: BlobService,
+  ) {}
 
   /** 给条目补签名 URL（图片 file_key / 题目内 images） */
   async withUrls(items: TimelineItem[]): Promise<TimelineItem[]> {
@@ -189,16 +193,49 @@ export class TimelineService {
     return { id }
   }
 
+  /**
+   * 批量软删。
+   *
+   * ⚠️ 存储优化要点（复习本与项目设计.md §11.3 策略 4/5）：
+   * 软删时**释放 blob 引用计数**。顺序很重要：
+   *   1) 先查出待删行的 file_hash（必须在置 deleted_at **之前**查，否则可能查不到）；
+   *   2) 再做软删；
+   *   3) 最后释放引用 —— 归零的 blob 才进待回收队列（由 maintenance 真删文件）。
+   * `deleted_at is null` 的过滤保证**同一条目重复删除只释放一次**，防止计数被多减。
+   */
   async removeMany(userId: string, ids: string[]): Promise<{ removed: number }> {
     if (!ids.length) return { removed: 0 }
     const client = getSupabaseClient()
+
+    // 1) 先取待删条目的内容 hash（此时还未置 deleted_at）
+    const { data: pending } = await client
+      .from(TABLE)
+      .select('id, file_hash')
+      .eq('user_id', userId)
+      .in('id', ids)
+      .is('deleted_at', null)
+
+    const hashes = Array.from(
+      new Set(((pending || []) as { file_hash: string | null }[]).map((r) => r.file_hash).filter(Boolean) as string[]),
+    )
+
+    // 2) 软删（带 deleted_at is null 过滤 ⇒ 幂等，重复删不会二次释放）
     const { data, error } = await client
       .from(TABLE)
       .update({ deleted_at: new Date().toISOString() })
       .eq('user_id', userId)
       .in('id', ids)
+      .is('deleted_at', null)
       .select('id')
     if (error) throw new Error(error.message)
+
+    // 3) 释放引用（失败不阻断删除；孤儿由 GC 核对兜底）
+    for (const h of hashes) {
+      await this.blobService.release(h).catch((e) =>
+        console.warn('[timeline] 释放 blob 引用失败', h, e),
+      )
+    }
+
     return { removed: (data || []).length }
   }
 

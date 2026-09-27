@@ -1,0 +1,113 @@
+# 更新包文件清单（v6-stage2 之后的全部更新）
+
+- 生成时间: 2026-09-27 08:12 +0800
+- 文件总数: 86
+- 包大小:   1.1M
+
+## 含哪些阶段
+
+- v6-stage3（图片黑屏/首页再编辑/微信登录兜底）
+- v6-stage4-p1（登录修复）、v6-stage4-p2（裁剪修复）
+- v7（PDF 多图拼页）
+- v8（存储优化：去重/缩略图/临时对象通道）
+- 后续增量：策略 3 生命周期分层 + 策略 6 配额（需求 F）
+- 安全与隐私设计方案文档
+
+## 按目录
+
+- **server/**: 43 个文件
+- **src/**: 7 个文件
+- **app-v4/**: 3 个文件
+- **migrations/**: 3 个文件
+- **dynamic-tests/**: 5 个文件
+- **tools/**: 5 个文件
+- **pdf-demo/**: 6 个文件
+
+## 完整清单
+
+- app-v4/src/pages/library/index.tsx (12K)
+- app-v4/src/pages/profile/index.tsx (12K)
+- app-v4/src/services/api.ts (28K)
+- dynamic-tests/run-all.mjs (20K)
+- dynamic-tests/run-pdf-e2e.mjs (8.0K)
+- dynamic-tests/run-pdf-layout.mjs (12K)
+- dynamic-tests/run-quota.mjs (24K)
+- dynamic-tests/run-storage.mjs (24K)
+- MANIFEST.md (4.0K)
+- migrations/0003_blob_dedup.sql (4.0K)
+- migrations/0004_thumb_columns.sql (4.0K)
+- migrations/0005_quota_and_tiering.sql (4.0K)
+- PATCHING.md (4.0K)
+- pdf-demo/mix-1.png (4.0K)
+- pdf-demo/mix-2.png (8.0K)
+- pdf-demo/mix-3.png (4.0K)
+- pdf-demo/mix-4.png (4.0K)
+- pdf-demo/pdf-demo-拼页示例.pdf (40K)
+- pdf-demo/pdf-demo-混合尺寸示例.pdf (68K)
+- server/scripts/backfill-storage.ts (8.0K)
+- server/src/app.module.ts (4.0K)
+- server/src/auth/auth.controller.ts (4.0K)
+- server/src/auth/auth.service.ts (16K)
+- server/src/documents/documents.controller.ts (4.0K)
+- server/src/documents/documents.module.ts (4.0K)
+- server/src/documents/documents.service.ts (4.0K)
+- server/src/documents/documents.types.ts (4.0K)
+- server/src/image/handwriting-mask.ts (32K)
+- server/src/image/handwriting-segmenter.ts (8.0K)
+- server/src/image/image.controller.ts (4.0K)
+- server/src/image/image.module.ts (4.0K)
+- server/src/image/image-preprocess.ts (12K)
+- server/src/image/image.service.ts (16K)
+- server/src/image/image.types.ts (4.0K)
+- server/src/library/library.controller.ts (4.0K)
+- server/src/library/library.module.ts (4.0K)
+- server/src/library/library.service.ts (8.0K)
+- server/src/library/library.types.ts (4.0K)
+- server/src/maintenance/maintenance.module.ts (4.0K)
+- server/src/maintenance/maintenance.service.ts (12K)
+- server/src/pdf/pdf-layout.ts (16K)
+- server/src/pdf/pdf.service.ts (8.0K)
+- server/src/quota/quota.controller.ts (4.0K)
+- server/src/quota/quota.module.ts (4.0K)
+- server/src/quota/quota-policy.ts (4.0K)
+- server/src/quota/quota.service.ts (8.0K)
+- server/src/storage/blob.service.ts (12K)
+- server/src/storage/database/shared/schema.ts (8.0K)
+- server/src/storage/database/supabase-client.ts (4.0K)
+- server/src/storage/image-pipeline.ts (8.0K)
+- server/src/storage/ingest.service.ts (12K)
+- server/src/storage/storage.controller.ts (4.0K)
+- server/src/storage/storage.module.ts (4.0K)
+- server/src/storage/storage.service.ts (8.0K)
+- server/src/storage/tier-stats.service.ts (4.0K)
+- server/src/storage/tier-stats.ts (8.0K)
+- server/src/timeline/timeline.controller.ts (4.0K)
+- server/src/timeline/timeline.module.ts (4.0K)
+- server/src/timeline/timeline.service.ts (16K)
+- server/src/timeline/timeline.types.ts (4.0K)
+- server/src/upload/upload.controller.ts (8.0K)
+- server/src/upload/upload.module.ts (4.0K)
+- src/components/image-editor.tsx (32K)
+- src/pages/index/index.tsx (24K)
+- src/pages/library/index.tsx (12K)
+- src/pages/profile/index.tsx (12K)
+- src/pages/recognize/index.tsx (24K)
+- src/services/api.ts (32K)
+- src/services/auth.ts (8.0K)
+- tools/audit-my-bash.cjs (8.0K)
+- tools/lint-shell.cjs (12K)
+- tools/run-js.cjs (4.0K)
+- tools/test-lint.sh (4.0K)
+- tools/verify-recall.cjs (4.0K)
+- 修复说明-v6-stage3.md (12K)
+- 出错停止-根因报告与防复发机制.md (8.0K)
+- 复习本与项目设计.md (48K)
+- 复习本多图拼页-实现说明.md (12K)
+- 存储空间优化-实现说明.md (24K)
+- 安全与隐私设计方案.md (44K)
+- 工程教训录.md (52K)
+- 策略3-生命周期分层-配置清单.md (16K)
+- 策略6-配额方案.md (12K)
+- 问题1-登录修复操作指引.md (4.0K)
+- 问题2-裁剪修复说明.md (4.0K)
+- 问题4-5-修复说明.md (8.0K)

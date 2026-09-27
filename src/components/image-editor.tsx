@@ -85,6 +85,18 @@ export default function ImageEditor({
   } | null>(null)
   // 容器相对视口的位置；每次触摸前都会重新测量，避免布局变化后坐标漂移
   const boxRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
+  // 触摸层相对视口的位置（含 -24 外扩）；用它本身的坐标系算触摸点，避免父级 inset 带来的偏移
+  const layerRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
+  const measureLayer = (cb?: () => void) => {
+    Taro.createSelectorQuery()
+      .select('#cropTouchLayer')
+      .boundingClientRect((rect) => {
+        const r = Array.isArray(rect) ? rect[0] : rect
+        if (r) layerRectRef.current = { left: r.left, top: r.top }
+        cb?.()
+      })
+      .exec()
+  }
 
   const measureBox = (cb?: () => void) => {
     Taro.createSelectorQuery()
@@ -193,11 +205,11 @@ export default function ImageEditor({
   }
 
   const onTouchStart = (e: any) => {
-    // 每次触摸前重新测量盒子位置，规避布局变化导致的坐标漂移（选不中的常见原因）
-    measureBox(() => {
+    // 每次触摸前重新测量「触摸层」自身位置（含 -24 外扩），用其坐标系算点，规避布局/inset 漂移
+    measureLayer(() => {
       const t = e.touches[0]
-      const rx = t.clientX - boxRectRef.current.left
-      const ry = t.clientY - boxRectRef.current.top
+      const rx = t.clientX - layerRectRef.current.left - 24
+      const ry = t.clientY - layerRectRef.current.top - 24
       const target = hitTarget(rx, ry)
       if (!target) return
       dragRef.current = { target, startX: rx, startY: ry, start: { ...crop } }
@@ -208,8 +220,8 @@ export default function ImageEditor({
     const drag = dragRef.current
     if (!drag) return
     const t = e.touches[0]
-    const rx = t.clientX - boxRectRef.current.left
-    const ry = t.clientY - boxRectRef.current.top
+    const rx = t.clientX - layerRectRef.current.left - 24
+    const ry = t.clientY - layerRectRef.current.top - 24
     const dx = (rx - drag.startX) / imgW
     const dy = (ry - drag.startY) / imgH
     setCrop(clampCrop(applyDrag(drag.start, drag.target, dx, dy)))
@@ -307,19 +319,24 @@ export default function ImageEditor({
   const exportEdited = async (rot: number = rotation, fullFrame = false): Promise<string> => {
     const node = await waitCanvasNode()
     if (!node) throw new Error('画布未就绪，请稍后重试')
-    const dpr = Taro.getSystemInfoSync().pixelRatio || 1
-    const outW = naturalW
-    const outH = naturalH
-    // 90°/270° 旋转后宽高互换，输出画布尺寸需相应交换，否则旋转图放不下会被裁掉
+    // 导出缓冲直接使用「原图逻辑尺寸 × fit」，不乘 dpr：
+    //  - 微信 Canvas2D 缓冲有硬上限（iOS 4096 / 安卓设备相关，超限即报
+    //    set width out of range 11000>8192）；乘 dpr 会把 4000px 原图撑到 12000px 触发该错；
+    //  - canvasToTempFilePath 的 x/y/width/destWidth 单位即缓冲像素，缓冲=逻辑尺寸时单位无歧义，
+    //    跨微信版本行为一致，彻底消除「框选范围≠导出范围」的漂移。
+    const MAX_CANVAS_SIDE = 4096
+    const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
+    const bufW = Math.max(1, Math.round(naturalW * fit))
+    const bufH = Math.max(1, Math.round(naturalH * fit))
+    // 90°/270° 旋转后宽高互换，输出画布尺寸需相应交换
     const swap = rot % 180 !== 0
-    const canvasW = swap ? outH : outW
-    const canvasH = swap ? outW : outH
-    node.width = Math.max(1, Math.round(canvasW * dpr))
-    node.height = Math.max(1, Math.round(canvasH * dpr))
+    const canvasW = swap ? bufH : bufW
+    const canvasH = swap ? bufW : bufH
+    node.width = canvasW
+    node.height = canvasH
     const ctx = node.getContext('2d')
     ctx.setTransform(1, 0, 0, 1, 0, 0)
-    ctx.clearRect(0, 0, node.width, node.height)
-    ctx.scale(dpr, dpr)
+    ctx.clearRect(0, 0, canvasW, canvasH)
 
     const localSrc = await toLocalIfRemote(currentSrc)
     let img: any = null
@@ -335,20 +352,17 @@ export default function ImageEditor({
     })
     if (!img.width || !img.height) throw new Error('图片加载失败，无法导出')
 
-    // 以画布中心为轴旋转整图（只旋转、不缩放），旋转后整张铺满输出画布
+    // 整张图烘焙进缓冲（不缩放），90°/270° 以中心旋转，旋转后整张铺满输出画布
     ctx.save()
     ctx.translate(canvasW / 2, canvasH / 2)
     ctx.rotate((rot * Math.PI) / 180)
-    ctx.drawImage(img, -outW / 2, -outH / 2, outW, outH)
+    ctx.drawImage(img, -bufW / 2, -bufH / 2, bufW, bufH)
     ctx.restore()
 
     // 裁剪区域：fullFrame（旋转烘焙）取整张；否则用框选 crop。
-    // canvasToTempFilePath 的 x/y/width/height 用「缓冲像素」= 逻辑 × dpr。
+    // cropToBufferRect 把归一化裁剪框直接映射到缓冲像素，与预览框共用同一套分数 → 零偏移。
     const r: Rect = fullFrame ? { x: 0, y: 0, w: 1, h: 1 } : crop
-    const x = r.x * canvasW * dpr
-    const y = r.y * canvasH * dpr
-    const w = r.w * canvasW * dpr
-    const h = r.h * canvasH * dpr
+    const { x, y, w, h } = cropToBufferRect(r, canvasW, canvasH)
     return new Promise<string>((resolve, reject) => {
       Taro.canvasToTempFilePath({
         canvas: node,
@@ -591,6 +605,7 @@ export default function ImageEditor({
           {/* 触摸层：仅捕获裁剪框拖动；向四周外扩 24px，确保画在边框外的手柄也能被抓住 */}
           {showFrame && (
             <View
+              id="cropTouchLayer"
               className="absolute"
               style={{ left: -24, top: -24, right: -24, bottom: -24 }}
               onTouchStart={onTouchStart}
@@ -667,6 +682,21 @@ function Overlay({ crop }: { crop: Rect }) {
 
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v))
+}
+
+/**
+ * 纯函数：归一化裁剪框 → 缓冲像素矩形。
+ * 预览框与导出共用同一组归一化坐标（crop.x/y/w/h ∈ [0,1]），
+ * 因此屏上框选区域与导出区域一一对应。导出缓冲=原图逻辑尺寸（见 exportEdited），
+ * 故这里用到的 canvasW/canvasH 即缓冲像素，与 canvasToTempFilePath 的坐标单位一致。
+ */
+function cropToBufferRect(r: Rect, canvasW: number, canvasH: number) {
+  return {
+    x: r.x * canvasW,
+    y: r.y * canvasH,
+    w: r.w * canvasW,
+    h: r.h * canvasH,
+  }
 }
 
 const MIN_SIZE = 0.12

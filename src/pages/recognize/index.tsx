@@ -9,10 +9,9 @@ import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
-  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage, matchSubject,
+  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction,
 } from '@/services/api'
-import { isLoggedIn, promptLogin } from '@/services/auth'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -32,7 +31,6 @@ export default function RecognizePage() {
   const [docFile, setDocFile] = useState('')
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
-  const [anonTip, setAnonTip] = useState(true)
 
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
@@ -77,14 +75,11 @@ export default function RecognizePage() {
     const slot = editor?.slot
     setEditor(null)
     if (!slot) return
+    // 回填到对应 slot，供后续「开始识别 / 直接保存」复用编辑结果（不在此落库）
     if (slot === 'paper') setPaperImage(path)
     else if (slot === 'question') setQuestionImage(path)
     else setAnswerImage(path)
   }
-
-  // 自动分类：优先用 LLM 识别出的学科，识别不出再回退默认学科
-  const autoSubject = (r: RecognizeResult, subs: Subject[], fallback: string) =>
-    matchSubject(r.subject || '', subs) || fallback
 
   const handleRecognizePaper = async () => {
     if (!paperImage) {
@@ -98,7 +93,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const result = await recognizePaper(paperImage, sid)
-      setDrafts(result.map((r) => ({ ...r, subject_id: autoSubject(r, subs, sid) })))
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('识别失败', e)
@@ -120,7 +115,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const res = await recognizeSeparate(questionImage, answerImage)
-      setDrafts(res.matched.map((r) => ({ ...r, subject_id: autoSubject(r, subs, sid) })))
+      setDrafts(res.matched.map((r) => ({ ...r, subject_id: sid })))
       setUnmatched(res.unmatched_questions)
       Taro.showToast({ title: `已关联 ${res.matched.length} 题`, icon: 'none' })
     } catch (e) {
@@ -141,7 +136,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const result = await recognizeDocumentByUrl(d.url || '', sid)
-      setDrafts(result.map((r) => ({ ...r, subject_id: autoSubject(r, subs, sid) })))
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('资料识别失败', e)
@@ -180,7 +175,7 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const result = await recognizeDocument(docFile, sid)
-      setDrafts(result.map((r) => ({ ...r, subject_id: autoSubject(r, subs, sid) })))
+      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       console.error('文档识别失败', e)
@@ -233,19 +228,17 @@ export default function RecognizePage() {
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
     setSaving(true)
     try {
-      // purpose=save：后端 /api/upload 会为图片建立 timeline(kind=image) 条目。
-      // 若 paperImage 为远程 URL，uploadImage 会先下载再上传，确保真的落库。
+      // purpose 必须是 save：这张图要被正式存档（进入「最近题目」并计入引用计数）。
+      // 若用默认的 temp 上传，它会被登记为「用完即弃的中间态」并在 24h 后被 GC 回收
+      // ⇒ 已保存的题目图片会裂掉。
       const up = await uploadImage(paperImage, { purpose: 'save' })
-      if (!(up && (up.timeline_id || up.key))) {
-        throw new Error('保存未生效，请重试')
-      }
-      // 后端已建档则只补学科；否则按 key/url 兜底建档
+      // 后端 /api/upload 已为图片自动建立 timeline(kind=image) 条目，直接用其 id 补学科
       await saveQuestionAsImage(sid, up.key, up.url, up.timeline_id)
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('图片直存失败', e)
-      Taro.showToast({ title: e instanceof Error ? e.message : '保存失败，请重试', icon: 'none' })
+      Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
     } finally {
       setSaving(false)
     }
@@ -254,29 +247,9 @@ export default function RecognizePage() {
   const subjectIndex = (id: string) => Math.max(0, subjects.findIndex((s) => s.id === id))
   const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || '选择学科'
 
-  // 未登录（匿名）提示：内容仅保留 24 小时，鼓励但不强制登录
-  const anonymous = !isLoggedIn()
-
   return (
     <ScrollView scrollY className="h-full bg-background">
       <View className="px-4 pt-4 pb-40">
-        {/* 匿名提示横幅：未登录时展示，可关闭 */}
-        {anonymous && anonTip && (
-          <View className="rounded-2xl border border-amber-300 bg-amber-50 p-3 mb-4 flex flex-row items-start justify-between">
-            <View className="flex-1 pr-2">
-              <Text className="block text-xs text-amber-800 leading-relaxed">
-                你还未登录，当前添加的内容仅保留 24 小时。登录后可长期保存、多端同步，且不会自动丢失。
-              </Text>
-              <View className="mt-2" onClick={() => void promptLogin()}>
-                <Text className="block text-xs text-primary font-medium">微信一键登录 ›</Text>
-              </View>
-            </View>
-            <View className="pl-2 pt-1" onClick={() => setAnonTip(false)}>
-              <Text className="block text-amber-500 text-sm">✕</Text>
-            </View>
-          </View>
-        )}
-
         {/* 模式切换 */}
         <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
           <ModeTab active={mode === 'paper'} onClick={() => setMode('paper')} label="拍照识别" />
@@ -286,7 +259,7 @@ export default function RecognizePage() {
 
         {/* 学科选择 */}
         <View className="flex flex-row items-center justify-between mb-4">
-          <Text className="block text-sm text-muted-foreground">默认学科 · 系统已自动识别每题学科，可手动调整</Text>
+          <Text className="block text-sm text-muted-foreground">默认归类学科</Text>
           <Picker
             mode="selector"
             range={subjects}

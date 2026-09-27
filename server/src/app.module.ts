@@ -21,6 +21,7 @@ import { PdfModule } from './pdf/pdf.module'
 import { OcrModule } from './ocr/ocr.module'
 import { SearchModule } from './search/search.module'
 import { MaintenanceModule } from './maintenance/maintenance.module'
+import { QuotaModule } from './quota/quota.module'
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { MaintenanceModule } from './maintenance/maintenance.module'
     OcrModule,
     SearchModule,
     MaintenanceModule,
+    QuotaModule, // 策略 6：配额
   ],
   controllers: [AppController],
   providers: [AppService],

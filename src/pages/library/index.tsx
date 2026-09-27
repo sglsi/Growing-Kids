@@ -4,8 +4,8 @@ import { useState } from 'react'
 import { FileText, Trash2 } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Input } from '@/components/ui/input'
 import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
+import { Input } from '@/components/ui/input'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
@@ -94,7 +94,9 @@ export default function LibraryPage() {
       const f = res.tempFiles[0]
       Taro.showLoading({ title: '上传中…' })
       // 后端 /api/upload 检测为非图片时自动归档到 library，并回传 library_id
-      await uploadFile(f.path)
+      // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
+      //    表现为「提示已归档，但资料库里没有」。
+      await uploadFile(f.path, { purpose: 'save' })
       Taro.hideLoading()
       Taro.showToast({ title: '已归档到资料库', icon: 'success' })
       load()
