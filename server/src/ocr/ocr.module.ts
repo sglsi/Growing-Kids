@@ -7,5 +7,7 @@ import { StorageModule } from '../storage/storage.module'
   imports: [StorageModule],
   controllers: [OcrController],
   providers: [OcrService],
+  // 供 ImageService 复用（Phase 3 交付 3：处理前后 OCR 一致性校验）
+  exports: [OcrService],
 })
 export class OcrModule {}

@@ -1,65 +1,75 @@
-# 更新包 · 打补丁指引（v6-stage2 之后）
+# 更新包 · 打补丁指引（stage2 之后 · 第二轮增量）
 
 本包内所有文件路径**已是仓库相对路径**，可直接覆盖到 `sglsi/Growing-Kids` 根目录：
-后端在 `server/src/...`，前端在 `src/...`（与 stage2 的 PATCHING.md 一致）。
-**无需再做目录改名**——之前的 stage3~v8 包内部用的是 `server-v4`/`demo` 名字，导致路径对不上，
-本包已统一还原为仓库结构。
+后端在 `server/src/...`，前端在 `src/...`。**无需再做目录改名。**
 
-## 覆盖范围
+> 本包是 `growing-kids-fixes-after-stage2.zip`（08:12）**之后的增量**。
+> 两个包可**独立使用**（本包已包含自身所需的全部改动文件），也可以先打旧包再打本包。
+
+## 本包覆盖范围
 
 | 阶段 | 内容 |
 |---|---|
-| v6-stage3 | 图片黑屏、首页再编辑、微信登录兜底 |
-| v6-stage4-p1 | 登录修复 |
-| v6-stage4-p2 | 裁剪修复 |
-| v7 | PDF 多图拼页 |
-| v8 | 存储优化：内容寻址去重 / 缩略图三档 / 临时对象通道 |
-| 后续增量 | 策略 3 生命周期分层 + 策略 6 配额（逻辑口径、用量接口、413 预检） |
-| 文档 | 安全与隐私设计方案、策略 3/6 配置与方案、存储优化实现说明 |
-
-> 附带：`dynamic-tests/`（回归测试）、`tools/`（危险命令检测器）、`pdf-demo/`（拼页示例），
-> 均为工程资产，非运行时必需，但建议一并提交以便回归。
+| Phase 1 几何纠偏 | 自动四角检测（误差 ~1.4px）+ 透视压平 + 手动拉四角 |
+| Phase 2 智能高清 | x2/x3/x4 × classical/ESPCN 超分 + OCR 一致性 |
+| Phase 3 增强 | OpenCV 自动角点、去手写 v2（`erase_v2`）、OCR 一致性回退 |
+| 四角 UI | 前端双模式（矩形裁剪 / 四角透视），归一化 [0,1] |
+| SR 限流 | `SrGate` 双泳道并发闸 + `SrUserQuota` 用户配额 + 排队降级提示 |
+| 口径统一 | 匿名/临时用户保留期 **30 分钟 → 24 小时**（文档口径统一；后端常量早已是 24h） |
 
 ## 方式一：直接覆盖（推荐）
 
 ```bash
 # 在 Growing-Kids 仓库根目录
-unzip -o growing-kids-fixes-after-stage2.zip
+unzip -o growing-kids-fixes-after-stage2-plus-image.zip
 git add -A
-git commit -m "fix: stage3~v8 + 存储优化 + 配额/分层 + 安全隐私文档"
+git commit -m "feat(image): 自动调正+智能高清(Phase1-3) + SR限流; docs: 临时用户保留期改24小时"
 git push
 ```
 
 ## 方式二：先 dry-run 确认
 
 ```bash
-unzip -l growing-kids-fixes-after-stage2.zip   # 看将要覆盖的文件
+unzip -l growing-kids-fixes-after-stage2-plus-image.zip   # 看将要覆盖的文件
 # 确认无误后再 unzip -o
 ```
 
 ## 部署侧必做
 
-1. **执行迁移（幂等，可反复跑）**，顺序执行：
-   - `migrations/0003_blob_dedup.sql`
-   - `migrations/0004_thumb_columns.sql`
-   - `migrations/0005_quota_and_tiering.sql`
-2. **配置环境变量**：`WX_APPID` / `WX_SECRET`（微信登录）、`QUOTA_MODE`（默认 `warn`，可选 `off|shadow|warn|block`）。
+1. **安装新增依赖**（`server/package.json` 已更新）：
+   ```bash
+   cd server && npm install        # 新增 @techstark/opencv-js
+   ```
+2. **配置环境变量**（SR 限流，均有默认值，可不配）：
+   | 变量 | 默认 | 含义 |
+   |---|:--:|---|
+   | `IMG_SR_GATE` | `on` | `off` 一键回退无限流 |
+   | `IMG_SR_CONCURRENCY_HEAVY` | `1` | 重任务并发权重和（1 核即 1） |
+   | `IMG_SR_CONCURRENCY_LIGHT` | `2` | 轻任务并发数 |
+   | `IMG_SR_QUEUE_MAX` | `8` | 排队上限 |
+   | `IMG_SR_QUEUE_TIMEOUT_MS` | `20000` | 排队超时 |
+   | `IMG_SR_USER_RATE` | `6` | 每用户每分钟 heavy 上限 |
+   | `IMG_SR_USER_CONCURRENT` | `1` | 每用户 heavy 同时进行数 |
 3. **重启后端**，跑类型检查与测试：
    ```bash
-   cd server && npx tsc --noEmit
-   cd ../dynamic-tests && node run-all.mjs && node run-storage.mjs && node run-quota.mjs
-   cd ../demo && npx taro build --type h5
+   cd server && npx tsc --noEmit && npx nest build
+   cd ../dynamic-tests && for t in run-image-v2.mjs run-image-v3.ts run-image-v4.ts run-image-v5.ts run-image-v6.ts run-ui-sr.mjs; do npx tsx $t; done
    ```
+   > 动态测试依赖 `tsx`；`dynamic-tests/node_modules` 是指向 `server/node_modules` 的符号链接（仓库内可能没有，按需自行 `npm i tsx`）。
 
-## 关于 `app-v4/`
+## 口径变更提醒（务必同步）
 
-包内含 `app-v4/`（第二前端，与 `src/` 同源但配置不同）。主仓库当前只有 `src/`，
-**如你不维护 app-v4，可忽略该目录**；若维护，请按需并入你的前端工程。
+**匿名/临时用户保留期由 30 分钟改为 24 小时**。本包已同步以下位置：
+- 文档：`PRD-成长学习伙伴.md`、`复习本与项目设计.md`、`安全与隐私设计方案.md`、`策略6-配额方案.md`
+- 后端常量：`server/src/users/users.types.ts`（`ANONYMOUS_TTL_MS = 24h`）——**该文件本就是 24h，故未含在本包**
+- 前端提示文案（`profile` 页："数据仅保留 1 天"）本就与 24 小时等价，无需改
+
+> 说明：若你的仓库里还并存着早期的 sql.js/SQLite 原型（`growing-kids-server`，内含 `TEMPORARY_TTL_MS`），
+> 其中也已改为 24h；那个原型不属于本包的覆盖范围，如需一并更新请告知。
 
 ## 验证
 
-- 后端 `tsc --noEmit` 0 错
-- `dynamic-tests`：run-all(41) / run-storage(78) / run-quota(95) 全绿
-- 前端构建通过
-- 配额：上传超量返回 413（`QUOTA_BYTES`/`QUOTA_COUNT`）；用量接口 `/api/quota/usage`
-- 分层：`GET /api/storage/tier-stats` 可出报告（需先配云侧 4 条生命周期规则，见策略 3 文档）
+- 后端 `tsc --noEmit` 0 错 / `nest build` 通过
+- 前端 `tsc --noEmit` 0 错
+- 动态测试 **190 项断言全绿**
+  - run-image-v2(18) / v3(24) / v4(37) / v5(26) / v6(61) / run-ui-sr(24)

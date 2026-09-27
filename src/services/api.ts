@@ -28,13 +28,27 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 type ReqResult = Taro.request.SuccessCallbackResult<any>
 
 // 统一解包：res.data 是 HTTP body，业务数据在 data 字段
+/** 带业务码/HTTP 状态的错误：供上层按 code 做差异化提示（如 SR 限流降级）。 */
+export class ApiError extends Error {
+  code?: string
+  status: number
+  data?: Record<string, unknown>
+  constructor(msg: string, status: number, code?: string, data?: Record<string, unknown>) {
+    super(msg)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.data = data
+  }
+}
+
 async function unwrap<T>(p: Promise<ReqResult>): Promise<T> {
   const res = await p
   captureUserId(res)
   console.log('[API Response]', res.statusCode, res.data)
   const body = res.data as ApiEnvelope<T>
   if (res.statusCode < 200 || res.statusCode >= 300) {
-    throw new Error(body?.msg || `请求失败(${res.statusCode})`)
+    throw new ApiError(body?.msg || `请求失败(${res.statusCode})`, res.statusCode, (body as any)?.code, (body as any)?.data)
   }
   if (body?.code !== undefined && body.code !== 200) {
     throw new Error(body.msg || '请求失败')
@@ -49,8 +63,8 @@ async function unwrapResponse<T>(p: Promise<ReqResult>): Promise<T> {
   console.log('[API Response]', res.statusCode, res.data)
   const body = res.data as ApiEnvelope<T>
   if (res.statusCode < 200 || res.statusCode >= 300) {
-    if (res.statusCode === 413) throw new Error('图片过大（超过限制），请裁剪或压缩后再识别')
-    throw new Error(body?.msg || `识别服务异常(${res.statusCode})`)
+    if (res.statusCode === 413) throw new ApiError('图片过大（超过限制），请裁剪或压缩后再识别', 413, (body as any)?.code, (body as any)?.data)
+    throw new ApiError(body?.msg || `识别服务异常(${res.statusCode})`, res.statusCode, (body as any)?.code, (body as any)?.data)
   }
   if (body?.code !== undefined && body.code !== 200) {
     throw new Error(body.msg || '识别失败，请重试')
@@ -741,7 +755,7 @@ export function combineToPdf(ids: string[]) {
 // ============================================================
 // 图片处理（AI）：自动调正 / 智能高清 / 去手写
 // ============================================================
-export type ImageAction = 'auto' | 'enhance' | 'erase'
+export type ImageAction = 'auto' | 'enhance' | 'erase' | 'erase_v2'
 
 async function ensureImageUrl(filePathOrUrl: string): Promise<string> {
   if (/^https?:\/\//.test(filePathOrUrl)) return filePathOrUrl
@@ -755,16 +769,46 @@ export interface ProcessImageOpts {
   save?: boolean
   /** 整体超时（毫秒），到点直接失败而不无限转圈，默认 90s */
   timeout?: number
+  /**
+   * 智能高清(enhance)专用：升采样倍率，默认 2，支持 2/3/4。
+   * 仅在后端 IMG_PIPELINE_MODE ∈ {new, hybrid} 时生效；否则后端回落图生图。
+   */
+  sr_scale?: 2 | 3 | 4
+  /**
+   * 智能高清(enhance)专用：推理模式。
+   *  - 'classical'（默认）：轻量零权重 SR，CPU 上快、对文档文字稳
+   *  - 'espcn'：ESPCN 神经网络推理（需后端配置真权重，较慢但细节更好）
+   */
+  sr_mode?: 'classical' | 'espcn'
+  /**
+   * 自动调正(auto)专用：前端手动拉出的试卷四角，**归一化 [0,1]**（相对原图），顺序任意。
+   * 提供则后端直接做透视压平（100% 保真，不重画）；缺省则走自动检测。
+   */
+  manual_corners?: [number, number][]
+  /**
+   * 自动调正(auto)专用：是否尝试曲面展开，默认 false（当前经典法实测不达标，会安全回落平面）。
+   */
+  dewarp_curved?: boolean
 }
 
 export async function processImage(action: ImageAction, filePathOrUrl: string, opts: ProcessImageOpts = {}) {
   const image_url = await ensureImageUrl(filePathOrUrl)
+  // 仅按动作携带对应参数，避免污染其它动作的请求体
+  const extra: Record<string, unknown> = {}
+  if (action === 'enhance') {
+    if (opts.sr_scale) extra.sr_scale = opts.sr_scale
+    if (opts.sr_mode) extra.sr_mode = opts.sr_mode
+  }
+  if (action === 'auto') {
+    if (opts.manual_corners?.length === 4) extra.manual_corners = opts.manual_corners
+    if (opts.dewarp_curved) extra.dewarp_curved = true
+  }
   return withTimeout(
     unwrapResponse<{ url: string; key: string; timeline_id: string }>(
       Network.request({
         url: '/api/image/process',
         method: 'POST',
-        data: { action, image_url, save: opts.save === true },
+        data: { action, image_url, save: opts.save === true, ...extra },
         header: authHeaders(),
       }),
     ),

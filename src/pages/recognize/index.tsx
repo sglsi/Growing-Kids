@@ -286,7 +286,7 @@ export default function RecognizePage() {
               <ImgActionBtn label="编辑裁剪" onClick={() => { if (paperImage) setEditor({ slot: 'paper', src: paperImage }); else chooseImage('paper') }} />
               <ImgActionBtn label="自动调正" onClick={() => openEditorWithAction('paper', 'auto')} />
               <ImgActionBtn label="智能高清" onClick={() => openEditorWithAction('paper', 'enhance')} />
-              <ImgActionBtn label="去手写" onClick={() => openEditorWithAction('paper', 'erase')} />
+              <ImgActionBtn label="去手写" onClick={() => openEditorWithAction('paper', 'erase_v2')} />
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
@@ -312,8 +312,8 @@ export default function RecognizePage() {
               <ImgActionBtn label="高清·答" onClick={() => openEditorWithAction('answer', 'enhance')} />
             </View>
             <View className="flex flex-row items-center justify-between gap-1 mb-3">
-              <ImgActionBtn label="去手写·题" onClick={() => openEditorWithAction('question', 'erase')} />
-              <ImgActionBtn label="去手写·答" onClick={() => openEditorWithAction('answer', 'erase')} />
+              <ImgActionBtn label="去手写·题" onClick={() => openEditorWithAction('question', 'erase_v2')} />
+              <ImgActionBtn label="去手写·答" onClick={() => openEditorWithAction('answer', 'erase_v2')} />
               <ImgActionBtn label="编辑·题" onClick={() => { if (questionImage) setEditor({ slot: 'question', src: questionImage }) }} />
               <ImgActionBtn label="编辑·答" onClick={() => { if (answerImage) setEditor({ slot: 'answer', src: answerImage }) }} />
             </View>

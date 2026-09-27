@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common'
+import { Injectable, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import {
   ImageGenerationClient,
   Config,
@@ -27,6 +27,11 @@ import {
   unmodifiedRegionSimilarity,
   type InpaintStrategy,
 } from './handwriting-mask'
+import { straightenImage, type Corner } from './image-dewarp'
+import { enhanceImage } from './image-superres'
+import { compareRecognized, OCR_CONSISTENCY_THRESHOLD, type OcrConsistency } from './image-quality'
+import { classifySr, srGate, srUserQuota, srGateEnabled } from './sr-gate'
+import { OcrService } from '../ocr/ocr.service'
 
 /**
  * 提示词：一律加上"锁版式"约束。
@@ -76,14 +81,94 @@ export class ImageService {
     private readonly storageService: StorageService,
     private readonly ingestService: IngestService,
     private readonly timelineService: TimelineService,
+    private readonly ocrService: OcrService,
   ) {}
 
-  private download(url: string): Promise<Buffer> {
+  /**
+   * 【Phase 3 · 交付 3】处理前后 OCR 一致性校验。
+   *
+   * 对「原图」与「处理后的图」各跑一次 VLM 识别，用字符集 Jaccard + 题数比 + 字数比
+   * 计算一致性分数。分数低于阈值 → 判定处理劣化了可识别内容 → 返回 `accept=false`，
+   * 调用方据此**回退原图**（宁可不增强，也不交付识别不出来的图）。
+   *
+   * 关键约束（方案 §4）：
+   *  - **整体 try/catch**：OCR 任一步失败（网络/配额/超时）都**默认接受处理图**
+   *    （`verified:false, accept:true`），绝不因校验环节本身的问题阻塞主流程。
+   *  - 有超时保护，避免 VLM 抖动把整条 enhance 链路拖死。
+   *  - 关闭开关：`IMG_OCR_VERIFY=off` 或 dto.verify_ocr=false（在 enhance 里判断）。
+   */
+  private async verifyOcrConsistency(
+    srcUrl: string,
+    processedBuffer: Buffer,
+    forwardHeaders: Record<string, string>,
+  ): Promise<{ accept: boolean; verified: boolean; consistency?: OcrConsistency; procUrl?: string; reason?: string }> {
+    const timeoutMs = Number(process.env.IMG_OCR_TIMEOUT_MS || 45000)
+    let timer: NodeJS.Timeout | undefined
+    try {
+      // ① 处理图先落存储拿公网 URL（VLM 需要可访问 URL，无法直接吃 Buffer）
+      const procIng = await this.ingestService.ingest(processedBuffer, 'image/png')
+      const procUrl = await this.storageService.getPublicUrl(procIng.key)
+
+      // ② 原图与处理图并行识别（temperature=0.1，降低随机性）
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`OCR 一致性校验超时(${timeoutMs}ms)`)), timeoutMs)
+      })
+      const [srcRes, procRes] = await Promise.race([
+        Promise.all([
+          this.ocrService.recognizeExamByUrls('', [srcUrl]),
+          this.ocrService.recognizeExamByUrls('', [procUrl]),
+        ]),
+        timeout,
+      ])
+
+      // ③ 一致性度量
+      const threshold = Number(process.env.IMG_OCR_MIN_SCORE || OCR_CONSISTENCY_THRESHOLD)
+      const consistency = compareRecognized(srcRes.items, procRes.items, threshold)
+      console.log(
+        `[image] OCR 一致性校验：score=${consistency.score.toFixed(3)} ` +
+          `(overlap=${consistency.charOverlap.toFixed(3)} ` +
+          `count=${consistency.countRatio.toFixed(3)} length=${consistency.lengthRatio.toFixed(3)}) ` +
+          `阈值 ${threshold} → ${consistency.similar ? '接受处理图' : '回退原图'}`,
+      )
+      return {
+        accept: consistency.similar,
+        verified: true,
+        consistency,
+        procUrl,
+        reason: consistency.similar ? undefined : `识别一致性偏低(${consistency.score.toFixed(2)} < ${threshold})`,
+      }
+    } catch (e) {
+      // OCR 失败/超时 → 默认接受处理图，不阻塞（方案 §4 硬约束）
+      console.warn('[image] OCR 一致性校验失败，默认接受处理图：', (e as Error).message)
+      return { accept: true, verified: false, reason: (e as Error).message }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 仅对「同源/同组织」域名透传鉴权头，避免把运行时令牌泄露给任意第三方 CDN。
+   * 覆盖 Coze / 火山引擎 / 字节系回传域名；其余一律不带头（也足够，公网图无需鉴权）。
+   */
+  private static SAFE_FORWARD_HOSTS = ['coze', 'volcengine', 'byteimg', 'bytedance', 'volces']
+
+  private static allowForwardHeaders(url: string): boolean {
+    try {
+      const host = new URL(url).hostname.toLowerCase()
+      return ImageService.SAFE_FORWARD_HOSTS.some((h) => host.includes(h))
+    } catch {
+      return false
+    }
+  }
+
+  private download(url: string, forwardHeaders?: Record<string, string>): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const mod = url.startsWith('https:') ? https : http
-      const req = mod.get(url, (res) => {
+      const reqHeaders =
+        forwardHeaders && ImageService.allowForwardHeaders(url) ? { ...forwardHeaders } : {}
+      const req = mod.get(url, reqHeaders, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.download(res.headers.location).then(resolve, reject)
+          this.download(res.headers.location, forwardHeaders).then(resolve, reject)
           res.resume()
           return
         }
@@ -123,7 +208,8 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
 
     // 原图
-    const srcBuffer = await this.download(dto.image_url)
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
     const srcMeta = await readMeta(srcBuffer)
 
     // ① 分割：拿到手写 mask（VLM 优先，失败降级色域阈值）
@@ -204,6 +290,94 @@ export class ImageService {
   }
 
   /**
+   * 【阶段三 / Phase 1】自动调正 = 几何纠偏（透视变换）。
+   *
+   * 与 `process()`（auto 走图生图重绘）的本质区别：
+   *   旧路径：把整图交给生成模型**重画** → 必重排、必丢边缘、必变色。
+   *   本方法：① 拿到文档四角 → ② 仅做透视变换把斜拍压平成正面矩形。
+   *   像素未被重画，**内容 100% 保真** —— 这是它优于图生图的根本。
+   *
+   * 四角来源：
+   *   - manual_corners（前端拉框，优先）：100% 精准、即时可用；
+   *   - auto 自动检测：本期 detectDocumentCorners 返回 null（精准检测需 OpenCV 绑定，后续增强）。
+   *   两者皆无 → 返回**原图**（不重画）+ debug.needManual 提示前端拉框（方案 §2.3 降级，绝不静默存坏图）。
+   *
+   * 灰度开关见 image.controller.ts：仅当 IMG_PIPELINE_MODE ∈ {new, hybrid} 时 auto 才进入本方法，
+   * 否则回落到 process() 图生图兜底。
+   */
+  async straighten(
+    userId: string,
+    dto: ProcessImageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<ImageProcessResult & { debug?: Record<string, unknown> }> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcMeta = await readMeta(srcBuffer)
+
+    // 手动四角：前端以**归一化 [0,1]** 坐标提交（相对于原图）。
+    // 兼容性：若任一坐标 > 1，则判定调用方已按**像素**提交，不再乘尺寸——
+    // 依据「坐标是否超出 [0,1]」自动区分口径，避免破坏既有像素调用方。
+    const manualCorners = dto.manual_corners?.map(([x, y]): Corner => [x, y])
+    if (manualCorners && manualCorners.some(([x, y]) => x > 1 || y > 1)) {
+      // 已是像素坐标，原样使用
+    } else if (manualCorners) {
+      // 归一化 → 像素
+      for (const p of manualCorners) {
+        p[0] *= srcMeta.width
+        p[1] *= srcMeta.height
+      }
+    }
+
+    const result = await straightenImage(srcBuffer, {
+      manualCorners,
+      auto: true,
+      curved: dto.dewarp_curved === true,
+    })
+
+    // 未命中自动检测且无手动四角 → 原样返回（不重画），提示前端拉框
+    if (result.needManual) {
+      const ing = await this.ingestService.ingest(srcBuffer, 'image/png')
+      const url = await this.storageService.getPublicUrl(ing.key)
+      console.log('[image] 自动调正：无四角/自动检测未命中，原样返回，提示手动拉框')
+      return {
+        url,
+        key: ing.key,
+        timeline_id:
+          dto.save === true
+            ? await this.archive(userId, ing.key, ing.sizeBytes, ing.thumbKey, ing.width, ing.height, ing.hash)
+            : '',
+        debug: { method: 'geometric-dewarp', needManual: true, note: '请前端拉出试卷四角后提交 auto' },
+      }
+    }
+
+    // 几何纠偏成功：内容保真，仅透视压平
+    const ing = await this.ingestService.ingest(result.buffer!, 'image/png')
+    const key = ing.key
+    const url = await this.storageService.getPublicUrl(key)
+    console.log(
+      `[image] 自动调正(几何纠偏) 完成：${srcMeta.width}x${srcMeta.height} → ` +
+        `${result.width}x${result.height}；路径 ${result.method}；排序后四角 ${JSON.stringify(result.orderedCorners)}`,
+    )
+    return {
+      url,
+      key,
+      timeline_id:
+        dto.save === true
+          ? await this.archive(userId, key, ing.sizeBytes, ing.thumbKey, ing.width, ing.height, ing.hash)
+          : '',
+      debug: {
+        method: 'geometric-dewarp',
+        path: result.method,
+        width: result.width,
+        height: result.height,
+        orderedCorners: result.orderedCorners,
+      },
+    }
+  }
+
+  /**
    * 归档进「最近题目」（供 process / eraseV2 复用）。
    *
    * ⚠️ 存储优化：这里的结果图此前是**未压缩的 PNG**，而 AI 输出普遍是
@@ -237,6 +411,143 @@ export class ImageService {
     } catch (e) {
       console.error('[image] 归档进 timeline 失败（不影响处理）', e)
       return ''
+    }
+  }
+
+  /**
+   * 【阶段三 / Phase 2】智能高清 = 轻量超分辨率（进程内 CPU 推理，零外部模型服务）。
+   *
+   * 与 `process()`（enhance 走图生图重绘）的本质区别：
+   *   旧路径：把整图交给生成模型**重画**放大 → 必重排、必变色、必丢手写字迹。
+   *   本方法：① 亮度通道走 SR（ESPCN 引擎 / 经典 Lanczos+unsharp）→ ② 色度走 Lanczos
+   *     升采样 → ③ 重组回 RGB。像素级处理、内容保真、CPU 可跑。
+   *
+   * 默认 mode='classical'（零权重、离线可用、对文档文字最稳）；置 SR_MODE=espcn 并经
+   * ESPCN_WEIGHTS_URL 提供真·学习权重时切换为 ESPCN 神经网络推理（同接口、同引擎）。
+   *
+   * 灰度开关见 image.controller.ts：仅当 IMG_PIPELINE_MODE ∈ {new, hybrid} 时 enhance 进入本方法，
+   * 否则回落到 process() 图生图兜底。
+   */
+  async enhance(
+    userId: string,
+    dto: ProcessImageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<ImageProcessResult & { debug?: Record<string, unknown> }> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcMeta = await readMeta(srcBuffer)
+
+    const mode: 'classical' | 'espcn' =
+      dto.sr_mode === 'espcn' || (process.env.SR_MODE || 'classical').toLowerCase() === 'espcn'
+        ? 'espcn'
+        : 'classical'
+    const weightsUrl = process.env.ESPCN_WEIGHTS_URL || undefined
+    const scale = dto.sr_scale && [2, 3, 4].includes(dto.sr_scale) ? dto.sr_scale : 2
+
+    // —— 服务端限流 / 排队（依据 Phase 2 压测结论）——
+    // 重任务 = x3/x4（任意模式）或 espcn（任意倍率）；仅 x2-classical 为轻任务（不占闸）。
+    // 两道防线：① 用户级配额（防滥用，429）② 全局并发闸（防 CPU 雪崩，排队/超时 503）。
+    const cls = classifySr(scale, mode)
+    const gateOn = srGateEnabled()
+    const useGate = gateOn && cls.heavy
+    let quotaHeld = false
+    let acquired = false
+
+    if (useGate) {
+      const q = srUserQuota.check(userId)
+      if (!q.ok) {
+        // 重任务被用户级配额拦截 → 429
+        throw new HttpException(
+          {
+            code: q.code,
+            msg: q.msg,
+            data: { retry_after_ms: q.retryAfterMs, suggest: { scale: 2, mode: 'classical' } as const },
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        )
+      }
+      quotaHeld = true
+
+      const acq = await srGate.acquire(cls.cost, cls.lane, {
+        timeoutMs: Number(process.env.IMG_SR_QUEUE_TIMEOUT_MS || 20000),
+      })
+      if (!acq.ok) {
+        srUserQuota.releaseUser(userId)
+        // 排队超时 / 队列满 → 503 + 降级建议（引导改选 x2 轻任务）
+        const msg =
+          acq.reason === 'queue_full'
+            ? '当前高清处理排队已满，请稍后再试，或改选 x2 快速模式'
+            : '当前高清处理排队较多（等待超时），请稍后再试，或改选 x2 快速模式'
+        throw new HttpException(
+          {
+            code: 'SR_QUEUE_TIMEOUT',
+            msg,
+            data: { reason: acq.reason, waited_ms: acq.waitedMs, suggest: { scale: 2, mode: 'classical' } as const },
+          },
+          HttpStatus.SERVICE_UNAVAILABLE,
+        )
+      }
+      acquired = true
+    }
+
+    let result: Awaited<ReturnType<typeof enhanceImage>>
+    try {
+      result = await enhanceImage(srcBuffer, { scale, mode, weightsUrl })
+    } finally {
+      // 额度必须归还（异常路径也不能泄漏）
+      if (acquired) srGate.release(cls.cost, cls.lane)
+      if (quotaHeld) srUserQuota.releaseUser(userId)
+    }
+
+    // —— 处理前后 OCR 一致性自动回退（Phase 3 交付 3）——
+    // 默认仅 enhance 开启；IMG_OCR_VERIFY=off 或 dto.verify_ocr=false 可关。
+    const ocrVerifyEnabled =
+      (process.env.IMG_OCR_VERIFY || 'on').toLowerCase() !== 'off' && dto.verify_ocr !== false
+    let ocrFallback = false
+    let verifyInfo: { verified: boolean; consistency?: OcrConsistency; reason?: string } | undefined
+    let outputBuffer = result.buffer
+    if (ocrVerifyEnabled) {
+      const v = await this.verifyOcrConsistency(dto.image_url, result.buffer, forwardHeaders)
+      verifyInfo = { verified: v.verified, consistency: v.consistency, reason: v.reason }
+      if (!v.accept) {
+        // 回退原图：清晰度未提升，但保证内容可识别（绝不交付劣化图）
+        ocrFallback = true
+        outputBuffer = srcBuffer
+        console.warn(`[image] 智能高清：OCR 一致性不达标，回退原图。原因：${v.reason}`)
+      }
+    }
+
+    const ing = await this.ingestService.ingest(outputBuffer, 'image/png')
+    const url = await this.storageService.getPublicUrl(ing.key)
+    console.log(
+      `[image] 智能高清(SR) 完成：${srcMeta.width}x${srcMeta.height} → ` +
+        `${result.width}x${result.height}；模式 ${result.mode} 倍率 x${scale}` +
+        (useGate ? `；闸 lane=${cls.lane} cost=${cls.cost}` : '；轻任务(未过闸)') +
+        (ocrVerifyEnabled ? `；OCR一致性${ocrFallback ? '★回退原图' : verifyInfo?.verified ? '通过' : '跳过(校验失败)'}` : ''),
+    )
+    return {
+      url,
+      key: ing.key,
+      timeline_id:
+        dto.save === true
+          ? await this.archive(userId, ing.key, ing.sizeBytes, ing.thumbKey, ing.width, ing.height, ing.hash)
+          : '',
+      debug: {
+        method: 'super-resolution',
+        mode: result.mode,
+        scale,
+        width: ocrFallback ? srcMeta.width : result.width,
+        height: ocrFallback ? srcMeta.height : result.height,
+        ocrVerify: ocrVerifyEnabled,
+        ocrVerified: verifyInfo?.verified ?? false,
+        ocrFallback,
+        ocrScore: verifyInfo?.consistency?.score,
+        ocrReason: verifyInfo?.reason,
+        // 限流诊断：heavy 任务过闸，light 任务不过闸
+        gate: { enabled: gateOn, heavy: cls.heavy, lane: cls.lane, cost: cls.cost },
+      },
     }
   }
 
@@ -287,16 +598,33 @@ export class ImageService {
       // ② 用同比例自定义尺寸替代写死的 '2K'，避免模型为适配档位而裁掉左右内容
       size: target.size,
       watermark: false,
+      // 显式要求 URL 回传（SDK 默认也是 url，但显式声明可消除模型端的不确定性）
+      responseFormat: 'url',
     })
 
     const helper = client.getResponseHelper(response)
+    // 诊断日志：记录 generate 究竟返回了 url 还是 b64，便于部署侧快速定位「未返回图片」类问题
+    const b64Count = (response.data || []).filter((d) => d.b64_json).length
+    console.log(
+      `[image] ${cfg.desc} generate 返回：success=${helper.success} urlCount=${helper.imageUrls.length} b64Count=${b64Count}` +
+        (helper.success ? '' : ` err=${helper.errorMessages.join('；')}`),
+    )
     if (!helper.success) {
       throw new BadRequestException(helper.errorMessages.join('；') || `${cfg.desc}处理失败`)
     }
-    const resultUrl = helper.imageUrls[0]
-    if (!resultUrl) throw new BadRequestException('处理服务未返回图片')
 
-    const rawBuffer = await this.download(resultUrl)
+    // 结果可能以 URL 或 base64 返回：优先用 URL，缺失时回退到 base64，
+    // 避免「模型返回 b64 → imageUrls 为空 → 三功能全抛『未返回图片』」的系统性失效。
+    const resultUrl = helper.imageUrls[0]
+    let rawBuffer: Buffer
+    if (resultUrl) {
+      rawBuffer = await this.download(resultUrl, headers)
+    } else {
+      const b64 = response.data?.find((d) => d.b64_json)?.b64_json
+      if (!b64) throw new BadRequestException('处理服务未返回图片')
+      rawBuffer = Buffer.from(b64, 'base64')
+      console.log(`[image] ${cfg.desc}：模型以 base64 回传，已本地解码`)
+    }
     const rawMeta = await readMeta(rawBuffer)
 
     // —— ③ 结果校验：长宽比偏差超阈值直接判失败 ——
