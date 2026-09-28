@@ -522,8 +522,12 @@ export class ImageService {
       dto.sr_mode === 'espcn' || (process.env.SR_MODE || 'classical').toLowerCase() === 'espcn'
         ? 'espcn'
         : 'classical'
-    const weightsUrl = process.env.ESPCN_WEIGHTS_URL || undefined
     const scale = dto.sr_scale && [2, 3, 4].includes(dto.sr_scale) ? dto.sr_scale : 2
+    // ESPCN_WEIGHTS_URL 支持 {scale} 占位符，便于一份配置加载分倍率权重
+    // （如 ESPCN_WEIGHTS_URL=/weights/espcn_x{scale}.json → 实际请求 espcn_x2.json ...）
+    const weightsUrl = process.env.ESPCN_WEIGHTS_URL
+      ? process.env.ESPCN_WEIGHTS_URL.replace(/\{scale\}/g, String(scale))
+      : undefined
 
     // —— 服务端限流 / 排队（依据 Phase 2 压测结论）——
     // 重任务 = x3/x4（任意模式）或 espcn（任意倍率）；仅 x2-classical 为轻任务（不占闸）。

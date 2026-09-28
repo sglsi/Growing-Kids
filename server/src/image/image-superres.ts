@@ -85,7 +85,12 @@ export function conv2d(
   inputs: Float32Array[], W: number, H: number,
   ksize: number, weights: Float32Array, biases: Float32Array,
   outC: number, inC: number,
+  act: SRSAct = 'relu',
 ): Float32Array[] {
+  const fn =
+    act === 'tanh' ? Math.tanh
+    : act === 'relu' ? (x: number) => Math.max(0, x)
+    : (x: number) => x
   const out: Float32Array[] = []
   for (let o = 0; o < outC; o++) {
     const ch = new Float32Array(W * H)
@@ -108,7 +113,7 @@ export function conv2d(
         }
       }
     }
-    for (let p = 0; p < ch.length; p++) ch[p] = Math.max(0, ch[p] + biases[o]) // ReLU
+    for (let p = 0; p < ch.length; p++) ch[p] = fn(ch[p] + biases[o])
     out.push(ch)
   }
   return out
@@ -132,6 +137,11 @@ export function pixelShuffle(
   return out
 }
 
+/** 隐藏层激活。ESPCN 原论文（model.py）conv1/conv2 用 tanh。 */
+export type SRSAct = 'tanh' | 'relu' | 'none'
+/** 输出激活。ESPCN 原论文用 sigmoid 把 [0,1] 映射回 [0,1]。 */
+export type SRSOutAct = 'sigmoid' | 'relu' | 'none'
+
 export interface SRWeights {
   scale: number
   // 卷积配置
@@ -141,18 +151,29 @@ export interface SRWeights {
   w1: Float32Array; b1: Float32Array
   w2: Float32Array; b2: Float32Array
   w3: Float32Array; b3: Float32Array
+  /**
+   * 激活函数。ESPCN 原论文用 tanh（conv1/conv2）+ sigmoid（输出）。
+   * 占位解析权重（buildAnalyticESPCN）用 'none'（线性），以保证无学习权重时仍是可用上采样；
+   * 真实权重经 ESPCN_WEIGHTS_URL 载入后，引擎按论文的 tanh/sigmoid 运行。
+   */
+  act?: SRSAct
+  outAct?: SRSOutAct
 }
 
 /**
- * 解析 ESPCN-x2 权重（smoke-test 用，无需下载）。
- * 设计：conv1/conv2 近似把亮度透传到 4 个特征图（带轻微 5x5 平滑），
- * conv3 的 4 个输出通道对应 2x2 子像素位置，做「最近邻上采样 + 轻度非锐化」，
- * 让引擎跑通且产出可用的 x2 放大。生产环境应用 loadESPCNWeights 替换为真·学习权重。
+ * 解析 ESPCN 权重（smoke-test 用，无需下载）。
+ *
+ * 与真实 ESPCN 保持同一结构（仅 Y 通道 + 子像素重排），但：
+ *   - 激活用 'none'（线性）：无学习权重时退化为「双线性子像素上采样 + 轻度非锐化」，
+ *     仍是可用上采样，避免 tanh/sigmoid 在无权重时把图像洗白；
+ *   - 真实权重经 ESPCN_WEIGHTS_URL 载入（loadESPCNWeights）后，引擎按论文的
+ *     tanh/sigmoid 激活在 [0,1] 归一化空间运行（见 superResolveESPCN）。
+ * 真实 ESPCN 架构为 conv1 1→64(5×5)、conv2 64→32(3×3)、conv3 32→scale²(3×3)，
+ * 此处 c1=c2=4 仅为占位，载入真实权重时由 w1..w3 张量尺寸决定通道数。
  */
 export function buildAnalyticESPCN(scale = 2): SRWeights {
   const c1 = 4, c2 = 4
-  // conv1：近似「恒等透传」亮度（5x5 仅中心=1），避免解析权重过度平滑丢失笔画高频；
-  // 真实 ESPCN 此处应是学习到的特征提取核，生产环境由 loadESPCNWeights 替换。
+  // conv1：近似「恒等透传」亮度（5x5 仅中心=1）
   const box5 = new Float32Array(25); box5[12] = 1
   const w1 = new Float32Array(c1 * 1 * 25)
   const b1 = new Float32Array(c1).fill(0)
@@ -167,14 +188,13 @@ export function buildAnalyticESPCN(scale = 2): SRWeights {
   }
 
   // conv3：scale² 个输出，每个对应一个子像素位置 (ox,oy)∈{0..scale-1}²。
-  // 仅用 ci=0（亮度通道，conv1/conv2 已近似透传）做双线性子像素采样 + 轻度非锐化，
-  // 其余 ci 权重为 0 —— 避免把 4 个相同特征通道相加导致 4× 过曝。
+  // 仅用 ci=0（亮度通道）做双线性子像素采样 + 轻度非锐化，其余 ci 权重为 0。
   const w3 = new Float32Array(scale * scale * c2 * 9)
   const b3 = new Float32Array(scale * scale).fill(0)
   // 3x3 扁平索引：4=(x,y) 5=(x+1,y) 7=(x,y+1) 8=(x+1,y+1)
   for (let p = 0; p < scale * scale; p++) {
     const ox = p % scale, oy = Math.floor(p / scale)
-    const fx = ox / scale, fy = oy / scale // 子像素在 2x 块内的分数偏移
+    const fx = ox / scale, fy = oy / scale // 子像素在 scale× 块内的分数偏移
     const wx0 = 1 - fx, wx1 = fx, wy0 = 1 - fy, wy1 = fy
     const k = new Float32Array(9).fill(0)
     k[4] = wx0 * wy0; k[5] = wx1 * wy0; k[7] = wx0 * wy1; k[8] = wx1 * wy1 // 双线性
@@ -183,7 +203,7 @@ export function buildAnalyticESPCN(scale = 2): SRWeights {
     k[1] -= boost * 0.25; k[3] -= boost * 0.25; k[5] -= boost * 0.25; k[7] -= boost * 0.25
     w3.set(k, (p * c2 + 0) * 9) // 仅 ci=0
   }
-  return { scale, k1: 5, c1, k2: 3, c2, k3: 3, w1, b1, w2, b2, w3, b3 }
+  return { scale, k1: 5, c1, k2: 3, c2, k3: 3, w1, b1, w2, b2, w3, b3, act: 'none', outAct: 'none' }
 }
 
 /** 从 JSON 加载真·ESPCN 权重（生产环境，虚拟主机有网络时）。 */
@@ -199,16 +219,36 @@ export async function loadESPCNWeights(url: string): Promise<SRWeights> {
   }
 }
 
-/** ESPCN 前向：亮度 → 升采样亮度（Float32, 0..255）。 */
+/**
+ * ESPCN 前向：亮度(0..255) → 升采样亮度(0..255)。
+ *
+ * 对齐 ESPCN 原论文（model.py / train.py）的数值约定：
+ *   - 输入 Y 先归一化到 [0,1]（对应 torchvision.transforms.ToTensor 除以 255）；
+ *   - conv1/conv2 走 tanh（论文激活），conv3 为线性；
+ *   - pixel_shuffle 后过 sigmoid 把 [0,1] 映射回 [0,1]，再 ×255。
+ * 真实学习权重（ESPCN_WEIGHTS_URL 载入）即按此约定训练，可直接套用；
+ * 占位解析权重（act/outAct='none'）则退化为可用上采样。
+ */
 export function superResolveESPCN(
   luma: Float32Array, W: number, H: number, w: SRWeights,
 ): Float32Array {
-  const s1 = conv2d([luma], W, H, w.k1, w.w1, w.b1, w.c1, 1)
-  const s2 = conv2d(s1, W, H, w.k2, w.w2, w.b2, w.c2, w.c1)
-  const s3 = conv2d(s2, W, H, w.k3, w.w3, w.b3, w.scale * w.scale, w.c2)
+  const n = W * H
+  const lin = new Float32Array(n)
+  for (let i = 0; i < n; i++) lin[i] = luma[i] / 255
+  const act = w.act ?? 'tanh'
+  const s1 = conv2d([lin], W, H, w.k1, w.w1, w.b1, w.c1, 1, act)
+  const s2 = conv2d(s1, W, H, w.k2, w.w2, w.b2, w.c2, w.c1, act)
+  const s3 = conv2d(s2, W, H, w.k3, w.w3, w.b3, w.scale * w.scale, w.c2, 'none')
   const up = pixelShuffle(s3, W, H, w.scale)
-  for (let i = 0; i < up.length; i++) up[i] = Math.min(255, Math.max(0, up[i]))
-  return up
+  const outAct = w.outAct ?? 'sigmoid'
+  const out = new Float32Array(up.length)
+  for (let i = 0; i < up.length; i++) {
+    let v = up[i]
+    if (outAct === 'sigmoid') v = 1 / (1 + Math.exp(-v))
+    else if (outAct === 'relu') v = Math.max(0, v)
+    out[i] = Math.min(255, Math.max(0, v * 255))
+  }
+  return out
 }
 
 /* ====================== 经典路径（默认，零权重） ====================== */
@@ -305,8 +345,10 @@ async function classicalUpscale(
 
 /**
  * 智能高清主入口（进程内 CPU 推理，无外部模型服务）。
- * 升采样亮度走 SR 引擎/经典管线，色度走 Lanczos（文字场景色度细节无关紧要），
- * 重组回 RGB 后编码。
+ *
+ * 管线对齐 ESPCN 参考实现（test_image.py）：转 YCbCr → 仅对亮度 Y 做超分 →
+ * 色度 Cb/Cr 双三次上采样 → 重组回 RGB。这是 ESPCN「人眼对亮度最敏感、色度可廉价上采样」
+ * 设计精髓，也是其高效又保质的根本原因；本项目在 Node 端用同一思路落地。
  */
 export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<SRResult> {
   const scale = opts.scale ?? 2
@@ -314,11 +356,17 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const W = info.width, H = info.height, ch = info.channels
 
-  // 提取亮度
-  const luma = new Float32Array(W * H)
+  // —— 转 YCbCr（对齐 test_image.py 的 img.convert('YCbCr')）——
+  // 仅对亮度 Y 做超分；Cb/Cr 仅双三次上采样后合并。
+  const Y = new Float32Array(W * H)
+  const Cb = new Float32Array(W * H)
+  const Cr = new Float32Array(W * H)
   for (let i = 0; i < W * H; i++) {
     const r = data[i * ch], g = data[i * ch + 1], b = data[i * ch + 2]
-    luma[i] = rgbToLuma(r, g, b)
+    const y = 0.299 * r + 0.587 * g + 0.114 * b
+    Y[i] = y
+    Cb[i] = (b - y) / 1.772 + 128
+    Cr[i] = (r - y) / 1.402 + 128
   }
 
   let lumaUp: Float32Array
@@ -326,33 +374,35 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
     let weights = opts.weights
     if (!weights && opts.weightsUrl) weights = await loadESPCNWeights(opts.weightsUrl)
     if (!weights) weights = buildAnalyticESPCN(scale)
-    lumaUp = superResolveESPCN(luma, W, H, weights)
+    lumaUp = superResolveESPCN(Y, W, H, weights)
   } else {
-    lumaUp = await classicalUpscale(luma, W, H, scale, opts)
+    lumaUp = await classicalUpscale(Y, W, H, scale, opts)
   }
 
-  // 色度：整图 Lanczos 升采样到目标尺寸
+  // —— 色度：低分辨率 Cb/Cr 经双三次上采样到目标尺寸（对齐 Image.BICUBIC）——
   const tW = W * scale, tH = H * scale
-  const up = await sharp(buf).resize(tW, tH, { kernel: 'lanczos3' }).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
-  const out = Buffer.alloc(tW * tH * up.info.channels)
-  const och = up.info.channels
+  const cbBytes = Uint8Array.from(Cb, (v) => Math.min(255, Math.max(0, v)))
+  const crBytes = Uint8Array.from(Cr, (v) => Math.min(255, Math.max(0, v)))
+  const cbUp = await sharp(cbBytes, { raw: { width: W, height: H, channels: 1 } })
+    .resize(tW, tH, { kernel: 'cubic' }).raw().toBuffer()
+  const crUp = await sharp(crBytes, { raw: { width: W, height: H, channels: 1 } })
+    .resize(tW, tH, { kernel: 'cubic' }).raw().toBuffer()
+
+  // —— 重组回 RGB（标准 BT.601 反变换，与正变换互逆）——
+  const out = Buffer.alloc(tW * tH * 4)
   for (let i = 0; i < tW * tH; i++) {
-    const r = up.data[i * och], g = up.data[i * och + 1], b = up.data[i * och + 2]
-    // 当前像素 YCbCr（标准 BT.601，Cb/Cr 去归一化以便精确反算）
-    const Y0 = rgbToLuma(r, g, b)
-    const CbC = (b - Y0) / 1.772
-    const CrC = (r - Y0) / 1.402
-    // 用 SR 亮度替换 Y，重组回 RGB（反变换精确，rgbToLuma(输出) ≡ Yn）
-    const Yn = lumaUp[i]
-    let R = Yn + 1.402 * CrC
-    let G = Yn - 0.344136 * CbC - 0.714136 * CrC
-    let B = Yn + 1.772 * CbC
-    out[i * och] = Math.min(255, Math.max(0, R))
-    out[i * och + 1] = Math.min(255, Math.max(0, G))
-    out[i * och + 2] = Math.min(255, Math.max(0, B))
-    if (och === 4) out[i * och + 3] = up.data[i * och + 3]
+    const y = lumaUp[i]
+    const cb = cbUp[i] - 128
+    const cr = crUp[i] - 128
+    let R = y + 1.402 * cr
+    let G = y - 0.344136 * cb - 0.714136 * cr
+    let B = y + 1.772 * cb
+    out[i * 4] = Math.min(255, Math.max(0, R))
+    out[i * 4 + 1] = Math.min(255, Math.max(0, G))
+    out[i * 4 + 2] = Math.min(255, Math.max(0, B))
+    out[i * 4 + 3] = 255
   }
 
-  const buffer = await sharp(out, { raw: { width: tW, height: tH, channels: och } }).png().toBuffer()
+  const buffer = await sharp(out, { raw: { width: tW, height: tH, channels: 4 } }).png().toBuffer()
   return { buffer, width: tW, height: tH, mode }
 }
