@@ -8,7 +8,7 @@
  *   判断 → confirmed=false ⇒ 走 exportEdited() ⇒ 按 crop（=内缩的 DEFAULT_CROP）再裁一刀 ⇒ 四周被裁。
  *
  * 修复：
- *   - handleSave 与 handleConfirm 统一用 `pendingCrop = showFrame && !confirmed`，
+ *   - handleSave 与 handleConfirm 统一用 `pendingCrop = cornerMode==='rect' && showFrame && !confirmed`，
  *     只有「主动裁剪且未确认」才按框裁；否则直接用 currentSrc（成品）；
  *   - 旋转 / AI 后置 confirmed=true（结果即成品），语义自洽。
  *
@@ -41,11 +41,12 @@ console.log('[0] 前提事实：DEFAULT_CROP 是「内缩框」（用它裁会�
   console.log(`    → 用它裁会掉掉左右各约 ${Math.round(DEFAULT_CROP.x * 100)}%，宽度损失 ${lostPct}%`)
 }
 
-console.log('\n[1] 复刻保存判断：pendingCrop = showFrame && !confirmed')
+console.log("\n[1] 复刻保存判断：pendingCrop = cornerMode==='rect' && showFrame && !confirmed")
 {
   // 复刻组件里的两个派生量
   const showFrameOf = (framing, aiBusy) => framing && !aiBusy
-  const pendingCropOf = (framing, aiBusy, confirmed) => showFrameOf(framing, aiBusy) && !confirmed
+  const pendingCropOf = (framing, aiBusy, confirmed, cornerMode = 'rect') =>
+    cornerMode === 'rect' && showFrameOf(framing, aiBusy) && !confirmed
 
   // 场景：旋转之后的状态（修复后：confirmed=true, framing=false）
   {
@@ -75,6 +76,13 @@ console.log('\n[1] 复刻保存判断：pendingCrop = showFrame && !confirmed')
     ok('AI 处理中（aiBusy=true）→ showFrame=false → 不裁',
       pendingCropOf(true, true, false) === false)
   }
+  // 场景：四角拉框模式下保存（quad 的 crop 是无关内缩矩形，绝不能按它裁）
+  {
+    ok('四角模式（cornerMode=quad, framing=true, confirmed=false）→ 不按矩形 crop 误裁',
+      pendingCropOf(true, false, false, 'quad') === false)
+    ok('矩形模式同状态（cornerMode=rect）→ 正常按框裁（对照）',
+      pendingCropOf(true, false, false, 'rect') === true)
+  }
 }
 
 console.log('\n[2] 反例：旧 handleSave 判断 `confirmed ? currentSrc : exportEdited()`（会裁）')
@@ -96,8 +104,8 @@ console.log('\n[3] 源码一致性（修复落地检查）')
 {
   // handleSave 必须用统一判断
   const saveBlock = src.slice(src.indexOf('const handleSave = async'), src.indexOf('const handleConfirm = async'))
-  ok('handleSave 使用 pendingCrop = showFrame && !confirmed',
-    /const pendingCrop = showFrame && !confirmed/.test(saveBlock))
+  ok('handleSave 使用 pendingCrop = cornerMode === \'rect\' && showFrame && !confirmed（quad 模式不误裁）',
+    /const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed/.test(saveBlock))
   ok('handleSave 在非 pendingCrop 时直接用 currentSrc（本地化），不再无条件 exportEdited',
     /pendingCrop \? await exportEdited\(\) : await toLocalIfRemote\(currentSrc\)/.test(saveBlock))
   ok('handleSave 不再出现「confirmed ? currentSrc : await exportEdited()」旧写法',
@@ -113,7 +121,7 @@ console.log('\n[3] 源码一致性（修复落地检查）')
   ok('AI 成功后置 confirmed=true', /setConfirmed\(true\)/.test(aiTail))
 
   // 两处判断必须一致（防止再次只改一处）
-  const count = (src.match(/const pendingCrop = showFrame && !confirmed/g) || []).length
+  const count = (src.match(/const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed/g) || []).length
   ok('handleSave 与 handleConfirm 共用同一判断（出现 2 处）', count === 2, `count=${count}`)
 }
 

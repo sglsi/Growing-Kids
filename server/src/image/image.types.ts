@@ -49,10 +49,25 @@ export interface ProcessImageDto {
   dewarp_curved?: boolean
 }
 
+/**
+ * 给用户看的「处理结果提示」。
+ *
+ * ⭐ 存在的理由（五轮「点了不能用」反馈的根因）：
+ *   三个功能都存在「安全地原样返回原图」的分支（未检出手写 / 未命中纸张四角 /
+ *   OCR 一致性不达标回退）。这些分支在后端是**正确且必要**的（宁可不改也不能改坏），
+ *   但此前前端拿到 200 + url 就当成功静默替换 → 用户看到的是「点了没反应」。
+ *   因此凡是「没改动」的返回，都必须带 notice，由前端弹窗明确告知原因与下一步。
+ */
+export interface ImageNotice {
+  level: 'info' | 'warn'
+  title: string
+  message: string
+}
+
 export interface ImageProcessResult {
   url: string
   key: string
   timeline_id: string
   /** erase_v2 会带回处理诊断信息（覆盖比例 / mask 来源 / 一致性等） */
-  debug?: Record<string, unknown>
+  debug?: Record<string, unknown> & { notice?: ImageNotice }
 }

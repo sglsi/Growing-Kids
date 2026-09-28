@@ -35,6 +35,107 @@ export interface HandwritingMask {
   coverage: number
   /** mask 来源，便于排查 */
   source: 'vlm' | 'threshold' | 'manual'
+  /** 检测过程诊断（覆盖率为何是 0 / 为何被护栏拦下），便于线上排查与用户提示 */
+  debug?: Record<string, unknown>
+  /**
+   * ⭐ **紧种子 mask**（可选，长度同为 width*height，值 0/255）。
+   *
+   * 表示「**确认属于手写笔画**的核心区」——即未经膨胀/羽化的原始检出结果。
+   *
+   * ── 为什么必须把它和 `data` 分开（实测暴露的严重缺陷）───────────────────
+   * `data` 为覆盖抗锯齿边缘做了膨胀+羽化，必然**比真实笔画大一圈**。
+   * 若修复时把 `data` 内像素也当作"参考源"，就会发生
+   * **「拿墨迹补墨迹」**：黑/灰笔迹色（luma≤170 且 chroma≤42）与印刷体墨色
+   * 完全一致，被判为"可信结构"，于是邻近未填掉的笔迹被当成参考色填回原位。
+   *
+   * 实测（dynamic-tests/probe-erase-diag.ts）：
+   *   黑笔：mask 内"结构"像素 31.52% → 残笔率 **40.44%**
+   *   铅笔：29.64% → **37.05%**；蓝笔（chroma≈142 天然被排除）：0.01% → 0.05%
+   *
+   * 而所有经典 inpainting（Criminisi 的 exemplar-based、Telea 的 FMM、
+   * Navier-Stokes）都遵循同一条铁律：**填充源只能来自已知区域（mask 之外）**，
+   * 绝不能从待修复区取。把两者分开后即可同时满足：
+   *   · 修复范围 = `data`（膨胀羽化后，保证盖住抗锯齿边缘）
+   *   · 源排除区 = `seed`（只排除真正的笔画，保留被膨胀框进来但未被压住的印刷线）
+   * 这正是业界「两阶段 mask」的标准用法。
+   */
+  seed?: Buffer
+}
+
+/**
+ * ⭐ 把 mask 对齐到指定尺寸，并保证**返回的一定是单通道**数据。
+ *
+ * ⚠️ 这是一个修复既有隐患的公共函数（实测踩到的坑）：
+ *    以 `raw:{channels:1}` 把灰度 mask 喂给 sharp 后，libvips 会按 **sRGB 灰阶**处理，
+ *    `.resize()` / `.blur()` / `.median()` 之后 `.raw()` 出来的**一律是 3 通道**
+ *    （r=g=b，长度 = w*h*3）。老代码直接 `maskBuf[i]` 按单通道索引，于是只读到
+ *    前 1/3 的数据 —— 表现为「mask 纵向错位 / 覆盖率莫名归零」，
+ *    且只在「mask 尺寸与图不一致」这条分支上触发，平时掩盖得很好。
+ *
+ * 统一走本函数：先按 stride 取通道 0，再返回长度严格等于 width*height 的 Buffer。
+ */
+export async function alignMask(
+  mask: HandwritingMask,
+  width: number,
+  height: number,
+): Promise<Buffer> {
+  if (mask.width === width && mask.height === height && mask.data.length === width * height) {
+    return mask.data
+  }
+  const raw = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
+    .resize(width, height, { fit: 'fill' })
+    .raw()
+    .toBuffer()
+  const ch = Math.max(1, Math.round(raw.length / (width * height)))
+  if (ch === 1) return raw
+  const out = Buffer.alloc(width * height, 0)
+  for (let i = 0; i < width * height; i++) out[i] = raw[i * ch]
+  return out
+}
+
+/**
+ * 方形结构元膨胀（max-filter）。
+ *
+ * ⚠️ 必须**可分离**实现：先横向一趟、再纵向一趟，等价于 (2r+1)×(2r+1) 方形膨胀，
+ * 但复杂度从 O(r²) 降到 O(r)。实测朴素版在 1200×900 上 r=17 时要 1.3B 次操作
+ * （跑 2 分钟不出结果），可分离版约 37M 次（~0.2s）。
+ *
+ * 用途：① 真形态学膨胀（捕获抗锯齿边缘，防"鬼影"残笔）；
+ *       ② 墨迹内测地扩散（每步 r=1）。
+ */
+function maxFilterU8(src: Buffer | Uint8Array, w: number, h: number, r: number): Buffer {
+  if (r <= 0) return Buffer.from(src)
+  const s = src instanceof Uint8Array ? src : new Uint8Array(src)
+  // 横向
+  const tmp = new Uint8Array(w * h)
+  for (let y = 0; y < h; y++) {
+    const base = y * w
+    for (let x = 0; x < w; x++) {
+      let m = 0
+      const x0 = x - r < 0 ? 0 : x - r
+      const x1 = x + r >= w ? w - 1 : x + r
+      for (let nx = x0; nx <= x1; nx++) {
+        const v = s[base + nx]
+        if (v > m) m = v
+      }
+      tmp[base + x] = m
+    }
+  }
+  // 纵向
+  const out = Buffer.alloc(w * h)
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let m = 0
+      const y0 = y - r < 0 ? 0 : y - r
+      const y1 = y + r >= h ? h - 1 : y + r
+      for (let ny = y0; ny <= y1; ny++) {
+        const v = tmp[ny * w + x]
+        if (v > m) m = v
+      }
+      out[y * w + x] = m
+    }
+  }
+  return out
 }
 
 /** 矩形区域（VLM 返回的 bounding box） */
@@ -130,7 +231,460 @@ export async function maskFromColorThreshold(
     data: mask,
     coverage: covered / (width * height),
     source: 'threshold',
+    // 色域法检出的是"有色偏像素"，本就与印刷墨色不同（chroma≥22），
+    // 不会被误当成结构源；这里把检出结果原样作为紧种子，供下游源排除使用。
+    seed: Buffer.from(mask),
   }
+}
+
+// ============================================================
+// ①-C 深色笔迹检测（铅笔 / 黑色中性笔）
+// ============================================================
+
+/**
+ * ⭐ 深色笔迹 mask（色域阈值的互补路径）。
+ *
+ * ── 为什么必须有这一层（实测暴露的根本缺陷）───────────────────────────────
+ * `maskFromColorThreshold` 的判据是「通道极差 chroma ≥ 22」，只对**蓝/红等彩色笔**
+ * 有效。而中国学生写作业/考试用的绝大多数是**黑色中性笔或铅笔**——chroma ≈ 0，
+ * 与印刷体同为近黑，色域法**完全检测不到** → coverage ≈ 0 → `eraseV2` 走
+ * 「未检测到手写，原样返回原图」→ 用户看到「去手点了没反应」。
+ *
+ * ── 判据：行级分类（文档分析领域的标准范式：文本行检测 → 行级分类）─────────
+ * 不用颜色，也不用"逐笔画纵向游程"，而是**先分行，再按行高分类**：
+ *   ① 行投影 → 分割出所有文本行；
+ *   ② 取行高的低分位数作为「印刷体字高」基准（印刷行通常占多数）；
+ *   ③ 行高 ≥ 基准 × 1.5 的行判为**手写行**，行内墨迹整体纳入 mask。
+ *
+ * ⭐ 为什么必须是"行级"而不是"逐笔画"（实测数据，见 dynamic-tests/probe-mask-tune.ts）：
+ *   逐笔画判据「纵向游程 > 字高」**只认竖直笔画**，手写的横笔纵向跨度天然很小，
+ *   实测召回天花板只有 **66%**（黑笔）/**46%**（铅笔）——擦完仍留一堆残笔。
+ *   行级判据把整行一次覆盖，**不受笔画方向影响**，实测召回 **100%**。
+ *
+ * ── 关键前提：字高估计必须可靠 ────────────────────────────────────────────
+ * ⚠️⚠️ 本函数第一版在这里踩了大坑（真实根因，务必保留这段注释）：
+ *   旧做法用「行投影文本带的中位数」，而 bandTh = maxRow×0.25；
+ *   **手写行笔画稀疏、行投影峰值低于该阈值 → 手写行被切成 3~10px 的碎片带**，
+ *   把中位数从真实的 19 拉到 **6**。于是 tallTh=9，几乎全部墨迹都"超字高"
+ *   → 种子泛滥 → 护栏必然触发 → 功能等价于不存在（又一次 L18 型缺陷）。
+ *   现改为「低阈值行分割 + 合并小间隙 + 取行高分位数」，实测字高稳定为 21。
+ *   （另一种候选方案「列向最长连续游程」也被实测否决：汉字非实心，
+ *     一列穿过「填」字会被横笔间隙切断，最长**连续**游程只有 6，而字高是 19。）
+ *
+ * ── 保守护栏（宁可漏，不可错擦）───────────────────────────────────────────
+ *   · **基线众数护栏**（最关键）：按列投影把行切成字符，看有多少字符的
+ *     **底边落在同一条基线（±1px）上**。占比高 = 印刷体，低 = 手写。
+ *
+ *     ⭐⭐ 为什么必须是它 —— 两个前任判据都被实测否决（保留事故档案）：
+ *       ① **行高**：大号标题与手写行都高 → **本质上不可分**（已知边界）。
+ *       ② **墨迹密度** = ink像素/(行高×横向间距)：实测手写 0.276~0.334、
+ *          标题 0.295~0.346 → **严重重叠**；更要命的是**拍照模糊会让密度整体
+ *          上升 20~50%**（笔画变粗：分子涨、分母几乎不变），于是绝对阈值把真实
+ *          手写整片误杀 —— 黑笔 blur=0.6 时 7 个手写行里 5 行被拦
+ *          （覆盖率 6.71% → **1.91%**），blur=1.0 时 **7 行全拦、覆盖率 0%**，
+ *          功能直接消失。这正是"测试图上正常、用户拍的照片上没反应"的典型成因。
+ *
+ *     基线众数抓住了一个更本质的差异：**印刷排版强制基线对齐，手写没有基线约束**。
+ *     实测（dynamic-tests/probe-feature-sep.ts）在全部模糊梯度上完美可分，
+ *     且**对模糊完全不敏感**：
+ *         手写（黑笔/铅笔 × blur 0/0.6/1.0）：**0.500**（恒定不变）
+ *         中文大标题 fs=40/46/52             ：0.750
+ *         英文标题（含 g/y/p 下伸字母）      ：0.813~0.969
+ *         中英混排                           ：0.650~0.684
+ *     阈值取两者中点 **0.575**，两侧各留约 0.075 边际。
+ *
+ *     ⚠️ 为什么不用「底边 IQR」（同一思路的朴素版）：中英混排时中文方块底边与
+ *        英文基线不在同一 y，形成**两个集群**，IQR 立刻变大（实测 0.146~0.167），
+ *        与手写的 0.158 **直接重叠**。众数占比对多集群稳健，IQR 不稳健。
+ *     ⚠️ 字符段数 < `minChars` 时判据不适用 → 按"手写"放行（保召回，
+ *        且短行即便误擦危害也小）。
+ *   · 候选墨迹总量 > 全部墨迹的 `maxInkShare` → 判为"分类失效"，整条路径作废。
+ *     ⚠️ 阈值从 0.45 放宽到 0.65：实测正常作答场景 share 可达 0.47，旧阈值会误杀正例。
+ *
+ * ── 诚实局限（无模型条件下的硬边界，不是 bug）─────────────────────────────
+ *   ① 黑色笔写得**与印刷体同字号**（填空题写在 `______` 上、大小一致）→ 行高相同，
+ *      行级判据失效，几何与颜色上都无法区分；
+ *   ② **手写压在印刷文字上**（不是写在空白处）→ 整行被印刷行主导，行高判据失效。
+ *      且即使强行检出，擦除也会连带毁掉被压住的印刷内容，**不擦才是正确行为**。
+ *   以上情况一律返回空 mask，并由 image.service 给出明确 notice 引导用户
+ *   （改用蓝/红笔重拍，或用「编辑裁剪」限定范围），绝不静默失败。
+ */
+/** 文本行（y0 闭、y1 开） */
+export interface TextRow { y0: number; y1: number }
+
+/**
+ * ② 行投影 + 行分割（低阈值 + 合并小间隙）
+ * ③ 印刷字高估计 = 行高的低分位数
+ *
+ * ⭐ 抽成公共函数的原因：`maskFromDarkInk` 之外的诊断/调优脚本也要用它。
+ *    若各写一份，参数稍不一致就会产生"生产环境正常、脚本复现不了"的鬼故事。
+ *
+ * ⚠️ 行分割阈值必须低（maxRow×0.05）：用 ×0.25 会把稀疏的手写行切成 3~10px 碎片带，
+ *    进而把字高中位数从 19 拉到 6 → 整条链路失效（见 maskFromDarkInk 函数头注释）。
+ *
+ * @param ink Otsu 二值化后的墨迹图（1 = 墨迹）
+ */
+export function segmentTextRows(
+  ink: Uint8Array,
+  w: number,
+  h: number,
+  opts: { gapMerge?: number; glyphQuantile?: number; rowProfileRatio?: number } = {},
+): { rows: TextRow[]; glyphH: number; rowProfile: Int32Array } {
+  const gapMerge = opts.gapMerge ?? 6
+  const glyphQuantile = opts.glyphQuantile ?? 0.3
+
+  const rowProfile = new Int32Array(h)
+  for (let y = 0; y < h; y++) {
+    let c = 0
+    for (let x = 0; x < w; x++) if (ink[y * w + x]) c++
+    rowProfile[y] = c
+  }
+  let maxRow = 0
+  for (let y = 0; y < h; y++) if (rowProfile[y] > maxRow) maxRow = rowProfile[y]
+  const rowTh = Math.max(1, Math.round(maxRow * (opts.rowProfileRatio ?? 0.05)))
+  const segs: TextRow[] = []
+  {
+    let y = 0
+    while (y < h) {
+      if (rowProfile[y] < rowTh) { y++; continue }
+      const y0 = y
+      while (y < h && rowProfile[y] >= rowTh) y++
+      segs.push({ y0, y1: y })
+    }
+  }
+  // 合并间隙很小的相邻段（同一行文字内部的空隙不应把行切开）
+  const rows: TextRow[] = []
+  for (const s of segs) {
+    const last = rows[rows.length - 1]
+    if (last && s.y0 - last.y1 <= gapMerge) last.y1 = s.y1
+    else rows.push({ y0: s.y0, y1: s.y1 })
+  }
+
+  // 印刷字高 = 行高的低分位数（印刷行通常占多数，低分位稳定落在其字高上）
+  const heights = rows.map((r) => r.y1 - r.y0).filter((v) => v >= 3).sort((a, b) => a - b)
+  let glyphH = heights.length ? heights[Math.floor(heights.length * glyphQuantile)] || 8 : 8
+  glyphH = Math.max(6, glyphH)
+
+  return { rows, glyphH, rowProfile }
+}
+
+/** 一行的墨迹密度 = 墨迹像素数 / (行高 × 横向跨度) */
+export function rowInkDensity(
+  ink: Uint8Array,
+  w: number,
+  r: TextRow,
+): { density: number; n: number; xmin: number; xmax: number } {
+  const rh = r.y1 - r.y0
+  let xmin = w, xmax = -1, n = 0
+  for (let y = r.y0; y < r.y1; y++)
+    for (let x = 0; x < w; x++)
+      if (ink[y * w + x]) { n++; if (x < xmin) xmin = x; if (x > xmax) xmax = x }
+  if (xmax < 0) return { density: 0, n: 0, xmin: 0, xmax: -1 }
+  return { density: n / (rh * Math.max(1, xmax - xmin)), n, xmin, xmax }
+}
+
+export async function maskFromDarkInk(
+  buf: Buffer,
+  opts: {
+    /** 行高 ≥ 印刷字高×该值 → 判为手写行 */
+    rowRatio?: number
+    /**
+     * 墨迹密度上限（**仅作异常兜底**）：候选行密度 = ink像素/(行高×横向间距)。
+     * ⚠️ 默认已从 0.30 放宽到 **0.55**，因为该判据对拍照模糊极其敏感，
+     *    0.30 会在 blur≥0.6 时把真实手写整片误杀（详见函数头事故档案）。
+     *    真正的"大标题 vs 手写"区分已交给 `baseModeMin`。
+     */
+    densityMax?: number
+    /**
+     * ⭐ 基线众数下限：字符底边落在同一基线（±1px）上的比例 ≥ 该值 → 判为印刷体。
+     * 实测手写恒为 0.500、印刷标题 0.650~0.969，默认取中点 **0.575**。
+     */
+    baseModeMin?: number
+    /** 基线判据所需的最少字符段数（不足则判据不适用，按手写放行） */
+    minChars?: number
+    /** 印刷字高的分位数（越小越偏印刷行） */
+    glyphQuantile?: number
+    /** 行分割时合并相邻行的最大间隙（像素） */
+    gapMerge?: number
+    maxInkShare?: number
+    dilate?: number
+    /** 羽化半径（像素）：产生软边缘，避免硬边接缝 */
+    feather?: number
+    /** 墨迹内测地扩散步数（字高倍数） */
+    grow?: number
+    /** 紧种子的额外膨胀半径（仅用于盖住抗锯齿边），默认 2 */
+    seedDilate?: number
+    workMaxSide?: number
+  } = {},
+): Promise<HandwritingMask> {
+  const rowRatio = opts.rowRatio ?? 1.5
+  const densityMax = opts.densityMax ?? 0.55
+  const baseModeMin = opts.baseModeMin ?? 0.575
+  const minChars = Math.max(3, opts.minChars ?? 4)
+  const glyphQuantile = opts.glyphQuantile ?? 0.3
+  const gapMerge = opts.gapMerge ?? 6
+  const maxInkShare = opts.maxInkShare ?? 0.65
+  const workMaxSide = opts.workMaxSide ?? 1200
+
+  const meta = await sharp(buf).metadata()
+  const W0 = meta.width || 0
+  const H0 = meta.height || 0
+  let EMPTY_REASON = 'not_run'
+  const empty = (dbg?: Record<string, unknown>): HandwritingMask => ({
+    width: W0, height: H0, data: Buffer.alloc(W0 * H0, 0), coverage: 0, source: 'threshold', debug: dbg,
+  })
+  if (!W0 || !H0) { EMPTY_REASON = 'bad_size'; return empty({ reason: EMPTY_REASON }) }
+
+  const scale = Math.min(1, workMaxSide / Math.max(W0, H0))
+  const w = Math.max(1, Math.round(W0 * scale))
+  const h = Math.max(1, Math.round(H0 * scale))
+  const gray = await sharp(buf).resize(w, h, { fit: 'fill' }).grayscale().raw().toBuffer()
+
+  // ① Otsu 二值化
+  const hist = new Int32Array(256)
+  for (let i = 0; i < gray.length; i++) hist[gray[i]]++
+  let sum = 0
+  for (let i = 0; i < 256; i++) sum += i * hist[i]
+  let sumB = 0, wB = 0, maxVar = -1, thr = 127
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]
+    if (wB === 0) continue
+    const wF = gray.length - wB
+    if (wF === 0) break
+    sumB += t * hist[t]
+    const mB = sumB / wB
+    const mF = (sum - sumB) / wF
+    const between = wB * wF * (mB - mF) * (mB - mF)
+    if (between > maxVar) { maxVar = between; thr = t }
+  }
+
+  const ink = new Uint8Array(w * h)
+  let inkTotal = 0
+  for (let i = 0; i < gray.length; i++) if (gray[i] < thr) { ink[i] = 1; inkTotal++ }
+  if (inkTotal < 50) { EMPTY_REASON = 'no_ink'; return empty({ reason: EMPTY_REASON, inkTotal }) }
+
+  // ②+③ 行分割与字高估计（抽成公共函数：诊断脚本与调优脚本必须复用同一份实现，
+  //     否则"两套行分割"会各自漂移，故障极难复现——本轮已因此吃过一次亏）
+  const { rows, glyphH } = segmentTextRows(ink, w, h, { gapMerge, glyphQuantile })
+  if (rows.length === 0) {
+    EMPTY_REASON = 'no_rows'
+    return empty({ reason: EMPTY_REASON, inkTotal })
+  }
+
+  // ④ 行级分类：行高 ≥ 字高×rowRatio 且 墨迹密度 ≤ densityMax → 判为手写行
+  //    密度护栏是防「大号印刷标题」误擦的关键，见函数头注释。
+  const seed = new Uint8Array(w * h)
+  let seedCount = 0
+  let rowTall = 0
+  let rowDensityBlocked = 0
+  let rowBaselineBlocked = 0
+  const rowLimit = glyphH * rowRatio
+
+  /**
+   * ⭐ 基线众数占比：把行按列投影切成字符，统计"底边落在同一条基线（±1px）上"的
+   *   字符比例。印刷排版强制基线对齐 → 高；手写无基线约束 → 低。
+   *   详细的可分性实测数据见函数头「基线众数护栏」一节。
+   *
+   * @returns 0~1。**0 表示样本不足、判据不适用**（调用方应按"手写"放行以保召回）。
+   */
+  const baselineModeShare = (r: TextRow, xmin: number, xmax: number): number => {
+    const bots: number[] = []
+    let x = xmin
+    while (x <= xmax && x < w) {
+      // 找下一个含墨迹的列，向两侧扩展出一个字符块
+      let c = 0
+      for (let y = r.y0; y < r.y1; y++) if (ink[y * w + x]) c++
+      if (c === 0) { x++; continue }
+      const x0 = x
+      while (x <= xmax && x < w) {
+        let cc = 0
+        for (let y = r.y0; y < r.y1; y++) if (ink[y * w + x]) cc++
+        if (cc === 0) break
+        x++
+      }
+      // 该字符块的底边（最下方的墨迹行）
+      let bot = -1
+      for (let y = r.y1 - 1; y >= r.y0; y--) {
+        let hit = false
+        for (let xx = x0; xx < x; xx++) if (ink[y * w + xx]) { hit = true; break }
+        if (hit) { bot = y; break }
+      }
+      if (bot >= 0) bots.push(bot)
+    }
+    if (bots.length < minChars) return 0
+    let best = 0
+    for (const b of bots) {
+      let cnt = 0
+      for (const o of bots) if (Math.abs(o - b) <= 1) cnt++
+      if (cnt > best) best = cnt
+    }
+    return best / bots.length
+  }
+
+  const tallDensities: number[] = []
+  const tallBaselines: number[] = []
+
+  for (const r of rows) {
+    const rh = r.y1 - r.y0
+    if (rh < rowLimit) continue
+    rowTall++
+    const { density, xmin, xmax } = rowInkDensity(ink, w, r)
+    tallDensities.push(density)
+
+    // 主判据：基线众数占比 ≥ baseModeMin → 印刷体（基线对齐 = 排版特征）
+    const bm = baselineModeShare(r, xmin, xmax)
+    tallBaselines.push(bm)
+    if (bm >= baseModeMin) { rowBaselineBlocked++; continue }
+    // 兜底：密度异常高（如整块涂黑、非文字图块）才拦，阈值刻意放得很宽，
+    //       绝不让它在正常模糊范围内误伤手写 —— 见函数头对密度判据的否决记录。
+    if (density > densityMax) { rowDensityBlocked++; continue }
+    for (let y = r.y0; y < r.y1; y++)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        if (!ink[i]) continue
+        seed[i] = 255
+        seedCount++
+      }
+  }
+  if (seedCount === 0) {
+    EMPTY_REASON = rowTall === 0 ? 'no_tall_row' : 'baseline_guard'
+    return empty({
+      reason: EMPTY_REASON, inkTotal, glyphH, rowLimit, rows: rows.length, rowTall,
+      rowBaselineBlocked, rowDensityBlocked,
+      tallDensities: tallDensities.map((d) => +d.toFixed(3)),
+      tallBaselines: tallBaselines.map((d) => +d.toFixed(3)),
+    })
+  }
+
+  // ⑤ 在**墨迹连通域内**做测地扩散：每步半径 1 膨胀后与 ink 取交。
+  //    手写笔画彼此连通 → 整字被覆盖；印刷体与手写若不相连 → 传播不过去
+  //    （比方形膨胀安全：方形膨胀会跨过空白把邻近印刷体一起吞掉）。
+  const steps = Math.max(1, Math.round(glyphH * (opts.grow ?? 0.5)))
+  const grown = new Uint8Array(seed)
+  for (let k = 0; k < steps; k++) {
+    const nx = maxFilterU8(grown, w, h, 1)
+    for (let i = 0; i < w * h; i++) {
+      if (!ink[i]) { grown[i] = 0; continue }
+      if (nx[i] > grown[i]) grown[i] = nx[i]
+    }
+  }
+  let candidateInk = 0
+  const candMask = Buffer.alloc(w * h, 0)
+  for (let i = 0; i < w * h; i++) {
+    if (!ink[i]) continue
+    if (grown[i] < 64) continue
+    candMask[i] = grown[i]
+    candidateInk++
+  }
+
+  // ⑥ 保守护栏：候选占比过高 → 分类失效，整条路径作废（绝不冒险擦整页）
+  if (candidateInk <= 0 || candidateInk / inkTotal > maxInkShare) {
+    EMPTY_REASON = candidateInk <= 0 ? 'no_candidate' : 'share_guard'
+    return empty({ reason: EMPTY_REASON, inkTotal, glyphH, rowLimit, seedCount, candidateInk, share: candidateInk / inkTotal })
+  }
+
+  // ⑦ 真形态学膨胀：捕获抗锯齿的半透明边缘像素。
+  //    领域共识（WPI_inpainting 的 MaxPool 膨胀 / LaMa 流程）：不膨胀会残留"鬼影"轮廓。
+  //    ⚠️ 旧实现是「blur + 阈值 24」，对细笔画净效果是**腐蚀**，与领域做法相反。
+  const dilate = opts.dilate ?? Math.max(2, Math.round(Math.min(w, h) * 0.004))
+  const dilated = maxFilterU8(candMask, w, h, dilate)
+
+  // ⑧ 羽化：把硬边 mask 变成**软 mask**（灰度渐变）。
+  //    领域共识：硬二值 mask 是可见接缝的第一大成因（ComfyUI MaskBlur/MaskSmooth、
+  //    guided filter 做 mask 精修）。百度网盘手写擦除冠军方案的 mask 也是
+  //    「差异 >20 置 1，<20 归一化」的连续值，而非硬 0/255。
+  //    取 max(膨胀结果, 模糊结果) → 只向外柔化，**绝不缩小覆盖范围**。
+  const feather = opts.feather ?? Math.max(2, Math.round(Math.min(w, h) * 0.003))
+  const blurredRaw = await sharp(dilated, { raw: { width: w, height: h, channels: 1 } })
+    .blur(Math.max(1, feather * 0.6))
+    .raw()
+    .toBuffer()
+  // ⚠️ 单通道 raw 经 blur 后实际是 3 通道（L19），按 stride 取通道 0
+  const bch = Math.max(1, Math.round(blurredRaw.length / (w * h)))
+  const soft = Buffer.alloc(w * h, 0)
+  for (let i = 0; i < w * h; i++) {
+    const b = blurredRaw[i * bch]
+    soft[i] = b > dilated[i] ? b : dilated[i]
+  }
+
+  // ⑨ 还原到原图尺寸
+  const fullRaw = await sharp(soft, { raw: { width: w, height: h, channels: 1 } })
+    .resize(W0, H0, { fit: 'fill', kernel: 'nearest' })
+    .raw()
+    .toBuffer()
+  const fch = Math.max(1, Math.round(fullRaw.length / (W0 * H0)))
+  const full = Buffer.alloc(W0 * H0, 0)
+  let covered = 0
+  // ⭐ 保留 0~255 的**连续值**（软 mask），不再二值化为 0/255：
+  //    下游 blendWithMask 直接把 mask 值写进 alpha 通道，天然支持软边融合。
+  for (let i = 0; i < W0 * H0; i++) {
+    const v = fullRaw[i * fch]
+    full[i] = v
+    if (v > 127) covered++
+  }
+
+  // ⑨-b ⭐ 紧种子：只膨胀 `seedDilate` 像素（仅够盖住笔画自身的抗锯齿边），
+  //      远小于上面的 dilate。用途见 HandwritingMask.seed 的注释——
+  //      它是修复阶段的**源排除区**，必须"紧"，否则会把该保留的印刷结构也排除掉。
+  const seedDilate = opts.seedDilate ?? 2
+  const seedTight = maxFilterU8(candMask, w, h, seedDilate)
+  const seedRaw = await sharp(seedTight, { raw: { width: w, height: h, channels: 1 } })
+    .resize(W0, H0, { fit: 'fill', kernel: 'nearest' })
+    .raw()
+    .toBuffer()
+  const sch = Math.max(1, Math.round(seedRaw.length / (W0 * H0)))
+  const seedFull = Buffer.alloc(W0 * H0, 0)
+  for (let i = 0; i < W0 * H0; i++) seedFull[i] = seedRaw[i * sch] > 127 ? 255 : 0
+
+  return {
+    width: W0,
+    height: H0,
+    data: full,
+    coverage: covered / (W0 * H0),
+    source: 'threshold',
+    seed: seedFull,
+    debug: {
+      inkTotal, glyphH, rowLimit, rows: rows.length, rowTall,
+      rowBaselineBlocked, rowDensityBlocked,
+      tallDensities: tallDensities.map((d) => +d.toFixed(3)),
+      tallBaselines: tallBaselines.map((d) => +d.toFixed(3)),
+      seedCount, candidateInk, share: candidateInk / inkTotal, dilate, feather,
+    },
+  }
+}
+
+/**
+ * 两张 mask 取并集（要求同尺寸；不同尺寸时按 nearest 拉伸对齐）。
+ *
+ * ⭐ 用 `max` 而不是「>127 ? 255 : 0」：后者会把**软 mask 丢弃**——
+ *    深色笔迹路径现在产出的是 0~255 连续值的软 mask（羽化后边缘是渐变），
+ *    二值化并集会把羽化效果抹掉，退回硬边接缝。
+ */
+export async function unionMasks(a: HandwritingMask, b: HandwritingMask): Promise<HandwritingMask> {
+  const ad = await alignMask(a, a.width, a.height)
+  const bd = await alignMask(b, a.width, a.height)
+  const out = Buffer.alloc(a.width * a.height, 0)
+  let covered = 0
+  const n = Math.min(out.length, Math.min(ad.length, bd.length))
+  for (let i = 0; i < n; i++) {
+    const v = ad[i] > bd[i] ? ad[i] : bd[i]
+    out[i] = v
+    if (v > 127) covered++
+  }
+
+  // 紧种子同样取并集（max）。任一路缺失就退化为"另一路的种子"；
+  // 两路都缺失则为 undefined，下游会用 mask 自身兜底（安全方向：排除得更多）。
+  let seed: Buffer | undefined
+  if (a.seed || b.seed) {
+    seed = Buffer.alloc(a.width * a.height, 0)
+    for (let i = 0; i < n; i++) {
+      const av = a.seed ? a.seed[i] ?? 0 : 0
+      const bv = b.seed ? b.seed[i] ?? 0 : 0
+      seed[i] = av > bv ? av : bv
+    }
+  }
+
+  return { width: a.width, height: a.height, data: out, coverage: covered / (a.width * a.height), source: a.source, seed }
 }
 
 // ============================================================
@@ -228,13 +782,7 @@ export async function classifyMaskRegions(
   const touchThreshold = opts.touchThreshold ?? 0.08
 
   // mask 尺寸对齐
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   const cols = Math.ceil(width / block)
   const rows = Math.ceil(height / block)
@@ -329,24 +877,53 @@ function textRegionMask(
  *     则退化为底色填充。
  *
  * ⚠️ 这是**确定性算法**，不生成任何"新内容"，只把邻域已有的结构延拓进 mask。
+ *
+ * ── ⭐ 填充源的铁律（实测踩坑后重写，务必保留）─────────────────────────────
+ * 上一版注释写着「刻意**不排除** mask 内像素 —— 穿透 mask 能就地拿到被盖住的线」。
+ * 这在**黑笔/铅笔**场景下是灾难：黑墨色（luma≤170、chroma≤42）与印刷体墨色
+ * 完全同分布，于是 `isStructure` 把**还没被填掉的手写笔迹**当成"可信印刷结构"，
+ * 直接把墨色填回原处 —— 实测残笔率黑笔 40.44% / 铅笔 37.05%，而蓝笔仅 0.05%
+ * （chroma≈142 天然被 chroma≤42 挡掉）。这是"越擦越黑"的直接来源。
+ *
+ * 所有经典 inpainting（Criminisi exemplar-based、Telea FMM、Navier-Stokes）
+ * 都遵循同一条铁律：**填充源只能来自已知区域，绝不能取自待修复区**。
+ *
+ * 但"完全排除 mask 内像素"又会丢掉"把手写截断的印刷线接回来"的能力
+ * （膨胀后的 mask 可能把整条线都框进去）。解决办法是**双层 mask**：
+ *   · 修复范围 = `mask.data`（膨胀+羽化，比笔画大一圈）
+ *   · 源排除区 = `mask.seed`（紧种子，只含真正的笔画本体）
+ * 于是线上"被膨胀框进来但未被手写压住"的部分**仍在可选源内**，
+ * 而手写笔画本体被排除 —— 两头都要。
+ *
+ * 若连紧种子都没有（历史调用方未传），退化为"排除整个 mask"：
+ * 宁可接不回线（留底色），也绝不能拿墨迹补墨迹。
  */
 async function structuralExtend(
   src: Buffer,
   mask: HandwritingMask,
   regionMask: Buffer | null,
-  opts: { searchRadius?: number; bg: BackgroundTone },
+  opts: {
+    searchRadius?: number
+    bg: BackgroundTone
+    criterion?: PrintPixelCriterion
+    maxExtend?: number
+    lineRatio?: number
+    minLineSamples?: number
+  },
 ): Promise<Buffer> {
   const meta = await sharp(src).metadata()
   const width = meta.width!, height = meta.height!
   const { data, info } = await sharp(src).removeAlpha().raw().toBuffer({ resolveWithObject: true })
   const channels = info.channels
   const searchRadius = Math.max(4, opts.searchRadius ?? Math.round(Math.min(width, height) * 0.012))
+  /** 远场延拓的最大步幅：默认整幅对角线，保证能跨越任意宽度的遮挡 */
+  const maxExtend = Math.max(4, opts.maxExtend ?? Math.max(width, height))
+  /** 判定"该行/列存在贯穿线"所需的结构密度（mask 外像素中 structure 的占比） */
+  const lineRatio = opts.lineRatio ?? 0.5
+  /** 判定贯穿线所需的最小 mask 外像素数（太少则比值不可信） */
+  const minLineSamples = Math.max(16, opts.minLineSamples ?? Math.round(Math.min(width, height) * 0.08))
 
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' }).raw().toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   // 输出初值 = 底色（找不到结构时就用它）
   const out = Buffer.alloc(width * height * channels)
@@ -356,16 +933,27 @@ async function structuralExtend(
     out[i * channels + 2] = opts.bg.b
   }
 
-  // "可信结构像素"：足够深 **且近灰** 的像素（印刷体墨色）。
-  // ⚠️ 刻意**不排除 mask 内像素** —— 当手写压在印刷线上时，mask（含 dilate）很可能
-  //    把整条线都框进去；此时"穿透 mask 找最近结构"反而能就地拿到被盖住的线，
-  //    从而把横线延拓接回。蓝笔 chroma≈142 仍被 chroma<=42 排除，不会污染结果。
+  // 源排除区：紧种子（有则用，没有就用整个 mask 兜底 —— 安全方向宁可多排除）
+  const exclude = mask.seed && mask.seed.length >= width * height ? mask.seed : maskBuf
+
+  // "可信结构像素"：近灰且足够深的像素（印刷体墨色）
+  // ⭐ 且**不在源排除区内** —— 绝不能拿待修复的手写墨迹当参考（见函数头铁律注释）。
+  //
+  // ⭐⭐ 判据必须与 `classifyMaskRegions` **完全一致**（实测暴露的第二个缺陷）：
+  //   上一版这里硬编码 `luma <= 170`，而分类用的 `DEFAULT_PRINT_CRITERION` 是 190。
+  //   结果出现自相矛盾 —— 印刷横线 #bbb 的 luma≈187：
+  //     分类阶段：187 ≤ 190 → 判为"压字区"，需要结构延拓 ✅
+  //     延拓阶段：187 > 170 → 一个"可信结构"都找不到 → 全线退化成底色 ❌
+  //   「同一概念（什么是印刷体）在系统里只能有一个定义」，否则两个模块各自漂移，
+  //   故障表现是"功能静默降级"，极难排查。现统一走同一个 criterion。
+  const criterion = opts.criterion ?? DEFAULT_PRINT_CRITERION
   const isStructure = (i: number) => {
+    if (exclude[i] > 127) return false
     const p = i * channels
     const r = data[p], g = data[p + 1], b = data[p + 2]
     const luma = (r * 299 + g * 587 + b * 114) / 1000
     const chroma = Math.max(r, g, b) - Math.min(r, g, b)
-    return luma <= 170 && chroma <= 42
+    return chroma <= criterion.chromaMax && luma <= criterion.lumaMax
   }
 
   // 8 个方向
@@ -374,6 +962,33 @@ async function structuralExtend(
     [-1, 0], [1, 0],
     [-1, 1], [0, 1], [1, 1],
   ]
+
+  // ⭐ 预计算「哪些行/列是贯穿线」：统计每行（列）在 **mask 之外** 的像素里
+  //   structure 的占比，超过 `lineRatio` 即认为该行（列）存在一条贯穿的线。
+  //   这是 O(w*h) 一次性扫描，之后每像素 O(1) 查表，比逐像素远距离搜索快得多。
+  //   ⚠️ 必须只看 mask 外的像素：mask 内的结构正是待重建的部分，不能拿来当证据
+  //      （否则"手写压在印刷体上"会自证为该行是线）。
+  const rowOut = new Int32Array(height)
+  const rowHit = new Int32Array(height)
+  const colOut = new Int32Array(width)
+  const colHit = new Int32Array(width)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const j = y * width + x
+      if (maskBuf[j] > 127) continue
+      rowOut[y]++; colOut[x]++
+      if (isStructure(j)) { rowHit[y]++; colHit[x]++ }
+    }
+  }
+  // 样本太少时比值不稳定，要求至少 minLineSamples 个 mask 外像素
+  const rowIsLine = new Uint8Array(height)
+  const colIsLine = new Uint8Array(width)
+  for (let y = 0; y < height; y++) {
+    if (rowOut[y] >= minLineSamples && rowHit[y] / rowOut[y] >= lineRatio) rowIsLine[y] = 1
+  }
+  for (let x = 0; x < width; x++) {
+    if (colOut[x] >= minLineSamples && colHit[x] / colOut[x] >= lineRatio) colIsLine[x] = 1
+  }
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -387,30 +1002,86 @@ async function structuralExtend(
       // 只对"压字区"做结构延拓；其余（空白区）留底色，交给外层 fillWithBackground
       if (regionMask && regionMask[i] <= 127) continue
 
-      // 沿 8 方向找最近的可信结构像素
-      let hitR = 0, hitG = 0, hitB = 0, hits = 0
+      // ── 近场：沿 8 方向找最近的可信结构像素（半径 searchRadius）────────────
+      //    适用：文字笔画、短线等"就在旁边"的结构。按距离加权，近的权重大。
+      let wsum = 0, accR = 0, accG = 0, accB = 0
       for (const [dx, dy] of DIRS) {
         for (let step = 1; step <= searchRadius; step++) {
           const nx = x + dx * step, ny = y + dy * step
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) break
           const j = ny * width + nx
-          if (isStructure(j)) {
-            const pj = j * channels
-            hitR += data[pj]; hitG += data[pj + 1]; hitB += data[pj + 2]; hits++
-            break
-          }
+          if (!isStructure(j)) continue
+          const w = 1 / (1 + step)
+          const pj = j * channels
+          accR += data[pj] * w; accG += data[pj + 1] * w; accB += data[pj + 2] * w
+          wsum += w
+          break
         }
       }
-      if (hits > 0) {
+      if (wsum > 0) {
         const p = i * channels
-        out[p] = Math.round(hitR / hits)
-        out[p + 1] = Math.round(hitG / hits)
-        out[p + 2] = Math.round(hitB / hits)
+        out[p] = Math.round(accR / wsum)
+        out[p + 1] = Math.round(accG / wsum)
+        out[p + 2] = Math.round(accB / wsum)
+        continue
+      }
+
+      // ── 线延拓：接回**贯穿型线条**（横线 / 竖线 / 表格线）───────────────
+      //    为什么需要这一段（实测暴露的第三个问题）：
+      //    只做近场时，"手写盖住横线中段 300px"的接回率只有 **0.71%** ——
+      //    搜索半径只有 ~11px，够得着的只有线段两端各 11px，中间全留白。
+      //
+      //    ⭐ 判据必须用「**同一行/列的连续密度**」，而不是"两端都能看到"：
+      //    前一版用「相反两方向都命中且颜色接近」，结果在真实版面上**严重误伤** ——
+      //    手写区的上下方都是印刷文字，两端颜色都很深、差值轻易 <24，
+      //    于是整块手写区被填成灰色补丁，接缝均值从 0.38 暴涨到 **21.73**。
+      //    根因：文字不是线，但"两端都看得到"这个判据区分不了它们。
+      //
+      //    线的本质是**在同一行（列）上连续**：
+      //      · 横线所在行 → 该行在 mask 之外的像素里，structure 占比接近 1；
+      //      · 手写所在的空白行 → 占比接近 0。
+      //    用这个密度判据即可干净地区分，且是 O(1) 查表，不必远距离搜索。
+      if (rowIsLine[y]) {
+        const hit = axialAvg(x, y, -1, 0, x, y, 1, 0)
+        if (hit) { const p = i * channels; out[p] = hit[0]; out[p + 1] = hit[1]; out[p + 2] = hit[2] }
+      } else if (colIsLine[x]) {
+        const hit = axialAvg(x, y, 0, -1, x, y, 0, 1)
+        if (hit) { const p = i * channels; out[p] = hit[0]; out[p + 1] = hit[1]; out[p + 2] = hit[2] }
       }
     }
   }
 
   return sharp(out, { raw: { width, height, channels: 3 } }).png().toBuffer()
+
+  /**
+   * 沿一对相反的主轴方向各找第一个可信结构像素，按距离加权平均。
+   * 找不到（单侧或双侧）就返回 null —— 此时老实留底色。
+   */
+  function axialAvg(
+    x0: number, y0: number, dx1: number, dy1: number,
+    x1: number, y1: number, dx2: number, dy2: number,
+  ): [number, number, number] | null {
+    const a = scan(x0, y0, dx1, dy1)
+    const b = scan(x1, y1, dx2, dy2)
+    if (!a && !b) return null
+    let r = 0, g = 0, bl = 0, w = 0
+    if (a) { const wa = 1 / (1 + a.d); r += a.r * wa; g += a.g * wa; bl += a.b * wa; w += wa }
+    if (b) { const wb = 1 / (1 + b.d); r += b.r * wb; g += b.g * wb; bl += b.b * wb; w += wb }
+    return [Math.round(r / w), Math.round(g / w), Math.round(bl / w)]
+  }
+
+  /** 沿单个主轴方向找到第一个可信结构像素（返回其颜色与距离） */
+  function scan(x0: number, y0: number, dx: number, dy: number) {
+    for (let step = 1; step <= maxExtend; step++) {
+      const nx = x0 + dx * step, ny = y0 + dy * step
+      if (nx < 0 || nx >= width || ny < 0 || ny >= height) return null
+      const j = ny * width + nx
+      if (!isStructure(j)) continue
+      const pj = j * channels
+      return { r: data[pj], g: data[pj + 1], b: data[pj + 2], d: step }
+    }
+    return null
+  }
 }
 
 // ============================================================
@@ -460,13 +1131,7 @@ export async function estimateBackground(
   const { data, info } = await sharp(src).removeAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height, channels } = info
 
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   const rs: number[] = []
   const gs: number[] = []
@@ -506,13 +1171,7 @@ async function fillWithBackground(src: Buffer, mask: HandwritingMask): Promise<B
   const width = meta.width!, height = meta.height!
   const bg = await estimateBackground(src, mask)
 
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   // 用确定性伪随机（种子固定）生成颗粒，保证结果可复现
   let seed = 0x9e3779b9
@@ -553,13 +1212,7 @@ async function diffuseFill(src: Buffer, mask: HandwritingMask): Promise<Buffer> 
   const { data, info } = await sharp(src).removeAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height, channels } = info
 
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   const out = Buffer.from(data)
   // known[i] = 1 表示该像素颜色可信
@@ -655,12 +1308,12 @@ export async function inpaint(
 export async function inpaintAdaptive(
   src: Buffer,
   mask: HandwritingMask,
-  opts: { block?: number; ring?: number; printThreshold?: number } = {},
+  opts: { block?: number; ring?: number; printThreshold?: number; criterion?: PrintPixelCriterion } = {},
 ): Promise<Buffer> {
   // ① 底色
   const bg = await estimateBackground(src, mask)
 
-  // ② 区域分类
+  // ② 区域分类（与 ④ 的延拓共用同一套"什么是印刷体"判据，见 structuralExtend 注释）
   const meta = await sharp(src).metadata()
   const width = meta.width!, height = meta.height!
   const { regions, blocks, } = await classifyMaskRegions(src, mask, opts)
@@ -679,16 +1332,12 @@ export async function inpaintAdaptive(
 
   // ④ 压字区用结构延拓覆盖（regionMask 限定只处理压字区）
   const rmask = textRegionMask(blocks, cols, rows, width, height, block)
-  const extended = await structuralExtend(src, mask, rmask, { bg })
+  const extended = await structuralExtend(src, mask, rmask, { bg, criterion: opts.criterion })
 
   // 在 base 上，把"压字区且属于 mask"的像素替换为 extended 的结果
   const baseRaw = await sharp(base).removeAlpha().raw().toBuffer()
   const extRaw = await sharp(extended).removeAlpha().raw().toBuffer()
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' }).raw().toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
   const out = Buffer.from(baseRaw)
   for (let i = 0; i < width * height; i++) {
     if (maskBuf[i] > 127 && rmask[i] > 127) {
@@ -736,13 +1385,7 @@ export async function blendWithMask(
   if (!width || !height) throw new Error('原图尺寸无效')
 
   // mask 尺寸需与图一致（不同则缩放）
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   // 修复图统一尺寸 + 取 RGBA
   const inpRGBA = await sharp(inpainted)
@@ -788,13 +1431,7 @@ export async function unmodifiedRegionSimilarity(
 
   let same = 0
   let sampled = 0
-  let maskBuf = mask.data
-  if (mask.width !== width || mask.height !== height) {
-    maskBuf = await sharp(mask.data, { raw: { width: mask.width, height: mask.height, channels: 1 } })
-      .resize(width, height, { fit: 'fill' })
-      .raw()
-      .toBuffer()
-  }
+  const maskBuf = await alignMask(mask, width, height)
 
   for (let i = 0, p = 0; i < maskBuf.length; i++, p += channels) {
     if (maskBuf[i] > 127) continue // 手写区域跳过（那里本来就该变）

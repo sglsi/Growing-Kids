@@ -77,5 +77,6 @@ export interface CreateTimelineDto {
 }
 
 export type UpdateTimelineDto = Partial<
-  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered'> & { content: QuestionContent }
+  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered' | 'file_key' | 'thumb_key'> &
+  { content: QuestionContent }
 >

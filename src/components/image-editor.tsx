@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2, Check } from 'lucide-react-taro'
-import { processImage, uploadImage, ApiError, type ImageAction } from '@/services/api'
+import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
   visible: boolean
@@ -832,7 +832,24 @@ export default function ImageEditor({
       //   用刚 reset 的 DEFAULT_CROP 再裁一刀 → 四周被裁（与旋转同一坑，见 L7-补充）。
       setConfirmed(true)
       setFraming(false)   // 干净预览（不再显示裁剪框）
-      Taro.showToast({ title: `${label}完成`, icon: 'success' })
+
+      // ⭐「没改动」必须说出来。后端凡是**安全地原样返回原图**的分支都会带 debug.notice
+      //   （未检出手写 / 未识别到歪斜 / 高清未通过内容校验已回退）。
+      //   此前这里只弹一句「完成」的 toast，图片看起来毫无变化 → 用户只能反馈
+      //   「点了还是不能用」，且连续五轮拿不到任何原因。现在改为弹窗说清原因与下一步。
+      const notice = (data as any)?.debug?.notice as
+        | { level: 'info' | 'warn'; title: string; message: string }
+        | undefined
+      if (notice?.title) {
+        Taro.showModal({
+          title: notice.title,
+          content: notice.message,
+          confirmText: '知道了',
+          showCancel: false,
+        })
+      } else {
+        Taro.showToast({ title: `${label}完成`, icon: 'success' })
+      }
     } catch (e) {
       console.error('AI 图片处理失败', e)
       // 限流类错误（429/503）走专用降级分支；degradedRetry 时不再二次降级（防循环）
@@ -842,18 +859,51 @@ export default function ImageEditor({
         Taro.hideLoading()
         return
       }
-      const msg = e instanceof Error ? e.message : `${label}失败，请重试`
-      Taro.showToast({ title: msg, icon: 'none' })
       setCurrentSrc(lastGoodSrc)
       try {
         const info = await Taro.getImageInfo({ src: lastGoodSrc })
         resetBox(info.width, info.height)
       } catch { /* ignore */ }
+      // ★ 失败详情必须弹窗展示（而非一闪而过的 toast）：
+      //   之前五轮反馈「点了不能用」却拿不到任何错误细节，就是因为 toast 1.5s 即消失。
+      //   弹窗需要用户手动关闭 → 用户能看清/截图真实原因，反馈才能闭环。
+      await showAiErrorDetail(label, e)
     }
     // 说明：降级重试通过 void handleAi(...) 异步派发，本函数随即返回；
     // 收尾（清 busy / 收 loading）统一放在 return 之前，避免与重试的 loading 交叉。
     setAiBusy(false)
     Taro.hideLoading()
+  }
+
+  /**
+   * AI 处理失败的详情弹窗（用户手动关闭，信息不丢失）。
+   * 先查线上后端能力自检（GET /api/image/capabilities）：
+   *  - 不支持 = 线上是旧版后端 → 明确告知「服务未更新」，给出可操作指引；
+   *  - 支持 = 新版后端处理失败 → 展示完整错误（HTTP 状态码 + 后端消息/网络错误），便于反馈闭环。
+   */
+  const showAiErrorDetail = async (label: string, e: unknown) => {
+    let detail = ''
+    if (e instanceof ApiError) {
+      detail = `服务返回错误 ${e.status}${(e as any)?.code ? `（${(e as any).code}）` : ''}：${e.message || '无'}`
+    } else if (e instanceof Error) {
+      detail = e.message || '未知错误'
+    } else {
+      detail = String(e || '未知错误')
+    }
+    // 能力自检：把「线上服务未更新」与「处理失败」区分开
+    let capHint = ''
+    try {
+      const cap = await fetchImageCapabilities()
+      if (!cap.supported) {
+        capHint = `\n\n检测到线上服务未包含「${label}」所需的处理模块（服务版本过旧）。请联系开发者更新线上后端（部署 push-ready/server 并保持 IMG_PIPELINE_MODE 为 hybrid）。`
+      }
+    } catch { /* 自检失败不影响错误展示 */ }
+    Taro.showModal({
+      title: `${label}失败`,
+      content: `${detail}${capHint}`,
+      confirmText: '知道了',
+      showCancel: false,
+    })
   }
 
   const handleSave = async () => {
@@ -863,10 +913,12 @@ export default function ImageEditor({
     try {
       // ★ 与 handleConfirm 共用同一套判断（此前 handleSave 缺此判断，导致「旋转/AI 后保存」
       //   又按 crop 默认框裁了一刀 → 四周被裁。这正是「旋转预览正常、保存后才裁」的根因）：
-      //   仅当「处于主动裁剪模式且尚未确认」时，才按当前框选裁剪；
+      //   仅当「处于**矩形**主动裁剪模式且尚未确认」时，才按当前框选裁剪；
+      //   ⚠️ cornerMode==='rect' 条件不可少：四角模式（quad）下 crop 仍是无关的内缩矩形，
+      //     若不加此条件，「四角拉框失败后点保存」会误按矩形内缩框再裁一刀（用户已实测踩坑）。
       //   其余情况（旋转/AI 处理的结果、已确认裁剪、原图直存）currentSrc 已是最终成品，**直接使用**，
       //   绝不再用 crop（尤其不要用被 reset 的 DEFAULT_CROP）二次裁剪。
-      const pendingCrop = showFrame && !confirmed
+      const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed
       const imgSrc = pendingCrop ? await exportEdited() : await toLocalIfRemote(currentSrc)
       if (!imgSrc) throw new Error('图片处理失败，请重试')
       const up = await uploadImage(imgSrc, { purpose: 'save' })
@@ -887,11 +939,11 @@ export default function ImageEditor({
     if (busy || aiBusy) return
     setBusy(true)
     try {
-      // 仅在「主动裁剪且尚未提交」时按当前框选裁剪；
+      // 仅在「**矩形**主动裁剪且尚未提交」时按当前框选裁剪（quad 模式下 crop 无意义，见 handleSave 注释）；
       // 其余情况（已提交裁剪 / AI 处理 / 旋转 / 原图直接确认）currentSrc 已是最终结果，
       // 直接以「本地化后的 currentSrc」提交——既避免 AI/旋转后被默认裁剪框再裁一刀，
       // 也避免 currentSrc 因下载失败残留远程 URL 时走错上传分支（导致静默不入库）。
-      const pendingCrop = showFrame && !confirmed
+      const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed
       const out = pendingCrop ? await exportEdited() : await toLocalIfRemote(currentSrc)
       if (!out) throw new Error('图片处理失败，请重试')
       onConfirm(out)

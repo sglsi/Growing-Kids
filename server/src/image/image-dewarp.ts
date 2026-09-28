@@ -60,8 +60,24 @@ function gaussianSolve(A: number[][], b: number[]): number[] {
 }
 
 /**
- * 双线性重采样：把 src(raw, w×h×ch) 按单应 H 反向映射到 outW×outH。
- * H 为 src->dst，反向采样时复用同一组系数（把目标坐标代入即得源坐标）。
+ * 双线性重采样：把 src(raw, w×h×ch) 按单应 H 映射到 outW×outH。
+ *
+ * ⚠️【事故档案 · 单应矩阵方向用反】───────────────────────────────────────────
+ * 旧注释写着「H 为 src->dst，反向采样时复用同一组系数（把目标坐标代入即得源坐标）」。
+ * 这句话是错的，而且后果严重：**反向采样需要的是 dst→src，即 H⁻¹，不是 H。**
+ *
+ * 实测（源图四角 [30,15]……，目标 890×1180）：
+ *   输出像素 (0,0) 本该取源图的 [30,15]，旧实现取到的是 [-32.1,-15.9] ——
+ *   整幅图被平移 + 施加了**反向**的透视，纸根本没被压平，只是被换了个错法弄歪。
+ *
+ * 它解释了长期无法定位的多个现象：
+ *   ① 用户反馈「四角拉框确认后，图片未按四角裁剪」—— 不是流程没走，是 warp 本身就错；
+ *   ② probe-corners-acc 里「喂真四角进去，输出行倾角 σ 仍有 2.23°」——真四角也救不了；
+ *   ③ 自动调正「命中反而比不命中更糟」（σ 0.06° → 3.3°）—— 错得更彻底。
+ *
+ * 修复：调用方改为传入 **dst→src** 的 H（solveHomography(dst, ordered)）。
+ * 判定依据（勿凭直觉改回）：`H(输出角) === 源图对应角`。
+ *
  * 边界外像素填 background（默认不透明白）。
  */
 function warpRaw(
@@ -118,7 +134,9 @@ export async function dewarpBuffer(buf: Buffer, cornersRaw: Corner[]): Promise<D
   const ordered = orderCorners(cornersRaw)
   const [W, H] = targetSize(ordered)
   const dst: Corner[] = [[0, 0], [W, 0], [W, H], [0, H]]
-  const homo = solveHomography(ordered, dst)
+  // 反向采样：对输出像素 (X,Y) 求它在源图中的位置 → 需要 **dst→src** 的单应。
+  // 传 solveHomography(dst, ordered) 而非 (ordered, dst)，见 warpRaw 顶部事故档案。
+  const homo = solveHomography(dst, ordered)
   const out = warpRaw(data, info.width, info.height, info.channels, homo, W, H)
   const buffer = await sharp(out, { raw: { width: W, height: H, channels: info.channels } })
     .png()
@@ -154,6 +172,24 @@ export interface StraightenOptions {
    * 故此项为「未来神经模型」预留；为 true 时先试曲面、失败即回落平面 homography，不劣化。
    */
   curved?: boolean
+  /**
+   * 是否在「四角检测未命中」后继续尝试**文本行倾斜估计**（默认 true）。
+   *
+   * ⭐ 这是让「自动调正」在真实场景真正可用的关键：四角检测要求画面里有纸张外框，
+   *   而手机拍试卷绝大多数是**纸面占满画面**（没有外框），Canny 只抓到文字碎边 →
+   *   恒不命中 → 旧行为直接原样返回，用户看到「点了没反应」。
+   *   文本行法只要有字就能算倾斜角，与有没有外框无关。
+   */
+  deskew?: boolean
+  /**
+   * 是否在 deskew 之后继续检测**透视残留**并校正（默认 true）。
+   *
+   * deskew 是旋转模型，只问「整体歪了多少度」；而真实拍照常常整体不歪
+   * （μ≈0°）却**各行互不平行**（σ>1°）—— 那是透视，旋转原理上修不了。
+   * 本项在纸面占满画面（无纸边可检测）时是唯一能修透视的路径。
+   * 见 image-perspective.ts 顶部说明。
+   */
+  perspective?: boolean
 }
 
 export interface StraightenOutput {
@@ -164,7 +200,13 @@ export interface StraightenOutput {
   /** true 表示未做变换，需要前端提供 manual_corners */
   needManual: boolean
   /** 实际使用的路径（便于 debug / 回归） */
-  method?: 'manual' | 'auto' | 'curved' | 'none'
+  method?: 'manual' | 'auto' | 'curved' | 'skew' | 'perspective' | 'none'
+  /** skew 路径专用：实际施加的旋转角（度）与置信度 */
+  rotateDeg?: number
+  confidence?: number
+  /** perspective 路径专用：校正前后的行不平行度（度） */
+  parallelBefore?: number
+  parallelAfter?: number
 }
 
 /**
@@ -204,5 +246,73 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
       }
     }
   }
+
+  // ⭐ 倾斜兜底（默认开启）：四角检测依赖「画面里有纸张外框」，而真实拍摄绝大多数是
+  //   纸面占满画面 → 四角恒不命中 → 旧实现直接原样返回（用户感知＝"点了没反应"）。
+  //   文本行投影法不依赖外框，只要纸上有字就能算出倾斜角并转正。
+  // ⭐ 旋转兜底（默认开启）：四角检测依赖「画面里有纸张外框」，而真实拍摄绝大多数是
+  //   纸面占满画面 → 四角恒不命中 → 旧实现直接原样返回（用户感知＝"点了没反应"）。
+  //   文本行投影法不依赖外框，只要纸上有字就能算出倾斜角并转正。
+  let rotBuf: Buffer | null = null
+  let skewInfo: { rotateDeg: number; confidence: number } | null = null
+  if (opts.deskew !== false) {
+    try {
+      const { deskewImage } = await import('./image-deskew')
+      const d = await deskewImage(buf)
+      if (d) {
+        console.log(
+          `[image-dewarp] 四角检测未命中，走文本行倾斜估计：旋转 ${d.rotateDeg}°（置信度 ${d.confidence.toFixed(2)}）`,
+        )
+        rotBuf = d.buffer
+        skewInfo = { rotateDeg: d.rotateDeg, confidence: d.confidence }
+      }
+    } catch (e) {
+      console.warn('[image-dewarp] 文本行倾斜估计失败：', (e as Error).message)
+    }
+  }
+
+  // ⭐ 透视残留校正（默认开启，继旋转之后——coarse-to-fine）：
+  //   旋转模型修不了「行与行互不平行」，那是透视的指纹。此时整体角度往往≈0，
+  //   deskew 会判定"本来就正"而放手不管，用户看到的就是"点了没反应"。
+  //   在旋转后的图上继续校正（先去掉整体旋转，剩下的 σ 才干净地代表透视）。
+  const baseForPersp = rotBuf ?? buf
+  if (opts.perspective !== false) {
+    try {
+      const { fixPerspectiveFromText } = await import('./image-perspective')
+      const p = await fixPerspectiveFromText(baseForPersp)
+      if (p) {
+        const m = await sharp(p.buffer).metadata()
+        console.log(
+          `[image-dewarp] 检测到透视残留并校正：行不平行度 ${p.beforeStd.toFixed(2)}° → ${p.afterStd.toFixed(2)}°`,
+        )
+        return {
+          buffer: p.buffer,
+          width: m.width || p.width,
+          height: m.height || p.height,
+          needManual: false,
+          method: 'perspective',
+          orderedCorners: p.corners,
+          ...(skewInfo ?? {}),
+          parallelBefore: p.beforeStd,
+          parallelAfter: p.afterStd,
+        }
+      }
+    } catch (e) {
+      console.warn('[image-dewarp] 透视残留校正失败：', (e as Error).message)
+    }
+  }
+
+  if (rotBuf) {
+    const m = await sharp(rotBuf).metadata()
+    return {
+      buffer: rotBuf,
+      width: m.width || 0,
+      height: m.height || 0,
+      needManual: false,
+      method: 'skew',
+      ...(skewInfo ?? {}),
+    }
+  }
+
   return { buffer: null, needManual: true, method: 'none' }
 }

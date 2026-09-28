@@ -102,6 +102,8 @@ export interface SegmentResult {
   rects: MaskRect[]
   usedVlm: boolean
   raw?: string
+  /** 检测过程诊断（为何覆盖率为 0），用于给用户可操作的提示 */
+  debug?: Record<string, unknown>
 }
 
 /**
@@ -177,8 +179,19 @@ export async function buildHandwritingMask(
     }
   }
 
-  // 降级：色域阈值
-  const { maskFromColorThreshold } = await import('./handwriting-mask')
-  const mask = await maskFromColorThreshold(imageBuffer)
-  return { mask, rects: [], usedVlm: false }
+  // 本地降级路径（**不依赖任何外部 AI**）：
+  //   ① 色域阈值 —— 抓蓝/红等**彩色**笔迹；
+  //   ② 深色墨迹 —— 抓铅笔/黑色中性笔（色域法因与印刷体同为近黑而完全失效的场景）。
+  // 两条路径互补，取**并集**：只靠 ① 时，中国学生最常用的黑笔/铅笔 100% 检不出，
+  // 表现就是「点了去手写没反应」（实测确认）。
+  const { maskFromColorThreshold, maskFromDarkInk, unionMasks } = await import('./handwriting-mask')
+  const chroma = await maskFromColorThreshold(imageBuffer)
+  const dark = await maskFromDarkInk(imageBuffer)
+  const mask = await unionMasks(chroma, dark)
+  return {
+    mask,
+    rects: [],
+    usedVlm: false,
+    debug: { chromaCoverage: chroma.coverage, darkCoverage: dark.coverage, darkDebug: dark.debug },
+  }
 }

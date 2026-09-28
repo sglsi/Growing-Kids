@@ -36,7 +36,11 @@ ok('存在 enhance 调用分支', /this\.imageService\.enhance\(/.test(src))
 ok('hybrid 失败会回退（有 catch + 回退注释）', /catch\s*\(e\)/.test(src) && /回退|兜底|fallback/.test(src))
 
 console.log('[4] 去手写 erase_v2 不受该开关影响（应始终直达）')
-ok('erase_v2 在 MODE 判断之前直接返回', src.indexOf("dto.action === 'erase_v2'") < src.indexOf('IMG_PIPELINE_MODE'))
+// 注：只看 process() 方法内的顺序（controller 顶部的 capabilities 端点也含 IMG_PIPELINE_MODE 字样）
+const procBody = src.slice(src.indexOf('async process('))
+ok('erase_v2 在 process() 内的 MODE 判断之前直接返回',
+  procBody.indexOf("dto.action === 'erase_v2'") >= 0 &&
+  procBody.indexOf("dto.action === 'erase_v2'") < procBody.indexOf('IMG_PIPELINE_MODE'))
 
 console.log(`\n==== 结果：${pass} passed, ${fail} failed ====`)
 process.exit(fail ? 1 : 0)

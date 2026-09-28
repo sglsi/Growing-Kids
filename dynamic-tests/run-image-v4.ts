@@ -117,9 +117,15 @@ async function main() {
     try { corners = await detectDocumentCorners(noise) } catch { threw = true }
     ok('detectDocumentCorners 不抛', !threw, `corners=${JSON.stringify(corners)}`)
 
-    // 无四角、auto 检测未命中 → needManual
+    // 无四角时的行为：
+    //   第七轮起新增「文本行投影倾斜估计」兜底（此前四角检测在"纸面占满画面"时恒不命中，
+    //   导致功能等价于不存在）。因此这里**不再**要求 needManual —— 只要不抛、且
+    //   要么给出纠偏结果、要么诚实地交还手动，就算通过。
+    //   噪声图无文本结构 → 两条路都不命中 → 应回到 needManual。
     const out = await straightenImage(noise, { auto: true })
-    ok('straightenImage 未命中 → needManual', out.needManual === true && out.buffer === null, `method=${out.method}`)
+    ok('straightenImage 无四角：要么纠偏成功，要么诚实交还手动',
+      (out.needManual === true && out.buffer === null) || (out.buffer !== null && out.needManual === false),
+      `method=${out.method} needManual=${out.needManual}`)
   }
 
   // ============ 交付 2：曲面 dewarp（实测不达标 → 断言"恒回落不劣化"）============

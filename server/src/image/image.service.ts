@@ -48,6 +48,54 @@ const STYLE_LOCK =
 const TONE_LOCK =
   '同时严格保持原图的纸张底色、墨色深浅与整体色调、对比度一致，不要提亮或调色，保持真实自然的纸张质感。'
 
+/**
+ * 「去手写」未检出时的**可操作**提示文案。
+ *
+ * ⭐ 为什么要按失败原因分分支（第八轮）：
+ *   笼统一句"没检测到手写"等于没告诉用户任何信息——他不知道下一步该改什么，
+ *   只会反复点按钮（这正是"点了没反应"投诉的来源）。手写分割有多种**性质完全不同**
+ *   的失败原因，各自对应不同的补救动作，必须分别给出。
+ *
+ * @param segDebug buildHandwritingMask 返回的 debug（含深色路径的 reason）
+ */
+function eraseHint(segDebug?: Record<string, unknown>): string {
+  const dark = (segDebug?.darkDebug ?? {}) as Record<string, unknown>
+  const reason = String(dark.reason ?? '')
+  const tail =
+    '\n\n可以这样做：\n' +
+    '· 把答案写在题目之间的空白处，字写得比印刷字大一些；\n' +
+    '· 改用蓝色/红色笔书写后重新拍照；\n' +
+    '· 或用「编辑裁剪」把含手写的区域裁掉。'
+
+  // 行级判据找到"高行"但被基线护栏判为印刷 → 几乎可以肯定是大号印刷标题/加粗字。
+  // ⚠️ reason 名随判据改名同步更新（第八轮）：判据从「墨迹密度」换成「基线众数」
+  //    后，这里若还写 density_guard 就会永远匹配不上，用户又拿不到原因了 ——
+  //    判据与提示文案必须一起改，否则反馈闭环会被静默切断。
+  if (reason === 'baseline_guard') {
+    return (
+      '页面上比正文大的文字都被判定为**印刷体**（字符底边严格对齐同一条基线，' +
+      '是排版特征），不是手写。\n' +
+      '这通常发生在试卷有**大号标题/加粗字**时——自动识别宁可不擦，也不能把题目擦掉。' +
+      tail
+    )
+  }
+  // 手写与印刷体处在同一行（压字）→ 行高被印刷行主导，无法分离
+  if (reason === 'no_tall_row') {
+    return (
+      '没有找到明显高于印刷正文的手写行。常见原因：\n' +
+      '· 答案直接**压在题目文字上**（擦除会连带毁掉被压住的印刷内容，因此主动放弃）；\n' +
+      '· 用黑色中性笔/铅笔写得和印刷字差不多大——同为黑色、同样大小，几何与颜色上都无法区分。' +
+      tail
+    )
+  }
+  return (
+    '自动识别支持：① 蓝/红等彩色笔迹；② 写在空白处、明显大于印刷字号的手写（铅笔/黑色中性笔）。\n' +
+    '若用黑色中性笔或铅笔、且写得和印刷字差不多大，笔迹与印刷体同为黑色，几何与颜色上都无法区分，\n' +
+    '自动识别会主动放弃（宁可不擦，也不能把题目一起擦掉）。' +
+    tail
+  )
+}
+
 // erase_v2 不走提示词（本地 mask + 修复），因此这里只对"图生图"动作要求完整
 const PROMPTS: Record<Exclude<ImageAction, 'erase_v2'>, { prompt: string; desc: string }> = {
   auto: {
@@ -232,7 +280,20 @@ export class ImageService {
           dto.save === true
             ? await this.archive(userId, key, ing.sizeBytes, ing.thumbKey, ing.width, ing.height, ing.hash)
             : '',
-        debug: { coverage: 0, usedVlm: seg.usedVlm, note: '未检测到手写，原图返回' },
+        debug: {
+          coverage: 0,
+          usedVlm: seg.usedVlm,
+          segDebug: seg.debug,
+          note: '未检测到手写，原图返回',
+          // ⭐ 必须带 notice：此前这里静默返回原图，前端当成功处理 → 用户看到「点了没反应」。
+          // ⭐ 文案按**具体失败原因**定制（第八轮）：不同原因对应不同的可操作建议，
+          //    笼统一句"没检测到"等于没说 —— 用户不知道下一步该改什么。
+          notice: {
+            level: 'info',
+            title: '未检测到可擦除的手写',
+            message: eraseHint(seg.debug),
+          },
+        },
       }
     }
 
@@ -348,7 +409,19 @@ export class ImageService {
           dto.save === true
             ? await this.archive(userId, ing.key, ing.sizeBytes, ing.thumbKey, ing.width, ing.height, ing.hash)
             : '',
-        debug: { method: 'geometric-dewarp', needManual: true, note: '请前端拉出试卷四角后提交 auto' },
+        debug: {
+          method: 'geometric-dewarp',
+          needManual: true,
+          note: '请前端拉出试卷四角后提交 auto',
+          notice: {
+            level: 'info',
+            title: '未能自动识别到歪斜',
+            message:
+              '这张图里既没找到可用于纠偏的纸张边缘（通常是纸面占满了整个画面），\n' +
+              '也没检测到明显的文字行倾斜 —— 说明它可能本来就是正的。\n\n' +
+              '如果确实拍歪了，请改用「四角拉框」手动框出试卷四角，再点「确认四角」。',
+          },
+        },
       }
     }
 
@@ -373,6 +446,12 @@ export class ImageService {
         width: result.width,
         height: result.height,
         orderedCorners: result.orderedCorners,
+        // skew 路径：实际施加的旋转角，便于排查「转多了/转反了」
+        rotateDeg: result.rotateDeg,
+        confidence: result.confidence,
+        // perspective 路径：行不平行度的前后值，便于排查「该修没修 / 越修越歪」
+        parallelBefore: result.parallelBefore,
+        parallelAfter: result.parallelAfter,
       },
     }
   }
@@ -545,6 +624,18 @@ export class ImageService {
         ocrFallback,
         ocrScore: verifyInfo?.consistency?.score,
         ocrReason: verifyInfo?.reason,
+        // ⭐ OCR 一致性不达标已回退原图：必须告知，否则用户只看到「点了没反应」
+        notice: ocrFallback
+          ? {
+              level: 'warn',
+              title: '高清处理未通过内容校验，已保留原图',
+              message:
+                `处理前后的文字识别一致性为 ${(verifyInfo?.consistency?.score ?? 0).toFixed(2)}，` +
+                `低于阈值 ${Number(process.env.IMG_OCR_MIN_SCORE || 0.75)}。\n` +
+                '为避免交付一张「看着更清楚但识别更差」的图，已回退到原图。\n\n' +
+                '可以试试：改用 x2 快速模式重新处理（改动更温和，更容易通过校验）。',
+            }
+          : undefined,
         // 限流诊断：heavy 任务过闸，light 任务不过闸
         gate: { enabled: gateOn, heavy: cls.heavy, lane: cls.lane, cost: cls.cost },
       },

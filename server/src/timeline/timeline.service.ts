@@ -165,6 +165,12 @@ export class TimelineService {
     if (dto.subject_id !== undefined) payload.subject_id = dto.subject_id
     if (dto.tags !== undefined) payload.tags = dto.tags
     if (dto.content !== undefined) payload.content = dto.content
+    // 图片字段（kind=image 的「原位替换」）：
+    // ⚠️ 必须支持原位替换（前端编辑已入库图片时直接 PUT file_key/thumb_key）。
+    // 旧方案「新建条目+软删旧条目」会让新条目插到列表最前、旧条目软删失败时残留，
+    // 造成「编辑 A 后编辑 B，打开的却是 A 的图」的错位（列表顺序每次编辑都在变）。
+    if (dto.file_key !== undefined) payload.file_key = dto.file_key
+    if (dto.thumb_key !== undefined) payload.thumb_key = dto.thumb_key
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null

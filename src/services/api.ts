@@ -363,6 +363,9 @@ export function updateTimeline(
     tags?: string[]
     mastered?: boolean
     content?: TimelineContentPayload
+    /** kind=image 的原位替换：直接更新条目指向的文件 key（列表顺序不变） */
+    file_key?: string
+    thumb_key?: string
   },
 ) {
   return unwrap<TimelineItem>(
@@ -426,43 +429,43 @@ export function batchDeleteTimeline(ids: string[]) {
  * 用「编辑后的图片」替换「最近题目」里的一条已有图片条目。
  *
  * 场景（用户反馈 #3）：首页点开已加入最近题目的图片，再做裁剪 / 智能高清 / 去手写。
- * 做法：把编辑结果以 purpose='save' 上传 → 生成新的 image 条目 → 继承原条目的学科 →
- *       软删旧条目。全程复用既有、已被验证的接口，不新增后端路由。
  *
- * @returns 新条目的 id（前端可直接用它刷新列表）
+ * ⚠️ 必须用「原位替换」（PUT file_key/thumb_key），不能用「新建条目+软删旧条目」：
+ *   旧方案的"新建"会让新条目插到列表最前、"软删"失败时旧条目残留 → 列表顺序每编辑一次变一次，
+ *   用户按记忆位置点「更多」会打开**别的题目的图**（正是「编辑 A 后操作 B，看到的却是 A」的根因）。
+ *   原位替换后条目 id 不变、位置不变、学科/复习本等属性全部保留。
+ *
+ * 做法：编辑结果以 purpose='temp' 上传（不落库）→ PUT /api/timeline/:id 更新 file_key/thumb_key。
+ * @returns 原条目 id（位置不变）
  */
 export async function replaceTimelineImage(
   oldItem: { id: string; subject_id?: string | null },
   editedFileOrUrl: string,
 ): Promise<{ id: string }> {
-  const up = await uploadImage(editedFileOrUrl, { purpose: 'save' })
-  let newId = up.timeline_id
-  // 兜底：后端 save 未直接返回 timeline_id 时，用已上传的 key/url 显式建一个 image 条目，
-  // 避免「后端未返回 id → 直接抛错 → 用户看到保存失败」的静默不入库。
-  if (!newId) {
-    try {
-      const created = await saveQuestionAsImage(oldItem.subject_id ?? '', up.key, up.url, '')
-      newId = (created as any)?.id
-    } catch (e) {
-      console.error('replaceTimelineImage 兜底建条目失败', e)
-    }
-  }
-  if (!newId) throw new Error('编辑结果保存失败，请重试')
-  // 继承原分类，避免编辑后掉回「未分类」
-  if (oldItem.subject_id) {
-    try {
-      await updateTimeline(newId, { subject_id: oldItem.subject_id })
-    } catch {
-      /* 分类继承失败不阻断主流程 */
-    }
-  }
-  // 旧条目软删（保留历史，不出现在列表）
+  const up = await uploadImage(editedFileOrUrl, { purpose: 'temp' })
+  if (!up?.key) throw new Error('编辑结果上传失败，请重试')
+  await updateTimeline(oldItem.id, { file_key: up.key })
+  return { id: oldItem.id }
+}
+
+/** 线上后端图像能力自检（GET /api/image/capabilities）。
+ *  404 = 线上是旧版后端（没有本地 straighten/enhance/erase_v2 管线）；
+ *  200 = 新版，data.version ≥ 3。前端在图像功能失败时据此区分「服务未更新」与「处理失败」。 */
+export async function fetchImageCapabilities(): Promise<{
+  supported: boolean
+  version?: number
+  pipeline_mode?: string
+}> {
   try {
-    await batchDeleteTimeline([oldItem.id])
-  } catch {
-    /* 删除失败不阻断，用户可手动删 */
+    const data = await unwrap<{ version: number; pipeline_mode: string }>(
+      Network.request({ url: '/api/image/capabilities', method: 'GET', header: authHeaders() }),
+    )
+    return { supported: true, version: data?.version, pipeline_mode: data?.pipeline_mode }
+  } catch (e) {
+    // 404/不存在路由 = 旧版后端；其余错误也按不支持处理（拿不到能力 = 无法保证可用）
+    console.warn('[capabilities] 线上后端能力自检失败（疑似旧版）:', e)
+    return { supported: false }
   }
-  return { id: newId }
 }
 
 /** 加入复习本 */
@@ -757,6 +760,24 @@ export function combineToPdf(ids: string[]) {
 // ============================================================
 export type ImageAction = 'auto' | 'enhance' | 'erase' | 'erase_v2'
 
+/**
+ * 图片处理结果。
+ *
+ * ⭐ `debug.notice`：后端在「安全地原样返回原图」时会带上它（未检出手写 /
+ *   未识别到歪斜 / 高清未通过内容校验）。前端**必须**据此弹窗告知，
+ *   否则用户看到的就是「点了没反应」——这正是连着五轮反馈的根因。
+ */
+export interface ImageProcessResult {
+  url: string
+  key: string
+  timeline_id: string
+  debug?: {
+    needManual?: boolean
+    notice?: { level: 'info' | 'warn'; title: string; message: string }
+    [k: string]: unknown
+  }
+}
+
 async function ensureImageUrl(filePathOrUrl: string): Promise<string> {
   if (/^https?:\/\//.test(filePathOrUrl)) return filePathOrUrl
   // AI 处理前的中间上传：用 purpose=temp，不要落库（避免自动进「最近题目」）
@@ -804,7 +825,7 @@ export async function processImage(action: ImageAction, filePathOrUrl: string, o
     if (opts.dewarp_curved) extra.dewarp_curved = true
   }
   return withTimeout(
-    unwrapResponse<{ url: string; key: string; timeline_id: string }>(
+    unwrapResponse<ImageProcessResult>(
       Network.request({
         url: '/api/image/process',
         method: 'POST',

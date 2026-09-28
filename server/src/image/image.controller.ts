@@ -1,11 +1,38 @@
-import { Controller, Post, Body, HttpCode, HttpException, Req } from '@nestjs/common'
+import { Controller, Post, Get, Body, HttpCode, HttpException, Req } from '@nestjs/common'
 import { ImageService } from './image.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
 import type { ProcessImageDto } from './image.types'
 
+/** 后端图像能力版本号：前端据此判断线上服务是否包含本地处理管线 */
+const IMAGE_CAPABILITIES_VERSION = 3
+
 @Controller('image')
 export class ImageController {
   constructor(private readonly imageService: ImageService) {}
+
+  // ⭐ 能力自检端点（无需登录也可访问的轻量 GET）：
+  //   GET /api/image/capabilities → 200 = 新版后端（含本地 straighten/enhance/erase_v2）；
+  //   404 = 旧版后端（没有本路由，auto/enhance 会落 Coze 兜底且大概率失败）。
+  //   用途：前端在图像功能失败时先查此端点，把「服务未更新」与「处理失败」区分开，
+  //   彻底终结「点了不能用但看不到原因」的循环反馈。
+  @Get('capabilities')
+  @HttpCode(200)
+  capabilities() {
+    const MODE = (process.env.IMG_PIPELINE_MODE || 'hybrid').toLowerCase()
+    return {
+      code: 200,
+      msg: 'success',
+      data: {
+        version: IMAGE_CAPABILITIES_VERSION,
+        pipeline_mode: MODE,
+        // 以下三项都是**本地自有功能**（不依赖外部 AI 服务）：
+        straighten: true,   // 自动调正：本地几何纠偏（透视压平，100% 保真）
+        enhance: true,      // 智能高清：本地超分/锐化（CPU 推理）
+        erase_v2: true,     // 去手写：本地手写检测 + 局部修复
+        external_fallback: MODE === 'hybrid' || MODE === 'gen', // 仅兜底用（需 COZE_API_TOKEN）
+      },
+    }
+  }
 
   // 图片处理：
   //   auto     自动调正
