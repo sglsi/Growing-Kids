@@ -1,5 +1,6 @@
 import sharp from 'sharp'
 import { dewarpBuffer, type Corner } from './image-dewarp'
+import { connectedComponents, otsuThreshold, metricsFromGray, type CharMetrics } from './image-layout'
 
 /**
  * 【自动调正 · 透视残留校正（无纸边场景）】
@@ -62,77 +63,72 @@ export interface PerspectiveFixResult {
   afterStd: number
 }
 
+/** detectTextRows 的返回类型（v3：补充字符度量，供智能高清 / 去手写复用） */
+export interface TextRowsResult {
+  rows: TextRowInfo[]
+  width: number
+  height: number
+  scale: number
+  /**
+   * 估计的字身高度（**原图尺度像素**）。
+   *
+   * ⭐ 方案 P0-前置改造：这个值此前在函数内部算出却没有导出，
+   *    导致「字高」这个全项目唯一的自适应参数来源无从获取。
+   *    现与 `image-layout.ts` 的共用基座对齐导出（同一张图在任何功能里量出的字高是同一个数）。
+   *    为 0 表示版面度量失败，调用方应回退固定参数。
+   */
+  medH: number
+  /** 完整字符度量（含笔画宽 / 行距 / 极性 / 置信度）。medH 即 metrics.medH */
+  metrics: CharMetrics
+}
+
 /**
  * 连通分量（8-连通 BFS）→ 过滤噪点 → 按质心 y 聚类成文本行。
- * 返回每行的最小二乘直线（k,b）与左右端点。
+ * 返回每行的最小二乘直线（k,b）与左右端点，以及字符度量。
+ *
+ * ⚠️ 行切分的判据与阈值**保持原样不动**（自动调正刚修好"放大裁切一块"，
+ *    这里只做「抽公共代码 + 把 medH 导出」，不改任何数值行为）。
  */
 export async function detectTextRows(
   buf: Buffer,
   opts: { maxSide?: number } = {},
-): Promise<{ rows: TextRowInfo[]; width: number; height: number; scale: number }> {
+): Promise<TextRowsResult> {
   const meta = await sharp(buf).metadata()
   const W0 = meta.width || 0
   const H0 = meta.height || 0
-  if (!W0 || !H0) return { rows: [], width: 0, height: 0, scale: 1 }
+  if (!W0 || !H0) {
+    return {
+      rows: [], width: 0, height: 0, scale: 1, medH: 0,
+      metrics: {
+        medH: 0, strokeWidth: 0, rowPitch: 0, inkIsDark: true,
+        confidence: 0, scale: 1, charCount: 0, rowCount: 0,
+      },
+    }
+  }
   const maxSide = opts.maxSide ?? EST_MAX_SIDE
   const scale = Math.min(1, maxSide / Math.max(W0, H0))
   const w = Math.max(1, Math.round(W0 * scale))
   const h = Math.max(1, Math.round(H0 * scale))
   const gray = await sharp(buf).resize(w, h, { fit: 'fill' }).grayscale().raw().toBuffer()
+  const grayU8 = new Uint8Array(gray.buffer, gray.byteOffset, gray.length)
 
-  // Otsu 二值化
-  const hist = new Int32Array(256)
-  for (let i = 0; i < gray.length; i++) hist[gray[i]]++
-  let sum = 0
-  for (let i = 0; i < 256; i++) sum += i * hist[i]
-  let wB = 0, sumB = 0, maxVar = -1, thr = 127
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t]
-    const wF = gray.length - wB
-    if (!wB || !wF) break
-    sumB += t * hist[t]
-    const v = wB * wF * (sumB / wB - (sum - sumB) / wF) ** 2
-    if (v > maxVar) { maxVar = v; thr = t }
-  }
+  // Otsu 二值化 + 8-连通分量：复用 image-layout 的共用实现（与旧代码等价）
+  const thr = otsuThreshold(grayU8, w * h)
   const ink = new Uint8Array(w * h)
-  for (let i = 0; i < w * h; i++) ink[i] = gray[i] < thr ? 1 : 0
+  for (let i = 0; i < w * h; i++) ink[i] = grayU8[i] < thr ? 1 : 0
+  const { comps } = connectedComponents(ink, w, h, false)
 
-  // BFS 连通分量
-  const lab = new Int32Array(w * h).fill(-1)
-  const comps: { x0: number; x1: number; y0: number; y1: number; n: number }[] = []
-  const stack: number[] = []
-  for (let s = 0; s < w * h; s++) {
-    if (!ink[s] || lab[s] >= 0) continue
-    const id = comps.length
-    stack.push(s)
-    lab[s] = id
-    let x0 = w, x1 = 0, y0 = h, y1 = 0, n = 0
-    while (stack.length) {
-      const p = stack.pop()!
-      const px = p % w, py = (p / w) | 0
-      n++
-      if (px < x0) x0 = px
-      if (px > x1) x1 = px
-      if (py < y0) y0 = py
-      if (py > y1) y1 = py
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = px + dx, ny = py + dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          const q = ny * w + nx
-          if (ink[q] && lab[q] < 0) { lab[q] = id; stack.push(q) }
-        }
-      }
-    }
-    comps.push({ x0, x1, y0, y1, n })
-  }
   // 过滤：噪点太小、横跨全图的横线/阴影、过高的块
   const heights = comps.map((c) => c.y1 - c.y0).sort((a, b) => a - b)
   const medH = heights[heights.length >> 1] || 10
   const blocks = comps.filter(
     (c) => c.n >= 8 && c.x1 - c.x0 < w * 0.9 && c.y1 - c.y0 < Math.max(medH * 3, h * 0.3),
   )
-  if (blocks.length < 4) return { rows: [], width: w, height: h, scale }
+  const emptyMetrics: CharMetrics = {
+    medH: 0, strokeWidth: 0, rowPitch: 0, inkIsDark: true,
+    confidence: 0, scale, charCount: blocks.length, rowCount: 0,
+  }
+  if (blocks.length < 4) return { rows: [], width: w, height: h, scale, medH: 0, metrics: emptyMetrics }
 
   // 按质心 y 排序 → 按间隙切行（间隙尺度用块高中位数，抗行距变化）
   const sorted = blocks.slice().sort((a, b) => (a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2)
@@ -158,7 +154,11 @@ export async function detectTextRows(
     const k = den < 1e-9 ? 0 : num / den
     rows.push({ k, b: my - k * mx, xL, xR, yc: my })
   }
-  return { rows, width: w, height: h, scale }
+  // 字符度量走**共用基座**的权威实现（含行距交叉校验，修正中文部件导致的系统性偏小）。
+  // 注意：上面行切分用的仍是本地 medH（旧行为），刻意不改 —— 自动调正刚修好
+  // "放大裁切一块"，此处只做「抽公共代码 + 导出度量」，不碰任何切分判据。
+  const metrics = metricsFromGray(grayU8, w, h, scale)
+  return { rows, width: w, height: h, scale, medH: metrics.medH, metrics }
 }
 
 /** 中位数 */
@@ -247,12 +247,29 @@ function fitXOfY(pts: [number, number][]): (y: number) => number {
  * 手写批注则长短随性、明显更短。实测这一步是"手写混排时还能估准四角"的关键——
  * 少它的话，手写的随机走向会混进包络，四角偏掉，印刷行虽被摆平、整图却被拉歪
  * （外部独立测量 1.53° → 3.09°，而只统计印刷行的内部自检还误报"已改善"）。
+ *
+ * ⚠️ 关键修复（修复"自动调正放大并裁切一块"）：
+ *    旧实现用「宽度 < 0.6×**最宽行**」做全局阈值。但**透视（keystone）下，离相机远的
+ *    远端行本就更窄**——它们被误判为手写短行整批删除，导致 `used` 的首/末行从"页面
+ *    顶/底边"塌缩到"内容中段"，`cornersFromTextRows` 据此估出的四角只覆盖内容内部一小块，
+ *    `dewarpBuffer` 把这一小块放大铺满整图 → 用户看到"放大并裁切一块"。透视越强删得越多，
+ *    恰好在最需要纠偏时出错。
+ *    现改为：① 阈值锚定**中位数宽度**（抗单条超宽标题行的干扰）并放宽到 0.35；
+ *            ② **强制保留最上、最下两行**——包络锚点绝不允许塌缩到内容内部。
  */
 function filterPrintRows(rows: TextRowInfo[]): TextRowInfo[] {
   if (rows.length < MIN_ROWS) return rows
   const widths = rows.map((r) => r.xR - r.xL)
-  const maxW = Math.max(...widths)
-  const keep = rows.filter((r) => r.xR - r.xL >= maxW * 0.6)
+  const sorted = [...widths].sort((a, b) => a - b)
+  const medW = sorted[sorted.length >> 1] || 1
+  const minW = medW * 0.35
+  // 按 yc 排序，强制保留真正的最上 / 最下两行（包络锚点）
+  const idxByYc = rows.map((_, i) => i).sort((a, b) => rows[a].yc - rows[b].yc)
+  const keepTop = idxByYc[0]
+  const keepBot = idxByYc[idxByYc.length - 1]
+  const keep = rows.filter(
+    (r, i) => i === keepTop || i === keepBot || r.xR - r.xL >= minW,
+  )
   return keep.length >= MIN_ROWS ? keep : rows
 }
 
@@ -320,16 +337,26 @@ export async function fixPerspectiveFromText(
   // 四角在缩小图上得到，按比例还原到原图坐标
   const corners = quad.map(([x, y]) => [x / first.scale, y / first.scale] as Corner)
 
-  // 几何护栏：内容包络估出的四角若过分畸形（面积过小 / 长宽比失真），
+  // 几何护栏：内容包络估出的四角若过分畸形 / 塌缩成内容内部一小块，
   // 说明行检测不可信，此时宁可放弃——射影变换一旦搞错就是全图拉坏。
+  // ⚠️ 用**缩小图坐标**的 quad 计算面积（与 imgArea 同尺度），修复旧实现
+  //    用 original 坐标 quad 与 downsampled 的 imgArea 混比（尺度错配）的 bug。
   const quadArea = Math.abs(
-    corners.reduce((s, p, i) => {
-      const q = corners[(i + 1) % 4]
+    quad.reduce((s, p, i) => {
+      const q = quad[(i + 1) % 4]
       return s + (p[0] * q[1] - q[0] * p[1])
     }, 0) / 2,
   )
   const imgArea = first.width * first.height
+  // ① 面积过小的畸形四边形直接放弃
   if (quadArea < imgArea * 0.25) return null
+  // ② 包络 bbox 必须覆盖画面足够比例：防止"四角塌缩到内容内部"被放大铺满
+  //    （即用户反馈的"自动调正放大并裁切一块"）。正常满幅页面 bbox 占比≈0.6~0.95。
+  const xs = quad.map((p) => p[0]), ys = quad.map((p) => p[1])
+  const bx0 = Math.min(...xs), bx1 = Math.max(...xs)
+  const by0 = Math.min(...ys), by1 = Math.max(...ys)
+  const bboxArea = (bx1 - bx0) * (by1 - by0)
+  if (bboxArea < imgArea * 0.5) return null
 
   let warped
   try {

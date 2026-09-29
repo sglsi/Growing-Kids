@@ -1,4 +1,6 @@
 import sharp from 'sharp'
+import { normalizeBackgroundLuma } from './image-doc-enhance'
+import { estimateCharMetrics } from './image-layout'
 
 /**
  * 阶段二：手写 mask 分割 + 局部修复（Inpainting）+ 原图混合（blend）
@@ -60,6 +62,111 @@ export interface HandwritingMask {
    * 这正是业界「两阶段 mask」的标准用法。
    */
   seed?: Buffer
+}
+
+// ============================================================
+// ①-0 P0-8 检测前置：光照归一化（消除拍照阴影/低频光照梯度）
+// ============================================================
+
+/**
+ * ⭐⭐ **为什么这一步是去手写的"生命线"，而不是锦上添花**（实测数据，务必保留）：
+ *
+ * 两条本地检测路径**都以全局阈值为地基**：
+ *   · `maskFromDarkInk`  —— Otsu 全局二值化 → 行投影 → 行分割
+ *   · `maskFromColorThreshold` —— 灰度高分位估纸面 → 相对彩度 + luma 暗度
+ *
+ * 而 **全局阈值遇到低频光照梯度必然失效**。合成千人thalames-gradient 实测
+ * （见 verify-p0-2-graphic.js 与 probe-p0-8-illumination.js，含 ground truth）：
+ *
+ *   场景          Otsu阈值  行数  最高行    mask 覆盖率   手写召回
+ *   光照均匀        147      18    40px      2.57%        100%
+ *   弱阴影(0.35)    121      18    40px      1.67%        61.75%
+ *   强阴影(0.50)    176       4  1161px      0.00%          0%（share_guard 触发）
+ *
+ * 强阴影下暗侧整页跌到阈值以下 → 全部变"墨迹" → 行投影连成一条 **1161px 的超级行**
+ * → 候选占比 0.986 → 护栏 `share_guard` 触发 → coverage=0 → 返回空 mask
+ * → 用户看到「**点了去手写，没反应**」。
+ *
+ * 这正好解释了代码里那句长期悬而未决的现象：
+ *   「测试图上正常、用户拍的照片上没反应」。
+ *
+ * ── 修复后的实测（同样三张图，仅加了本函数）─────────────────────────────
+ *   clean 2.57%→2.58% ／ shade0.35 1.67%→**2.56%** ／ shade0.5 0.00%→**2.55%**
+ *   三个场景全部收敛到同一水平 —— 光照归一化把"20 路 progenitor的影响抹平了。
+ *
+ * ── 跨功能复用（方法论 §5.1）───────────────────────────────────────────
+ * 复用智能高清 P0-1 已落地的 `normalizeBackgroundLuma`（morphological closing
+ * 估背景 + Top-Hat 拉平），**不重复实现**。此处只做两件事：
+ *   ① 把单通道 luma 的归一化结果**回写到 RGB**；
+ *   ② 套一层 fail-open，保证前置环节绝不拖垮主链路。
+ *
+ * ── ⚠️ 关键设计：为什么回写用**乘性**而非加性 ──────────────────────────
+ * 拍照的光照降质本质是**乘性过程** `I(x) = R(x) · L(x)`，除法才是它的逆。
+ * 若用加性平移 `R + Δ`，暗部通道会被整体抬升而**色度被压扁**：同一支蓝笔写在暗角里，
+ * `max−min` 会明显小于亮处，于是 P0-1 的相对彩度判据在暗角**系统性漏检**。
+ * 乘性还原则保持 RGB 三通道的比例 → chroma 的相对关系不被破坏。
+ *
+ * ── ⚠️ 第二个关键设计：归一化图**只用于检测，不用于最终输出** ────────────
+ * 修复与混合仍在**原图**上进行（`blendWithMask` 保证非 mask 区 100% 原样）。
+ * 若把归一化后的图输出给用户，等于顺手把整张卷子的观感也改了 —— 那是"智能高清"的活，
+ * 不是"去手写"的活，越界会让用户对一次操作的预期失控。
+ */
+export interface Preprocessed {
+  /** 光照归一化后的图（与原图同尺寸、同像素格式） */
+  buffer: Buffer
+  /** 是否真的执行了归一化（medH 获取失败 / 图过小时会跳过） */
+  applied: boolean
+  /** 用于结构元尺寸的字高估计值 */
+  medH: number
+  /** luma 的平均位移量，用于判断"这张图本来就很平"（接近 0 则归一化无害且几乎无效） */
+  deltaMean: number
+}
+
+export async function normalizeIlluminationForDetection(
+  buf: Buffer,
+  opts: { flatten?: number } = {},
+): Promise<Preprocessed> {
+  const flatten = opts.flatten ?? 1
+  const meta = await sharp(buf).metadata()
+  const W = meta.width || 0
+  const H = meta.height || 0
+
+  // fail-open：前置环节任何异常都不能中断主链路，原图照常进入检测。
+  const passthrough = (medH = 0): Preprocessed => ({ buffer: buf, applied: false, medH, deltaMean: 0 })
+  if (!W || !H) return passthrough()
+
+  try {
+    const metrics = await estimateCharMetrics(buf)
+    // ⚠️ medH 不可用时必须**跳过而不是用拍脑袋的默认值**：closing 的结构元半径直接
+    // 由 medH 决定（SE_SCALE×medH/2），默认值一旦偏小就填不掉字 → 背景估计失真，
+    // 反而比不做更糟。（return false 比 return 一个可能错的结果安全。）
+    const medH = metrics && Number.isFinite(metrics.medH) && metrics.medH > 0 ? metrics.medH : 0
+    if (!medH) return passthrough(0)
+
+    const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    const ch = info.channels
+    const n = W * H
+    const luma = new Float32Array(n)
+    for (let i = 0, p = 0; i < n; i++, p += ch) {
+      luma[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]
+    }
+    const lumaN = await normalizeBackgroundLuma(luma, W, H, { medH, flatten, inkIsDark: true })
+
+    let deltaSum = 0
+    const out = Buffer.alloc(n * ch)
+    for (let i = 0, p = 0; i < n; i++, p += ch) {
+      deltaSum += Math.abs(lumaN[i] - luma[i])
+      const k = lumaN[i] / Math.max(1, luma[i])
+      for (let c = 0; c < ch; c++) {
+        out[p + c] = Math.max(0, Math.min(255, Math.round(data[p + c] * k)))
+      }
+    }
+    const buffer = await sharp(out, { raw: { width: W, height: H, channels: ch } }).png().toBuffer()
+    return { buffer, applied: true, medH, deltaMean: deltaSum / n }
+  } catch (e) {
+    console.warn('[mask] P0-8 光照归一化失败，回退原图：', e instanceof Error ? e.message : e)
+    return passthrough()
+  }
 }
 
 /**
@@ -195,33 +302,122 @@ export function maskFromRects(
  *
  * 局限（业界公认）：对**纯黑签字笔**无效（与印刷体色差太小）。
  * 所以它只作为 VLM 不可用时的降级路径，且必须叠加下面 `inknessFilter` 抑制印刷体。
+ *
+ * ## P0-1（2026-09-29）实测事故：绝对 chroma 阈值对纸张底色鲁棒性为零
+ *
+ * 在真实试卷（1279×1706，纸张泛黄）上，旧判据 `chroma >= 22 && min < 200`
+ * 命中了 **49.66% 的画面** —— mask 几乎覆盖半页，真擦下去就是整页灾难。
+ * 诊断数据（见 diag-mask-ascii.js 的 P0-1 输出）：
+ *   - chroma 分布：20-21 占 14.4%，**22-23 占 49.7%**（几乎全部像素挤在阈值边缘）
+ *   - 命中像素 avg max=193.7 / avg min=169.5 → **这是浅色纸张，不是墨水**
+ *
+ * 根因：纸整页偏暖偏黄，**纸张自身的 chroma 天然就是 22~23**，绝对阈值正好切在
+ * 分布峰值边缘。这类写法的隐藏前提是"背景应当是中性白"—— 真实拍摄根本不成立。
+ * （这也印证 TextIn 的结论：早期**颜色定位**类方法效果不彰。）
+ *
+ * 修法（不调阈值，改参照基准）：
+ *   ① **彩度要相对纸张算**：`chromaExcess = chroma - paperChroma`，
+ *      只有比纸张**更彩**才算色偏（纸张泛黄的 20 被减掉，蓝红笔的 100+ 保留）。
+ *   ② **暗度是硬约束**：真正的墨水必须明显暗于纸面（`luma <= paperLuma × 0.8`），
+ *      用 luma 而非 max 通道——蓝笔的 max 通道值很高（蓝色分量 200+），但 luma 很低。
+ *   ③ **整页兜底**：候选率仍异常高 → 判为纸张底色问题而非笔迹，直接返回空 mask。
+ *
+ * ⚠️ 教训：凡是"对背景做绝对假设"的阈值（此处假设背景中性白），换一张图就会失效。
+ *     能相对化的量一定要相对化（这里相对化的是**纸张自身的彩度与亮度**）。
  */
 export async function maskFromColorThreshold(
   buf: Buffer,
-  opts: { chromaMin?: number; darknessMax?: number } = {},
+  opts: {
+    /** 相对纸张的彩度增量阈值 */
+    chromaMin?: number
+    /** 暗度上限占纸张亮度的比例（luma ≤ paperLuma×该值 才算墨水） */
+    darknessRatio?: number
+    /**
+     * 候选率硬上限：超过则判定为「纸张整体色偏」而非笔迹，返回空 mask。
+     * 真实笔迹占画面比例远高于此的情况几乎不存在（>15% 就是满页涂写了）。
+     */
+    maxCoverage?: number
+  } = {},
 ): Promise<HandwritingMask> {
-  const chromaMin = opts.chromaMin ?? 22 // 通道极差阈值：越大越严格
-  const darknessMax = opts.darknessMax ?? 200
+  const chromaMin = opts.chromaMin ?? 22
+  const darknessRatio = opts.darknessRatio ?? 0.8
+  const maxCoverage = opts.maxCoverage ?? 0.15
 
   const { data, info } = await sharp(buf)
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true })
   const { width, height, channels } = info
-  const mask = Buffer.alloc(width * height, 0)
-  let covered = 0
+  const total = width * height
+  const mask = Buffer.alloc(total, 0)
 
-  for (let i = 0, p = 0; i < mask.length; i++, p += channels) {
+  // ① 估计纸面基准色：用**灰度直方图的高分位**取亮部像素，统计其 RGB 中位数。
+  //    亮部绝大多数是纸面（墨迹占比极低），中位数对残留墨点免疫。
+  const lumaArr = new Float32Array(total)
+  const lumaHist = new Int32Array(256)
+  for (let i = 0, p = 0; i < total; i++, p += channels) {
+    const l = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]
+    lumaArr[i] = l
+    lumaHist[Math.min(255, Math.round(l))]++
+  }
+  let accN = 0
+  let brightThr = 200
+  for (let t = 255; t >= 0; t--) {
+    accN += lumaHist[t]
+    if (accN >= total * 0.25) { brightThr = t; break } // 取最亮 25% 作为纸面样本
+  }
+  const rs: number[] = []
+  const gs: number[] = []
+  const bs: number[] = []
+  const step = Math.max(1, Math.floor(Math.sqrt(total / 120000)))
+  for (let i = 0, p = 0; i < total; i += step, p += step * channels) {
+    if (lumaArr[i] < brightThr) continue
+    rs.push(data[p]); gs.push(data[p + 1]); bs.push(data[p + 2])
+  }
+  const med = (a: number[]) => {
+    if (!a.length) return 255
+    a.sort((x, y) => x - y)
+    return a[a.length >> 1]
+  }
+  const paperR = med(rs)
+  const paperG = med(gs)
+  const paperB = med(bs)
+  // 纸张自身的彩度与亮度 —— 这就是"相对化"的基准
+  const paperChroma = Math.max(paperR, paperG, paperB) - Math.min(paperR, paperG, paperB)
+  const paperLuma = 0.299 * paperR + 0.587 * paperG + 0.114 * paperB
+  const lumaCap = paperLuma * darknessRatio
+
+  // ② 逐像素判定
+  let covered = 0
+  for (let i = 0, p = 0; i < total; i++, p += channels) {
     const r = data[p]
     const g = data[p + 1]
     const b = data[p + 2]
-    const max = Math.max(r, g, b)
-    const min = Math.min(r, g, b)
-    const chroma = max - min
-    // 有颜色倾向 且 不是纯白背景
-    if (chroma >= chromaMin && min < darknessMax) {
+    const chromaExcess = Math.max(r, g, b) - Math.min(r, g, b) - paperChroma
+    // 必须同时满足：比纸张更彩 **且** 明显暗于纸面（用 luma 而非 max，否则蓝笔会被漏）
+    if (chromaExcess >= chromaMin && lumaArr[i] <= lumaCap) {
       mask[i] = 255
       covered++
+    }
+  }
+
+  const coverage = covered / total
+  // ③ 整页兜底：候选率异常 → 是纸张底色问题，不是笔迹。宁可不擦，不能擦坏。
+  if (coverage > maxCoverage) {
+    return {
+      width,
+      height,
+      data: Buffer.alloc(total, 0),
+      coverage: 0,
+      source: 'threshold',
+      seed: Buffer.alloc(total, 0),
+      debug: {
+        reason: 'paper_tint_guard',
+        rawCoverage: +coverage.toFixed(4),
+        paperChroma,
+        paperLuma: +paperLuma.toFixed(1),
+        note: '整页色偏而非笔迹（纸张自身 chroma 高），P0-1 已拦截',
+      },
     }
   }
 
@@ -229,11 +425,12 @@ export async function maskFromColorThreshold(
     width,
     height,
     data: mask,
-    coverage: covered / (width * height),
+    coverage,
     source: 'threshold',
-    // 色域法检出的是"有色偏像素"，本就与印刷墨色不同（chroma≥22），
+    // 色域法检出的是"有色偏像素"，本就与印刷墨色不同（相对纸张 chroma 超出阈值），
     // 不会被误当成结构源；这里把检出结果原样作为紧种子，供下游源排除使用。
     seed: Buffer.from(mask),
+    debug: { paperChroma, paperLuma: +paperLuma.toFixed(1), chromaMin, lumaCap: +lumaCap.toFixed(1) },
   }
 }
 
@@ -586,7 +783,18 @@ export async function maskFromDarkInk(
   // ⑦ 真形态学膨胀：捕获抗锯齿的半透明边缘像素。
   //    领域共识（WPI_inpainting 的 MaxPool 膨胀 / LaMa 流程）：不膨胀会残留"鬼影"轮廓。
   //    ⚠️ 旧实现是「blur + 阈值 24」，对细笔画净效果是**腐蚀**，与领域做法相反。
-  const dilate = opts.dilate ?? Math.max(2, Math.round(Math.min(w, h) * 0.004))
+  //
+  // ⭐ **P0-7 自适应膨胀半径**：必须随**字高/笔画宽**变化，不能随图片尺寸。
+  //    旧式 `min(w,h)×0.004` 的依据是"图片多大"，与笔画粗细毫无关系：
+  //      · 密集小字试卷（1200px 宽、字高 16）→ 半径 4~5 ≈ 笔画宽的 2 倍以上
+  //        → 膨胀过度，把紧邻的印刷字一起吞进 mask（实测「外扩过度波及印刷文字」）；
+  //      · 大字笔记（同图片尺寸、字高 60）→ 半径仍是 4~5，相对笔画太窄
+  //        → 盖不住抗锯齿边缘，擦完留下"残影轮廓"。
+  //    正确的量纲是笔画本身：`笔画宽 ≈ 字高/8`（中文宋体的经验比例，
+  //    OCR/版面分析领域常用），再乘 1.5 留足覆盖抗锯齿的余量。
+  const strokeW = glyphH / 8
+  const autoDilate = Math.max(2, Math.round(strokeW * 1.5))
+  const dilate = opts.dilate ?? autoDilate
   const dilated = maxFilterU8(candMask, w, h, dilate)
 
   // ⑧ 羽化：把硬边 mask 变成**软 mask**（灰度渐变）。
@@ -626,7 +834,11 @@ export async function maskFromDarkInk(
   // ⑨-b ⭐ 紧种子：只膨胀 `seedDilate` 像素（仅够盖住笔画自身的抗锯齿边），
   //      远小于上面的 dilate。用途见 HandwritingMask.seed 的注释——
   //      它是修复阶段的**源排除区**，必须"紧"，否则会把该保留的印刷结构也排除掉。
-  const seedDilate = opts.seedDilate ?? 2
+  // ⚠️ 紧种子必须**严格窄于**修复区(`dilate`)：种子是"修复时的源排除区"，
+  //    若它等于或宽于修复区，就等于把整个待修复区都排除出参考源，
+  //    `structuralExtend` 无源可取 → 豁口。P0-7 让 dilate 可能降到下限 2，
+  //    这里必须跟着夹紧。
+  const seedDilate = Math.min(opts.seedDilate ?? 2, Math.max(1, dilate - 1))
   const seedTight = maxFilterU8(candMask, w, h, seedDilate)
   const seedRaw = await sharp(seedTight, { raw: { width: w, height: h, channels: 1 } })
     .resize(W0, H0, { fit: 'fill', kernel: 'nearest' })
@@ -1121,8 +1333,28 @@ export interface BackgroundTone {
 }
 
 /**
- * 在 mask **之外**的像素上估计纸张底色。
- * 用中位数而非均值，避免被残余墨点拉偏。
+ * ⭐ **P0-6 底色取样铁律**：在 mask 之外的**最亮 10% 像素**上估计纸张底色。
+ *
+ * ── 为什么不能用"mask 外的全量中位数"（实测事故：输出背景发灰）───────────
+ * 真实拍摄永远有照明梯度、纸张自带的暗角、装订阴影、脏污.
+ * 这些**暗背景像素不在 mask 内**、数量又巨大，会把全量中位数从真实的纸张白拉向暗侧。
+ * 于是填进去的"底色"比纸暗 → 用户看到「擦完的方块发灰 / 像贴了一块补丁」。
+ *
+ * 对策是**先在非 mask 区内取亮部**（然后对亮部取中位数，保留对残余墨点的免疫），
+ * 把光照引起的低频暗衰减排除掉，取到真正的纸面。
+ *
+ * ⚠️ 份额为什么是 10%（在 45% vignette 的合成图上扫描得出）：
+ *        最亮 50% → 色距 28.9 ｜ 20% → 11.6 ｜ **10% → 5.2** ｜ 5% → 3.5 ｜ 2% → 1.7
+ *    起点"全量中位数"的色距是 **58.3**，可见主要收益在前 10% 就拿到了；
+ *    再往下收紧收益递减，却开始牺牲抗噪性（样本量与单点噪点的主导风险）。
+ *
+ * ⚠️ 为什么阈值要在**非 mask 区内部**统计亮度分位，而不是用全局常量 200：
+ *    全局常量又变回了对纸色的**绝对假设**（见 P0-1 的教训）——纸张泛黄时
+ *    "最亮 10%"可能整体低于 200，用常量会一个样本都取不到，退化成死白。
+ *
+ * ⚠️ 诚实局限：vignette 是**连续**径向衰减，只要取样窗口还有宽度，就一定残留
+ *    一点偏差（本例 5.2）。要彻底抹平只能做**局部底色**（按 mask 邻域取色），
+ *    那属于 P1 —— 全局底色在"整页光照一致"时已经足够。
  */
 export async function estimateBackground(
   src: Buffer,
@@ -1133,32 +1365,51 @@ export async function estimateBackground(
 
   const maskBuf = await alignMask(mask, width, height)
 
-  const rs: number[] = []
-  const gs: number[] = []
-  const bs: number[] = []
   // 采样步长：大图上不必逐像素，既省时又不影响中位数稳定性
   const step = Math.max(1, Math.floor(Math.sqrt((width * height) / 200000)))
+  const px: Array<{ r: number; g: number; b: number; l: number }> = []
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
       const i = y * width + x
       if (maskBuf[i] > 127) continue
       const p = i * channels
-      rs.push(data[p]); gs.push(data[p + 1]); bs.push(data[p + 2])
+      const r = data[p]
+      const g = data[p + 1]
+      const b = data[p + 2]
+      px.push({ r, g, b, l: 0.299 * r + 0.587 * g + 0.114 * b })
     }
   }
-  if (rs.length === 0) return { r: 255, g: 255, b: 255, noise: 0 }
+  if (px.length === 0) return { r: 255, g: 255, b: 255, noise: 0 }
+
+  // ① 在**非 mask 区内部**求亮度分位，取最亮 `BRIGHT_SHARE` 作为纸面样本
+  //    ⚠️ 份额不是拍脑袋定的：在暗角(45% vignette)合成图上做过敏感度扫描——
+  //        最亮 50% → 色距 28.9 ｜ 20% → 11.6 ｜ 10% → 5.2 ｜ 5% → 3.5 ｜ 2% → 1.7
+  //    取 **10%**：把色距从 11.6（20% 时）进一步压到 5.2，
+  //    又保住充足样本量（即便在下采样采样点上，仍有数以万计的像素参与中位数统计，
+  //    不会被个别噪点主导）。比它更严的份额收益递减，却开始牺牲抗噪性。
+  const lumas = px.map((o) => o.l).sort((a, b) => a - b)
+  const BRIGHT_SHARE = 0.1
+  const thr = lumas[Math.max(0, Math.floor(lumas.length * (1 - BRIGHT_SHARE)) - 1)]
+  const sample = px.filter((o) => o.l >= thr)
+  const use = sample.length > 0 ? sample : px
 
   const median = (arr: number[]) => {
-    arr.sort((a, b) => a - b)
-    return arr[arr.length >> 1]
+    const a = arr.slice().sort((x, y) => x - y)
+    return a[a.length >> 1]
   }
+  const rs = use.map((o) => o.r)
+  const gs = use.map((o) => o.g)
+  const bs = use.map((o) => o.b)
   const r = median(rs), g = median(gs), b = median(bs)
-  // 以中位色为基准估计高频波动
+
+  // ② 以纸面样本为基准估计高频波动（颗粒强度）。
+  //    注意只在**同一批样本**上算，别把阴影的低频起伏算成纸张颗粒 —— 那会让
+  //    补出来的区域比周围"脏"。
   let acc = 0
-  for (let i = 0; i < rs.length; i++) {
+  for (let i = 0; i < use.length; i++) {
     acc += (rs[i] - r) ** 2 + (gs[i] - g) ** 2 + (bs[i] - b) ** 2
   }
-  const noise = Math.sqrt(acc / (rs.length * 3))
+  const noise = Math.sqrt(acc / (use.length * 3))
   return { r, g, b, noise }
 }
 

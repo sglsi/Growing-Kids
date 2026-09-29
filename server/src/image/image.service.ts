@@ -123,6 +123,22 @@ const PROMPTS: Record<Exclude<ImageAction, 'erase_v2'>, { prompt: string; desc: 
   },
 }
 
+/**
+ * 【P1 多模式】归一化输出模式。
+ * 非法/未知值一律落回 'enhance' —— 宁可走通用默认，也不要因为一个拼错的枚举值
+ * 让整条管线静默退化（这是本项目"点了没反应"类反馈的老教训）。
+ */
+function normalizeEnhancePreset(v?: string): 'original' | 'enhance' | 'bw' {
+  const s = (v || '').toLowerCase()
+  return s === 'original' || s === 'bw' ? s : 'enhance'
+}
+
+/** 【P1 强度档位】归一化，未知值落回 'medium' */
+function normalizeEnhanceStrength(v?: string): 'weak' | 'medium' | 'strong' {
+  const s = (v || '').toLowerCase()
+  return s === 'weak' || s === 'strong' ? s : 'medium'
+}
+
 @Injectable()
 export class ImageService {
   constructor(
@@ -523,6 +539,9 @@ export class ImageService {
         ? 'espcn'
         : 'classical'
     const scale = dto.sr_scale && [2, 3, 4].includes(dto.sr_scale) ? dto.sr_scale : 2
+    // —— P1 多模式 / 强度档位（方案 §P1）——
+    const preset = normalizeEnhancePreset(dto.enhance_preset ?? process.env.IMG_ENHANCE_PRESET)
+    const strength = normalizeEnhanceStrength(dto.enhance_strength ?? process.env.IMG_ENHANCE_STRENGTH)
     // ESPCN_WEIGHTS_URL 支持 {scale} 占位符，便于一份配置加载分倍率权重
     // （如 ESPCN_WEIGHTS_URL=/weights/espcn_x{scale}.json → 实际请求 espcn_x2.json ...）
     const weightsUrl = process.env.ESPCN_WEIGHTS_URL
@@ -577,7 +596,7 @@ export class ImageService {
 
     let result: Awaited<ReturnType<typeof enhanceImage>>
     try {
-      result = await enhanceImage(srcBuffer, { scale, mode, weightsUrl })
+      result = await enhanceImage(srcBuffer, { scale, mode, weightsUrl, preset, strength })
     } finally {
       // 额度必须归还（异常路径也不能泄漏）
       if (acquired) srGate.release(cls.cost, cls.lane)
@@ -586,8 +605,11 @@ export class ImageService {
 
     // —— 处理前后 OCR 一致性自动回退（Phase 3 交付 3）——
     // 默认仅 enhance 开启；IMG_OCR_VERIFY=off 或 dto.verify_ocr=false 可关。
+    // 「原图」模式一步未动，一致性恒为 1，校验纯属浪费 → 跳过。
     const ocrVerifyEnabled =
-      (process.env.IMG_OCR_VERIFY || 'on').toLowerCase() !== 'off' && dto.verify_ocr !== false
+      (process.env.IMG_OCR_VERIFY || 'on').toLowerCase() !== 'off' &&
+      dto.verify_ocr !== false &&
+      preset !== 'original'
     let ocrFallback = false
     let verifyInfo: { verified: boolean; consistency?: OcrConsistency; reason?: string } | undefined
     let outputBuffer = result.buffer
@@ -620,6 +642,10 @@ export class ImageService {
       debug: {
         method: 'super-resolution',
         mode: result.mode,
+        preset,
+        strength,
+        // 文档增强诊断：字高 / 窗口 / 版面保护块数 / 各环节耗时（方案 §六 可观测性）
+        enhance: result.debug,
         scale,
         width: ocrFallback ? srcMeta.width : result.width,
         height: ocrFallback ? srcMeta.height : result.height,

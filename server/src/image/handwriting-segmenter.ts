@@ -1,6 +1,6 @@
 import { LLMClient, Config, HeaderUtils } from 'coze-coding-dev-sdk'
 import sharp from 'sharp'
-import { maskFromRects, type HandwritingMask, type MaskRect } from './handwriting-mask'
+import { maskFromRects, normalizeIlluminationForDetection, type HandwritingMask, type MaskRect } from './handwriting-mask'
 
 /**
  * 阶段二 · 手写区域分割器
@@ -185,13 +185,28 @@ export async function buildHandwritingMask(
   // 两条路径互补，取**并集**：只靠 ① 时，中国学生最常用的黑笔/铅笔 100% 检不出，
   // 表现就是「点了去手写没反应」（实测确认）。
   const { maskFromColorThreshold, maskFromDarkInk, unionMasks } = await import('./handwriting-mask')
-  const chroma = await maskFromColorThreshold(imageBuffer)
-  const dark = await maskFromDarkInk(imageBuffer)
+  // P0-8 前置：先把低频光照梯度拉平，再喂给检测。
+  // 依据见 handwriting-mask.ts 的 `normalizeIlluminationForDetection` 函数头——
+  // 实测强阴影下 Otsu 会连带把整页判成墨迹，形成 1161px 超级行并触发 share_guard，
+  // 最终表现为「点了去手写没反应」。归一化后三档光照的覆盖率收敛到同一水平。
+  // ⚠️ 归一化图**只用于**检测，后续修复与混合仍在**原图**上进行。
+  const pre = await normalizeIlluminationForDetection(imageBuffer)
+  const detectBuf = pre.buffer
+
+  const chroma = await maskFromColorThreshold(detectBuf)
+  const dark = await maskFromDarkInk(detectBuf)
   const mask = await unionMasks(chroma, dark)
   return {
     mask,
     rects: [],
     usedVlm: false,
-    debug: { chromaCoverage: chroma.coverage, darkCoverage: dark.coverage, darkDebug: dark.debug },
+    debug: {
+      chromaCoverage: chroma.coverage,
+      darkCoverage: dark.coverage,
+      darkDebug: dark.debug,
+      illuminationNormalized: pre.applied,
+      medH: Math.round(pre.medH),
+      lumaDeltaMean: +pre.deltaMean.toFixed(2),
+    },
   }
 }

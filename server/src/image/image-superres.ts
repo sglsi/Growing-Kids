@@ -1,4 +1,13 @@
 import sharp from 'sharp'
+import {
+  enhanceDocumentLuma,
+  normalizeBackgroundLuma,
+  scaleMetrics,
+  tuningFor,
+  type EnhancePreset,
+  type EnhanceStrength,
+} from './image-doc-enhance'
+import { estimateCharMetricsFromLuma, type CharMetrics } from './image-layout'
 
 /**
  * Phase 2 智能高清（Super-Resolution）核心。
@@ -36,6 +45,21 @@ export interface SROptions {
    * false 则走 JS 边缘感知非锐化（慢，留作质量对比）。
    */
   fast?: boolean
+  /**
+   * 【P1 多模式输出】original（原样）/ enhance（默认，软映射保留灰阶）/ bw（黑白硬二值化）。
+   * 对齐扫描全能王的三模式设计（方案 §P1）。
+   */
+  preset?: EnhancePreset
+  /**
+   * 【P1 强度档位】weak / medium（默认）/ strong。
+   * 存在理由：避免"算法觉得好看、用户觉得过头"——把最终把控权交给用户（方案 §P1）。
+   */
+  strength?: EnhanceStrength
+  /**
+   * 置 true 时跳过整条文档增强管线，退化为旧行为（仅超分 + 固定 sigma 锐化）。
+   * 仅用于 A/B 对照与问题排查，生产不要开。
+   */
+  legacy?: boolean
 }
 
 export interface SRResult {
@@ -43,6 +67,10 @@ export interface SRResult {
   width: number
   height: number
   mode: SRMode
+  /** P1 输出模式（回显给调用方，便于日志与前端展示） */
+  preset?: EnhancePreset
+  /** 文档增强过程诊断（字高 / 窗口 / 版面保护块数 / 各环节耗时） */
+  debug?: Record<string, unknown>
 }
 
 /* ============================ 颜色工具 ============================ */
@@ -66,9 +94,13 @@ export function conv2dSingle(
       let acc = bias
       for (let ky = 0; ky < ksize; ky++) {
         for (let kx = 0; kx < ksize; kx++) {
-          const sx = Math.min(Math.max(x + kx - half, 0), W - 1)
-          const sy = Math.min(Math.max(y + ky - half, 0), H - 1)
-          acc += src[sy * W + sx] * kernel[ky * ksize + kx]
+          // 零填充（zero-padding），对齐 TensorFlow 的 SAME 卷积约定；
+          // 边缘复制会在边界引入与训练图不一致的偏差。
+          const sx = x + kx - half
+          const sy = y + ky - half
+          if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+            acc += src[sy * W + sx] * kernel[ky * ksize + kx]
+          }
         }
       }
       out[y * W + x] = acc
@@ -102,13 +134,16 @@ export function conv2d(
         for (let x = 0; x < W; x++) {
           let acc = 0
           const base = y * W + x
-          for (let ky = 0; ky < ksize; ky++) {
-            for (let kx = 0; kx < ksize; kx++) {
-              const sx = Math.min(Math.max(x + kx - half, 0), W - 1)
-              const sy = Math.min(Math.max(y + ky - half, 0), H - 1)
-              acc += inputs[i][sy * W + sx] * kernel[ky * ksize + kx]
-            }
+      for (let ky = 0; ky < ksize; ky++) {
+        for (let kx = 0; kx < ksize; kx++) {
+          // 零填充，对齐 TF SAME 卷积（见 conv2dSingle 注释）
+          const sx = x + kx - half
+          const sy = y + ky - half
+          if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+            acc += inputs[i][sy * W + sx] * kernel[ky * ksize + kx]
           }
+        }
+      }
           ch[base] += acc
         }
       }
@@ -119,7 +154,12 @@ export function conv2d(
   return out
 }
 
-/** 亚像素重排：scale² 个 W×H 通道 → 1 个 (scaleW)×(scaleH) 通道。 */
+/**
+ * 亚像素重排：scale² 个 W×H 通道 → 1 个 (scaleW)×(scaleH) 通道。
+ * 顺序严格对齐 TensorFlow 的 tf.nn.depth_to_space（NHWC, block_size=scale）：
+ *   输出子位置 (oy, ox) 取自通道 c = oy*scale + ox，即 oy=⌊c/scale⌋, ox=c%scale。
+ * （早期实现写成 oy=c%scale / ox=⌊c/scale⌋，把横纵子位置对调，导致 scale=2 时全盘错位。）
+ */
 export function pixelShuffle(
   chs: Float32Array[], W: number, H: number, scale: number,
 ): Float32Array {
@@ -128,8 +168,8 @@ export function pixelShuffle(
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       for (let c = 0; c < scale * scale; c++) {
-        const oy = y * scale + (c % scale)
-        const ox = x * scale + Math.floor(c / scale)
+        const oy = y * scale + Math.floor(c / scale)
+        const ox = x * scale + (c % scale)
         out[oy * OW + ox] = chs[c][y * W + x]
       }
     }
@@ -137,10 +177,14 @@ export function pixelShuffle(
   return out
 }
 
-/** 隐藏层激活。ESPCN 原论文（model.py）conv1/conv2 用 tanh。 */
+/**
+ * 隐藏层激活。注意：本项目实际部署的训练权重（来自 ESPCN 冻结图，conv_espcn_xN.pb）
+ * 其 conv1/conv2 用的是 ReLU（与“原论文用 tanh”不同），conv3 为线性。
+ * 故真实权重 JSON 里 act='relu'；占位解析权重用 'none'。
+ */
 export type SRSAct = 'tanh' | 'relu' | 'none'
-/** 输出激活。ESPCN 原论文用 sigmoid 把 [0,1] 映射回 [0,1]。 */
-export type SRSOutAct = 'sigmoid' | 'relu' | 'none'
+/** 输出激活。本项目真实权重用 tanh（输出 ∈[-1,1]，再 ×255 还原灰度），不是 sigmoid。 */
+export type SRSOutAct = 'sigmoid' | 'relu' | 'tanh' | 'none'
 
 export interface SRWeights {
   scale: number
@@ -152,12 +196,24 @@ export interface SRWeights {
   w2: Float32Array; b2: Float32Array
   w3: Float32Array; b3: Float32Array
   /**
-   * 激活函数。ESPCN 原论文用 tanh（conv1/conv2）+ sigmoid（输出）。
-   * 占位解析权重（buildAnalyticESPCN）用 'none'（线性），以保证无学习权重时仍是可用上采样；
-   * 真实权重经 ESPCN_WEIGHTS_URL 载入后，引擎按论文的 tanh/sigmoid 运行。
+   * 隐藏层激活。本项目真实训练权重（conv_espcn_xN.pb）conv1/conv2 用 'relu'、conv3 线性（'none'）；
+   * 占位解析权重（buildAnalyticESPCN）用 'none' 以保证无学习权重时仍是可用上采样。
+   * 注意：原作者论文用 tanh，但本项目实际权重是 ReLU，转换脚本据此写 act='relu'。
    */
   act?: SRSAct
   outAct?: SRSOutAct
+  /**
+   * 输入归一化与输出反归一化（适配不同训练约定）。
+   * 本项目真实权重（已数值验证，combo C 胜出）的约定：
+   *   lin = luma * inScale + inShift        （inScale=1/255, inShift=0 → 输入 Y/255 ∈ [0,1]）
+   *   pixel = act_out * outScale + outShift （outAct='tanh', outScale=255, outShift=0 → tanh×255）
+   * 转换脚本 convert_espcn_pb.py 已据此写出 inScale/outScale/outShift，无需手动调整。
+   * （历史上曾误用 ESPCN-master 的 [-1,1] 约定 inScale=1/127.5/inShift=-1；对当前 .pb 已排除。）
+   */
+  inScale?: number
+  inShift?: number
+  outScale?: number
+  outShift?: number
 }
 
 /**
@@ -206,47 +262,81 @@ export function buildAnalyticESPCN(scale = 2): SRWeights {
   return { scale, k1: 5, c1, k2: 3, c2, k3: 3, w1, b1, w2, b2, w3, b3, act: 'none', outAct: 'none' }
 }
 
-/** 从 JSON 加载真·ESPCN 权重（生产环境，虚拟主机有网络时）。 */
+/**
+ * 权重缓存：真·权重 JSON 约 0.5MB（含 Float32Array 转换），每次请求重新加载
+ * 会显著拖慢 enhance。同一 url/路径只解析一次，进程内复用。
+ */
+const espcnWeightCache = new Map<string, SRWeights>()
+
+/**
+ * 从 JSON 加载真·ESPCN 权重。
+ *
+ * 支持三种来源（自动识别）：
+ *  - `http(s)://...`：远程/对象存储/CDN；
+ *  - `file:///abs/path.json`：本地文件；
+ *  - `/abs/path.json` 或 `./rel/path.json`：本地文件（相对 process.cwd()）。
+ * 本机部署时直接放磁盘即可，无需额外起静态服务。
+ */
 export async function loadESPCNWeights(url: string): Promise<SRWeights> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`加载 ESPCN 权重失败 HTTP ${res.status}`)
-  const j = (await res.json()) as any
+  const cached = espcnWeightCache.get(url)
+  if (cached) return cached
+
+  let j: any
+  if (/^https?:\/\//i.test(url)) {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`加载 ESPCN 权重失败 HTTP ${res.status}`)
+    j = (await res.json()) as any
+  } else {
+    const p = url.startsWith('file://') ? url.slice('file://'.length) : url
+    const { readFile } = await import('node:fs/promises')
+    j = JSON.parse(await readFile(p, 'utf8'))
+  }
+
   const mk = (a: number[]) => Float32Array.from(a)
-  return {
+  const w: SRWeights = {
     scale: j.scale,
     k1: j.k1, c1: j.c1, k2: j.k2, c2: j.c2, k3: j.k3,
     w1: mk(j.w1), b1: mk(j.b1), w2: mk(j.w2), b2: mk(j.b2), w3: mk(j.w3), b3: mk(j.b3),
+    act: j.act, outAct: j.outAct,
+    inScale: j.inScale, inShift: j.inShift, outScale: j.outScale, outShift: j.outShift,
   }
+  espcnWeightCache.set(url, w)
+  return w
 }
 
 /**
  * ESPCN 前向：亮度(0..255) → 升采样亮度(0..255)。
  *
- * 对齐 ESPCN 原论文（model.py / train.py）的数值约定：
- *   - 输入 Y 先归一化到 [0,1]（对应 torchvision.transforms.ToTensor 除以 255）；
- *   - conv1/conv2 走 tanh（论文激活），conv3 为线性；
- *   - pixel_shuffle 后过 sigmoid 把 [0,1] 映射回 [0,1]，再 ×255。
- * 真实学习权重（ESPCN_WEIGHTS_URL 载入）即按此约定训练，可直接套用；
+ * 数值约定（与本项目真实训练权重 conv_espcn_xN.pb 逐位对齐，已数值验证）：
+ *   - 输入 Y 归一化到 [0,1]：lin = Y/255（inScale=1/255, inShift=0）；
+ *   - conv1/conv2 走 ReLU，conv3 为线性；
+ *   - pixel_shuffle 后过 Tanh（输出 ∈[-1,1]），再 ×255 还原灰度并裁剪到 [0,255]。
  * 占位解析权重（act/outAct='none'）则退化为可用上采样。
+ * 注：ESPCN 原论文用 tanh+sigmoid，但本项目实际部署权重是 ReLU+Tanh，故以权重 JSON 字段为准。
  */
 export function superResolveESPCN(
   luma: Float32Array, W: number, H: number, w: SRWeights,
 ): Float32Array {
   const n = W * H
+  const inScale = w.inScale ?? 1 / 255
+  const inShift = w.inShift ?? 0
   const lin = new Float32Array(n)
-  for (let i = 0; i < n; i++) lin[i] = luma[i] / 255
+  for (let i = 0; i < n; i++) lin[i] = luma[i] * inScale + inShift
   const act = w.act ?? 'tanh'
   const s1 = conv2d([lin], W, H, w.k1, w.w1, w.b1, w.c1, 1, act)
   const s2 = conv2d(s1, W, H, w.k2, w.w2, w.b2, w.c2, w.c1, act)
   const s3 = conv2d(s2, W, H, w.k3, w.w3, w.b3, w.scale * w.scale, w.c2, 'none')
   const up = pixelShuffle(s3, W, H, w.scale)
   const outAct = w.outAct ?? 'sigmoid'
+  const outScale = w.outScale ?? 255
+  const outShift = w.outShift ?? 0
   const out = new Float32Array(up.length)
   for (let i = 0; i < up.length; i++) {
     let v = up[i]
     if (outAct === 'sigmoid') v = 1 / (1 + Math.exp(-v))
     else if (outAct === 'relu') v = Math.max(0, v)
-    out[i] = Math.min(255, Math.max(0, v * 255))
+    else if (outAct === 'tanh') v = Math.tanh(v)
+    out[i] = Math.min(255, Math.max(0, v * outScale + outShift))
   }
   return out
 }
@@ -346,13 +436,55 @@ async function classicalUpscale(
 /**
  * 智能高清主入口（进程内 CPU 推理，无外部模型服务）。
  *
- * 管线对齐 ESPCN 参考实现（test_image.py）：转 YCbCr → 仅对亮度 Y 做超分 →
- * 色度 Cb/Cr 双三次上采样 → 重组回 RGB。这是 ESPCN「人眼对亮度最敏感、色度可廉价上采样」
- * 设计精髓，也是其高效又保质的根本原因；本项目在 Node 端用同一思路落地。
+ * ── 管线（方案 §四「总体管线」的程序化落地）─────────────────────────────────
+ * ```
+ *   RGB → YCbCr
+ *     ① P0-1 背景归一化      （原尺度；低频 → 工作图降采样做）
+ *     ② 超分辨率              （ESPCN / classical Lanczos，色度双三次）
+ *     ③ P0-4 自适应参数       （字符度量按倍率换算到超分尺度）
+ *     ④ P0-5 版面感知         （图形/插图/表格线保护区）
+ *     ⑤ P0-2 局部对比软增强   （Sauvola 软映射，积分图 O(1)）
+ *     ⑥ P0.5 自适应锐化       （sigma ≈ 笔画宽/2 + 梯度软门控）
+ *     ⑦ P1 硬二值化           （仅 bw 模式）
+ *   → 重组 RGB
+ * ```
+ *
+ * **顺序理由**（每一条都对应方案里的一句约束）：
+ *  · ① 在最前：它削的是低频背景，先做才不会干扰后续笔画级高频处理；
+ *    若在超分之后做，等于让超分先把阴影梯度插值放大了一遍。
+ *  · ② → ⑤：硬映射会永久损失灰阶，之后再超分没有意义（方案原话）。
+ *  · ⑤ → ⑥：见 `adaptiveSharpen` 的顺序说明（增强后边缘更陡，门控更准，
+ *    且锐化的小过冲不会被随后的对比拉伸再放大一次）。
+ *  · ⑦ 永远最后。
+ *
+ * 转 YCbCr 本身对齐 ESPCN 参考实现（test_image.py）：仅亮度走增强，色度廉价上采样。
+ * 这是 ESPCN「人眼对亮度最敏感」的精髓，也保证**增强不引入色偏**。
  */
 export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<SRResult> {
+  // 公共 API 自带枚举防御：service 层虽已归一化，但直接调用本函数的路径（脚本/测试/
+  // 未来新入口）不该被一个拼错的枚举值带偏 —— 非法值一律落回默认。
+  const preset: EnhancePreset =
+    opts.preset === 'original' || opts.preset === 'bw' ? opts.preset : 'enhance'
+  const strength: EnhanceStrength =
+    opts.strength === 'weak' || opts.strength === 'strong' ? opts.strength : 'medium'
+  const legacy = opts.legacy === true
   const scale = opts.scale ?? 2
   const mode: SRMode = (opts.mode ?? 'classical').toLowerCase() === 'espcn' ? 'espcn' : 'classical'
+
+  // 「原图」模式：一步不动，直接回原图。保真场景用（方案 P1 三模式之一）。
+  if (preset === 'original') {
+    const meta = await sharp(buf).metadata()
+    const buffer = await sharp(buf).png().toBuffer()
+    return {
+      buffer,
+      width: meta.width || 0,
+      height: meta.height || 0,
+      mode,
+      preset,
+      debug: { preset, stage: 'original', note: '未做任何像素改动' },
+    }
+  }
+
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const W = info.width, H = info.height, ch = info.channels
 
@@ -369,34 +501,85 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
     Cr[i] = (r - y) / 1.402 + 128
   }
 
+  // —— P0-4 字符度量：全项目自适应参数的唯一来源 ——
+  // 只在原尺度跑一次连通域，超分后按倍率换算（scaleMetrics），省一次全图度量。
+  const debug: Record<string, unknown> = { preset, mode, scale }
+  let metrics0: CharMetrics | undefined
+  if (!legacy) {
+    const t = Date.now()
+    metrics0 = estimateCharMetricsFromLuma(Y, W, H)
+    debug.msMetrics = Date.now() - t
+  }
+
+  // —— ① P0-1 背景归一化：超分之前削掉低频光照梯度 ——
+  let Yn: Float32Array = Y
+  if (!legacy && metrics0) {
+    const tuning = tuningFor(strength)
+    const t = Date.now()
+    Yn = await normalizeBackgroundLuma(Y, W, H, {
+      medH: metrics0.medH > 0 ? metrics0.medH : 14,
+      flatten: tuning.flatten,
+      inkIsDark: metrics0.inkIsDark,
+      levelStretch: tuning.levelStretch,
+    })
+    debug.msNormalizePrefill = Date.now() - t
+  }
+
   let lumaUp: Float32Array
   if (mode === 'espcn') {
     let weights = opts.weights
     if (!weights && opts.weightsUrl) weights = await loadESPCNWeights(opts.weightsUrl)
     if (!weights) weights = buildAnalyticESPCN(scale)
-    lumaUp = superResolveESPCN(Y, W, H, weights)
+    lumaUp = superResolveESPCN(Yn, W, H, weights)
   } else {
-    lumaUp = await classicalUpscale(Y, W, H, scale, opts)
+    // 锐化交给 P0.5（自适应 sigma + 梯度门控），这里传 0 关掉旧固定 sigma=1.4 锐化
+    lumaUp = await classicalUpscale(Yn, W, H, scale, legacy ? opts : { ...opts, sharpen: 0 })
+  }
+
+  // —— ③④⑤⑥⑦ 文档增强（超分尺度上做：笔画级高频必须原尺度，方案 §7.1）——
+  if (!legacy) {
+    const tW = W * scale, tH = H * scale
+    const mUp = metrics0 && metrics0.medH > 0 ? scaleMetrics(metrics0, scale) : undefined
+    const r = await enhanceDocumentLuma(lumaUp, tW, tH, {
+      preset,
+      strength,
+      metrics: mUp,
+      // 背景归一化已在超分前完成，避免重复
+      preNormalized: true,
+      debug,
+    })
+    lumaUp = r.luma
   }
 
   // —— 色度：低分辨率 Cb/Cr 经双三次上采样到目标尺寸（对齐 Image.BICUBIC）——
   const tW = W * scale, tH = H * scale
-  const cbBytes = Uint8Array.from(Cb, (v) => Math.min(255, Math.max(0, v)))
-  const crBytes = Uint8Array.from(Cr, (v) => Math.min(255, Math.max(0, v)))
-  const cbUp = await sharp(cbBytes, { raw: { width: W, height: H, channels: 1 } })
-    .resize(tW, tH, { kernel: 'cubic' }).raw().toBuffer()
-  const crUp = await sharp(crBytes, { raw: { width: W, height: H, channels: 1 } })
-    .resize(tW, tH, { kernel: 'cubic' }).raw().toBuffer()
+  const cbBytes = Uint8Array.from(Cb, (v) => Math.min(255, Math.max(0, Math.round(v))))
+  const crBytes = Uint8Array.from(Cr, (v) => Math.min(255, Math.max(0, Math.round(v))))
+  // 关键：libvips 会把单通道 b-w 图提升为 sRGB 三通道后再运算，若直接 .raw()
+  // 拿到的是 3 通道缓冲，按单通道索引取值会错位 3 倍，导致色度整体错乱
+  // （表现为输出严重偏色、PSNR 掉 ~14dB）。显式 toColourspace('b-w') 锁回单通道。
+  const upChroma = (bytes: Uint8Array) =>
+    sharp(bytes, { raw: { width: W, height: H, channels: 1 } })
+      .toColourspace('b-w')
+      .resize(tW, tH, { kernel: 'cubic' })
+      .raw()
+      .toBuffer()
+  const cbUp = await upChroma(cbBytes)
+  const crUp = await upChroma(crBytes)
 
   // —— 重组回 RGB（标准 BT.601 反变换，与正变换互逆）——
+  //
+  // ⚠️ bw 模式必须把色度**中性化**（cb=cr=0 即 128）：亮度已被硬二值化到 0/255，
+  //    若再叠加原色度，蓝字会变成「纯饱和蓝」而不是黑 —— 那不是黑白扫描件该有的样子。
+  const neutral = preset === 'bw'
   const out = Buffer.alloc(tW * tH * 4)
   for (let i = 0; i < tW * tH; i++) {
     const y = lumaUp[i]
-    const cb = cbUp[i] - 128
-    const cr = crUp[i] - 128
-    let R = y + 1.402 * cr
-    let G = y - 0.344136 * cb - 0.714136 * cr
-    let B = y + 1.772 * cb
+    const cb = neutral ? 0 : cbUp[i] - 128
+    const cr = neutral ? 0 : crUp[i] - 128
+    const R = y + 1.402 * cr
+    const G = y - 0.344136 * cb - 0.714136 * cr
+    const B = y + 1.772 * cb
     out[i * 4] = Math.min(255, Math.max(0, R))
     out[i * 4 + 1] = Math.min(255, Math.max(0, G))
     out[i * 4 + 2] = Math.min(255, Math.max(0, B))
@@ -404,5 +587,5 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
   }
 
   const buffer = await sharp(out, { raw: { width: tW, height: tH, channels: 4 } }).png().toBuffer()
-  return { buffer, width: tW, height: tH, mode }
+  return { buffer, width: tW, height: tH, mode, preset, debug }
 }

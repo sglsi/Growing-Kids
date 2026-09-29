@@ -37,6 +37,22 @@ export interface ProcessImageDto {
    */
   sr_mode?: 'classical' | 'espcn'
   /**
+   * 【P1 多模式输出】智能高清专用（对齐扫描全能王，方案 §P1）：
+   *  - `original` 原图：不做任何像素改动（保真场景，如已很清晰的印刷件）
+   *  - `enhance`  增强（**默认**）：背景归一化 + 局部对比软增强 + 自适应锐化，
+   *                保留灰阶，不破坏照片/插图 —— 通用首选
+   *  - `bw`       黑白：上述 + Sauvola 硬二值化，纯文字文档可读性最大，
+   *                ⚠️ 会丢失灰阶（图表/照片区由版面感知自动保护，不被二值化）
+   * 缺省读环境变量 IMG_ENHANCE_PRESET。
+   */
+  enhance_preset?: 'original' | 'enhance' | 'bw'
+  /**
+   * 【P1 强度档位】智能高清专用：'weak' | 'medium'(默认) | 'strong'。
+   * 存在理由：把"是否过头"的最终把控权交给用户，避免算法自说自话（方案 §P1）。
+   * 缺省读环境变量 IMG_ENHANCE_STRENGTH。
+   */
+  enhance_strength?: 'weak' | 'medium' | 'strong'
+  /**
    * 【Phase 3】处理前后 OCR 一致性自动回退。
    * 仅 enhance 默认开启（auto/erase 不启用）；置 false 可关。
    * 处理图识别一致性低于阈值(IMG_OCR_MIN_SCORE,默认0.75)时自动回退原图。
