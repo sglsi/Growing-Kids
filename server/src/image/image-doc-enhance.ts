@@ -27,7 +27,7 @@ import {
  *   P0-4 自适应窗口    窗口 = 2~3 × 字高（来自 image-layout 的共用度量）
  *   P0-5 版面感知      只在文字区增强，**图形/插图/照片/表格线**保持原样
  *   P0.5 自适应锐化    sigma ≈ 笔画宽/2 + 局部梯度软门控 + 限幅防光晕
- *   P1   多模式        原图 / 增强（默认）/ 黑白（硬二值化）+ 弱/中/强 档位
+ *   P1   多模式        原图 / 增强（默认，彩色）/ 黑白（硬二值化）/ 增亮 / 灰度 + 弱/中/强 档位
  *
  * ── 每一条关键工程约束（都有出处，别随手改）────────────────────────────────
  * ① **算子极性**：暗字亮底必须用 **closing**（膨胀→腐蚀）估背景。
@@ -44,7 +44,7 @@ import {
 /* ============================ 类型与档位 ============================ */
 
 /** P1 输出模式 */
-export type EnhancePreset = 'original' | 'enhance' | 'bw'
+export type EnhancePreset = 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
 /** P1 强度档位 */
 export type EnhanceStrength = 'weak' | 'medium' | 'strong'
 
@@ -61,11 +61,19 @@ export interface EnhanceTuning {
   sharpenAmount: number
 }
 
-/** 三档强度。数值起点参照方案 §五「关键参数建议」 */
+/**
+ * 三档强度。数值起点参照方案 §五「关键参数建议」。
+ *
+ * ⚠️ 2026-09-29 修订（对照全能扫描王实测，见用户反馈 + 量化诊断）：
+ *   旧参数下背景最高只到 ~245、且存在「三种区域三种白度」的斑驳，文字还被加粗。
+ *   本轮把归一化改**除法**并拉满 flatten，使背景精确收敛到 targetLevel（默认 255），
+ *   再在收尾用白点拉伸把背景 P90 强制顶到 255（达成 253~255 动态范围，与扫描王一致）。
+ *   softMin/halo 收紧、sharpenAmount 降档，根治「文字加粗 + 白边过冲」。
+ */
 const TUNING: Record<EnhanceStrength, EnhanceTuning> = {
-  weak:   { flatten: 0.55, levelStretch: 0.30, k: 0.15, blend: 0.50, sharpenAmount: 0.50 },
-  medium: { flatten: 0.80, levelStretch: 0.55, k: 0.22, blend: 0.72, sharpenAmount: 0.85 },
-  strong: { flatten: 1.00, levelStretch: 0.80, k: 0.30, blend: 0.90, sharpenAmount: 1.20 },
+  weak:   { flatten: 0.90, levelStretch: 0.50, k: 0.15, blend: 0.50, sharpenAmount: 0.40 },
+  medium: { flatten: 1.00, levelStretch: 0.75, k: 0.22, blend: 0.72, sharpenAmount: 0.60 },
+  strong: { flatten: 1.00, levelStretch: 0.95, k: 0.30, blend: 0.90, sharpenAmount: 0.90 },
 }
 
 export function tuningFor(strength: EnhanceStrength): EnhanceTuning {
@@ -273,12 +281,19 @@ const BG_MAX_SIDE = 768
 const SE_SCALE = 2.5
 
 /**
- * 光照 / 背景归一化（Top-Hat 思路）。
+ * 光照 / 背景归一化（Top-Hat 思路 + **除法**同态归一化）。
  *
  *   bg   = closing(gray)            暗字亮底（或 opening，白字黑底）
- *   out  = gray − bg + targetLevel   背景被拉平到常数 targetLevel
+ *   out  = gray * (targetLevel / bg)  背景处(gray≈bg)精确收敛到 targetLevel（纯白）
  *
- * `flatten` 控制拉平程度：0 → 完全不动（out === 原图），1 → 完全拉平。
+ * ── 为什么是除法而不是旧的「减法」(gray − bg + targetLevel) ────────────────
+ *   旧公式受 `flatten<1` 与残差截断限制，背景最高只到 ~245，且阴影里 `bg` 偏低时
+ *   背景被拉得更暗 → 「深一片浅一片」。除法是光照归一化的标准做法（Photoshop「划分」
+ *   混合 / 同态滤波）：把每个像素除以**局部光照估计 bg**，整页的乘性光照差异被还原，
+ *   背景**精确**收敛到 targetLevel，墨迹(src≪bg)基本不动。flatten 作为「原图↔归一化」
+ *   的混合旋钮保留可解释性。
+ *
+ * `flatten` 控制拉平程度：0 → 完全不动（out === 原图），1 → 完全除法归一化。
  *
  * @param medH 当前尺度下的字高（结构元尺寸的唯一依据）
  */
@@ -310,17 +325,28 @@ export async function normalizeBackgroundLuma(
 
   // targetLevel：背景的"干净纸张白"。用高分位而非均值 —— 均值会被阴影拉低，
   // 拉平到均值等于把整页压暗，反而更"没修过"。
-  const targetLevel = clamp(grayPercentile(bg, bg.length, 0.9), 190, 252)
+  // ⚠️ 上限从 252 提到 255（2026-09-29）：配合除法归一化，背景可精确收敛到纯白，
+  //   达成与全能扫描王一致的 253~255 动态范围。
+  const targetLevel = clamp(grayPercentile(bg, bg.length, 0.9), 190, 255)
 
   // 背景是低频 → 在工作尺度估好，升采样回原尺度（方案 §7.1）。
   // ⚠️ 升采样 **bg 本身**而不是 (targetLevel − bg) 的残差：残差可正可负且幅值
   //    可达 ±252，走 8bit 字节通道必须加偏移缩放，会引入截断误差；bg 本身恒在
   //    0..255，直接走字节通道无损。
   const bgUp = await upscaleGray(toGrayBytes(bg, w * h), w, h, W, H)
+  // 除法归一化的增益上限：限制极端阴影/深色调区被过度洗白（防照片、彩色插图失真）。
+  //   阴影里纸张 bg≈130 → ratio=255/130≈1.96 < 2.4，正常提亮；
+  //   若 bg 异常低（接近纯黑底）则封顶，避免数值爆炸。
+  const RATIO_CAP = 2.4
+  const ratioLo = 1 / RATIO_CAP
   for (let i = 0; i < n; i++) {
-    // flatten=1 → out = src − bg + targetLevel（完全拉平到纸张白）
-    // flatten=0 → out = src − bg + bg = src（完全不动）
-    out[i] = clamp(src[i] + (targetLevel - bgUp[i]) * opts.flatten, 0, 255)
+    const bgv = bgUp[i] < 16 ? 16 : bgUp[i] // 防除零（极深底色罕见）
+    let ratio = targetLevel / bgv
+    if (ratio > RATIO_CAP) ratio = RATIO_CAP
+    else if (ratio < ratioLo) ratio = ratioLo
+    const divided = src[i] * ratio // 背景处 src≈bgv → 精确收敛到 targetLevel
+    // flatten 作为「原图 ↔ 归一化」混合旋钮：1=完全除法归一化，0=完全不动
+    out[i] = clamp(src[i] + (divided - src[i]) * opts.flatten, 0, 255)
   }
 
   // 自动色阶：把灰度 p2/p98 拉到 0/255。背景拉平后仍可能整体发灰
@@ -595,7 +621,9 @@ export function localContrastEnhance(
   const { win, k, blend, protect } = opts
   const lo = opts.lo ?? 6
   const hi = opts.hi ?? 249
-  const softMin = opts.softMin ?? 16
+  // ⚠️ 2026-09-29：默认 16→8。softMin 过宽会把抗锯齿边缘像素拉向黑，叠加锐化过冲
+  //   形成「文字加粗」的负增强；收紧到 8 让过渡带更贴近笔画本体。
+  const softMin = opts.softMin ?? 8
   const softK = opts.softK ?? 1.6
   const span = hi - lo
   return mapLocalStats(luma, W, H, win, (v, mean, sigma, i) => {
@@ -618,6 +646,10 @@ export function localContrastEnhance(
 /**
  * P1「黑白」模式：Sauvola **硬**二值化。
  *
+ * ⚠️ 2026-09-29：生产 bw 路径已改走 `binarizeBwPage`（全局 Otsu + 温和去噪，
+ * 对照全能扫描王实测，见该函数注释）。本函数保留用于 A/B 对照与参数实验，
+ * 不再被 enhanceDocumentLuma 调用。
+ *
  * 只在用户显式选择时启用；保护区内保持原灰阶（不破坏插图/照片）。
  */
 export function binarizeSauvola(
@@ -634,6 +666,71 @@ export function binarizeSauvola(
     if (p > 0.5) return v
     return v < sauvolaT(mean, sigma, k) ? lo : hi
   })
+}
+
+export interface BwBinarizeResult {
+  luma: Float32Array
+  /** 全局 Otsu 阈值（诊断用） */
+  threshold: number
+  /** 被去噪移除的孤立墨点数（诊断用） */
+  specksRemoved: number
+}
+
+/**
+ * P1「黑白」模式收尾（2026-09-29 修订，对照全能扫描王实测）：
+ * **全局 Otsu 二值化 + 温和孤立墨点去噪**，整页一视同仁。
+ *
+ * ── 为什么从 Sauvola(k=0.2) 换成全局 Otsu ─────────────────────────────────
+ * 背景归一化（管线①）已把整页背景精确拉到 255，Sauvola 的抗阴影优势不复存在，
+ * 反而暴露短板：平坦背景局部 σ≈0 → T = μ·(1−k) ≈ 204，把灰度 100~204 的
+ * 抗锯齿过渡像素**全部判黑**——表现为笔画加粗粘连；且保护区按旧逻辑原样保留
+ * 灰度——表现为图形区斑驳灰底。
+ * 同一张归一化亮度图 A/B 实测（排除手写区，基准=全能扫描王）：
+ *   Sauvola0.2 → 图形区中间调残留 19.3%、噪点 165、全页 ink 5.60%
+ *   全局 Otsu  → 图形区中间调残留  2.0%、噪点  75、全页 ink 4.93%（基准 4.58%）
+ * 全局 Otsu 的前提正是管线①的除法归一化：阴影已被消除，双峰（纸白/墨黑）清晰，
+ * T 落在谷底（实测 144），过渡带只在笔画真正深度处判黑 → 笔画忠实不加粗。
+ *
+ * ── 保护区为什么不再豁免 ──────────────────────────────────────────────────
+ * P0-5 保护的目的「不在保留灰阶的模式里破坏灰阶」对黑白模式不成立：整页只剩
+ * 0/255，豁免只会把纸纹灰底留在图形周围。对齐扫描王实测：其黑白模式全页二值化，
+ * 图形线条保留、背景拉白。连续色调照片被二值化是用户显式选择黑白模式的预期代价。
+ * （enhance / gray / brighten 的保护区豁免不受影响。）
+ *
+ * ── 去噪为什么温和 ────────────────────────────────────────────────────────
+ * 实测教训：面积阈值取 0.5·strokeWidth²（≈27px）会把 5×7px 的逗号/句点一起删掉
+ * （正文区 29 处标点消失）。扫描王本身保留 ~244 个小噪点，说明其去噪极轻甚至没有。
+ * 取 max(3, 0.15·strokeWidth²)（实测图 ≈8px）：标点面积 ≈0.5·strokeWidth²，
+ * 留 3 倍以上余量；中位面积 2px 的孤立噪点被清除。
+ */
+export function binarizeBwPage(
+  luma: Float32Array,
+  W: number,
+  H: number,
+  opts: { strokeWidth: number },
+): BwBinarizeResult {
+  const n = W * H
+  const bytes = toGrayBytes(luma, n)
+  const t = otsuThreshold(bytes, n)
+  const out = new Float32Array(n)
+  for (let i = 0; i < n; i++) out[i] = luma[i] < t ? 0 : 255
+
+  const speckMax = Math.max(3, Math.round(0.15 * opts.strokeWidth * opts.strokeWidth))
+  const ink = new Uint8Array(n)
+  for (let i = 0; i < n; i++) ink[i] = out[i] === 0 ? 1 : 0
+  const { comps } = connectedComponents(ink, W, H, false)
+  let removed = 0
+  for (const c of comps) {
+    if (c.n > speckMax) continue
+    removed++
+    for (let y = c.y0; y <= c.y1; y++) {
+      const base = y * W
+      for (let x = c.x0; x <= c.x1; x++) {
+        if (ink[base + x]) out[base + x] = 255
+      }
+    }
+  }
+  return { luma: out, threshold: t, specksRemoved: removed }
 }
 
 /* ============================ P0.5 自适应锐化 ============================ */
@@ -657,12 +754,15 @@ export async function adaptiveSharpen(
   luma: Float32Array,
   W: number,
   H: number,
-  opts: { sigma: number; amount: number; haloLimit?: number },
+  opts: { sigma: number; amount: number; haloLimit?: number; protect?: Float32Array | null },
 ): Promise<Float32Array> {
   const n = W * H
   if (opts.amount <= 0 || n === 0) return Float32Array.from(luma)
   const sigma = clamp(opts.sigma, 0.4, 4)
-  const halo = opts.haloLimit ?? 36
+  // ⚠️ 2026-09-29：默认 36→18。halo 过宽会在笔画两侧产生可见白边过冲（光晕），
+  //   与 softMin 过宽叠加正是「文字加粗」的元凶之一。
+  const halo = opts.haloLimit ?? 18
+  const protect = opts.protect ?? null
 
   // 高斯模糊走 libvips 原生（方案 §7.1：重算子交给原生扩展，不要纯 JS 循环）
   const bytes = toGrayBytes(luma, n)
@@ -704,7 +804,10 @@ export async function adaptiveSharpen(
     else if (d < -halo) d = -halo
     let gate = grad[i] / gRef
     if (gate > 1) gate = 1
-    let o = v + opts.amount * gate * d
+    // 保护区免受锐化（与 contrast/bw 一致）：几何图/照片/插图的边缘不被锐化过冲破坏
+    const p = protect ? protect[i] : 0
+    const amt = p > 0 ? opts.amount * (1 - p) : opts.amount
+    let o = v + amt * gate * d
     if (o < 0) o = 0
     else if (o > 255) o = 255
     out[i] = o
@@ -727,7 +830,9 @@ export async function enhanceDocumentLuma(
   H: number,
   opts: DocEnhanceOptions = {},
 ): Promise<DocEnhanceResult> {
-  const preset = opts.preset === 'original' || opts.preset === 'bw' ? opts.preset : 'enhance'
+  const requestedPreset = opts.preset
+  const internalPreset: 'enhance' | 'bw' =
+    requestedPreset === 'bw' ? 'bw' : 'enhance'
   const strengthIn =
     opts.strength === 'weak' || opts.strength === 'strong' ? opts.strength : 'medium'
   const tuning = tuningFor(strengthIn)
@@ -749,7 +854,7 @@ export async function enhanceDocumentLuma(
     charCount: metrics.charCount,
     rowCount: metrics.rowCount,
   }
-  debug.preset = preset
+  debug.preset = requestedPreset
   debug.strength = strengthIn
 
   // 度量不可信时回退固定参数：窗口取文献常用值 31，SE 半径随之中等
@@ -765,7 +870,7 @@ export async function enhanceDocumentLuma(
   const win = (Math.round(clamp(medH * 2.5, 11, winMax)) | 1) as number
   debug.win = win
 
-  if (preset === 'original') {
+  if (requestedPreset === 'original') {
     debug.stage = 'original'
     return { luma: Float32Array.from(luma), width: W, height: H, metrics, debug }
   }
@@ -800,17 +905,53 @@ export async function enhanceDocumentLuma(
   })
   debug.msContrast = Date.now() - t3
 
-  // ④ P0.5 自适应锐化（sigma ≈ 笔画宽/2）
+  // ④ P0.5 自适应锐化（sigma ≈ 笔画宽/2）；保护区一并豁免
   const t4 = Date.now()
   const sigma = clamp((metrics.strokeWidth > 0 ? metrics.strokeWidth : medH / 8) / 2, 0.5, 3)
   debug.sharpenSigma = +sigma.toFixed(2)
-  cur = await adaptiveSharpen(cur, W, H, { sigma, amount: tuning.sharpenAmount })
+  cur = await adaptiveSharpen(cur, W, H, { sigma, amount: tuning.sharpenAmount, protect })
   debug.msSharpen = Date.now() - t4
 
-  // ⑤ P1 黑白模式：硬二值化（永远最后）
-  if (preset === 'bw') {
+  // ④b 收尾白点拉伸（建议②，2026-09-29）：把背景亮部 P90 强制顶到 255，
+  //     消除「深一片浅一片」，使全图背景落入 253~255 区间（与全能扫描王一致）。
+  //     正常除法归一化后背景已≈255，此步为无操作或极轻修正；仅在残存阴影/暗角时触发，
+  //     是「背景必到 253~255」的硬保险。背景已≥253 时跳过，避免把墨迹也一并提亮。
+  const tWp = Date.now()
+  const whitePt = grayPercentile(cur, W * H, 0.90)
+  if (whitePt < 253) {
+    const g = 255 / Math.max(1, whitePt)
+    for (let i = 0; i < W * H; i++) {
+      const v = cur[i] * g
+      cur[i] = v > 255 ? 255 : v
+    }
+    debug.whitePointStretch = +g.toFixed(3)
+  } else {
+    debug.whitePointStretch = 1
+  }
+  debug.msWhitePoint = Date.now() - tWp
+
+  // ④c 增亮模式：白点拉伸之后再做一次 gamma 提亮（gamma<1 抬升中间调），
+  //     整体偏亮、更通透；保留灰阶、不与硬二值化叠加。
+  if (requestedPreset === 'brighten') {
+    const tB = Date.now()
+    const gamma = 0.82
+    for (let i = 0; i < W * H; i++) cur[i] = 255 * Math.pow(clamp(cur[i], 0, 255) / 255, gamma)
+    debug.brightenGamma = gamma
+    debug.msBrighten = Date.now() - tB
+  }
+
+  // ⑤ P1 黑白/灰度模式：灰度类输出（bw 全局 Otsu 硬二值化、gray 保留灰阶）。
+  //    硬二值化永远最后，且只作用于 bw 预设。
+  if (internalPreset === 'bw') {
     const t5 = Date.now()
-    cur = binarizeSauvola(cur, W, H, { win, k: 0.2, protect })
+    // 2026-09-29：Sauvola(k=0.2) → 全局 Otsu + 温和去噪（binarizeBwPage 注释有实测依据）。
+    // 前提是管线①的除法归一化已消除阴影；保护区不再豁免（黑白模式整页拉白，对齐扫描王）。
+    const bw = binarizeBwPage(cur, W, H, {
+      strokeWidth: metrics.strokeWidth > 0 ? metrics.strokeWidth : Math.max(1, medH / 8),
+    })
+    cur = bw.luma
+    debug.bwThreshold = bw.threshold
+    debug.specksRemoved = bw.specksRemoved
     debug.msBinarize = Date.now() - t5
   }
 

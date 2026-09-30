@@ -276,9 +276,10 @@ export class ImageService {
     const srcBuffer = await this.download(dto.image_url, fwd)
     const srcMeta = await readMeta(srcBuffer)
 
-    // ① 分割：拿到手写 mask（VLM 优先，失败降级色域阈值）
+    // ① 分割：拿到手写 mask（VLM 优先，失败降级色域阈值；manual_regions 无条件并入）
     const seg = await buildHandwritingMask(srcBuffer, dto.image_url, forwardHeaders, {
       allowVlm: dto.use_vlm !== false,
+      manualRects: dto.manual_regions,
     })
     const { mask } = seg
 

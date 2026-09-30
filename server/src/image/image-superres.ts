@@ -28,7 +28,11 @@ import { estimateCharMetricsFromLuma, type CharMetrics } from './image-layout'
 export type SRMode = 'classical' | 'espcn'
 
 export interface SROptions {
-  /** 升采样倍率，默认 2（ESPCN 原论文 x2/x3/x4） */
+  /**
+   * 高清扩展升采样倍率（X2/X3/X4）。彩色类模式（enhance/brighten/gray）默认 2；
+   * **黑白模式固定为 1（不超分）**——二值图超分只是对 0/255 插值，徒增体积与耗时。
+   * 见《智能高清-方法论》§P2：高清扩展是"可选清晰度增强"，与基础增强（背景归一化+对比增强）正交。
+   */
   scale?: number
   /** 'classical' | 'espcn'，默认 classical */
   mode?: SRMode
@@ -46,8 +50,9 @@ export interface SROptions {
    */
   fast?: boolean
   /**
-   * 【P1 多模式输出】original（原样）/ enhance（默认，软映射保留灰阶）/ bw（黑白硬二值化）。
-   * 对齐扫描全能王的三模式设计（方案 §P1）。
+   * 【P1 多模式输出】original（原样）/ enhance（默认，彩色增强）/ bw（黑白硬二值化）/
+   * brighten（增亮）/ gray（去色增强，保留灰阶）。对齐扫描全能王的五种模式设计（方案 §P1）。
+   * 单图入口 enhanceImage 用 preset 选定其一；并列入口 enhanceImageModes 一次性产出全部五种。
    */
   preset?: EnhancePreset
   /**
@@ -186,6 +191,8 @@ export type SRSAct = 'tanh' | 'relu' | 'none'
 /** 输出激活。本项目真实权重用 tanh（输出 ∈[-1,1]，再 ×255 还原灰度），不是 sigmoid。 */
 export type SRSOutAct = 'sigmoid' | 'relu' | 'tanh' | 'none'
 
+export type SRFamily = 'espcn' | 'classic' | 'tatt' | 'real-esrgan'
+
 export interface SRWeights {
   scale: number
   // 卷积配置
@@ -214,6 +221,13 @@ export interface SRWeights {
   inShift?: number
   outScale?: number
   outShift?: number
+  /**
+   * 高清扩展引擎族（P2 可插拔化）。决定 `runSREngine` 走哪个前向：
+   *   · 'espcn'   经典 ESPCN 三层卷积（真·学习权重，或解析退化权重）
+   *   · 'classic' 解析退化权重（双线性 + 轻锐化，等价于经典上采样）
+   *   · 'tatt' / 'real-esrgan' 为 **P2 中期接入点**，需加载对应预训练权重（权重文件应携带 `family` 字段）
+   */
+  family?: SRFamily
 }
 
 /**
@@ -259,7 +273,7 @@ export function buildAnalyticESPCN(scale = 2): SRWeights {
     k[1] -= boost * 0.25; k[3] -= boost * 0.25; k[5] -= boost * 0.25; k[7] -= boost * 0.25
     w3.set(k, (p * c2 + 0) * 9) // 仅 ci=0
   }
-  return { scale, k1: 5, c1, k2: 3, c2, k3: 3, w1, b1, w2, b2, w3, b3, act: 'none', outAct: 'none' }
+  return { scale, k1: 5, c1, k2: 3, c2, k3: 3, w1, b1, w2, b2, w3, b3, act: 'none', outAct: 'none', family: 'classic' }
 }
 
 /**
@@ -297,7 +311,7 @@ export async function loadESPCNWeights(url: string): Promise<SRWeights> {
     scale: j.scale,
     k1: j.k1, c1: j.c1, k2: j.k2, c2: j.c2, k3: j.k3,
     w1: mk(j.w1), b1: mk(j.b1), w2: mk(j.w2), b2: mk(j.b2), w3: mk(j.w3), b3: mk(j.b3),
-    act: j.act, outAct: j.outAct,
+    act: j.act, outAct: j.outAct, family: j.family ?? 'espcn',
     inScale: j.inScale, inShift: j.inShift, outScale: j.outScale, outShift: j.outShift,
   }
   espcnWeightCache.set(url, w)
@@ -339,6 +353,22 @@ export function superResolveESPCN(
     out[i] = Math.min(255, Math.max(0, v * outScale + outShift))
   }
   return out
+}
+
+/**
+ * 高清扩展统一分发入口（P2 可插拔地基）。
+ * 按 `weights.family` 选择前向引擎；当前支持 `espcn` / `classic`（解析退化权重），
+ * `tatt` / `real-esrgan` 为 **P2 中期接入点**——需加载对应预训练权重并实现前向，
+ * 当前未实现时给出明确错误（而非静默退化成错误结果）。
+ */
+export function runSREngine(w: SRWeights, luma: Float32Array, W: number, H: number): Float32Array {
+  const fam = w.family ?? 'espcn'
+  if (fam === 'tatt' || fam === 'real-esrgan') {
+    throw new Error(
+      `高清扩展引擎 '${fam}' 尚未接入：P2 中期需加载对应预训练权重并在 runSREngine 实现前向（见《智能高清-方法论》§P2）`,
+    )
+  }
+  return superResolveESPCN(luma, W, H, w)
 }
 
 /* ====================== 经典路径（默认，零权重） ====================== */
@@ -460,36 +490,52 @@ async function classicalUpscale(
  * 转 YCbCr 本身对齐 ESPCN 参考实现（test_image.py）：仅亮度走增强，色度廉价上采样。
  * 这是 ESPCN「人眼对亮度最敏感」的精髓，也保证**增强不引入色偏**。
  */
-export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<SRResult> {
-  // 公共 API 自带枚举防御：service 层虽已归一化，但直接调用本函数的路径（脚本/测试/
-  // 未来新入口）不该被一个拼错的枚举值带偏 —— 非法值一律落回默认。
-  const preset: EnhancePreset =
-    opts.preset === 'original' || opts.preset === 'bw' ? opts.preset : 'enhance'
-  const strength: EnhanceStrength =
-    opts.strength === 'weak' || opts.strength === 'strong' ? opts.strength : 'medium'
+/** 枚举防御：直接调用路径（脚本/测试/新入口）不该被拼错的枚举带偏，非法值落回默认 */
+function normalizePreset(p?: EnhancePreset): EnhancePreset {
+  return p === 'original' || p === 'enhance' || p === 'bw' || p === 'brighten' || p === 'gray'
+    ? p
+    : 'enhance'
+}
+function normalizeStrength(s?: EnhanceStrength): EnhanceStrength {
+  return s === 'weak' || s === 'strong' ? s : 'medium'
+}
+function normalizeMode(o?: SRMode): SRMode {
+  return o === 'espcn' ? 'espcn' : 'classical'
+}
+
+interface EnhanceCtx {
+  rawBuf: Buffer
+  W: number
+  H: number
+  tW: number
+  tH: number
+  scale: number
+  mode: SRMode
+  legacy: boolean
+  lumaUp: Float32Array
+  /** 原分辨率归一化亮度（超分前）。黑白模式二值化直接用此，避免对二值图做无意义的超分插值 */
+  lumaBase: Float32Array
+  cbUp: Buffer
+  crUp: Buffer
+  metricsUp?: CharMetrics
+  /** 原分辨率字符度量（未 scale）。黑白模式用原分辨率渲染时传此，避免膨胀/去噪阈值被 scale 放大 */
+  metrics0?: CharMetrics
+  debug: Record<string, unknown>
+}
+
+/**
+ * 共享预处理：YCbCr 分离 → 字符度量 → 背景归一化(超分前，一次) → 超分(一次) → 色度上采样(一次)。
+ * 五模式只在这一步之后分叉，背景归一化与超分不重复计算。
+ */
+async function prepareEnhanceContext(buf: Buffer, opts: SROptions): Promise<EnhanceCtx> {
+  const strength = normalizeStrength(opts.strength)
+  const mode = normalizeMode(opts.mode)
   const legacy = opts.legacy === true
   const scale = opts.scale ?? 2
-  const mode: SRMode = (opts.mode ?? 'classical').toLowerCase() === 'espcn' ? 'espcn' : 'classical'
-
-  // 「原图」模式：一步不动，直接回原图。保真场景用（方案 P1 三模式之一）。
-  if (preset === 'original') {
-    const meta = await sharp(buf).metadata()
-    const buffer = await sharp(buf).png().toBuffer()
-    return {
-      buffer,
-      width: meta.width || 0,
-      height: meta.height || 0,
-      mode,
-      preset,
-      debug: { preset, stage: 'original', note: '未做任何像素改动' },
-    }
-  }
 
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const W = info.width, H = info.height, ch = info.channels
 
-  // —— 转 YCbCr（对齐 test_image.py 的 img.convert('YCbCr')）——
-  // 仅对亮度 Y 做超分；Cb/Cr 仅双三次上采样后合并。
   const Y = new Float32Array(W * H)
   const Cb = new Float32Array(W * H)
   const Cr = new Float32Array(W * H)
@@ -501,9 +547,7 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
     Cr[i] = (r - y) / 1.402 + 128
   }
 
-  // —— P0-4 字符度量：全项目自适应参数的唯一来源 ——
-  // 只在原尺度跑一次连通域，超分后按倍率换算（scaleMetrics），省一次全图度量。
-  const debug: Record<string, unknown> = { preset, mode, scale }
+  const debug: Record<string, unknown> = { mode, scale }
   let metrics0: CharMetrics | undefined
   if (!legacy) {
     const t = Date.now()
@@ -511,7 +555,7 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
     debug.msMetrics = Date.now() - t
   }
 
-  // —— ① P0-1 背景归一化：超分之前削掉低频光照梯度 ——
+  const tW = W * scale, tH = H * scale
   let Yn: Float32Array = Y
   if (!legacy && metrics0) {
     const tuning = tuningFor(strength)
@@ -526,38 +570,19 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
   }
 
   let lumaUp: Float32Array
-  if (mode === 'espcn') {
+  if (scale === 1) {
+    lumaUp = Float32Array.from(Yn)
+  } else if (mode === 'espcn') {
     let weights = opts.weights
     if (!weights && opts.weightsUrl) weights = await loadESPCNWeights(opts.weightsUrl)
     if (!weights) weights = buildAnalyticESPCN(scale)
-    lumaUp = superResolveESPCN(Yn, W, H, weights)
+    lumaUp = runSREngine(weights, Yn, W, H)
   } else {
-    // 锐化交给 P0.5（自适应 sigma + 梯度门控），这里传 0 关掉旧固定 sigma=1.4 锐化
     lumaUp = await classicalUpscale(Yn, W, H, scale, legacy ? opts : { ...opts, sharpen: 0 })
   }
 
-  // —— ③④⑤⑥⑦ 文档增强（超分尺度上做：笔画级高频必须原尺度，方案 §7.1）——
-  if (!legacy) {
-    const tW = W * scale, tH = H * scale
-    const mUp = metrics0 && metrics0.medH > 0 ? scaleMetrics(metrics0, scale) : undefined
-    const r = await enhanceDocumentLuma(lumaUp, tW, tH, {
-      preset,
-      strength,
-      metrics: mUp,
-      // 背景归一化已在超分前完成，避免重复
-      preNormalized: true,
-      debug,
-    })
-    lumaUp = r.luma
-  }
-
-  // —— 色度：低分辨率 Cb/Cr 经双三次上采样到目标尺寸（对齐 Image.BICUBIC）——
-  const tW = W * scale, tH = H * scale
   const cbBytes = Uint8Array.from(Cb, (v) => Math.min(255, Math.max(0, Math.round(v))))
   const crBytes = Uint8Array.from(Cr, (v) => Math.min(255, Math.max(0, Math.round(v))))
-  // 关键：libvips 会把单通道 b-w 图提升为 sRGB 三通道后再运算，若直接 .raw()
-  // 拿到的是 3 通道缓冲，按单通道索引取值会错位 3 倍，导致色度整体错乱
-  // （表现为输出严重偏色、PSNR 掉 ~14dB）。显式 toColourspace('b-w') 锁回单通道。
   const upChroma = (bytes: Uint8Array) =>
     sharp(bytes, { raw: { width: W, height: H, channels: 1 } })
       .toColourspace('b-w')
@@ -567,14 +592,23 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
   const cbUp = await upChroma(cbBytes)
   const crUp = await upChroma(crBytes)
 
-  // —— 重组回 RGB（标准 BT.601 反变换，与正变换互逆）——
-  //
-  // ⚠️ bw 模式必须把色度**中性化**（cb=cr=0 即 128）：亮度已被硬二值化到 0/255，
-  //    若再叠加原色度，蓝字会变成「纯饱和蓝」而不是黑 —— 那不是黑白扫描件该有的样子。
-  const neutral = preset === 'bw'
-  const out = Buffer.alloc(tW * tH * 4)
-  for (let i = 0; i < tW * tH; i++) {
-    const y = lumaUp[i]
+  const metricsUp = metrics0 && metrics0.medH > 0 ? scaleMetrics(metrics0, scale) : undefined
+  return { rawBuf: buf, W, H, tW, tH, scale, mode, legacy, lumaUp, lumaBase: Yn, cbUp, crUp, metricsUp, metrics0, debug }
+}
+
+/** YCbCr → RGB 重组（灰度类预设中性化色度），输出 PNG */
+async function recombineToPng(
+  luma: Float32Array,
+  tW: number,
+  tH: number,
+  neutral: boolean,
+  cbUp: Buffer,
+  crUp: Buffer,
+): Promise<Buffer> {
+  const n = tW * tH
+  const out = Buffer.alloc(n * 4)
+  for (let i = 0; i < n; i++) {
+    const y = luma[i]
     const cb = neutral ? 0 : cbUp[i] - 128
     const cr = neutral ? 0 : crUp[i] - 128
     const R = y + 1.402 * cr
@@ -585,7 +619,95 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
     out[i * 4 + 2] = Math.min(255, Math.max(0, B))
     out[i * 4 + 3] = 255
   }
-
-  const buffer = await sharp(out, { raw: { width: tW, height: tH, channels: 4 } }).png().toBuffer()
-  return { buffer, width: tW, height: tH, mode, preset, debug }
+  return sharp(out, { raw: { width: tW, height: tH, channels: 4 } }).png().toBuffer()
 }
+
+/** 单预设渲染：原图直出，其余在共享 lumaUp 上做文档增强并重组 RGB */
+async function renderPreset(
+  ctx: EnhanceCtx,
+  preset: EnhancePreset,
+  strength: EnhanceStrength,
+  debug?: Record<string, unknown>,
+): Promise<Buffer> {
+  if (preset === 'original') return sharp(ctx.rawBuf).png().toBuffer()
+  // 黑白模式在「原分辨率」(scale=1) 直接二值化：二值图超分只是对 0/255 插值，徒增体积、拖慢速度，
+  // 且扫描王自身输出也低于原图分辨率。neutral=true 时 recombine 不读 cbUp/crUp，故无尺寸冲突。
+  const useBase = preset === 'bw' && ctx.scale > 1
+  const luma = useBase ? ctx.lumaBase : ctx.lumaUp
+  const w = useBase ? ctx.W : ctx.tW
+  const h = useBase ? ctx.H : ctx.tH
+  const metrics = useBase ? ctx.metrics0 : ctx.metricsUp
+  const r = await enhanceDocumentLuma(luma, w, h, {
+    preset,
+    strength,
+    metrics,
+    preNormalized: true,
+    debug: debug ?? {},
+  })
+  const neutral = preset === 'bw' || preset === 'gray'
+  return recombineToPng(r.luma, w, h, neutral, ctx.cbUp, ctx.crUp)
+}
+
+export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<SRResult> {
+  const preset = normalizePreset(opts.preset)
+  // 「原图」模式：一步不动，直接回原图（保真场景，方案 P1 模式之一）。
+  if (preset === 'original') {
+    const meta = await sharp(buf).metadata()
+    const buffer = await sharp(buf).png().toBuffer()
+    return {
+      buffer,
+      width: meta.width || 0,
+      height: meta.height || 0,
+      mode: normalizeMode(opts.mode),
+      preset,
+      debug: { preset, stage: 'original', note: '未做任何像素改动' },
+    }
+  }
+  // 黑白模式不超分：二值图超分无意义，强制原分辨率输出（更小体积、更快、效果一致）。
+  const effScale = preset === 'bw' ? 1 : opts.scale
+  const ctx = await prepareEnhanceContext(buf, { ...opts, scale: effScale })
+  const buffer = await renderPreset(ctx, preset, normalizeStrength(opts.strength), ctx.debug)
+  return { buffer, width: ctx.tW, height: ctx.tH, mode: ctx.mode, preset, debug: ctx.debug }
+}
+
+export interface SRModesResult {
+  /** 五模式并列输出（均为 PNG Buffer） */
+  modes: {
+    original: Buffer
+    enhance: Buffer
+    bw: Buffer
+    brighten: Buffer
+    gray: Buffer
+  }
+  /** 处理后尺寸（original 为原图尺寸，可能不同） */
+  width: number
+  height: number
+  debug: Record<string, unknown>
+}
+
+/**
+ * 【P1 多模式并列输出入口】一次性产出 原图 / 增强 / 黑白 / 增亮 / 灰度 五种结果。
+ *
+ * 设计要点（见《智能高清-方法论》§P1）：
+ *  · 背景归一化与超分（ESPCN）只对归一化后的亮度做**一次**，五模式共享；
+ *    各模式仅在「对比增强 / 锐化 / 二值化 / 提亮」这一步分叉，成本可控。
+ *  · 默认 scale=1（轻量预览）；要最终画质可传 scale=2，彩色类模式做超分。
+ *    黑白模式无论 scale 多少都固定原分辨率输出（二值图不超分，见 renderPreset）。
+ *  · 模式语义：
+ *      original 原样直出 | enhance 彩色增强(默认) | bw 黑白硬二值 | brighten 增亮 | gray 去色增强(留灰阶)
+ *  · 前端拿到后可并列渲染缩略图，让用户挑最满意的一张（提升满意度 / 粘性）。
+ */
+export async function enhanceImageModes(buf: Buffer, opts: SROptions = {}): Promise<SRModesResult> {
+  const strength = normalizeStrength(opts.strength)
+  const scale = opts.scale ?? 1
+  const ctx = await prepareEnhanceContext(buf, { ...opts, scale })
+  const modes = {
+    original: await renderPreset(ctx, 'original', strength),
+    enhance: await renderPreset(ctx, 'enhance', strength),
+    bw: await renderPreset(ctx, 'bw', strength),
+    brighten: await renderPreset(ctx, 'brighten', strength),
+    gray: await renderPreset(ctx, 'gray', strength),
+  }
+  return { modes, width: ctx.tW, height: ctx.tH, debug: ctx.debug }
+}
+

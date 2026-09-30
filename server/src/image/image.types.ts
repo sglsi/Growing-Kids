@@ -10,13 +10,15 @@ export interface ProcessImageDto {
   // erase_v2 专用：是否允许用 VLM 做手写区域分割（默认 true，false 则只走色域阈值）
   use_vlm?: boolean
   /**
-   * erase_v2 专用：局部修复策略。
-   *  - masked（默认）：背景底色填充 —— 能抹除**大面积实心手写**，推荐
-   *  - edge：由内向外扩散填充 —— 适合需要延续底色渐变的场景
-   *  - median：中值滤波 —— 只适合细笔迹落在空白/浅色背景
-   *  - blur：高斯模糊 —— 浅色笔迹的柔和淡化
+   * erase_v2 专用：⭐ 交互式补擦（扫描王/TextIn 同款兜底交互）。
+   * 用户在前端框选"没擦干净"的残留区域（归一化坐标 0~1），服务端**无条件**并入
+   * 擦除 mask——自动检测对「黑笔手写 vs 黑色印刷」有理论上限（几何/色彩特征
+   * 全面重叠），漏检零容忍场景下这是确定性手段，优先级高于一切自动检测。
+   * 格式同 VLM 输出：{x,y,w,h} 均为归一化值，可与 use_vlm/自动检测叠加使用。
    */
-  strategy?: 'median' | 'blur' | 'masked' | 'edge'
+  manual_regions?: Array<{ x: number; y: number; w: number; h: number }>
+  // erase_v2 专用：局部修复策略（缺省 adaptive：空白区填底色 / 压字区结构延拓）
+  strategy?: 'median' | 'blur' | 'masked' | 'edge' | 'adaptive'
   /**
    * 自动调正(几何纠偏)专用：前端手动拉出的试卷四角，顺序任意
    * [[x,y],[x,y],[x,y],[x,y]]。提供则直接做透视压平（100% 保真，不重画）；
@@ -27,7 +29,8 @@ export interface ProcessImageDto {
    */
   manual_corners?: [[number, number], [number, number], [number, number], [number, number]]
   /**
-   * 智能高清(SR)专用：升采样倍率，默认 2，支持 2/3/4。
+   * 智能高清【高清扩展】专用：升采样倍率，默认 2，支持 2/3/4（X2/X3/X4）。
+   * 即"高清扩展"清晰度增强——彩色增强模式可选开启；黑白模式强制原生分辨率不启用。
    * 仅当 IMG_PIPELINE_MODE ∈ {new, hybrid} 时生效；否则回落图生图 enhance。
    */
   sr_scale?: 2 | 3 | 4

@@ -1,6 +1,13 @@
 import { LLMClient, Config, HeaderUtils } from 'coze-coding-dev-sdk'
 import sharp from 'sharp'
-import { maskFromRects, normalizeIlluminationForDetection, type HandwritingMask, type MaskRect } from './handwriting-mask'
+import {
+  maskFromRects,
+  normalizeIlluminationForDetection,
+  stripEdgeTouchingArtifacts,
+  unionMasks,
+  type HandwritingMask,
+  type MaskRect,
+} from './handwriting-mask'
 
 /**
  * 阶段二 · 手写区域分割器
@@ -39,10 +46,11 @@ const SEG_PROMPT = `你是一个文档版面分析助手。请分析这张试卷
 
 严格要求：
 1. 只框选**手写笔迹**，不要框选印刷体文字、印刷表格线、印刷图片、页面边框、空白区域。
-2. 注意区分：印刷体边缘整齐、墨色均匀；手写笔迹粗细不均、有连笔、倾斜、涂抹。
-3. 若手写与印刷重叠，只框出重叠区域中手写覆盖的部分。
-4. 坐标使用**归一化值**（0~1，相对图片宽高）。
-5. 宁多框一点（稍作外扩），也不要漏掉笔迹，但不要整页都框。
+2. 注意区分：印刷体边缘整齐、墨色均匀、**基线对齐、字距均匀**；手写笔迹粗细不均、有连笔、倾斜、大小不一。
+3. 手写最常出现的位置：**填空横线上方/横线处、括号内、题干行尾、空白解答区、图形旁标注**——请逐一检查，不要遗漏小片手写（如勾选符号、单个字母/数字）。
+4. 若手写与印刷重叠（压字），只框出手写笔画覆盖的细长区域，**绝不要把整行印刷文字框进去**。
+5. 坐标使用**归一化值**（0~1，相对图片宽高）。
+6. 宁多框一点（稍作外扩），也不要漏掉笔迹，但不要整页都框。
 
 只输出 JSON，不要任何解释文字，格式如下：
 {"regions":[{"x":0.12,"y":0.35,"w":0.40,"h":0.06,"confidence":0.9,"label":"handwriting"}],"confidence":0.9}
@@ -148,34 +156,56 @@ export async function segmentByVlm(
  * 完整的分割流程（对外主入口）：
  *   ① 优先 VLM；失败则降级到色域阈值。
  *   ② 把矩形或阈值结果统一成 HandwritingMask，并按需与阈值 mask **取交集/并集**收敛。
+ *   ③ `manualRects`（⭐ 交互式补擦）：用户框选的区域**无条件**并入 mask——
+ *      这是扫描王 / TextIn 等主流产品的同款交互：本地自动检测对「黑笔手写 vs
+ *      黑色印刷」存在理论上限（几何/色彩特征全面重叠，见方法论 §5.3/§5.4），
+ *      漏检零容忍场景下，用户框选是**确定性**兜底，优先级高于一切自动检测。
  *
  * @param imageBuffer 原图（用于尺寸与阈值兜底）
  * @param imageUrl    原图公网 URL（用于 VLM）
+ * @param opts.manualRects 用户框选区域（归一化坐标 0~1，与 VLM 输出同构）
  */
 export async function buildHandwritingMask(
   imageBuffer: Buffer,
   imageUrl: string,
   forwardHeaders: Record<string, string>,
-  opts: SegmentOptions & { allowVlm?: boolean } = {},
+  opts: SegmentOptions & { allowVlm?: boolean; manualRects?: MaskRect[] } = {},
 ): Promise<SegmentResult> {
   const meta = await sharp(imageBuffer).metadata()
   const width = meta.width!
   const height = meta.height!
   const dilate = Math.round(Math.min(width, height) * (opts.dilateRatio ?? 0.008))
+  const manualRects = opts.manualRects?.filter((r) => r && r.w > 0 && r.h > 0) ?? []
 
+  let vlmRects: MaskRect[] = []
+  let vlmRaw: string | undefined
   if (opts.allowVlm !== false) {
     try {
       const vlm = await segmentByVlm(imageUrl, forwardHeaders, opts)
       if (vlm && vlm.rects.length > 0) {
-        return {
-          mask: maskFromRects(width, height, vlm.rects, { dilate, source: 'vlm' }),
-          rects: vlm.rects,
-          usedVlm: true,
-          raw: vlm.raw,
-        }
+        vlmRects = vlm.rects
+        vlmRaw = vlm.raw
       }
     } catch (e) {
       console.warn('[mask] VLM 分割失败，降级到色域阈值', e instanceof Error ? e.message : e)
+    }
+  }
+
+  // ── VLM / 手动框选路径：矩形 → mask ──
+  if (vlmRects.length > 0 || manualRects.length > 0) {
+    const all = [...vlmRects, ...manualRects]
+    // 手动框选的外扩取小值：用户框的就是要擦的，过度外扩会波及邻近印刷体
+    const manualDilate = Math.max(2, Math.round(dilate / 2))
+    const mask = maskFromRects(width, height, all, {
+      dilate: manualRects.length > 0 ? manualDilate : dilate,
+      source: manualRects.length > 0 && vlmRects.length === 0 ? 'manual' : 'vlm',
+    })
+    return {
+      mask,
+      rects: all,
+      usedVlm: vlmRects.length > 0,
+      raw: vlmRaw,
+      debug: manualRects.length > 0 ? { manualRects: manualRects.length } : undefined,
     }
   }
 
@@ -184,7 +214,7 @@ export async function buildHandwritingMask(
   //   ② 深色墨迹 —— 抓铅笔/黑色中性笔（色域法因与印刷体同为近黑而完全失效的场景）。
   // 两条路径互补，取**并集**：只靠 ① 时，中国学生最常用的黑笔/铅笔 100% 检不出，
   // 表现就是「点了去手写没反应」（实测确认）。
-  const { maskFromColorThreshold, maskFromDarkInk, unionMasks } = await import('./handwriting-mask')
+  const { maskFromColorThreshold, maskFromDarkInk, maskFromLayoutSlots } = await import('./handwriting-mask')
   // P0-8 前置：先把低频光照梯度拉平，再喂给检测。
   // 依据见 handwriting-mask.ts 的 `normalizeIlluminationForDetection` 函数头——
   // 实测强阴影下 Otsu 会连带把整页判成墨迹，形成 1161px 超级行并触发 share_guard，
@@ -195,7 +225,15 @@ export async function buildHandwritingMask(
 
   const chroma = await maskFromColorThreshold(detectBuf)
   const dark = await maskFromDarkInk(detectBuf)
-  const mask = await unionMasks(chroma, dark)
+  // ⭐ 第三通道：布局先验（横线填空槽位）。外观路径对"黑笔短答案/压字填空"不可分，
+  //   本通道用题型结构（横线槽位）直接定位手写，与外观/VLM 通道取并集（详见方法论 §5.5）。
+  const layout = await maskFromLayoutSlots(detectBuf)
+  const m1 = await unionMasks(chroma, dark)
+  const mask = await unionMasks(m1, layout)
+  // ⭐ 贴边伪影清除：色域路径没有深色路径的「边缘连通清除」防线，
+  //    会把装订阴影/页边检出为细长条（真卷实测 32×1520，占 coverage 37%）。
+  //    只作用于本地检测结果——manual/vlm 来源绝不清除。
+  const edgeStripped = stripEdgeTouchingArtifacts(mask)
   return {
     mask,
     rects: [],
@@ -207,6 +245,7 @@ export async function buildHandwritingMask(
       illuminationNormalized: pre.applied,
       medH: Math.round(pre.medH),
       lumaDeltaMean: +pre.deltaMean.toFixed(2),
+      ...(edgeStripped.length ? { edgeStripped } : {}),
     },
   }
 }
