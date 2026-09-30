@@ -1,7 +1,7 @@
 import { View, Text, Image, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { CircleUser, LogIn, LogOut, Pencil } from 'lucide-react-taro'
+import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
@@ -185,16 +185,18 @@ export default function ProfilePage() {
 
           {/* 数据概览 */}
           <View className="flex flex-row gap-3 mb-5">
-            <MiniStat label="收件箱" value={overview?.total ?? 0} />
-            <MiniStat label="复习本" value={overview?.review_total ?? 0} />
-            <MiniStat label="本周新增" value={overview?.week_total ?? 0} />
+            <MiniStat icon={<Inbox size={14} color="#5C5750" />} label="收件箱" value={overview?.total ?? 0} />
+            <MiniStat icon={<BookOpen size={14} color="#5C5750" />} label="复习本" value={overview?.review_total ?? 0} />
+            <MiniStat icon={<Plus size={14} color="#5C5750" />} label="本周新增" value={overview?.week_total ?? 0} />
           </View>
 
           {/* 存储配额（策略 6）：拿不到用量时整块不展示 */}
           {usage && (
             <Card className="rounded-2xl border-border p-4 mb-5">
-              <View className="flex flex-row items-center justify-between mb-2">
+              <View className="flex flex-row items-center gap-2 mb-2">
+                <HardDrive size={16} color="#BE3E2D" />
                 <Text className="block text-sm font-semibold text-foreground">存储空间</Text>
+                <View className="flex-1" />
                 <Text className="block text-xs text-muted-foreground">
                   {formatBytes(usage.used_bytes)} / {formatBytes(usage.quota_bytes)}
                   {' · '}
@@ -243,11 +245,14 @@ export default function ProfilePage() {
   )
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function MiniStat({ icon, label, value }: { icon?: React.ReactNode; label: string; value: number }) {
   return (
     <Card className="flex-1 rounded-2xl border-border p-3">
+      <View className="flex flex-row items-center gap-1 mb-1">
+        {icon}
+        <Text className="block text-xs text-muted-foreground">{label}</Text>
+      </View>
       <Text className="block text-xl font-bold text-foreground">{value}</Text>
-      <Text className="block text-xs mt-1 text-muted-foreground">{label}</Text>
     </Card>
   )
 }

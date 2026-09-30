@@ -7,6 +7,7 @@ import ReviewItemCard from '@/components/review-item-card'
 import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
+import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
@@ -168,21 +169,7 @@ export default function SubjectPage() {
           onSearch={() => resetAndLoad({ keyword: keyword })}
           countText={`复习本 · 共 ${total} 条`}
           placeholder="搜索题干 / 答案关键词，回车确认"
-          right={
-            !sel.selecting ? (
-              <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
-            ) : (
-              <View className="flex flex-row items-center gap-3">
-                {sel.count > 0 && (
-                  <>
-                    <Text className="block text-sm text-foreground">已选 {sel.count}</Text>
-                    <Text className="block text-sm text-muted-foreground" onClick={sel.clear}>清空</Text>
-                  </>
-                )}
-                <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
-              </View>
-            )
-          }
+          right={<SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />}
         >
           <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
         </FilterHeader>

@@ -1,10 +1,12 @@
 import { View, Text, ScrollView, Image as TaroImage, Picker } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState, useEffect } from 'react'
+import { Crop, Wand, Sparkles, Eraser } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import SegmentedTabs from '@/components/segmented-tabs'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import {
@@ -251,11 +253,16 @@ export default function RecognizePage() {
     <ScrollView scrollY className="h-full bg-background">
       <View className="px-4 pt-4 pb-40">
         {/* 模式切换 */}
-        <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
-          <ModeTab active={mode === 'paper'} onClick={() => setMode('paper')} label="拍照识别" />
-          <ModeTab active={mode === 'split'} onClick={() => setMode('split')} label="题目答案分传" />
-          <ModeTab active={mode === 'doc'} onClick={() => setMode('doc')} label="导入文档" />
-        </View>
+        <SegmentedTabs<Mode>
+          className="mb-4"
+          value={mode}
+          onValueChange={(v) => setMode(v)}
+          options={[
+            { value: 'paper', label: '拍照识别' },
+            { value: 'split', label: '题答分传' },
+            { value: 'doc', label: '导入文档' },
+          ]}
+        />
 
         {/* 学科选择 */}
         <View className="flex flex-row items-center justify-between mb-4">
@@ -283,10 +290,10 @@ export default function RecognizePage() {
               </View>
             )}
             <View className="flex flex-row items-center justify-between gap-1 mb-3">
-              <ImgActionBtn label="编辑裁剪" onClick={() => { if (paperImage) setEditor({ slot: 'paper', src: paperImage }); else chooseImage('paper') }} />
-              <ImgActionBtn label="自动调正" onClick={() => openEditorWithAction('paper', 'auto')} />
-              <ImgActionBtn label="智能高清" onClick={() => openEditorWithAction('paper', 'enhance')} />
-              <ImgActionBtn label="去手写" onClick={() => openEditorWithAction('paper', 'erase_v2')} />
+              <ImgActionBtn icon={Crop} label="编辑裁剪" onClick={() => { if (paperImage) setEditor({ slot: 'paper', src: paperImage }); else chooseImage('paper') }} />
+              <ImgActionBtn icon={Wand} label="自动调正" onClick={() => openEditorWithAction('paper', 'auto')} />
+              <ImgActionBtn icon={Sparkles} label="智能高清" onClick={() => openEditorWithAction('paper', 'enhance')} />
+              <ImgActionBtn icon={Eraser} label="去手写" onClick={() => openEditorWithAction('paper', 'erase_v2')} />
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
@@ -300,22 +307,39 @@ export default function RecognizePage() {
         ) : mode === 'split' ? (
           <Card className="rounded-2xl border-border p-4 mb-4">
             <Text className="block text-xs text-muted-foreground mb-3">分别上传题目图和答案图，系统自动识别并关联</Text>
-            <View className="flex flex-row gap-3 mb-3">
-              <SplitUploader title="题目" image={questionImage} onPick={() => chooseImage('question')} />
-              <SplitUploader title="答案" image={answerImage} onPick={() => chooseImage('answer')} />
+            {/* 题目图 + 动作 */}
+            <Text className="block text-xs font-medium text-foreground mb-2">题目</Text>
+            <View className="mb-2">
+              {questionImage ? (
+                <TaroImage src={questionImage} mode="widthFix" className="w-full rounded-xl" onClick={() => chooseImage('question')} />
+              ) : (
+                <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={() => chooseImage('question')}>
+                  <Text className="block text-xs text-muted-foreground">点击上传题目图</Text>
+                </View>
+              )}
             </View>
-            <Text className="block text-xs text-muted-foreground mb-2">图片处理（分别对题目 / 答案图生效）</Text>
-            <View className="flex flex-row items-center justify-between gap-1 mb-3">
-              <ImgActionBtn label="自动调正·题" onClick={() => openEditorWithAction('question', 'auto')} />
-              <ImgActionBtn label="自动调正·答" onClick={() => openEditorWithAction('answer', 'auto')} />
-              <ImgActionBtn label="高清·题" onClick={() => openEditorWithAction('question', 'enhance')} />
-              <ImgActionBtn label="高清·答" onClick={() => openEditorWithAction('answer', 'enhance')} />
+            <View className="flex flex-row items-center gap-1 mb-4">
+              <ImgActionBtn icon={Crop} label="编辑" onClick={() => { if (questionImage) setEditor({ slot: 'question', src: questionImage }) }} />
+              <ImgActionBtn icon={Wand} label="调正" onClick={() => openEditorWithAction('question', 'auto')} />
+              <ImgActionBtn icon={Sparkles} label="高清" onClick={() => openEditorWithAction('question', 'enhance')} />
+              <ImgActionBtn icon={Eraser} label="去手写" onClick={() => openEditorWithAction('question', 'erase_v2')} />
             </View>
-            <View className="flex flex-row items-center justify-between gap-1 mb-3">
-              <ImgActionBtn label="去手写·题" onClick={() => openEditorWithAction('question', 'erase_v2')} />
-              <ImgActionBtn label="去手写·答" onClick={() => openEditorWithAction('answer', 'erase_v2')} />
-              <ImgActionBtn label="编辑·题" onClick={() => { if (questionImage) setEditor({ slot: 'question', src: questionImage }) }} />
-              <ImgActionBtn label="编辑·答" onClick={() => { if (answerImage) setEditor({ slot: 'answer', src: answerImage }) }} />
+            {/* 答案图 + 动作 */}
+            <Text className="block text-xs font-medium text-foreground mb-2">答案</Text>
+            <View className="mb-2">
+              {answerImage ? (
+                <TaroImage src={answerImage} mode="widthFix" className="w-full rounded-xl" onClick={() => chooseImage('answer')} />
+              ) : (
+                <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={() => chooseImage('answer')}>
+                  <Text className="block text-xs text-muted-foreground">点击上传答案图</Text>
+                </View>
+              )}
+            </View>
+            <View className="flex flex-row items-center gap-1 mb-3">
+              <ImgActionBtn icon={Crop} label="编辑" onClick={() => { if (answerImage) setEditor({ slot: 'answer', src: answerImage }) }} />
+              <ImgActionBtn icon={Wand} label="调正" onClick={() => openEditorWithAction('answer', 'auto')} />
+              <ImgActionBtn icon={Sparkles} label="高清" onClick={() => openEditorWithAction('answer', 'enhance')} />
+              <ImgActionBtn icon={Eraser} label="去手写" onClick={() => openEditorWithAction('answer', 'erase_v2')} />
             </View>
             <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleLink}>
               <Text className="block text-sm">{loading ? '识别中…' : '识别并关联'}</Text>
@@ -439,36 +463,11 @@ export default function RecognizePage() {
   )
 }
 
-function ModeTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+function ImgActionBtn({ icon: Icon, label, onClick }: { icon?: any; label: string; onClick: () => void }) {
   return (
-    <View
-      className={`flex-1 flex items-center justify-center h-9 rounded-lg ${active ? 'bg-background shadow-sm' : ''}`}
-      onClick={onClick}
-    >
-      <Text className={`block text-sm ${active ? 'text-primary font-medium' : 'text-muted-foreground'}`}>{label}</Text>
-    </View>
-  )
-}
-
-function SplitUploader({ title, image, onPick }: { title: string; image: string; onPick: () => void }) {
-  return (
-    <View className="flex-1">
-      <Text className="block text-xs text-muted-foreground mb-2">{title}</Text>
-      {image ? (
-        <TaroImage src={image} mode="aspectFill" className="w-full h-28 rounded-xl" onClick={onPick} />
-      ) : (
-        <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={onPick}>
-          <Text className="block text-xs text-muted-foreground">上传{title}图</Text>
-        </View>
-      )}
-    </View>
-  )
-}
-
-function ImgActionBtn({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <View className="flex-1 bg-muted rounded-lg py-2 flex items-center justify-center" onClick={onClick}>
-      <Text className="block text-xs text-primary text-center">{label}</Text>
+    <View className="flex-1 flex flex-row items-center justify-center gap-1 bg-muted rounded-lg py-2" onClick={onClick}>
+      {Icon ? <Icon size={14} color="#BE3E2D" /> : null}
+      <Text className="block text-xs text-primary">{label}</Text>
     </View>
   )
 }

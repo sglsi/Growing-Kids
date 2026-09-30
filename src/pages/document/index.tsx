@@ -6,14 +6,17 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import ReviewItemCard from '@/components/review-item-card'
 import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
+import SegmentedTabs from '@/components/segmented-tabs'
+import SubjectBadge from '@/components/subject-badge'
+import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument,
   type Subject, type TimelineItem, type DocItem,
 } from '@/services/api'
-import { getSubjectColor, formatTime } from '@/types'
+import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
-import { FileText, Check, FolderOpen } from 'lucide-react-taro'
+import { FileText, FolderOpen } from 'lucide-react-taro'
 
 type Range = 'week' | 'month' | 'all'
 type Tab = 'generate' | 'library'
@@ -144,25 +147,24 @@ export default function DocumentPage() {
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
       {/* 固定顶部标签 */}
-      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', padding: '12px 16px 0', borderBottom: '1px solid #ecefe3' }}>
-        <View className="flex flex-row bg-muted rounded-xl p-1 mb-2">
-          <View
-            className={`flex-1 flex items-center justify-center h-9 rounded-lg ${tab === 'generate' ? 'bg-background shadow-sm' : ''}`}
-            onClick={() => setTab('generate')}
-          >
-            <Text className={`block text-sm ${tab === 'generate' ? 'text-primary font-medium' : 'text-muted-foreground'}`}>汇总生成</Text>
+      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', padding: '12px 16px', borderBottom: '1px solid #ecefe3' }}>
+        <View className="flex flex-row items-center gap-2">
+          <View className="flex-1">
+            <SegmentedTabs<Tab>
+              value={tab}
+              onValueChange={setTab}
+              options={[
+                { value: 'generate', label: '汇总生成' },
+                { value: 'library', label: '我的文档' },
+              ]}
+            />
           </View>
           <View
-            className={`flex-1 flex items-center justify-center h-9 rounded-lg ${tab === 'library' ? 'bg-background shadow-sm' : ''}`}
-            onClick={() => setTab('library')}
-          >
-            <Text className={`block text-sm ${tab === 'library' ? 'text-primary font-medium' : 'text-muted-foreground'}`}>我的文档</Text>
-          </View>
-          <View
-            className="flex-1 flex items-center justify-center h-9 rounded-lg"
+            className="flex flex-row items-center gap-1 rounded-xl border border-border bg-background px-3 h-9"
             onClick={goLibrary}
           >
-            <Text className="block text-sm text-muted-foreground">资料库</Text>
+            <FolderOpen size={14} color="#BE3E2D" />
+            <Text className="block text-sm text-foreground whitespace-nowrap">资料库</Text>
           </View>
         </View>
       </View>
@@ -171,42 +173,32 @@ export default function DocumentPage() {
         <ScrollView scrollY style={{ height: '100vh', paddingTop: 60 }}>
           <View className="px-4 pt-4 pb-32">
             <Text className="block text-sm font-semibold text-foreground mb-2">汇总时间段</Text>
-            <View className="flex flex-row bg-muted rounded-xl p-1 mb-4">
-              {([['week', '近一周'], ['month', '近一月'], ['all', '全部']] as [Range, string][]).map(([v, label]) => (
-                <View
-                  key={v}
-                  className={`flex-1 flex items-center justify-center h-9 rounded-lg ${range === v ? 'bg-background shadow-sm' : ''}`}
-                  onClick={() => setRange(v)}
-                >
-                  <Text className={`block text-sm ${range === v ? 'text-primary font-medium' : 'text-muted-foreground'}`}>{label}</Text>
-                </View>
-              ))}
+            <View className="mb-4">
+              <SegmentedTabs<Range>
+                value={range}
+                onValueChange={setRange}
+                options={[
+                  { value: 'week', label: '近一周' },
+                  { value: 'month', label: '近一月' },
+                  { value: 'all', label: '全部' },
+                ]}
+              />
             </View>
 
             <View className="mb-2">
               <Text className="block text-sm font-semibold text-foreground">选择学科（不选为全部学科）</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-2 mb-5">
-              <View
-                className={`rounded-full border px-3 py-2 ${activeSubject === '' ? 'bg-primary border-primary' : 'bg-background border-border'}`}
-                onClick={() => setActiveSubject('')}
-              >
-                <Text className={`block text-xs ${activeSubject === '' ? 'text-primary-foreground' : ''}`}>全部</Text>
-              </View>
-              {subjects.map((s) => {
-                const active = activeSubject === s.id
-                const c = getSubjectColor(s.color)
-                return (
-                  <View
-                    key={s.id}
-                    className={`flex flex-row items-center gap-2 rounded-full border px-3 py-2 ${active ? 'bg-primary border-primary' : c.badge}`}
-                    onClick={() => setActiveSubject(s.id)}
-                  >
-                    {!active && <View className={`w-2 h-2 rounded-full ${c.dot}`} />}
-                    <Text className={`block text-xs ${active ? 'text-primary-foreground' : ''}`}>{s.name}</Text>
-                  </View>
-                )
-              })}
+              <SubjectBadge name="全部" active={activeSubject === ''} onClick={() => setActiveSubject('')} />
+              {subjects.map((s) => (
+                <SubjectBadge
+                  key={s.id}
+                  name={s.name}
+                  color={s.color}
+                  active={activeSubject === s.id}
+                  onClick={() => setActiveSubject(s.id)}
+                />
+              ))}
             </View>
 
             <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-5">
@@ -252,37 +244,25 @@ export default function DocumentPage() {
         </ScrollView>
       ) : (
         <>
-          <View style={{ position: 'fixed', top: 60, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
+          <View style={{ position: 'fixed', top: 70, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
               <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份文档</Text>
-              {!sel.selecting ? (
-                <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
-              ) : (
-                <View className="flex flex-row items-center gap-3">
-                  {sel.count > 0 && (
-                    <>
-                      <Text className="block text-sm text-foreground">已选 {sel.count}</Text>
-                      <Text className="block text-sm text-muted-foreground" onClick={sel.clear}>清空</Text>
-                    </>
-                  )}
-                  <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
-                </View>
-              )}
+              <SelectionBar selection={sel} enterLabel="批量选择" />
             </View>
-            <View className="flex flex-row gap-2 mt-2">
-              {([['all', '全部'], ['docx', 'Word'], ['pdf', 'PDF']] as ['all' | 'docx' | 'pdf', string][]).map(([v, label]) => (
-                <View
-                  key={v}
-                  className={`rounded-full border px-3 py-2 ${docFilter === v ? 'bg-primary border-primary' : 'bg-background border-border'}`}
-                  onClick={() => { setDocFilter(v); sel.clear() }}
-                >
-                  <Text className={`block text-xs ${docFilter === v ? 'text-primary-foreground' : ''}`}>{label}</Text>
-                </View>
-              ))}
+            <View className="mt-2">
+              <SegmentedTabs<'all' | 'docx' | 'pdf'>
+                value={docFilter}
+                onValueChange={(v) => { setDocFilter(v); sel.clear() }}
+                options={[
+                  { value: 'all', label: '全部' },
+                  { value: 'docx', label: 'Word' },
+                  { value: 'pdf', label: 'PDF' },
+                ]}
+              />
             </View>
           </View>
 
-          <ScrollView scrollY style={{ height: '100vh', paddingTop: 136 }}>
+          <ScrollView scrollY style={{ height: '100vh', paddingTop: 170 }}>
             <View className="px-4 pb-28 pt-3">
               {docsLoading ? (
                 <View className="space-y-3">
@@ -299,9 +279,7 @@ export default function DocumentPage() {
                       onLongPress={() => sel.longPress(d.id)}
                     >
                       {sel.selecting && (
-                        <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${sel.selected.has(d.id) ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-                          {sel.selected.has(d.id) && <Check size={14} color="#fff" />}
-                        </View>
+                        <CheckDot checked={sel.selected.has(d.id)} size={20} />
                       )}
                       <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
                         <FileText size={20} color="#BE3E2D" />

@@ -1,8 +1,9 @@
 import { View, Text, Image } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { Check, Image as ImageIcon, Ellipsis } from 'lucide-react-taro'
+import { Image as ImageIcon, Ellipsis } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
 import type { TimelineItem } from '@/types'
 
@@ -69,9 +70,7 @@ export default function ReviewItemCard({
         <View className="flex flex-row">
           {selecting && (
             <View className="pl-3 flex items-center">
-              <View className={`w-5 h-5 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-                {checked && <Check size={13} color="#fff" />}
-              </View>
+              <CheckDot checked={!!checked} size={20} />
             </View>
           )}
           <View className={`w-2 self-stretch ${color.bar}`} />
@@ -131,9 +130,7 @@ export default function ReviewItemCard({
       <View className="flex flex-row">
         {selecting && (
           <View className="pl-3 flex items-center">
-            <View className={`w-5 h-5 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-              {checked && <Check size={13} color="#fff" />}
-            </View>
+            <CheckDot checked={!!checked} size={20} />
           </View>
         )}
         <View className={`w-2 self-stretch ${color.bar}`} />

@@ -1,13 +1,15 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { Trash2, BookmarkPlus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag } from 'lucide-react-taro'
+import { Trash2, BookmarkPlus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
 import ImageEditor from '@/components/image-editor'
 import { ActionBtn, BottomActionBar, EmptyCard } from '@/components/filter-header'
+import SubjectBadge from '@/components/subject-badge'
+import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
@@ -15,7 +17,6 @@ import {
   type Overview, type TimelineItem, type Subject, type ImageAction,
 } from '@/services/api'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
-import { getSubjectColor } from '@/types'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -271,23 +272,34 @@ export default function IndexPage() {
             </View>
           </View>
 
-          {/* 识别与导入主操作区 */}
+          {/* 识别与导入主操作区（主操作独立，3 个次操作合并为一行） */}
           <Card className="rounded-2xl border-border p-4 mb-4">
-            <View className="flex flex-row gap-3 mb-3">
-              <Button className="flex-1 h-12 rounded-xl" onClick={goRecognize}>
-                <Text className="block text-sm">拍照 / 相册识别</Text>
-              </Button>
-              <Button variant="outline" className="flex-1 h-12 rounded-xl" onClick={goSplit}>
-                <Text className="block text-sm">题目答案分传</Text>
-              </Button>
+            <View
+              className="flex flex-row items-center gap-3 rounded-xl bg-primary mb-3 px-2 py-2"
+              onClick={goRecognize}
+            >
+              <View className="flex flex-row items-center justify-center w-9 h-9 rounded-full bg-primary-foreground">
+                <Camera size={18} color="#BE3E2D" />
+              </View>
+              <View className="flex-1">
+                <Text className="block text-sm font-medium text-primary-foreground">拍照 / 相册识别</Text>
+                <Text className="block text-xs text-primary-foreground opacity-70">拍下一道错题，自动整理到收件箱</Text>
+              </View>
+              <Text className="block text-primary-foreground opacity-70 text-xl">›</Text>
             </View>
-            <View className="flex flex-row gap-3">
-              <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={goDocImport}>
-                <Text className="block text-sm">导入文档识别</Text>
-              </Button>
-              <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={goLibrary}>
-                <Text className="block text-sm">资料库</Text>
-              </Button>
+            <View className="flex flex-row gap-2">
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goSplit}>
+                <Images size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">题答分传</Text>
+              </View>
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goDocImport}>
+                <FileText size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">导入文档</Text>
+              </View>
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goLibrary}>
+                <BookmarkPlus size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">资料库</Text>
+              </View>
             </View>
           </Card>
 
@@ -309,24 +321,19 @@ export default function IndexPage() {
               {/* 学科入口 */}
               <View className="mb-2 flex flex-row items-center justify-between">
                 <Text className="block text-sm font-semibold text-foreground">学科分类</Text>
-                <Text className="block text-xs text-muted-foreground" onClick={() => goSubject()}>全部</Text>
+                <Text className="block text-xs text-muted-foreground" onClick={() => goSubject()}>全部 ›</Text>
               </View>
               <View className="flex flex-row flex-wrap gap-2 mb-5">
                 {overview?.subject_stats?.length ? (
-                  overview.subject_stats.map((s) => {
-                    const c = getSubjectColor(s.color)
-                    return (
-                      <View
-                        key={s.subject_id}
-                        className={`flex flex-row items-center gap-2 rounded-full border px-3 py-2 ${c.badge}`}
-                        onClick={() => goSubject(s.subject_id)}
-                      >
-                        <View className={`w-2 h-2 rounded-full ${c.dot}`} />
-                        <Text className="block text-xs">{s.name}</Text>
-                        <Text className="block text-xs opacity-70">{s.count}</Text>
-                      </View>
-                    )
-                  })
+                  overview.subject_stats.map((s) => (
+                    <SubjectBadge
+                      key={s.subject_id}
+                      name={s.name}
+                      color={s.color}
+                      trailing={<Text className="block text-xs opacity-70">{s.count}</Text>}
+                      onClick={() => goSubject(s.subject_id)}
+                    />
+                  ))
                 ) : (
                   <Text className="block text-xs text-muted-foreground">暂无分类数据</Text>
                 )}
@@ -334,22 +341,11 @@ export default function IndexPage() {
 
               {/* 最近题目（统一收件箱） */}
               <View className="mb-2 flex flex-row items-center justify-between">
-                <Text className="block text-sm font-semibold text-foreground">
-                  最近题目 <Text className="block text-xs text-muted-foreground">（共 {inboxTotal} 条 · 点学科标签改分类，点「…」可再编辑）</Text>
-                </Text>
-                {!sel.selecting ? (
-                  <Text className="block text-xs text-primary" onClick={sel.enter}>批量选择</Text>
-                ) : (
-                  <View className="flex flex-row items-center gap-3">
-                    {sel.count > 0 && (
-                      <>
-                        <Text className="block text-xs text-foreground">已选 {sel.count}</Text>
-                        <Text className="block text-xs text-muted-foreground" onClick={sel.clear}>清空</Text>
-                      </>
-                    )}
-                    <Text className="block text-xs text-primary" onClick={sel.exit}>取消</Text>
-                  </View>
-                )}
+                <View className="flex flex-col">
+                  <Text className="block text-sm font-semibold text-foreground">最近题目</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">共 {inboxTotal} 条 · 点学科标签可改分类，点「…」可再编辑</Text>
+                </View>
+                <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
               </View>
 
               {inbox.length ? (
@@ -409,15 +405,11 @@ export default function IndexPage() {
           <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '70vh' }} onClick={(e) => e.stopPropagation?.()}>
             <Text className="block text-sm font-semibold text-foreground mb-3">选择分类</Text>
             <View className="overflow-y-auto">
-              {subjects.map((s) => {
-                const c = getSubjectColor(s.color)
-                return (
-                  <View key={s.id} className={`flex flex-row items-center gap-2 rounded-xl border px-3 py-3 mb-2 ${c.badge}`} onClick={() => applySubject(s)}>
-                    <View className={`w-2 h-2 rounded-full ${c.dot}`} />
-                    <Text className="block text-sm">{s.name}</Text>
-                  </View>
-                )
-              })}
+              {subjects.map((s) => (
+                <View key={s.id} className="mb-2">
+                  <SubjectBadge name={s.name} color={s.color} showArrow onClick={() => applySubject(s)} />
+                </View>
+              ))}
               <View className="flex flex-row items-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 mb-2" onClick={() => applySubject(null)}>
                 <Text className="block text-sm text-muted-foreground">未分类 / 清除</Text>
               </View>
