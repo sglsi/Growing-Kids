@@ -67,6 +67,11 @@ export class TimelineService {
       // 题目按题干/答案搜；图片按 title 搜（content->>question / title）
       q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw}`)
     }
+    if (query.since) {
+      // review 模式按加入复习本的时间过滤；其他按创建时间过滤
+      const field = scope === 'review' ? 'added_to_review_at' : 'created_at'
+      q = q.gte(field, query.since)
+    }
 
     const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
     q = q.order(orderField, { ascending: false }).range(from, to)

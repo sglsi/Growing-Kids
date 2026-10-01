@@ -9,6 +9,7 @@ import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-heade
 import SegmentedTabs from '@/components/segmented-tabs'
 import SubjectBadge from '@/components/subject-badge'
 import SelectionBar, { CheckDot } from '@/components/selection-bar'
+import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument,
@@ -18,16 +19,14 @@ import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import { FileText, FolderOpen } from 'lucide-react-taro'
 
-type Range = 'week' | 'month' | 'all'
+type Range = RangeValue
 type Tab = 'generate' | 'library'
 
-function getDateRange(r: Range): { start: string; end: string } {
-  const now = new Date()
-  const end = now.toISOString()
-  if (r === 'all') return { start: '', end: '' }
-  const days = r === 'week' ? 7 : 30
-  const start = new Date(now.getTime() - days * 24 * 3600 * 1000).toISOString()
-  return { start, end }
+function getDateRange(r: Range, latestTimestamp?: string | null): { start: string; end: string } {
+  const end = new Date().toISOString()
+  const since = getSinceFromRange(r, latestTimestamp)
+  if (!since) return { start: '', end: r === 'all' ? '' : end }
+  return { start: since, end }
 }
 
 export default function DocumentPage() {
@@ -35,6 +34,7 @@ export default function DocumentPage() {
 
   // —— 生成相关 ——
   const [range, setRange] = useState<Range>('week')
+  const [latestTimestamp, setLatestTimestamp] = useState<string | undefined>(undefined)
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [activeSubject, setActiveSubject] = useState('')
   const [questions, setQuestions] = useState<TimelineItem[]>([])
@@ -75,13 +75,17 @@ export default function DocumentPage() {
     setPreviewed(true)
     try {
       // v4：汇总数据源为 timeline（kind=question），已掌握过滤与时间/学科筛选均在后端
-      const { start, end } = getDateRange(range)
+      const { start, end } = getDateRange(range, latestTimestamp)
       const res = await fetchTimeline({
         scope: 'recent',
         subjectId: activeSubject || undefined,
         pageSize: 100,
       })
       let list = res.list.filter((it) => it.kind === 'question')
+      // 自动模式：首次预览时把最新一条记录为锚点
+      if (!latestTimestamp && range === 'auto' && list[0]) {
+        setLatestTimestamp(list[0].created_at)
+      }
       if (!includeMastered) list = list.filter((it) => !it.mastered)
       if (start) list = list.filter((it) => it.created_at >= start)
       if (end) list = list.filter((it) => it.created_at <= end)
@@ -100,7 +104,7 @@ export default function DocumentPage() {
     }
     setExporting(true)
     try {
-      const { start, end } = getDateRange(range)
+      const { start, end } = getDateRange(range, latestTimestamp)
       const res = await exportDocument({
         subject_id: activeSubject || undefined,
         start_date: start,
@@ -174,14 +178,12 @@ export default function DocumentPage() {
           <View className="px-4 pt-4 pb-32">
             <Text className="block text-sm font-semibold text-foreground mb-2">汇总时间段</Text>
             <View className="mb-4">
-              <SegmentedTabs<Range>
+              <RangePicker
                 value={range}
-                onValueChange={setRange}
-                options={[
-                  { value: 'week', label: '近一周' },
-                  { value: 'month', label: '近一月' },
-                  { value: 'all', label: '全部' },
-                ]}
+                onChange={(v) => {
+                  setRange(v)
+                  setPreviewed(false)
+                }}
               />
             </View>
 

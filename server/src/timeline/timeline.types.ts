@@ -54,6 +54,8 @@ export interface TimelineListQuery {
   subject_id?: string
   tag?: string
   keyword?: string
+  /** ISO 时间，过滤 created_at >= since（review 模式下按 added_to_review_at） */
+  since?: string
   page?: number
   page_size?: number
 }

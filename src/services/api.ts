@@ -262,6 +262,8 @@ export interface TimelineQuery {
   subjectId?: string
   tag?: string
   keyword?: string
+  /** ISO 时间，过滤 created_at >= since（review 模式下按 added_to_review_at） */
+  since?: string
   page?: number
   pageSize?: number
 }
@@ -272,6 +274,7 @@ export function fetchTimeline(q: TimelineQuery = {}) {
   if (q.subjectId) data.subject_id = q.subjectId
   if (q.tag) data.tag = q.tag
   if (q.keyword) data.keyword = q.keyword
+  if (q.since) data.since = q.since
   if (q.page !== undefined) data.page = q.page
   if (q.pageSize !== undefined) data.page_size = q.pageSize
   return unwrap<Paged<TimelineItem>>(
