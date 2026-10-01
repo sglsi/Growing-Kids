@@ -22,6 +22,7 @@ import { OcrModule } from './ocr/ocr.module'
 import { SearchModule } from './search/search.module'
 import { MaintenanceModule } from './maintenance/maintenance.module'
 import { QuotaModule } from './quota/quota.module'
+import { MemoryModule } from './memory/memory.module'
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { QuotaModule } from './quota/quota.module'
     SearchModule,
     MaintenanceModule,
     QuotaModule, // 策略 6：配额
+    MemoryModule, // 成长记忆
   ],
   controllers: [AppController],
   providers: [AppService],

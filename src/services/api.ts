@@ -97,7 +97,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
 //   purpose='temp' 或省略 → 仅返回可访问 URL，不落库（用于 AI 处理前的中间上传）
 // ============================================================
 export interface UploadOpts {
-  purpose?: 'save' | 'temp'
+  purpose?: 'save' | 'temp' | 'memory'
 }
 
 // ============================================================
@@ -139,7 +139,7 @@ export async function uploadFile(
 ): Promise<{ key: string; url: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
   // 上传前先在本机粗压（省流量）；服务端还会再精压一次
   const srcPath = await compressForUpload(filePath)
-  const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : '/api/upload'
+  const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : `/api/upload${opts.purpose ? `?purpose=${opts.purpose}` : ''}`
   // purpose 同时放进 query（url）与 multipart 表单字段（formData），双保险：
   // 部分容器/中间层会丢弃 query，部分会丢弃表单字段，两端都读即可确保后端拿到。
   const formData: Record<string, string> = {}

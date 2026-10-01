@@ -103,6 +103,9 @@ export class UploadController {
     //   所以只有调用方明确声明「这是用完即弃的中间态」才走 temp（策略 5② + 策略 7）；
     //   其余一律走正式路径 —— 宁可多占一份空间，不可误删一张在用图片。
     const isTemp = purpose === 'temp'
+    // memory 上传（成长记忆：图片 / 音频 / 视频）走正式存储但不归档到 timeline / library，
+    // 仅返回 key/url，由 memory 模块在 addMedia 时把 key 关联到 memory_media。
+    const isMemory = purpose === 'memory'
     const ing = isTemp
       ? await this.ingestService.ingestTemp(buffer, contentType)
       : await this.ingestService.ingest(buffer, contentType)
@@ -112,7 +115,7 @@ export class UploadController {
     let timelineId = ''
     let libraryId = ''
 
-    if (archive) {
+    if (archive && !isMemory) {
       if (isImage) {
         // 图片 → 统一收件箱（最近题目）
         // 写入 thumb_key / width / height，使列表能走缩略图（此前这些字段恒空 → 列表拉原图）

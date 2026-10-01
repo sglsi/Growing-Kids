@@ -206,5 +206,14 @@ export function extOf(mime: string): string {
   if (m.includes('heic') || m.includes('heif')) return 'heic'
   if (m.includes('pdf')) return 'pdf'
   if (m.includes('word') || m.includes('officedocument')) return 'docx'
+  // 成长记忆：音频
+  if (m.includes('mpeg')) return 'mp3'
+  if (m.includes('mp4')) return 'mp4'
+  if (m.includes('aac')) return 'aac'
+  if (m.includes('ogg')) return 'ogg'
+  if (m.includes('wav') || m.includes('wave')) return 'wav'
+  if (m.includes('webm')) return 'webm'
+  if (m.includes('quicktime')) return 'mov'
+  if (m.includes('3gpp')) return '3gp'
   return 'bin'
 }

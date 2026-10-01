@@ -29,6 +29,10 @@ interface SelectionBarProps {
   countPrefix?: string
   /** 选择态时「清空」按钮文案，默认「清空」 */
   clearLabel?: string
+  /** 选择态时是否显示「全选」按钮（可选用，使用方提供 handler） */
+  onSelectAll?: () => void
+  /** 「全选」按钮文案，默认「全选」 */
+  selectAllLabel?: string
 }
 
 /**
@@ -37,6 +41,7 @@ interface SelectionBarProps {
  */
 export default function SelectionBar({
   selection, enterLabel = '批量选择', countPrefix = '已选', clearLabel = '清空',
+  onSelectAll, selectAllLabel = '全选',
 }: SelectionBarProps) {
   if (!selection.selecting) {
     return (
@@ -45,11 +50,12 @@ export default function SelectionBar({
   }
   return (
     <View className="flex flex-row items-center gap-3">
+      <Text className="block text-sm text-foreground">{countPrefix} {selection.count}</Text>
+      {onSelectAll ? (
+        <Text className="block text-sm text-muted-foreground" onClick={onSelectAll}>{selectAllLabel}</Text>
+      ) : null}
       {selection.count > 0 ? (
-        <>
-          <Text className="block text-sm text-foreground">{countPrefix} {selection.count}</Text>
-          <Text className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</Text>
-        </>
+        <Text className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</Text>
       ) : null}
       <Text className="block text-sm text-primary" onClick={selection.exit}>取消</Text>
     </View>
