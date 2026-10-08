@@ -20,6 +20,19 @@ export interface ProcessImageDto {
   // erase_v2 专用：局部修复策略（缺省 adaptive：空白区填底色 / 压字区结构延拓）
   strategy?: 'median' | 'blur' | 'masked' | 'edge' | 'adaptive'
   /**
+   * erase_v2 专用：⭐ 擦除模式（v18.2 / v21.5）。
+   *  - **'word'（缺省默认）**：只擦「确信手写」的词（词级判别器 state===1），
+   *    印刷(0) 与 疑虑(2) 一律保留 —— 即「疑罪从无」，宁可少擦也不误伤印刷。
+   *    端到端实测 4 卷：擦净 34/44(77%)、插图受损 6/16、框外改动 90,881px（损伤最低）。
+   *  - 'union_generic'：hybrid 经**颜色无关印刷保护**后 ∪ 词通道确信手写。
+   *    召回更高（84%）、损伤略升（95,783px），适合「更想擦干净」的场景。
+   *  - 'union'：旧三通道并集，服务黑笔/铅笔手写卷；
+   *  - 'color'：仅彩色笔迹通道 + 印刷保护闸，服务**红/蓝笔批改卷**——
+   *    红笔卷上深色/槽位通道对红笔清除零贡献，却会连带吞掉大量印刷正文
+   *    （实测 mask 内被删像素 42.5% 是印刷）。color 模式误删降 52%~99%。
+   */
+  erase_mode?: 'union' | 'color' | 'word' | 'union_generic'
+  /**
    * 自动调正(几何纠偏)专用：前端手动拉出的试卷四角，顺序任意
    * [[x,y],[x,y],[x,y],[x,y]]。提供则直接做透视压平（100% 保真，不重画）；
    * 未提供且自动检测未命中时降级返回原图并提示手动拉框（方案 §2.3）。
@@ -28,6 +41,16 @@ export interface ProcessImageDto {
    * 兼容旧调用方直接传像素坐标（任一坐标 >1 即判定为像素，不再缩放）。
    */
   manual_corners?: [[number, number], [number, number], [number, number], [number, number]]
+  /**
+   * 错题区域提取（POST /image/wrongq）专用。
+   *  - wrongq_chroma_min：红笔色域彩度阈值，默认 14（v6 实测：22 会漏细对勾）
+   *  - wrongq_allow_vlm：是否允许调用 VLM 做语义判错。**本环境 COZE_API_TOKEN 未配置时
+   *    自动 fail-open**，改由本地证据层产出，并在 debug.vlmError 中说明原因
+   *  - wrongq_assets：是否为每个题块产出 raw/enhanced/clean 三份裁图（默认 false，省时）
+   */
+  wrongq_chroma_min?: number
+  wrongq_allow_vlm?: boolean
+  wrongq_assets?: boolean
   /**
    * 智能高清【高清扩展】专用：升采样倍率，默认 2，支持 2/3/4（X2/X3/X4）。
    * 即"高清扩展"清晰度增强——彩色增强模式可选开启；黑白模式强制原生分辨率不启用。
@@ -48,7 +71,16 @@ export interface ProcessImageDto {
    *                ⚠️ 会丢失灰阶（图表/照片区由版面感知自动保护，不被二值化）
    * 缺省读环境变量 IMG_ENHANCE_PRESET。
    */
-  enhance_preset?: 'original' | 'enhance' | 'bw'
+  enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
+  /**
+   * 【P1 后续：多模式并列输出】智能高清专用。
+   * 置 true 时一次产出**全部五种模式**（原图/增强/黑白/增亮/灰度）的预览图，
+   * 在 `ImageProcessResult.modes` 返回各模式 url，供前端并列渲染缩略图让用户自选
+   * （方案 §P1「预览自选 UX」）。主 `url` 仍是智能默认档那张。
+   * ⚠️ 预览为轻量档（内部 scale=1，不做高清扩展），用户选定后再按选定模式
+   *    请求最终画质（scale=2 高清扩展 + OCR 一致性校验），避免 5 份大图浪费算力。
+   */
+  multi_modes?: boolean
   /**
    * 【P1 强度档位】智能高清专用：'weak' | 'medium'(默认) | 'strong'。
    * 存在理由：把"是否过头"的最终把控权交给用户，避免算法自说自话（方案 §P1）。
@@ -83,10 +115,25 @@ export interface ImageNotice {
   message: string
 }
 
+/** 单模式产出的图（多模式并列输出中的一项） */
+export interface ModeAsset {
+  url: string
+  key: string
+  width: number
+  height: number
+  sizeBytes: number
+}
+
 export interface ImageProcessResult {
   url: string
   key: string
   timeline_id: string
+  /**
+   * 【P1 后续】多模式并列输出：`multi_modes=true` 时返回五种模式各自的图，
+   * 键为模式名（original / enhance / bw / brighten / gray）。
+   * 前端据此渲染缩略图条，点击即把该模式设为主图（预览自选，方案 §P1）。
+   */
+  modes?: Record<'original' | 'enhance' | 'bw' | 'brighten' | 'gray', ModeAsset>
   /** erase_v2 会带回处理诊断信息（覆盖比例 / mask 来源 / 一致性等） */
   debug?: Record<string, unknown> & { notice?: ImageNotice }
 }

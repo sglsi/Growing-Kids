@@ -21,6 +21,7 @@ import {
   RATIO_TOLERANCE,
 } from './image-preprocess'
 import { buildHandwritingMask } from './handwriting-segmenter'
+import { buildEraseMask } from './erase-mask-policy'
 import {
   inpaint,
   blendWithMask,
@@ -28,10 +29,15 @@ import {
   type InpaintStrategy,
 } from './handwriting-mask'
 import { straightenImage, type Corner } from './image-dewarp'
-import { enhanceImage } from './image-superres'
+import { enhanceImage, enhanceImageModes } from './image-superres'
+import { detectMonoSource, type EnhancePreset, type MonoSourceResult } from './image-doc-enhance'
 import { compareRecognized, OCR_CONSISTENCY_THRESHOLD, type OcrConsistency } from './image-quality'
 import { classifySr, srGate, srUserQuota, srGateEnabled } from './sr-gate'
 import { OcrService } from '../ocr/ocr.service'
+import { extractWrongQuestions } from './wrongq'
+import { buildLayoutContext } from './wrongq-layout'
+import { renderBlockAssets } from './wrongq-render'
+import type { WrongqBlock } from './wrongq.types'
 
 /**
  * 提示词：一律加上"锁版式"约束。
@@ -58,6 +64,64 @@ const TONE_LOCK =
  *
  * @param segDebug buildHandwritingMask 返回的 debug（含深色路径的 reason）
  */
+/**
+ * ⭐ v20.9 框选补擦的用户提示。
+ *
+ * 背景：框选补擦的机制已从「整块矩形并入mask」改为「框内笔迹像素并入mask」
+ *   （见 handwriting-segmenter.ts mergeManualRects）。
+ *   副作用：若用户框到了**整幅偏暗的照片**，框内像素会 100% 被判为笔迹 →
+ *   该区域被整体重绘 → 图片内容被摧毁。
+ *   这类区域与「大面积手写涂抹」在像素层面确实无法区分（实测所有统计判据
+ *   AUC 均不成立，见 probe-graphic-guard4.ts），所以**不在后端静默拒擦**，
+ *   而是如实上报比例，由前端弹窗告知用户「可能框到了照片」。
+ *
+ * 与 notice 的既有约定一致（image.types.ts §「凡是没改动的返回都必须带 notice」）：
+ *   即使有改动，只要结果可能不符合用户预期，也必须说清楚。
+ */
+function manualNotice(
+  segDebug?: Record<string, unknown>,
+  maskDebug?: Record<string, unknown>,
+): Record<string, unknown> {
+  const src = (maskDebug ?? segDebug ?? {}) as Record<string, unknown>
+  const merged = Number(src.manualRects ?? 0)
+  if (!merged) return {}
+  const ratio = Number(src.manualStrokeRatio ?? 0)
+  const detail = typeof src.manualRejectDetail === 'string' ? src.manualRejectDetail : ''
+  const out: Record<string, unknown> = {
+    manualRects: merged,
+    manualStrokeRatio: ratio,
+  }
+  if (detail) out.manualRectDetail = detail
+  // ① 笔迹占比接近 1 = 框内几乎每个像素都要被重绘。
+  //    实测：文字区 3%~70%（框越大越低），**整幅偏暗的照片必然接近 1**。
+  if (ratio >= 0.95) {
+    out.notice = {
+      level: 'warn',
+      title: '这个框几乎整块都会被擦除',
+      message:
+        '框内 95% 以上的像素都被判为笔迹。\n' +
+        '如果框的是**照片或深色插图**，该区域内容会被整体重绘而丢失。\n' +
+        '建议只框需要清理的手写所在的小范围。',
+    }
+    return out
+  }
+  // ② 笔迹占比中等 = 大概率框到了印刷体为主的正文区。
+  //    实测（probe-print-damage.ts + G3 目检）：框纯印刷体区块时，
+  //    框内暗像素**100% 会被擦除** —— 框里没有手写，印刷字却全没了。
+  //    这是框选补擦的**固有代价**（用户指令即命令），只能提示，不能静默。
+  if (ratio >= 0.15) {
+    out.notice = {
+      level: 'info',
+      title: '框选区域将被整块清除',
+      message:
+        `框内约 ${(ratio * 100).toFixed(0)}% 的像素（深色笔画）会被清除。\n` +
+        '如果这个框里主要是**印刷文字**而不是手写，\n' +
+        '请把框缩小到只覆盖手写的那几行。',
+    }
+  }
+  return out
+}
+
 function eraseHint(segDebug?: Record<string, unknown>): string {
   const dark = (segDebug?.darkDebug ?? {}) as Record<string, unknown>
   const reason = String(dark.reason ?? '')
@@ -128,9 +192,10 @@ const PROMPTS: Record<Exclude<ImageAction, 'erase_v2'>, { prompt: string; desc: 
  * 非法/未知值一律落回 'enhance' —— 宁可走通用默认，也不要因为一个拼错的枚举值
  * 让整条管线静默退化（这是本项目"点了没反应"类反馈的老教训）。
  */
-function normalizeEnhancePreset(v?: string): 'original' | 'enhance' | 'bw' {
+function normalizeEnhancePreset(v?: string): EnhancePreset {
   const s = (v || '').toLowerCase()
-  return s === 'original' || s === 'bw' ? s : 'enhance'
+  if (s === 'original' || s === 'bw' || s === 'brighten' || s === 'gray') return s
+  return 'enhance'
 }
 
 /** 【P1 强度档位】归一化，未知值落回 'medium' */
@@ -173,21 +238,21 @@ export class ImageService {
       const procIng = await this.ingestService.ingest(processedBuffer, 'image/png')
       const procUrl = await this.storageService.getPublicUrl(procIng.key)
 
-      // ② 原图与处理图并行识别（temperature=0.1，降低随机性）
+      // ② 原图与处理图并行识别：优先本地 OCR 原始文字（稳定可比对），VLM 仅兜底
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`OCR 一致性校验超时(${timeoutMs}ms)`)), timeoutMs)
       })
-      const [srcRes, procRes] = await Promise.race([
+      const [srcItems, procItems] = await Promise.race([
         Promise.all([
-          this.ocrService.recognizeExamByUrls('', [srcUrl]),
-          this.ocrService.recognizeExamByUrls('', [procUrl]),
+          this.ocrService.recognizeRawItems([srcUrl]),
+          this.ocrService.recognizeRawItems([procUrl]),
         ]),
         timeout,
       ])
 
       // ③ 一致性度量
       const threshold = Number(process.env.IMG_OCR_MIN_SCORE || OCR_CONSISTENCY_THRESHOLD)
-      const consistency = compareRecognized(srcRes.items, procRes.items, threshold)
+      const consistency = compareRecognized(srcItems, procItems, threshold)
       console.log(
         `[image] OCR 一致性校验：score=${consistency.score.toFixed(3)} ` +
           `(overlap=${consistency.charOverlap.toFixed(3)} ` +
@@ -277,11 +342,40 @@ export class ImageService {
     const srcMeta = await readMeta(srcBuffer)
 
     // ① 分割：拿到手写 mask（VLM 优先，失败降级色域阈值；manual_regions 无条件并入）
+    //    erase_mode='color'：红/蓝笔批改卷走「仅色域+印刷保护」，避免深色/槽位通道吞印刷（v18.2）
+    //    ⭐ v20.2 默认 'hybrid'：色域红笔 + 红笔空间先验黑笔（教师只批改学生写过的地方）。
+    //       实测 4 张英语灰报：黑笔去除 0.60~0.64（此前 0.003~0.013），印刷误删 ≤0.001。
+    //       无红笔卷自动回退 union（segmenter 内自适应，debug.mode=union(hybrid-fallback)），
+    //       因此默认值从 union 升级为 hybrid 是安全的——两种场景都覆盖。
+    //       显式传 erase_mode='union' 可强制旧三通道并集。
+    // ⭐ v21.5 合成策略：默认 'word'（只擦确信手写，疑罪从无）；'union_generic' 为备选。
+    //    旧模式 'color' / 'union' 保持原语义，不经词通道。
+    //    base mask 对 word / union_generic 统一取 hybrid（词通道在其之上做门控）。
+    // ⭐ v21.7 确认：缺省（含显式 'word'）→ 'word'。最终 mask 由 discriminateWords 逐词疑罪从无裁定，
+    //    red-ink-prior 的 hybrid 黑笔路径**不**进入 word 路径（仅 'union'/'union_generic' 模式才并入）。
+    //    因此"红笔压印刷"的修复（minDomainRatio / 几何过滤）主要发生在 union 路径；word 路径靠
+    //    逐词判别器二次把关，天然不受红对勾误判影响。
+    const policy: 'word' | 'union_generic' | null =
+      dto.erase_mode === 'union_generic' ? 'union_generic'
+        : dto.erase_mode === 'union' || dto.erase_mode === 'color' ? null
+          : 'word'   // 缺省（含显式 'word'）→ 只擦确信手写
     const seg = await buildHandwritingMask(srcBuffer, dto.image_url, forwardHeaders, {
       allowVlm: dto.use_vlm !== false,
       manualRects: dto.manual_regions,
+      // ⭐ 基础分割默认**仍为 hybrid**（E3 门禁语义不变）；'word' / 'union_generic'
+      //   是在这个基础 mask 之上叠加的「合成策略」，不是另一套分割模式。
+      eraseMode: dto.erase_mode === 'color' ? 'color' : dto.erase_mode === 'union' ? 'union' : 'hybrid',
     })
-    const { mask } = seg
+    let mask = seg.mask
+    if (policy) {
+      try {
+        mask = await buildEraseMask(srcBuffer, mask, policy)
+      } catch (e) {
+        // 词通道失败必须**降级到基础 mask**，绝不让用户拿不到结果
+        console.warn(`[image] 去手写V2：合成策略 ${policy} 失败，降级为基础 mask（${String(e)}）`)
+        mask = seg.mask
+      }
+    }
 
     // 没有手写 → 直接返回原图，不做任何改动（对用户最安全）
     if (mask.coverage <= 0.0001) {
@@ -363,6 +457,7 @@ export class ImageService {
         strategy,
         unmodifiedSimilarity: sim.similarity,
         srcSize: `${srcMeta.width}x${srcMeta.height}`,
+        ...manualNotice(seg.debug, mask.debug),
       },
     }
   }
@@ -383,6 +478,72 @@ export class ImageService {
    * 灰度开关见 image.controller.ts：仅当 IMG_PIPELINE_MODE ∈ {new, hybrid} 时 auto 才进入本方法，
    * 否则回落到 process() 图生图兜底。
    */
+  /**
+   * 错题区域提取（路径 B：VLM 出题块粗框 + 本地红笔证据校验/收紧）。
+   *
+   * ⚠️ VLM 状态：本环境 COZE_API_TOKEN 未配置，VLM 调用 fail-open，
+   *    全流程由本地证据层独立产出（blocks.source='local'，置信度刻意压低），
+   *    debug.vlmError 写明原因，**绝不阻塞、绝不伪装成 VLM 结果**。
+   *    配置凭证后传 imageUrl 即自动启用融合（blocks.source 变 'fused'）。
+   */
+  async wrongq(
+    userId: string,
+    dto: ProcessImageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<{ blocks: WrongqBlock[]; debug: Record<string, unknown> }> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+
+    // 版面上下文单独构建一次：产裁图时要复用同一份（避免重复 straighten）
+    const ctx = await buildLayoutContext(srcBuffer)
+    const result = await extractWrongQuestions(srcBuffer, {
+      chromaMin: dto.wrongq_chroma_min ?? 14,
+      allowVlm: dto.wrongq_allow_vlm === true,
+      imageUrl: dto.image_url, // VLM 仅接受公网 URL
+    }, ctx)
+
+    const debug: Record<string, unknown> = {
+      ...result.debug,
+      medH: result.medH,
+      cols: result.cols.map(([a, b]) => b - a),
+      vlmUsed: result.vlmUsed,
+    }
+    if (result.vlmError) debug.vlmError = result.vlmError
+    void userId
+
+    // 可选：为每个题块产出 raw / enhanced / clean 三份裁图
+    if (dto.wrongq_assets === true) {
+      const assets: Array<Record<string, unknown>> = []
+      for (const b of result.blocks) {
+        try {
+          const a = await renderBlockAssets(ctx.flatBuf, b, ctx)
+          const rawIng = await this.ingestService.ingest(a.raw, 'image/png')
+          const item: Record<string, unknown> = {
+            id: b.id,
+            verdict: b.verdict,
+            raw: await this.storageService.getPublicUrl(rawIng.key),
+            notes: a.notes,
+          }
+          if (a.enhanced) {
+            const g = await this.ingestService.ingest(a.enhanced, 'image/png')
+            item.enhanced = await this.storageService.getPublicUrl(g.key)
+          }
+          if (a.clean) {
+            const g2 = await this.ingestService.ingest(a.clean, 'image/png')
+            item.clean = await this.storageService.getPublicUrl(g2.key)
+          }
+          assets.push(item)
+        } catch (e) {
+          assets.push({ id: b.id, error: String((e as Error)?.message ?? e).slice(0, 120) })
+        }
+      }
+      debug.assets = assets
+    }
+
+    return { blocks: result.blocks, debug }
+  }
+
   async straighten(
     userId: string,
     dto: ProcessImageDto,
@@ -541,13 +702,70 @@ export class ImageService {
         : 'classical'
     const scale = dto.sr_scale && [2, 3, 4].includes(dto.sr_scale) ? dto.sr_scale : 2
     // —— P1 多模式 / 强度档位（方案 §P1）——
-    const preset = normalizeEnhancePreset(dto.enhance_preset ?? process.env.IMG_ENHANCE_PRESET)
+    // ⭐ 智能默认档（P1 后续）：调用方**未显式指定** preset 时，用单色源检测自动选：
+    //    纯黑白打印件 → 默认「黑白」（方案 §P1 实测：黑白源走彩色模式会带色偏格子 28.2%）；
+    //    否则 → 默认「增强并锐化」。用户仍可手动切换，不剥夺选择权。
+    const explicitPreset = dto.enhance_preset ?? process.env.IMG_ENHANCE_PRESET
+    let mono: MonoSourceResult | undefined
+    let autoPreset: EnhancePreset | undefined
+    let preset: EnhancePreset
+    if (explicitPreset) {
+      preset = normalizeEnhancePreset(explicitPreset)
+    } else {
+      try {
+        mono = await detectMonoSource(srcBuffer)
+        autoPreset = mono.isMono ? 'bw' : 'enhance'
+      } catch (e: unknown) {
+        console.warn(`[image] 单色源检测失败，回落默认 enhance：${String((e as Error)?.message ?? e)}`)
+      }
+      preset = autoPreset ?? 'enhance'
+    }
     const strength = normalizeEnhanceStrength(dto.enhance_strength ?? process.env.IMG_ENHANCE_STRENGTH)
+
     // ESPCN_WEIGHTS_URL 支持 {scale} 占位符，便于一份配置加载分倍率权重
     // （如 ESPCN_WEIGHTS_URL=/weights/espcn_x{scale}.json → 实际请求 espcn_x2.json ...）
     const weightsUrl = process.env.ESPCN_WEIGHTS_URL
       ? process.env.ESPCN_WEIGHTS_URL.replace(/\{scale\}/g, String(scale))
       : undefined
+
+    // —— P1 后续：多模式并列输出（预览自选，方案 §P1）——
+    //    一次性产出五种模式的**轻量预览**（内部 scale=1，不做高清扩展），供前端
+    //    并列渲染缩略图让用户挑；用户选定后再按该模式请求最终画质（scale=2 + OCR 校验）。
+    if (dto.multi_modes === true) {
+      const mr = await enhanceImageModes(srcBuffer, { scale: 1, mode, weightsUrl, strength })
+      const modes: Record<string, { url: string; key: string; width: number; height: number; sizeBytes: number }> = {}
+      for (const [name, buf] of Object.entries(mr.modes)) {
+        const g = await this.ingestService.ingest(buf, 'image/png')
+        modes[name] = {
+          url: await this.storageService.getPublicUrl(g.key),
+          key: g.key,
+          width: g.width,
+          height: g.height,
+          sizeBytes: g.sizeBytes,
+        }
+      }
+      const main = modes[preset] ?? modes.enhance
+      console.log(
+        `[image] 智能高清·多模式预览：五模式已产出，默认档=${preset}` +
+          (autoPreset ? `（自动判定：单色源=${mono?.isMono}）` : '（调用方指定）'),
+      )
+      return {
+        url: main.url,
+        key: main.key,
+        timeline_id: '',
+        modes: modes as ImageProcessResult['modes'],
+        debug: {
+          method: 'super-resolution',
+          stage: 'multi-modes-preview',
+          mode,
+          preset,
+          autoPreset,
+          mono,
+          scale: 1,
+          modes: Object.keys(modes),
+        },
+      }
+    }
 
     // —— 服务端限流 / 排队（依据 Phase 2 压测结论）——
     // 重任务 = x3/x4（任意模式）或 espcn（任意倍率）；仅 x2-classical 为轻任务（不占闸）。
@@ -645,6 +863,9 @@ export class ImageService {
         mode: result.mode,
         preset,
         strength,
+        // ⭐ 智能默认档（P1 后续）：前端可据此提示「已按黑白件自动选了黑白模式」
+        autoPreset,
+        mono,
         // 文档增强诊断：字高 / 窗口 / 版面保护块数 / 各环节耗时（方案 §六 可观测性）
         enhance: result.debug,
         scale,

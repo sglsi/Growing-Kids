@@ -1,6 +1,7 @@
 import sharp from 'sharp'
 import { normalizeBackgroundLuma } from './image-doc-enhance'
-import { estimateCharMetrics } from './image-layout'
+import { estimateCharMetrics, connectedComponents, closeInk3x3, LAYOUT_MAX_SIDE } from './image-layout'
+import { buildDocContext, type DocContext } from './adaptive-stats'
 
 /**
  * 阶段二：手写 mask 分割 + 局部修复（Inpainting）+ 原图混合（blend）
@@ -36,7 +37,7 @@ export interface HandwritingMask {
   /** 覆盖比例（手写像素 / 总像素），用于判断是否需要修复、以及选择策略 */
   coverage: number
   /** mask 来源，便于排查 */
-  source: 'vlm' | 'threshold' | 'manual' | 'layout'
+  source: 'vlm' | 'threshold' | 'manual' | 'layout' | 'word' | 'union_generic'
   /** 检测过程诊断（覆盖率为何是 0 / 为何被护栏拦下），便于线上排查与用户提示 */
   debug?: Record<string, unknown>
   /**
@@ -699,6 +700,22 @@ export async function maskFromDarkInk(
     /** 紧种子的额外膨胀半径（仅用于盖住抗锯齿边），默认 2 */
     seedDilate?: number
     workMaxSide?: number
+    /**
+     * ⭐ 分块自适应阈值（v16，替代全局 Otsu）：把每像素阈值从「全页单一 Otsu 值」
+     * 改为「局部窗口统计」threshold = blockMean - adaptiveK×blockStd。
+     * 重阴影页底部浅手写的暗块局部均值自动降低 → 阈值随之降低 → 浅手写能进 ink；
+     * 但纯阴影区整体偏暗、无笔画纹理（局部 std 极低），须叠加**对比度闸门**
+     * (blockMean - gray ≥ adaptiveMinContrast) 才判墨，否则阴影噪点会被当墨。
+     */
+    adaptiveBlock?: number
+    adaptiveK?: number
+    adaptiveMinContrast?: number
+    /**
+     * ⭐ P1（自适应方法论）：复用 `adaptive-stats.ts` 估计的 DocContext（纸面/版面/Sauvola）。
+     * 传入则从 ctx 取 charH 决定 Sauvola 窗口（2×charH），不再用固定 adaptiveBlock。
+     * 缺省且 process.env.INK_ADAPTIVE 处于 shadow/on 时，内部自建 ctx（探针可单独调用，向后兼容）。
+     */
+    ctx?: DocContext
   } = {},
 ): Promise<HandwritingMask> {
   // ⭐ rowRatio 从 1.5 降到 1.15（真卷实测暴露的第十个缺陷：同高手写整区漏检）
@@ -719,6 +736,29 @@ export async function maskFromDarkInk(
   const gapIrregular = opts.gapIrregular ?? (process.env.DARK_GAPCV ? +process.env.DARK_GAPCV : 0.75)
   const maxInkShare = opts.maxInkShare ?? 0.65
   const workMaxSide = opts.workMaxSide ?? 1200
+  // v16 分块自适应阈值参数（见 opts 注释）
+  const aBlk = opts.adaptiveBlock ?? 40
+  const aK = opts.adaptiveK ?? (process.env.DARK_ADAPT_K ? +process.env.DARK_ADAPT_K : 0.25)
+  const aMinC = opts.adaptiveMinContrast ?? (process.env.DARK_ADAPT_MINC ? +process.env.DARK_ADAPT_MINC : 12)
+  // P1 · Sauvola 常量（L0 · Sauvola 2000 原文推荐 k∈[0.2,0.5] 取中点；
+  //   最终值以合成集跨图最差值扫参确定，禁止在真实图上拍脑袋 —— 见方法论 §5 标定纪律）
+  const SV_K = 0.34 // L0 · Sauvola 2000
+  const SV_R = 128  // L0 · 文档灰度标准化动态范围
+  // P1 · 自适应门禁（P1-4 已落地：Sauvola 为默认）：
+  //   INK_ADAPTIVE 缺省/未设  → Sauvola 激活（默认，文献推荐、阈值级已验证 J1~J3 通过）
+  //   =on     → Sauvola 激活（显式）
+  //   =shadow → 旧 Niblack 分支激活 + Sauvola 影子并行（仅写 debug，验收用）
+  //   =off    → 旧 Niblack 分支（回滚开关，保留以应对 regreession）
+  // ⚠️ 重要根因（P1 验收发现）：在 buildHandwritingMask 的 hybrid 路径，当红笔空间先验
+  //   可用时会在 handwriting-segmenter.ts:591 提前 return，根本不调用本函数——故 P1 对
+  //   有红笔页面的 E7 印刷损伤无直接影响（E7 根因在 red-ink-prior radius=24 膨胀 + hybrid
+  //   路径跳过 protectPrintUnderColorHandwriting，归属 P2-2）。P1 仅改善深色路径被激活
+  //   的场景（union 路径 / 无红笔页面 / page31 实测 E7 +1.72pp）。
+  const INK_ADAPTIVE = process.env.INK_ADAPTIVE
+  const useOld = INK_ADAPTIVE === 'off'
+  const shadowSauv = INK_ADAPTIVE === 'shadow'
+  const adaptiveOn = !useOld                       // 默认激活 Sauvola 估计（建 DocContext）
+  const useSauvolaActive = adaptiveOn && !shadowSauv
 
   const meta = await sharp(buf).metadata()
   const W0 = meta.width || 0
@@ -734,12 +774,30 @@ export async function maskFromDarkInk(
   const h = Math.max(1, Math.round(H0 * scale))
   const gray = await sharp(buf).resize(w, h, { fit: 'fill' }).grayscale().raw().toBuffer()
 
-  // ① Otsu 二值化
+  // P1 · DocContext（纸面/版面/Sauvola 估计）。仅自适应模式才建，避免回滚路径有任何额外开销/耦合。
+  // charH 由 estimateCharMetrics 在 LAYOUT_MAX_SIDE 尺度估计；本函数灰度在 workMaxSide 尺度，
+  // 故窗口须按比例换算（见下方 adaptiveWinR）。
+  let ctx: DocContext | undefined = opts.ctx
+  if (adaptiveOn && !ctx) {
+    const isGray = Number(meta.channels ?? 3) === 1
+    ctx = await buildDocContext(buf, { width: W0, height: H0, isGray })
+  }
+
+  // ① 分块自适应阈值（v16，替代全局 Otsu）
+  //   全局 Otsu 把整页阈值按白纸直方图拉高 → 重阴影页底部浅手写过不了线（ink=0）。
+  //   改用局部窗口阈值：threshold = blockMean - k*blockStd，浅手写所在暗块阈值自动降低；
+  //   但纯阴影区整体偏暗、无笔画纹理 → 仅靠「比局部背景暗」不够，须加对比度闸门
+  //   (blockMean - gray ≥ minContrast) 屏蔽阴影噪点。积分图加速，O(n)。
+  //   仍计算全局 Otsu 仅用于诊断日志/兜底对照。
   const hist = new Int32Array(256)
   for (let i = 0; i < gray.length; i++) hist[gray[i]]++
   let sum = 0
   for (let i = 0; i < 256; i++) sum += i * hist[i]
-  let sumB = 0, wB = 0, maxVar = -1, thr = 127
+  // Otsu 平台中点（修复取首个最大值 bug，详见 adaptive-stats.ts otsuPlatform）：
+  //   最大方差常落在一段平台上，取首个 t 会得到平台低端——二值/近二值图上=0、
+  //   普通扫描件上恒=127（平台起点）。改为取平台 [tLow,tHigh] 中点。
+  //   ⚠️ 本 Otsu 仅作诊断日志/兜底对照（见上方注释），不参与 mask 输出，改动零行为风险。
+  let sumB = 0, wB = 0, maxVar = -1, otsuTlow = 0, otsuThigh = 0, otsuSet = false
   for (let t = 0; t < 256; t++) {
     wB += hist[t]
     if (wB === 0) continue
@@ -749,12 +807,80 @@ export async function maskFromDarkInk(
     const mB = sumB / wB
     const mF = (sum - sumB) / wF
     const between = wB * wF * (mB - mF) * (mB - mF)
-    if (between > maxVar) { maxVar = between; thr = t }
+    if (between > maxVar) { maxVar = between; otsuTlow = otsuThigh = t; otsuSet = true }
+    else if (between === maxVar) { otsuThigh = t }
   }
+  const otsuThr = otsuSet ? Math.round((otsuTlow + otsuThigh) / 2) : 127
+  // 积分图（前缀和 / 平方和）
+  const I = new Float64Array((w + 1) * (h + 1))
+  const I2 = new Float64Array((w + 1) * (h + 1))
+  for (let y = 0; y < h; y++) {
+    let rowS = 0, rowS2 = 0
+    const base = (y + 1) * (w + 1)
+    const pbase = y * w
+    for (let x = 0; x < w; x++) {
+      const v = gray[pbase + x]
+      rowS += v; rowS2 += v * v
+      I[base + x + 1] = I[y * (w + 1) + x + 1] + rowS
+      I2[base + x + 1] = I2[y * (w + 1) + x + 1] + rowS2
+    }
+  }
+  // P1 · 自适应窗口半径：自适应模式 = 2×charH（转换为本灰度坐标系），否则沿用固定 aBlk。
+  // charH 在 LAYOUT_MAX_SIDE 尺度估计，本灰度在 workMaxSide 尺度；二者 resize 比例之比 = 像素尺度换算系数。
+  // 窗口钳到 [16,64]：下限保底（避免极小字被邻居平均淹没），上限防窗口跨多行后把行间距当背景。
+  const maxDim = Math.max(1, Math.max(W0, H0))
+  const maskScale = Math.min(1, workMaxSide / maxDim)
+  const ctxScale = Math.min(1, LAYOUT_MAX_SIDE / maxDim)
+  // ⭐ P0-5c：ctx.layout.charH 是**原图尺度**（见 image-layout.metricsFromGray 的
+  //   `medH = medHWork × inv`）。旧式 charH×(maskScale/ctxScale) 等于 ×(workMaxSide/800)，
+  //   即把原图尺度当成 800-work 尺度，窗口虚大 maxDim/800 倍（2000px 图 → 2.5 倍）。
+  //   正确值 = 原图尺度 × maskScale = charHWork × (maskScale/ctxScale)。
+  //   开关 CHARH_COORD=off 保持旧行为以便 A/B（端到端验证后置为默认 on）。
+  const coordFix = (process.env.CHARH_COORD ?? 'off') !== 'off'
+  const charHInMask = ctx
+    ? coordFix
+      ? (ctx.layout.charHWork ?? ctx.layout.charH * ctxScale) * (maskScale / Math.max(1e-6, ctxScale))
+      : ctx.layout.charH * (maskScale / Math.max(1e-6, ctxScale))
+    : aBlk
+  const adaptiveWinR = adaptiveOn && ctx
+    ? Math.max(16, Math.min(64, Math.round(charHInMask)))
+    : aBlk
 
   const ink = new Uint8Array(w * h)
+  // P1 · 影子：Sauvola 并行计算的 ink（仅写 debug，不参与并集），对照旧 Niblack 分支。
+  const inkShadow = shadowSauv ? new Uint8Array(w * h) : null
   let inkTotal = 0
-  for (let i = 0; i < gray.length; i++) if (gray[i] < thr) { ink[i] = 1; inkTotal++ }
+  let inkShadowTotal = 0
+  let adaptThrSum = 0, adaptThrN = 0
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - adaptiveWinR), y1 = Math.min(h - 1, y + adaptiveWinR)
+    const iy0 = y0 * (w + 1), iy1 = (y1 + 1) * (w + 1)
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - adaptiveWinR), x1 = Math.min(w - 1, x + adaptiveWinR)
+      const cnt = (x1 - x0 + 1) * (y1 - y0 + 1)
+      const s = I[iy1 + x1 + 1] - I[iy1 + x0] - I[iy0 + x1 + 1] + I[iy0 + x0]
+      const s2 = I2[iy1 + x1 + 1] - I2[iy1 + x0] - I2[iy0 + x1 + 1] + I2[iy0 + x0]
+      const mean = s / cnt
+      const variance = s2 / cnt - mean * mean
+      const std = Math.sqrt(variance > 0 ? variance : 0)
+      // 旧：Niblack 式 T = mean − aK·std（依赖固定块 + 拍脑袋 k）
+      const tOld = mean - aK * std
+      // 新：Sauvola 式 T = mean·(1 + k(s/R − 1))，窗口随字高自适应（L3），k/R 为 L0 文献常数
+      const tSauv = mean * (1 + SV_K * (std / SV_R - 1))
+      const g = gray[y * w + x]
+      const contrast = mean - g
+      // 激活判据：on 模式用 Sauvola，其余（含 shadow）沿用旧 Niblack，保证回滚零行为变更
+      const activeHit = useSauvolaActive
+        ? (g < tSauv && contrast >= aMinC)
+        : (g < tOld && contrast >= aMinC)
+      if (activeHit) { ink[y * w + x] = 1; inkTotal++ }
+      if (inkShadow) {
+        if (g < tSauv && contrast >= aMinC) { inkShadow[y * w + x] = 1; inkShadowTotal++ }
+      }
+      if ((y & 31) === 0 && (x & 31) === 0) { adaptThrSum += (useSauvolaActive ? tSauv : tOld); adaptThrN++ }
+    }
+  }
+  if (process.env.DARK_DBG) console.error(`[dark] 全局Otsu=${otsuThr} 自适应均值阈≈${(adaptThrSum / Math.max(1, adaptThrN)).toFixed(1)} mode=${INK_ADAPTIVE ?? 'off'} winR=${adaptiveWinR} aK=${aK} SV_K=${SV_K} minContrast=${aMinC} ink=${inkTotal}`)
   if (inkTotal < 50) { EMPTY_REASON = 'no_ink'; return empty({ reason: EMPTY_REASON, inkTotal }) }
 
   // ①.5 边缘连通暗区清除（实测暴露：装订边/桌边会把整条检测链焊死）
@@ -1286,6 +1412,23 @@ export async function maskFromDarkInk(
   const seedFull = Buffer.alloc(W0 * H0, 0)
   for (let i = 0; i < W0 * H0; i++) seedFull[i] = seedRaw[i * sch] > 127 ? 255 : 0
 
+  // P1 · 影子对比：work 尺度逐像素对比旧 Niblack ink 与 Sauvola inkShadow，给出切换剧烈度。
+  const shadowDbg = inkShadow
+    ? (() => {
+        let diff = 0
+        for (let i = 0; i < ink.length; i++) if ((ink[i] > 0) !== (inkShadow[i] > 0)) diff++
+        return {
+          sauvolaCoverage: +(inkShadowTotal / ink.length).toFixed(4),
+          oldCoverage: +(inkTotal / ink.length).toFixed(4),
+          diffPx: diff,
+          diffShare: +(diff / ink.length).toFixed(4),
+          winR: adaptiveWinR,
+          charH: ctx ? ctx.layout.charH : null,
+          charHInMask: +charHInMask.toFixed(1),
+        }
+      })()
+    : undefined
+
   return {
     width: W0,
     height: H0,
@@ -1302,6 +1445,7 @@ export async function maskFromDarkInk(
       rowsDetail,
       blankLines,
       seedCount, candidateInk, share: candidateInk / inkTotal, dilate, feather,
+      ...(shadowDbg ? { shadow: shadowDbg, inkyMode: INK_ADAPTIVE ?? 'off' } : {}),
     },
   }
 }
@@ -1340,6 +1484,280 @@ export async function unionMasks(a: HandwritingMask, b: HandwritingMask): Promis
   return { width: a.width, height: a.height, data: out, coverage: covered / (a.width * a.height), source: a.source, seed }
 }
 
+// ============================================================
+// ①-9 v18 印刷保护闸：彩色手写域内保留印刷像素
+// ============================================================
+/**
+ * ⭐ v18 背景（实测事故：物理导学案18答案.pdf 误删大量印刷内容）───────
+ * 红笔作答卷上，三通道并集 mask 会把**印刷黑字连同红笔一起吞掉**：
+ *   · chroma 通道：红笔笔画边缘的抗锯齿混色像素、红黑交叠像素被一并检出，
+ *     并把紧邻的印刷笔画圈进同一连通区；
+ *   · dark 通道：只看灰度，红笔（灰度≈100）与印刷黑字（灰度≈30）都进 ink 候选，
+ *     行分类一旦在某印刷段失守，整段黑字被判为手写；
+ *   · slots 通道：槽位膨胀（glyphH/8×1.5）把槽位区域内的印刷文字整块圈入。
+ * 实测该卷 mask 内被删像素中 **42.5% 是黑色印刷**（page-1 达 73854px）。
+ *
+ * 判据（物理依据最强的一条）：**红笔手写 = 高彩度；印刷黑字 = 低彩度深色**。
+ * 前提条件：域内有彩色手写证据（chroma ≥ coloredChromaMin 的像素）。
+ *
+ * 算法（连通域级决策 + 像素级保护）：
+ *   1. mask 分 4 邻域连通域，统计域内彩色像素占比 + **腐蚀存活率**（v18.2）；
+ *   2. 占比 ≥ coloredRatioMin → 「彩色手写域」，启用像素级保护：
+ *      域内"印刷特征像素"（buildPrintMap：低彩度深色）且不在彩色核
+ *      膨胀（protectDilate，盖住抗锯齿/羽化边）范围内的 → 从 mask 剔除；
+ *   3. 占比 < 阈值 → 「低彩色域」，用**笔画粗细**复检（v18.2）：
+ *      腐蚀存活率 < printErodeSurvival（1-2px 细笔画 = 印刷特征，实测印刷 <2%、
+ *      手写 >8%）→ 该域是 slots/dark 误吞的**纯印刷域** → 整域从 mask 剔除；
+ *      存活率达标 → 可能是黑笔手写 → 保持原状（零回归）。
+ *
+ * 失败模式安全：最坏情况 = 少擦（红笔压在印刷字上的交叠像素保留原印刷色，
+ * 黑笔轻笔小断裂段被当印刷保留），绝不会多擦。
+ */
+export async function protectPrintUnderColorHandwriting(
+  origBuf: Buffer,
+  mask: HandwritingMask,
+  opts: {
+    /** 域内彩色像素占比 ≥ 该值 → 视为「彩色手写域」，启用印刷保护。默认 0.03 */
+    coloredRatioMin?: number
+    /** 彩色核膨胀半径（盖住羽化/抗锯齿边）。默认 1（v18.2：3 会误删红笔紧邻印刷） */
+    protectDilate?: number
+    /** 彩色像素判定：通道极差阈值。默认 40 */
+    coloredChromaMin?: number
+    /** 低彩色域判为「纯印刷域」的腐蚀存活率上限。默认 0.05（实测印刷 <2%、手写 >8%） */
+    printErodeSurvival?: number
+    /** 域像素数 ≥ 该值才做「纯印刷域」剔除（小域存活率判据不稳，宁少剔）。默认 200 */
+    printDomainMinPx?: number
+    criterion?: PrintPixelCriterion
+  } = {},
+): Promise<HandwritingMask> {
+  const coloredRatioMin = opts.coloredRatioMin ?? 0.03
+  const protectDilate = Math.max(1, opts.protectDilate ?? 1)
+  const coloredChromaMin = opts.coloredChromaMin ?? 40
+  const printErodeSurvival = opts.printErodeSurvival ?? 0.05
+  const printDomainMinPx = opts.printDomainMinPx ?? 200
+
+  const { print, width: W, height: H } = await buildPrintMap(origBuf, opts.criterion ?? DEFAULT_PRINT_CRITERION)
+  const n = W * H
+  const maskData = await alignMask(mask, W, H)
+
+  // ① 彩色手写核：通道极差（max-min）足够大 = 笔迹带色（红/蓝笔）
+  const { data: rgb, info } = await sharp(origBuf).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  const ch = info.channels
+  const colored = Buffer.alloc(n, 0)
+  let coloredTotal = 0
+  for (let i = 0, p = 0; i < n; i++, p += ch) {
+    const r = rgb[p], g = rgb[p + 1], b = rgb[p + 2]
+    if (Math.max(r, g, b) - Math.min(r, g, b) >= coloredChromaMin) { colored[i] = 255; coloredTotal++ }
+  }
+  // 整页无彩色笔迹（黑笔/铅笔场景）→ 原样返回，零干预
+  if (coloredTotal === 0) return { ...mask, data: maskData }
+
+  // ② 彩色核膨胀：盖住笔画边缘的抗锯齿混色带
+  const coloredDil = maxFilterU8(colored, W, H, protectDilate)
+
+  // ③ 连通域标记（迭代 DFS，避免 3.9M 像素递归爆栈）+ 域级彩色占比 / 腐蚀存活率统计
+  //    腐蚀存活率 = 四邻全在 mask 内的像素占比（1 轮 4 邻域腐蚀后存活比例），
+  //    即 v14 笔画粗细判据：手写 3-5px 笔画中轴存活（>8%），印刷 1-2px 全灭（<2%）。
+  const labels = new Int32Array(n)
+  const stack = new Int32Array(n)
+  const compColored: number[] = [0]
+  const compTotal: number[] = [0]
+  const compAlive: number[] = [0]
+  let compCount = 0
+  for (let s = 0; s < n; s++) {
+    if (maskData[s] <= 127 || labels[s] !== 0) continue
+    compCount++
+    labels[s] = compCount
+    let sp = 0
+    stack[sp++] = s
+    let cCol = 0, cTot = 0, cAlive = 0
+    while (sp > 0) {
+      const i = stack[--sp]
+      cTot++
+      if (colored[i]) cCol++
+      const y = (i / W) | 0
+      const x = i - y * W
+      const up = y > 0 && maskData[i - W] > 127
+      const dn = y < H - 1 && maskData[i + W] > 127
+      const lf = x > 0 && maskData[i - 1] > 127
+      const rt = x < W - 1 && maskData[i + 1] > 127
+      if (up && dn && lf && rt) cAlive++
+      if (up && labels[i - W] === 0) { labels[i - W] = compCount; stack[sp++] = i - W }
+      if (dn && labels[i + W] === 0) { labels[i + W] = compCount; stack[sp++] = i + W }
+      if (lf && labels[i - 1] === 0) { labels[i - 1] = compCount; stack[sp++] = i - 1 }
+      if (rt && labels[i + 1] === 0) { labels[i + 1] = compCount; stack[sp++] = i + 1 }
+    }
+    compColored.push(cCol)
+    compTotal.push(cTot)
+    compAlive.push(cAlive)
+  }
+
+  // ④ 像素级保护 + 纯印刷域剔除
+  let protectedPx = 0
+  let droppedDomains = 0
+  let droppedPx = 0
+  const out = Buffer.alloc(n, 0)
+  const outSeed = mask.seed ? Buffer.alloc(n, 0) : undefined
+  let covered = 0
+  // 预判每个域的去留：彩色域=保护；低彩色域按腐蚀存活率决定是否整体剔除
+  const dropDomain = new Uint8Array(compCount + 1)
+  for (let L = 1; L <= compCount; L++) {
+    const ratio = compColored[L] / Math.max(1, compTotal[L])
+    if (ratio < coloredRatioMin && compTotal[L] >= printDomainMinPx) {
+      const survival = compAlive[L] / Math.max(1, compTotal[L])
+      if (survival < printErodeSurvival) { dropDomain[L] = 1; droppedDomains++ }
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const v = maskData[i]
+    if (v === 0) continue
+    const L = labels[i]
+    if (L > 0 && dropDomain[L]) { droppedPx++; continue } // 纯印刷域：整域剔除（保留原印刷）
+    const isColorDomain = L > 0 && compColored[L] / Math.max(1, compTotal[L]) >= coloredRatioMin
+    if (isColorDomain && print[i] && !coloredDil[i]) {
+      protectedPx++
+      continue // 保留印刷：mask 与 seed 同时剔除
+    }
+    out[i] = v
+    if (outSeed && mask.seed) outSeed[i] = mask.seed[i]
+    if (v > 127) covered++
+  }
+
+  return {
+    width: W,
+    height: H,
+    data: out,
+    coverage: covered / n,
+    source: mask.source,
+    ...(outSeed ? { seed: outSeed } : {}),
+    debug: {
+      ...(mask.debug ?? {}),
+      printProtected: protectedPx,
+      printDroppedDomains: droppedDomains,
+      printDroppedPx: droppedPx,
+      coloredDomains: compCount,
+      coloredTotalPx: coloredTotal,
+    },
+  }
+}
+
+/**
+ * ⭐ 颜色无关的印刷保护（P4 收尾修复，2026-10-06）
+ *
+ * 取代 `protectPrintUnderColorHandwriting` 的「仅彩色笔场景」盲区：
+ * 后者在整页无彩色笔迹时（黑笔写在印刷卷，98%+ 真实场景）直接 early-return 零干预。
+ * 本函数不依赖任何彩色笔，只用 `buildPrintMap`（chroma+luma，颜色无关）判定印刷像素，
+ * 再按**连通域几何 + 印刷像素占比**剔除被误判为手写的印刷字域：
+ *   - 域高 ≤ 1.8×字高 且 域宽 ≤ 8×字高（印刷字/行稿的典型尺度）
+ *   - 域内 print 像素占比 ≥ printRatioMin（默认 0.6）→ 判定为印刷字 → 整域剔除（保留原印刷）
+ * 这样黑笔压印刷的假阳性被护住，而粗笔画手写（3~5px，域高常超 1.8×字高）不受影响。
+ *
+ * ⚠️ 纯影子函数：当前**不接入任何生产路径**，仅由探针调用做对照实验；
+ *    接入主路径需先完成 P0-5 字高标尺（charH 是此处唯一的尺度依据）。
+ */
+export async function protectPrintGeneric(
+  origBuf: Buffer,
+  mask: HandwritingMask,
+  opts: {
+    /** 字高（原图像素）。唯一尺度依据；≤0 时跳过几何闸门（仅靠 print 占比） */
+    charH?: number
+    /** 域内 print 像素占比 ≥ 该值才判为印刷字。默认 0.6 */
+    printRatioMin?: number
+    criterion?: PrintPixelCriterion
+  } = {},
+): Promise<HandwritingMask> {
+  const { print, width: W, height: H } = await buildPrintMap(origBuf, opts.criterion ?? DEFAULT_PRINT_CRITERION)
+  const maskData = await alignMask(mask, W, H)
+  const n = W * H
+  const { comps } = connectedComponents(maskData, W, H, false)
+  // L1 · 字高：取自版面统计（与词级判别器同一把标尺）；0 = 未知时关闭几何闸门，退化为仅靠印刷像素占比。
+  const charH = opts.charH ?? 0
+  // L2 · 印刷域判据：域内 print 像素占比下限。0.6 = 过半即判印刷，余量用于吸收抗锯齿边与压字混色。
+  const printRatioMin = opts.printRatioMin ?? 0.6
+  const out = Buffer.from(maskData)
+  let protectedPx = 0
+  for (const c of comps) {
+    if (c.n < 4) continue
+    const bh = c.y1 - c.y0 + 1
+    const bw = c.x1 - c.x0 + 1
+    if (charH > 0 && (bh > charH * 1.8 || bw > charH * 8)) continue // 超印刷字尺度 → 不判印刷，保留（可能是手写块）
+    let tot = 0, pr = 0
+    for (let y = c.y0; y <= c.y1; y++) {
+      const b = y * W
+      for (let x = c.x0; x <= c.x1; x++) { tot++; if (print[b + x]) pr++ }
+    }
+    if (tot === 0) continue
+    if (pr / tot >= printRatioMin) {
+      for (let y = c.y0; y <= c.y1; y++) {
+        const b = y * W
+        for (let x = c.x0; x <= c.x1; x++) if (out[b + x] > 127) { out[b + x] = 0; protectedPx++ }
+      }
+    }
+  }
+  let covered = 0
+  for (let i = 0; i < n; i++) if (out[i] > 127) covered++
+  return { ...mask, data: out, coverage: covered / n, debug: { ...(mask.debug ?? {}), printGenericProtected: protectedPx } }
+}
+
+/**
+ * ⭐ P2-2b 几何印刷域过滤器：从「黑笔先验 mask」中剔除**印刷字域**（与 E7 / E5 修正同源分类器）。
+ *
+ * 为什么需要它：maskFromRedSpatialPrior 的菱形膨胀 + 连通域包含度过滤，会把红笔旁整行印刷
+ * 当成黑笔保留（v20.2 的腐蚀存活率判据对「整行印刷」失效——行稿内部存活率中等，不被判为
+ * 印刷域）。这些印刷域进入 black 后，protectPrintUnderColorHandwriting 的彩色连通域逻辑也漏过
+ * （印刷域自身无彩色，但与红笔同域→彩色占比>0→当手写域保留）。
+ * 故在 prior 内部、合并前，用几何形状（域高 ≤1.6×行高 且 域宽 ≤6×行高）直接剔除印刷字域，
+ * 从根上保证 black 不含印刷。半径即可放心放大去抓黑笔，E7 由本过滤器兜底、不受半径牵制。
+ *
+ * ⭐ v21.7 红笔压印刷修复：**加「不接触红笔」约束**。
+ *   旧版对一切"形状像印刷字"的域一刀切剔除，会把**黑笔批改笔画**（黑笔笔触尺寸≈印刷字）一并误删。
+ *   关键区分：黑笔必**邻近红笔**（教师只在学生写过、且自己批改过的地方落笔），而红对勾随手打在
+ *   印刷题目/横线上时，那块印刷体与红笔是"被压住"而非"邻笔批改"。
+ *   故仅当该域**四邻域不接触红笔**时才剔除（视为印刷体保留）；接触红笔者疑为黑笔批改 → 保留。
+ *   这样精准剔除"红笔压住的印刷行"，同时保住紧邻红笔的黑笔。
+ *   ⚠️ 残留边界：红对勾恰好整字罩住某个小印刷字符、且该字完全不邻接红笔时仍可能被剔；
+ *      该情形在默认 'word' 路径下还会被逐词判别器二次把关（疑罪从无），影响可控。
+ *
+ * @param data      mask 像素（>127 视为墨）
+ * @param medH      行高（原始尺度），决定印刷域高/宽上限
+ * @param redTouch  可选红笔 mask（>0 即红笔像素），传入后只对"不接触红笔"的印刷状域剔除
+ */
+export function dropPrintLikeComponents(data: Uint8Array, w: number, h: number, medH: number, redTouch?: Uint8Array): Uint8Array {
+  if (medH <= 0) return data
+  const { comps } = connectedComponents(data, w, h, false)
+  const out = data.slice()
+  const maxH = medH * 1.6
+  const maxW = medH * 6
+  for (const c of comps) {
+    const bh = c.y1 - c.y0 + 1
+    const bw = c.x1 - c.x0 + 1
+    if (c.n < 4) continue
+    if (bh <= maxH && bw <= maxW) {            // 形状符合印刷字
+      // v21.7：接触红笔者疑为黑笔批改 → 保留（不剔除）
+      if (redTouch) {
+        let touchesRed = false
+        for (let y = c.y0; y <= c.y1 && !touchesRed; y++) {
+          const b = y * w
+          for (let x = c.x0; x <= c.x1; x++) {
+            if (out[b + x] <= 127) continue
+            if ((x > 0 && redTouch[b + x - 1] > 0) || (x < w - 1 && redTouch[b + x + 1] > 0)
+              || (y > 0 && redTouch[b - w + x] > 0) || (y < h - 1 && redTouch[b + w + x] > 0)) {
+              touchesRed = true
+              break
+            }
+          }
+        }
+        if (touchesRed) continue
+      }
+      for (let y = c.y0; y <= c.y1; y++) {
+        const b = y * w
+        for (let x = c.x0; x <= c.x1; x++) if (out[b + x] > 127) out[b + x] = 0
+      }
+    }
+  }
+  return out
+}
+
 /**
  * ⭐ 笔画粗细（1 轮 4 邻域腐蚀存活率）——「手写 vs 印刷线稿」的本质判据（v14）
  *
@@ -1371,6 +1789,172 @@ function erodeSurvivalRate(
     }
   }
   return { alive, total }
+}
+
+/**
+ * ⭐ v19：**红色页眉家具排除 + 细笔补连**（红/蓝笔批改卷去手写专用）。
+ *
+ * ── 为什么要这一步（英语灰报 4 张实测暴露的缺陷）────────────────────────
+ * 报纸/练习册常有**印刷的**红色元素：报头红色横幅、侧边红框、红底页码。
+ * 色域通道的判据是"有彩度且暗于纸面"，**分不清印刷红与红笔**——
+ * 实测基线下这 4 张的印刷红家具被擦掉 **100%**（furnitureKeep = 0.000），
+ * 是实打实的"误删印刷"，只因它是红色更容易被忽略。
+ *
+ * ── 判定（与错题提取 `wrongq-mark.ts` 同源，两处务必保持一致）─────────────
+ *   贴边(≤0.8×medH) / 横幅(宽>0.8×页宽且高<3×medH) / 竖条(高>0.8×页高且宽<3×medH)
+ *   → 判为印刷页眉家具，整域从 mask 剔除。
+ *
+ * ⚠️ **顺序不可颠倒：必须先排除家具，再做闭运算。**
+ *    反过来做，1px 膨胀会把页眉横幅与正文红笔连成整页巨型连通域，
+ *    家具判定会把真笔迹一起误杀（错题提取 v6 已实测该坑，单域达 68777px²）。
+ *
+ * ── 实测收益（4 张《学英语》报纸，见 probe-erase-news.ts 参数扫描）─────────
+ *   chromaMin 22 → 14 + 家具排除 + 闭运算：
+ *     教师红笔去红率   0.34~0.70 → 0.57~0.82（+9~+24 个百分点）
+ *     印刷红家具保留率 0.000     → 1.000
+ *     低彩度深色印刷损伤率 保持 ~0（≤0.00001）
+ */
+export interface ColorEraseRefineOptions {
+  /**
+   * 「触边」判据的最小面积门槛（px²）。
+   * 默认 0 —— 即 v19 原始行为：只要贴边就判家具。
+   * ⚠️ 实测副作用（v19.1）：报纸正文中靠页边的红笔批注也会被贴边判据吃掉，
+   *    page29 因此判出 26 个"家具"域、去红率反比基线低 5pp。
+   *    版面家具（报头/页眉色条）都是**成片实心块**，给面积下限即可把细碎笔迹放行。
+   */
+  edgeMinArea?: number
+  /** 「触边」判据的最小填充率 n/(bw×bh)：实心色块高、笔画镂空低。默认 0（不限制） */
+  edgeMinFill?: number
+  /**
+   * ⭐ v19.2 **种子生长**：在已确认的红笔 mask 邻域内补抓"淡红"。
+   *
+   * 为什么需要：主阈值 chromaMin=14 抓到的只是笔画核心，笔画边缘与淡压下笔处
+   * 的彩度落在 8~14 之间，擦完仍留一圈红边（4 张实测去红率 0.65~0.88 的缺口主要在这）。
+   *
+   * 为什么安全：种子已经是"排除家具后"的红笔，家具邻域不会成为种子；
+   * 且生长附加"红通道占优 + 暗于纸面"双条件，黑色印刷（低彩度）与新闻纸黄底（高亮度）都进不来。
+   *
+   * ⚠️ 与"放宽家具判据"的区别：v19.1 实测证明放宽触边判据会把真家具一起放行
+   *    （家具保留率 1.000 → 0.24~0.87），属"错擦"，已否决；生长只增不减，不动家具。
+   */
+  grow?: {
+    /** 检测用 RGB 原图（与 mask 同尺寸的 raw 数据） */
+    rgb: Buffer
+    channels: number
+    /** 生长半径（px），默认 max(2, round(medH*0.1)) */
+    radius?: number
+    /** 生长区的最低彩度，默认 8（低于主阈值 14，专收淡红边缘） */
+    chromaMin?: number
+  }
+}
+
+export function refineColorEraseMask(
+  mask: HandwritingMask,
+  medH: number,
+  opts: ColorEraseRefineOptions = {},
+): HandwritingMask {
+  const w = mask.width
+  const h = mask.height
+  const n = w * h
+  const ink = new Uint8Array(n)
+  for (let i = 0; i < n; i++) ink[i] = mask.data[i] ? 1 : 0
+
+  const { comps } = connectedComponents(ink, w, h, false)
+  const edgeTol = Math.max(4, Math.round(medH * 0.8))
+  const edgeMinArea = opts.edgeMinArea ?? 0
+  const edgeMinFill = opts.edgeMinFill ?? 0
+  let furnPx = 0
+  let furnDomains = 0
+  for (const c of comps) {
+    const bw = c.x1 - c.x0 + 1
+    const bh = c.y1 - c.y0 + 1
+    const touches =
+      c.x0 <= edgeTol || c.x1 >= w - 1 - edgeTol || c.y0 <= edgeTol || c.y1 >= h - 1 - edgeTol
+    // 触边判据加"成片"约束：面积够大（或够实心）才算版面家具，细碎笔迹放行
+    const solidEnough = c.n >= edgeMinArea && c.n / Math.max(1, bw * bh) >= edgeMinFill
+    const isFurniture =
+      (touches && solidEnough) ||
+      (bw > w * 0.8 && bh < medH * 3) ||
+      (bh > h * 0.8 && bw < medH * 3)
+    if (!isFurniture) continue
+    furnDomains++
+    furnPx += c.n
+    for (let y = c.y0; y <= c.y1; y++) {
+      const b = y * w
+      for (let x = c.x0; x <= c.x1; x++) if (ink[b + x]) ink[b + x] = 0
+    }
+  }
+
+  // 家具排除之后再闭运算：补连细笔画（对勾/细订正被阈值打碎的断裂部分）
+  let closed = closeInk3x3(ink, w, h)
+
+  // ⭐ v19.2 种子生长：以闭运算后的红笔为种子，在其邻域内补抓淡红边缘像素
+  let growPx = 0
+  const g = opts.grow
+  if (g && g.rgb && g.rgb.length >= n * g.channels) {
+    const ch = g.channels
+    const rgb = g.rgb
+    const radius = Math.max(2, Math.round(g.radius && g.radius > 0 ? g.radius : medH * 0.1))
+    const growChroma = g.chromaMin ?? 8
+
+    // 纸面亮度：全图 luma 的 p90 近似（新闻纸灰底偏暗，不能取 max）
+    const samp: number[] = []
+    for (let i = 0; i < n; i += 37) {
+      const p = i * ch
+      samp.push(0.299 * rgb[p] + 0.587 * rgb[p + 1] + 0.114 * rgb[p + 2])
+    }
+    samp.sort((a, b) => a - b)
+    const paper = samp[Math.floor(samp.length * 0.9)] ?? 240
+    const darkTh = paper * 0.88
+
+    const grown = new Uint8Array(closed)
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius)
+      const y1 = Math.min(h - 1, y + radius)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        if (closed[i]) continue
+        // 邻域内必须已有种子
+        let hasSeed = false
+        const x0 = Math.max(0, x - radius)
+        const x1 = Math.min(w - 1, x + radius)
+        for (let yy = y0; yy <= y1 && !hasSeed; yy++) {
+          const b = yy * w
+          for (let xx = x0; xx <= x1; xx++) if (closed[b + xx]) { hasSeed = true; break }
+        }
+        if (!hasSeed) continue
+        const p = i * ch
+        const r = rgb[p]
+        const gg = rgb[p + 1]
+        const bb = rgb[p + 2]
+        const chroma = Math.max(r, gg, bb) - Math.min(r, gg, bb)
+        if (chroma < growChroma) continue
+        if (!(r >= gg && r >= bb)) continue // 红通道占优：拦掉黄/蓝/青印刷
+        const luma = 0.299 * r + 0.587 * gg + 0.114 * bb
+        if (luma > darkTh) continue // 亮于纸面：是纸底不是笔迹
+        grown[i] = 1
+        growPx++
+      }
+    }
+    // 生长后再闭合一次，让补进来的碎片与笔画连成片（避免填充时出现孤岛）
+    closed = closeInk3x3(grown, w, h)
+  }
+
+  const out = Buffer.alloc(n)
+  let covered = 0
+  for (let i = 0; i < n; i++) if (closed[i]) { out[i] = 255; covered++ }
+  return {
+    ...mask,
+    data: out,
+    coverage: covered / n,
+    debug: {
+      ...(mask.debug ?? {}),
+      furnitureDomains: furnDomains,
+      furniturePx: furnPx,
+      growPx,
+      refineApplied: true,
+    },
+  }
 }
 
 /**
@@ -2439,7 +3023,7 @@ export async function estimateBackground(
 export async function buildLocalBackgroundMap(
   src: Buffer,
   mask: HandwritingMask,
-  _opts: { block?: number; paperQuantile?: number } = {},
+  _opts: { block?: number; paperQuantile?: number; supportMin?: number } = {},
 ): Promise<Buffer | null> {
   try {
     const meta = await sharp(src).metadata()
@@ -2461,12 +3045,28 @@ export async function buildLocalBackgroundMap(
       .toBuffer()
     // mask 同步下采样：块内 mask 占比 > 0.3 → 整块算待重建
     //（宁保守：绝不让墨迹像素以低权重混进"纸面统计"）
-    const maskSmall = await sharp(maskBuf, { raw: { width: W, height: H, channels: 1 } })
+    //
+    // ⭐ v17 关键修复：必须强制 `toColourspace('b-w')`。
+    //   实测 sharp 把 1 通道 raw 图 resize 后会输出 **3 通道**（len = w*h*3），
+    //   于是下面 `maskSmall[i]` 以「1 字节/像素」的步长去读 3 通道数据 → **整幅错位**，
+    //   hole 标记到的完全是别的像素（探针实测 holes=0/307200，框内取样全 0）。
+    //   后果：局部变量本该排除的墨迹被当作有效纸面支撑 → 填进去的底色复现印刷/墨迹结构
+    //   → 表现就是用户长期反馈的「区域识别出来了，但里面的字没擦干净」。
+    const maskSmall = await sharp(Buffer.from(maskBuf), { raw: { width: W, height: H, channels: 1 } })
       .resize(w, h, { fit: 'fill' })
+      .toColourspace('b-w')
       .raw()
       .toBuffer()
 
     const ns = w * h
+    // ⭐ v17：window「有效支撑」下限。
+    //    原判据 `den < 1e-4` 形同虚设——高斯核有**无限远的数值尾巴**，
+    //    大块 mask 内部即使周围 100px 全是 hole，den 也会是 1e-3~1e-5 这种极小却非零的值，
+    //    于是走 `num/den`：两个趋近 0 的数相除，结果被**最近的那几个非 hole 像素主导**
+    //    （常常是紧贴框外的印刷线条）→ 底色图在框内复现印刷/墨迹结构 → 填进去"看着像没擦干净"。
+    //    实测：950×480 实心框内局部底色图 min=124、暗px=31365（干净应当 ~0 暗px）。
+    //    改为要求 window 内有 ≥15% 的有效权重才采信局部估计，否则回退上一轮/全局底色。
+    const MIN_SUPPORT = _opts.supportMin ?? 0.15
     const chs: Float32Array[] = [new Float32Array(ns), new Float32Array(ns), new Float32Array(ns)]
     const hole = new Uint8Array(ns)
     const lumaS = new Float32Array(ns)
@@ -2493,12 +3093,21 @@ export async function buildLocalBackgroundMap(
       }
       // 分子 = conv(src·w)，分母 = conv(w)：权重在求和号内，可分离卷积两趟完成
       const den = normConvolve1(wt, w, h, K)
+      if (process.env.LOCALBG_DBG) {
+        let nHole = 0, holeDenSum = 0, holeBelow = 0, nonHoleDenSum = 0
+        for (let i = 0; i < ns; i++) {
+          if (hole[i]) { nHole++; holeDenSum += den[i]; if (den[i] < MIN_SUPPORT) holeBelow++ }
+          else nonHoleDenSum += den[i]
+        }
+        console.error(`[bgmap] round${round} holes=${nHole}/${ns} (${((nHole / ns) * 100).toFixed(1)}%) holeDen均值=${(holeDenSum / Math.max(1, nHole)).toFixed(4)} holeDen<${MIN_SUPPORT}占比=${((holeBelow / Math.max(1, nHole)) * 100).toFixed(1)}% nonHoleDen均值=${(nonHoleDenSum / Math.max(1, ns - nHole)).toFixed(4)}`)
+      }
       const num = chs.map((c) => normConvolve1(c, w, h, K, wt))
       const fallbackRGB = bgRGB
       if (!fallbackRGB) {
         const g = await estimateBackground(src, mask)
         for (let i = 0; i < ns; i++) {
-          if (den[i] < 1e-4) {
+          // v17：见 MIN_SUPPORT 注释——原 1e-4 判据被高斯尾巴绕过，导致大 mask 内填出印刷结构
+          if (den[i] < MIN_SUPPORT) {
             for (let c = 0; c < 3; c++) num[c][i] = [g.r, g.g, g.b][c]
           } else {
             for (let c = 0; c < 3; c++) num[c][i] /= den[i]
@@ -2506,7 +3115,7 @@ export async function buildLocalBackgroundMap(
         }
       } else {
         for (let i = 0; i < ns; i++) {
-          if (den[i] < 1e-4) {
+          if (den[i] < MIN_SUPPORT) {
             for (let c = 0; c < 3; c++) num[c][i] = fallbackRGB[c][i]
           } else {
             for (let c = 0; c < 3; c++) num[c][i] /= den[i]

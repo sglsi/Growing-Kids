@@ -6,8 +6,6 @@ export interface RecognizedItem {
   source: string
   status: 'answered' | 'pending'
   question_image_keys: string[]
-  /** LLM 自动识别出的学科名称（中文，如「数学」），前端据此匹配用户学科 */
-  subject?: string
 }
 
 export interface RecognizeExamDto {
@@ -27,4 +25,31 @@ export interface RecognizePairDto {
 
 export interface RecognizeDocDto {
   file_url: string
+}
+
+// ---------- 本地 OCR 侧车（PaddleOCR + RapidOCR 融合）响应契约 ----------
+// 与 ocr-engine/main.py 的 /recognize 输出对齐
+export type OcrBox = [number, number, number, number]
+
+export interface LocalOcrTextRegion {
+  text: string
+  box: OcrBox
+  score: number
+}
+
+export interface LocalOcrLayoutBlock {
+  type: string
+  box: OcrBox
+  text: string
+}
+
+export interface LocalOcrResult {
+  raw_text: string
+  text_regions: LocalOcrTextRegion[]
+  layout: LocalOcrLayoutBlock[]
+  tables: unknown[]
+  formulas: unknown[]
+  confidence: number
+  engine_used: string[]
+  low_confidence: boolean
 }

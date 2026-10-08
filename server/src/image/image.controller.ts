@@ -92,6 +92,21 @@ export class ImageController {
     return { code: 200, msg: 'success', data }
   }
 
+  /**
+   * 错题区域提取：POST /api/image/wrongq
+   *
+   * 路径 B：VLM 出题块粗框 + 本地红笔证据校验/收紧。
+   * ⚠️ VLM 凭证缺失时自动降级本地证据层（debug.vlmError 写明原因），不阻塞。
+   */
+  @Post('wrongq')
+  @HttpCode(200)
+  async wrongq(@Body() dto: ProcessImageDto, @Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    const headers = (req.headers || {}) as Record<string, string>
+    const data = await this.imageService.wrongq(userId, dto, headers)
+    return { code: 200, msg: 'success', data }
+  }
+
   /** 判断是否为 SR 限流类错误（429 / 503）——用于跳过 hybrid 兜底 */
   private isRateLimitError(e: HttpException): boolean {
     const status = e.getStatus()

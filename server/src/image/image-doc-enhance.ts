@@ -7,6 +7,142 @@ import {
   type CharMetrics,
 } from './image-layout'
 
+// ============================ P1 智能默认档：单色源检测 ============================
+/**
+ * 判定源图是否为「**基本单色**」（纯黑白打印件/已灰度化），用于 P1 智能默认档：
+ * 单色源默认走「黑白」模式，否则默认「增强并锐化」（方案 §P1 · 智能默认档）。
+ *
+ * ── 为什么必须先看"墨迹"的彩度，而不是全图 ──────────────────────────────
+ * 扫描件的**纸面**天然带轻微色偏（偏黄/偏蓝，chroma 可达 10~20），若按全图彩度
+ * 判定，几乎整页都被算作"彩色"，判据失效。真正区分"黑白印刷件 vs 彩色件"的是
+ * **墨迹像素**：黑白印刷的墨是灰/黑（chroma≈0），彩色件有红/蓝笔迹、彩色印刷、
+ * 彩色插图（chroma 显著 >0）。故只对暗于纸面的像素统计彩度。
+ *
+ * ── 为什么还要看 Otsu 双峰分离度 ────────────────────────────────────────
+ * 彩度判据对"黑白件但被彩色光照污染"（如暖光下拍照）会误判为彩色。补一条
+ * **亮度双峰分明度**（Otsu 两类均值差 separation）：纯打印件墨/纸对比清晰 → 双峰分明；
+ * 连续色调照片/复杂彩图 → 直方图铺开、分离度低。两条同时成立才判单色（保守方向：
+ * 判错则退回 enhance，用户仍可手动切黑白，不会误伤）。
+ *
+ * 实测（真试卷 1279×1706 与其灰度副本）：
+ *   灰度副本 inkChromaP95=0  → isMono=true
+ *   原扫描件（含红笔解答）inkChromaP95>40 → isMono=false
+ */
+export interface MonoSourceResult {
+  /** 是否为基本单色源（建议默认走「黑白」模式） */
+  isMono: boolean
+  /** 墨迹像素的彩度 p95（判单色的主判据） */
+  inkChromaP95: number
+  /** 墨迹像素的彩度均值 */
+  inkChromaMean: number
+  /** 纸面参考亮度（亮部分位数） */
+  paperLuma: number
+  /** Otsu 双峰分离度（前景/背景均值差，越大越分明） */
+  otsuSeparation: number
+  /** 判定的可信度 0~1（两条判据的裕度取小） */
+  confidence: number
+  /** 参与统计的墨迹像素数（过少则 confidence 打折） */
+  inkSamples: number
+  debug?: Record<string, unknown>
+}
+
+export async function detectMonoSource(
+  buf: Buffer,
+  opts: {
+    /** 分析用最长边（降采样加速，彩度与直方图都是低频统计） */
+    maxSide?: number
+    /** 墨迹彩度 p95 上限：超过即判彩色。默认 28 */
+    inkChromaP95Max?: number
+    /** Otsu 双峰分离度下限：低于此值不判单色。默认 55 */
+    otsuSeparationMin?: number
+    /** 相对纸面暗多少算墨迹。默认 40 */
+    inkDarkness?: number
+  } = {},
+): Promise<MonoSourceResult> {
+  const maxSide = opts.maxSide ?? 640
+  const chromaMax = opts.inkChromaP95Max ?? 28
+  const sepMin = opts.otsuSeparationMin ?? 55
+  const inkDarkness = opts.inkDarkness ?? 40
+
+  const { data, info } = await sharp(buf)
+    .removeAlpha()
+    .resize(maxSide, maxSide, { fit: 'inside' })
+    .raw()
+    .toBuffer({ resolveWithObject: true })
+  const { width: W, height: H, channels: ch } = info
+  const n = W * H
+  const luma = new Float32Array(n)
+  const chromaArr = new Float32Array(n)
+  for (let i = 0, p = 0; i < n; i++, p += ch) {
+    const r = data[p], g = data[p + 1], b = data[p + 2]
+    luma[i] = 0.299 * r + 0.587 * g + 0.114 * b
+    chromaArr[i] = Math.max(r, g, b) - Math.min(r, g, b)
+  }
+
+  // ① 纸面参考亮度：亮部分位（纸占多数）
+  //    ⚠️ quantileSorted 签名收 number[]（既有用法），Float32Array 需显式转数组
+  const sortedLuma = Array.from(luma).sort((a, b) => a - b)
+  const paperLuma = quantileSorted(sortedLuma, 0.9)
+  // ② 墨迹像素 = 显著暗于纸面
+  const inkIdx: number[] = []
+  const inkChroma: number[] = []
+  for (let i = 0; i < n; i++) {
+    if (paperLuma - luma[i] >= inkDarkness) {
+      inkIdx.push(i)
+      inkChroma.push(chromaArr[i])
+    }
+  }
+  const inkSamples = inkChroma.length
+  if (inkSamples === 0) {
+    return {
+      isMono: false,
+      inkChromaP95: 0,
+      inkChromaMean: 0,
+      paperLuma,
+      otsuSeparation: 0,
+      confidence: 0,
+      inkSamples: 0,
+      debug: { reason: 'no_ink' },
+    }
+  }
+  const sortedChroma = inkChroma.slice().sort((a, b) => a - b)
+  const inkChromaP95 = quantileSorted(sortedChroma, 0.95)
+  let s = 0
+  for (const c of inkChroma) s += c
+  const inkChromaMean = s / inkSamples
+
+  // ③ Otsu + 双峰分离度
+  const thr = otsuThreshold(luma)
+  let sB = 0, nB = 0, sF = 0, nF = 0
+  for (let i = 0; i < n; i++) {
+    if (luma[i] <= thr) { sB += luma[i]; nB++ } else { sF += luma[i]; nF++ }
+  }
+  const mB = nB ? sB / nB : 0
+  const mF = nF ? sF / nF : 255
+  const otsuSeparation = mF - mB
+
+  // ④ 双判据：彩度低 且 双峰分明 → 单色（保守，任一不成立即彩色）
+  const chromaOk = inkChromaP95 <= chromaMax
+  const sepOk = otsuSeparation >= sepMin
+  const isMono = chromaOk && sepOk
+  // 可信度：两条判据的裕度取小，样本不足再打折
+  const chromaMargin = chromaMax > 0 ? 1 - inkChromaP95 / (chromaMax * 2) : 0
+  const sepMargin = 1 - Math.min(1, sepMin / Math.max(1, otsuSeparation))
+  const samplePenalty = inkSamples < 500 ? 0.6 : 1
+  const confidence = Math.max(0, Math.min(1, Math.min(chromaMargin, sepMargin))) * samplePenalty
+
+  return {
+    isMono,
+    inkChromaP95: +inkChromaP95.toFixed(2),
+    inkChromaMean: +inkChromaMean.toFixed(2),
+    paperLuma: +paperLuma.toFixed(1),
+    otsuSeparation: +otsuSeparation.toFixed(1),
+    confidence: +confidence.toFixed(3),
+    inkSamples,
+    debug: { thr, chromaOk, sepOk, mB: +mB.toFixed(1), mF: +mF.toFixed(1) },
+  }
+}
+
 /**
  * 【智能高清 · 文档图像增强核心】
  *
