@@ -1,0 +1,12 @@
+# OCR 侧车依赖
+# 注意：paddleocr / rapidocr-onnxruntime 体积较大，首次安装会下载预训练模型权重。
+# CPU 部署用 mobile 档即可；GPU 部署请把 onnxruntime 换为 onnxruntime-gpu。
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pillow>=10.0
+numpy>=1.24
+opencv-python-headless>=4.8
+onnxruntime>=1.17
+# 双引擎（互为备份）：
+rapidocr-onnxruntime>=1.4        # RapidOCR：ONNX 轻量，CPU 友好
+paddleocr>=3.0                  # PaddleOCR 3.0：PP-OCRv5(文字+手写) + PP-StructureV3(版面/表格/公式)

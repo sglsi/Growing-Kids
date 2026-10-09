@@ -1,4 +1,4 @@
-import { View, Text, Canvas, Image as TaroImage } from '@tarojs/components'
+import { View, Text, Canvas, Slider, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -26,6 +26,13 @@ interface Rect {
   w: number
   h: number
 }
+
+/**
+ * 去手写「框选补擦」区域。
+ * 结构与 Rect 相同、但语义独立：**归一化 0~1（相对整张预览图）**，
+ * 与服务端 `ProcessImageDto.manual_regions` 严格同构，直接透传。
+ */
+type EraseRegion = Rect
 
 /** 归一化角点 [x, y]，取值 [0,1]（相对原图） */
 type Corner = [number, number]
@@ -103,6 +110,26 @@ const SR_SCALES: { value: SRScale; label: string; hint: string }[] = [
   { value: 4, label: 'x4', hint: '最清晰 · 慢' },
 ]
 
+/**
+ * P1 五种输出模式（对齐扫描全能王，方案 §P1 taxonomy）。
+ * 用户点「智能高清」后并列产出这五种预览图，自行挑选最满意的一张——
+ * 不再由算法替用户"定一个最好结果"。
+ */
+const ENHANCE_PRESETS: { value: string; label: string; hint: string }[] = [
+  { value: 'original', label: '原图', hint: '不增强' },
+  { value: 'enhance', label: '增强', hint: '彩色·锐化' },
+  { value: 'bw', label: '黑白', hint: '文档·最清晰' },
+  { value: 'brighten', label: '增亮', hint: '偏暗/阴影' },
+  { value: 'gray', label: '灰度', hint: '去色·留层次' },
+]
+
+/** P1 强度档位：把"是否过头"的把控权交给用户 */
+const ENHANCE_STRENGTHS: { value: 'weak' | 'medium' | 'strong'; label: string }[] = [
+  { value: 'weak', label: '弱' },
+  { value: 'medium', label: '中' },
+  { value: 'strong', label: '强' },
+]
+
 const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
   { value: 'classical', label: '标准', hint: '轻量锐化 · CPU 友好' },
   { value: 'espcn', label: '神经网络', hint: 'ESPCN · 细节更好 · 慢' },
@@ -129,7 +156,41 @@ export default function ImageEditor({
   // 智能高清设置：倍率 + 模式（点「智能高清」时弹出小面板选择，选定后再处理）
   const [srScale, setSrScale] = useState<SRScale>(2)
   const [srMode, setSrMode] = useState<SRMode>('classical')
+  // ── P1 后续：多模式预览自选 ────────────────────────────────────────────
+  /** 五模式预览图（后端 multi_modes 一次产出），键为模式名 */
+  const [modeThumbs, setModeThumbs] = useState<Record<string, { url: string }>>({})
+  /** 当前选中的模式（后端未指定时由智能默认档给出） */
+  const [activePreset, setActivePreset] = useState<string>('enhance')
+  /** 强度档位 */
+  const [enhanceStrength, setEnhanceStrength] = useState<'weak' | 'medium' | 'strong'>('medium')
+  /** 多模式预览的「原图底稿」：换模式时以它为输入重新生成，避免在处理结果上二次叠加增强 */
+  const [enhanceBase, setEnhanceBase] = useState<string>('')
   const [srPanelOpen, setSrPanelOpen] = useState(false)
+
+  // ── 去手写：框选补擦 + 对比 + 撤销（方案 §5.10 R1/R2）────────────────────
+  // eraseMode=true：用户在 result 图上划框，圈出「自动漏擦的手写」
+  const [eraseMode, setEraseMode] = useState(false)
+  /**
+   * ⭐ 红/蓝笔卷模式（v18.2）：开启后 erase_v2 走 `erase_mode='color'`
+   * （仅彩色笔迹通道 + 印刷保护闸）。背景：红笔批改/作答卷上，深色墨迹与
+   * 布局槽位通道对红笔清除零贡献，却会把印刷正文连同红笔一起吞掉
+   * （实测 mask 内被删像素 42.5% 是印刷）。黑笔/铅笔卷保持默认 union。
+   */
+  const [colorPenMode, setColorPenMode] = useState(false)
+  /** 已圈选区域（归一化）。点「应用去手写」时作为 manual_regions 透传给后端 */
+  const [eraseRects, setEraseRects] = useState<EraseRegion[]>([])
+  /** 跟随手指的虚框（显示坐标 px），仅用于实时反馈，松手后转为 eraseRects */
+  const [eraseDrag, setEraseDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  const eraseDragRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  /**
+   * 去手写步骤栈：每成功擦除一次就压入「擦除前」的图。
+   * 栈顶即对比用的「擦除前」图，撤销=弹栈并回显。
+   */
+  const [eraseStack, setEraseStack] = useState<string[]>([])
+  /** 对比模式开关：左侧显示擦除前、右侧显示擦除后 */
+  const [compareMode, setCompareMode] = useState(false)
+  /** 对比滑杆位置 0~1：左侧露出「擦除前」的比例 */
+  const [compareRatio, setCompareRatio] = useState(0.5)
   // 编辑模式：矩形裁剪 / 四角透视（互斥）。默认矩形，行为与历史一致。
   const [cornerMode, setCornerMode] = useState<CornerMode>('rect')
   // 四角归一化坐标，顺序 [tl,tr,br,bl]
@@ -352,6 +413,137 @@ export default function ImageEditor({
     setFraming(true)
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // 去手写补正：框选补擦 / 对比 / 撤销（方案 §5.10 R1 / R2）
+  //
+  // 设计动机：自动检测不可能覆盖 100%（GT 回归里「7题细笔画+括号碎裂」这类
+  // 硬边界实测就漏检）。与其继续加判据（边际收益递减且互相干扰，见 §5.7），
+  // 不如给用户一条 **5 秒就能修好** 的通道：圈住漏擦的手写 → 后端无条件并入
+  // mask → 实测圈选区擦净率 100%。
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** 栈顶 = 最近一次擦除「之前」的图（对比左半 & 撤销目标） */
+  const beforeSrc = eraseStack.length > 0 ? eraseStack[eraseStack.length - 1] : null
+
+  /** 进入/退出框选补擦模式 */
+  const toggleEraseMode = () => {
+    if (busy || aiBusy) return
+    if (eraseMode) {
+      setEraseMode(false)
+      setEraseRects([])
+      eraseDragRef.current = null
+      setEraseDrag(null)
+      return
+    }
+    if (!beforeSrc) {
+      Taro.showToast({ title: '请先做一次「去手写」，再圈选漏擦部分', icon: 'none' })
+      return
+    }
+    setEraseMode(true)
+    setConfirmed(true)
+    setFraming(false)
+    setCompareMode(false)
+    Taro.showToast({ title: '在图上划框圈住漏擦的手写，完成后点「应用去手写」', icon: 'none', duration: 2600 })
+  }
+
+  const onEraseTouchStart = (e: any) => {
+    // 每次触摸前重新测量图片盒位置（父级 inset/缩放会漂移），用它自身的坐标系算点
+    measureBox(() => {
+      const t = e.touches[0]
+      const rx = clamp(t.clientX - boxRectRef.current.left, 0, imgW)
+      const ry = clamp(t.clientY - boxRectRef.current.top, 0, imgH)
+      const d = { x0: rx, y0: ry, x1: rx, y1: ry }
+      eraseDragRef.current = d
+      setEraseDrag(d)
+    })
+  }
+
+  const onEraseTouchMove = (e: any) => {
+    const d = eraseDragRef.current
+    if (!d) return
+    const t = e.touches[0]
+    const rx = clamp(t.clientX - boxRectRef.current.left, 0, imgW)
+    const ry = clamp(t.clientY - boxRectRef.current.top, 0, imgH)
+    const next = { ...d, x1: rx, y1: ry }
+    eraseDragRef.current = next
+    setEraseDrag(next)
+  }
+
+  const onEraseTouchEnd = () => {
+    const d = eraseDragRef.current
+    eraseDragRef.current = null
+    setEraseDrag(null)
+    if (!d || imgW <= 0 || imgH <= 0) return
+    const x0 = Math.min(d.x0, d.x1)
+    const x1 = Math.max(d.x0, d.x1)
+    const y0 = Math.min(d.y0, d.y1)
+    const y1 = Math.max(d.y0, d.y1)
+    const w = (x1 - x0) / imgW
+    const h = (y1 - y0) / imgH
+    // 轻点误触会产生极小框 → 忽略（否则一次轻点就提交一个无意义区域）
+    if (w < 0.015 || h < 0.015) {
+      Taro.showToast({ title: '框太小，已忽略', icon: 'none', duration: 1200 })
+      return
+    }
+    setEraseRects((rs) => [...rs, { x: x0 / imgW, y: y0 / imgH, w, h }])
+  }
+
+  const clearEraseRects = () => {
+    setEraseRects([])
+    eraseDragRef.current = null
+    setEraseDrag(null)
+  }
+
+  /** 提交框选区域做局部重擦（manual_regions 透传给后端无条件并入 mask） */
+  const applyEraseRegions = async () => {
+    if (busy || aiBusy) return
+    if (eraseRects.length === 0) {
+      Taro.showToast({ title: '请先在图上划框圈住漏擦的手写', icon: 'none' })
+      return
+    }
+    const regions = eraseRects
+    setEraseMode(false)
+    setEraseRects([])
+    await handleAi('erase_v2', '去手写', { manual_regions: regions })
+  }
+
+  /** 撤销最近一次成功的去手写步骤（回显该步骤之前的图） */
+  const undoErase = async () => {
+    if (busy || aiBusy) return
+    if (eraseStack.length === 0) {
+      Taro.showToast({ title: '没有可撤销的去手写步骤', icon: 'none' })
+      return
+    }
+    const last = eraseStack[eraseStack.length - 1]
+    setEraseStack((s) => s.slice(0, -1))
+    setEraseMode(false)
+    setEraseRects([])
+    setCompareMode(false)
+    setCurrentSrc(last)
+    try {
+      const info = await Taro.getImageInfo({ src: last })
+      setRotation(0)
+      setCrop(DEFAULT_CROP)
+      setQuad(DEFAULT_QUAD)
+      setCornerMode('rect')
+      resetBox(info.width, info.height)
+    } catch {
+      /* 拿不到尺寸也先换图，不影响撤销本身 */
+    }
+    setConfirmed(true)
+    setFraming(false)
+    Taro.showToast({ title: '已撤销上一步去手写', icon: 'success' })
+  }
+
+  /** 原图/结果对比（P3 对标夸克：滑杆拖动看差异） */
+  const toggleCompare = () => {
+    if (!beforeSrc) {
+      Taro.showToast({ title: '还没有对比对象，请先做一次去手写', icon: 'none' })
+      return
+    }
+    setCompareMode((v) => !v)
+  }
+
   const handleRotate = async () => {
     if (busy || aiBusy) return
     setBusy(true)
@@ -459,11 +651,11 @@ export default function ImageEditor({
   /**
    * 加载图片（node.createImage），返回 Image 对象。
    */
-  const loadImageOnCanvas = async (node: any, imgSrc: string): Promise<any> => {
+  const loadImageOnCanvas = async (node: any, srcUrl: string): Promise<any> => {
     let img: any = null
     if (node.createImage) img = node.createImage()
     else img = new Image()
-    img.src = imgSrc
+    img.src = srcUrl
     await new Promise<void>((resolve) => {
       let done = false
       const finish = () => { if (!done) { done = true; resolve() } }
@@ -505,7 +697,7 @@ export default function ImageEditor({
 
     await waitLayout()
 
-    const localSrc = await toLocalIfRemote(currentSrc)
+    const imgLocal = await toLocalIfRemote(currentSrc)
 
     // 输出缓冲尺寸计算（先按 state 估算，加载实际图片后再校正，见下方防御分支）
     const fitWhole = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
@@ -546,7 +738,7 @@ export default function ImageEditor({
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, outW, outH)
 
-    const img = await loadImageOnCanvas(node, localSrc)
+    const img = await loadImageOnCanvas(node, imgLocal)
 
     // ★ 防御：state 尺寸与实际文件不符时，以实际文件为准重算（源坐标/输出尺寸全部按实际）。
     //   不一致常见于：远程图 EXIF 旋转、getImageInfo 与 Image 解码差异、异步替换竞态。
@@ -757,16 +949,39 @@ export default function ImageEditor({
   const handleAi = async (
     action: ImageAction,
     label: string,
-    opts?: { sr_scale?: SRScale; sr_mode?: SRMode; manual_corners?: Corner[] },
+    opts?: {
+      sr_scale?: SRScale
+      sr_mode?: SRMode
+      manual_corners?: Corner[]
+      /** 去手写框选补擦区域（归一化），透传给后端 manual_regions */
+      manual_regions?: EraseRegion[]
+      /** 去手写擦除模式（v18.2）：'color'=红/蓝笔卷保印刷；缺省 union=黑笔卷 */
+      erase_mode?: 'union' | 'color'
+      /** P1 多模式：输出模式选择（original/enhance/bw/brighten/gray） */
+      enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
+      /** P1 多模式：强度档位 1/2/3 */
+      enhance_strength?: 1 | 2 | 3
+      /** P1 多模式：是否返回五种并列输出 */
+      multi_modes?: boolean
+    },
     /** true = 本次为「限流降级重试」，不再二次降级（防循环） */
     degradedRetry = false,
+    /**
+     * ⭐ 源图覆盖（P1 换模式专用）：默认用 currentSrc，但「切换输出模式」时必须传
+     * **增强前的底稿**——否则是在已增强的图上再增强一次，效果叠加失真。
+     */
+    sourceOverride?: string,
   ) => {
     if (aiBusy || busy) return
     setAiBusy(true)
     Taro.showLoading({ title: `${label}处理中…`, mask: true })
     let lastGoodSrc = currentSrc
+    // ⭐ 记录「处理前」的原图：去手写成功后压入步骤栈，供对比/撤销使用（§5.10 R2）
+    const srcBefore = currentSrc
+    // 进入处理即退出对比态，避免滑杆停留在旧结果上造成困惑
+    setCompareMode(false)
     try {
-      const sourceForProcess = await compressImage(currentSrc)
+      const sourceForProcess = await compressImage(sourceOverride || currentSrc)
       lastGoodSrc = sourceForProcess
 
       let sourceUrl = sourceForProcess
@@ -775,7 +990,13 @@ export default function ImageEditor({
         sourceUrl = up.url
       }
 
-      const data = await processImage(action, sourceUrl, opts)
+      const data = await processImage(
+        action,
+        sourceUrl,
+        action === 'erase_v2'
+          ? { ...opts, erase_mode: colorPenMode ? 'color' : 'union' }
+          : opts,
+      )
       if (!data?.url) throw new Error('处理服务未返回图片')
 
       // 后端自动检测未命中且未提供四角 → 不静默返回原图，提示用户手动拉四角（方案 §2.3）
@@ -832,6 +1053,26 @@ export default function ImageEditor({
       //   用刚 reset 的 DEFAULT_CROP 再裁一刀 → 四周被裁（与旋转同一坑，见 L7-补充）。
       setConfirmed(true)
       setFraming(false)   // 干净预览（不再显示裁剪框）
+
+      // ⭐ 去手写步骤入栈：栈顶 = 该次擦除「之前」的图 → 对比左侧 / 撤销目标。
+      //   只在成功后入栈，失败的一步步档不入历史（与服务器异常恢复语义一致）。
+      if (action === 'erase' || action === 'erase_v2') {
+        setEraseStack((s) => [...s, srcBefore])
+      }
+
+      // ⭐ P1 多模式预览自选：后端一次产出五模式后，落地缩略图与默认档。
+      //   同时记住「底稿」，后续换模式以底稿为输入重新生成（不在成品上二次增强）。
+      if (action === 'enhance') {
+        const modes = (data as any)?.modes as Record<string, { url: string }> | undefined
+        if (modes && Object.keys(modes).length > 0) {
+          setModeThumbs(modes)
+          setEnhanceBase(srcBefore)
+          const auto = (data as any)?.debug?.autoPreset as string | undefined
+          setActivePreset(auto || 'enhance')
+        } else {
+          setModeThumbs({})
+        }
+      }
 
       // ⭐「没改动」必须说出来。后端凡是**安全地原样返回原图**的分支都会带 debug.notice
       //   （未检出手写 / 未识别到歪斜 / 高清未通过内容校验已回退）。
@@ -980,6 +1221,39 @@ export default function ImageEditor({
     void handleAi(action, label)
   }
 
+  /**
+   * ⭐ P1 预览自选：点选某个模式。
+   * 第一步：立即把主图切到该模式的**预览图**（秒切，用户先看到差别）；
+   * 第二步：以「增强前底稿」为输入，按该模式重新生成**最终高清画质**并替换主图
+   *        （若不换底稿，就是在已增强的成品上再增强一次 → 效果叠加失真）。
+   */
+  const pickEnhanceMode = async (preset: string) => {
+    if (aiBusy || busy) return
+    const thumb = modeThumbs[preset]
+    if (!thumb?.url) return
+    setActivePreset(preset)
+    try {
+      const dl: any = await downloadWithTimeout(thumb.url, 30000)
+      if (dl?.tempFilePath) {
+        setCurrentSrc(dl.tempFilePath)
+        const info = await Taro.getImageInfo({ src: dl.tempFilePath })
+        if (info?.width && info?.height) resetBox(info.width, info.height)
+      }
+    } catch { /* 预览切换失败不阻断，继续走高清重生成 */ }
+    // 原图模式不需要再走一遍管线（本就是原样直出）
+    if (preset === 'original') {
+      setCurrentSrc(enhanceBase || currentSrc)
+      return
+    }
+    await handleAi(
+      'enhance',
+      '智能高清',
+      { sr_scale: srScale, sr_mode: srMode, enhance_preset: preset as 'original' | 'enhance' | 'bw' | 'brighten' | 'gray', enhance_strength: (({ weak: 1, medium: 2, strong: 3 } as const)[enhanceStrength]) ?? 2 },
+      false,
+      enhanceBase || undefined,
+    )
+  }
+
   /** 切换「矩形裁剪 / 四角拉框」两种模式（互斥）。 */
   const toggleCornerMode = () => {
     if (aiBusy || busy) return
@@ -1012,7 +1286,13 @@ export default function ImageEditor({
   // 面板里点「开始处理」：带上所选倍率/模式调用后端
   const runEnhance = () => {
     setSrPanelOpen(false)
-    void handleAi('enhance', '智能高清', { sr_scale: srScale, sr_mode: srMode })
+    // ⭐ P1 预览自选：一次产出五模式预览图，让用户挑最满意的一张（方案 §P1）
+    void handleAi('enhance', '智能高清', {
+      sr_scale: srScale,
+      sr_mode: srMode,
+      multi_modes: true,
+      enhance_strength: (({ weak: 1, medium: 2, strong: 3 } as const)[enhanceStrength]) ?? 2,
+    })
   }
 
   return (
@@ -1047,6 +1327,72 @@ export default function ImageEditor({
               style={{ width: '100%', height: '100%' }}
               onError={() => setPreviewError(true)}
             />
+          )}
+
+          {/* ── 去手写对比：左侧露出「擦除前」，右侧为「擦除后」（P3 对标夸克）──
+              ⚠️ 内层图片必须保持**完整尺寸**(imgW×imgH)再由外层按百分比裁剪，
+                 否则 aspectFit 会按裁剪后的容器重新缩放 → 左右两侧比例对不上。 */}
+          {compareMode && beforeSrc && !previewError && (
+            <>
+              <View
+                className="absolute pointer-events-none"
+                style={{ left: 0, top: 0, width: `${compareRatio * 100}%`, height: '100%', overflow: 'hidden' }}
+              >
+                <TaroImage src={beforeSrc} mode="aspectFit" style={{ width: imgW, height: imgH }} />
+              </View>
+              <View
+                className="absolute pointer-events-none"
+                style={{ left: compareRatio * imgW - 1, top: 0, width: 2, height: '100%', backgroundColor: '#ffffff' }}
+              />
+            </>
+          )}
+
+          {/* ── 去手写框选补擦层：触摸层 + 已圈区域 + 跟随手指的虚框 ── */}
+          {eraseMode && (
+            <>
+              <View
+                id="eraseTouchLayer"
+                className="absolute"
+                style={{ left: 0, top: 0, right: 0, bottom: 0 }}
+                onClick={(e: any) => e?.stopPropagation?.()}
+                onTouchStart={onEraseTouchStart}
+                onTouchMove={onEraseTouchMove}
+                onTouchEnd={onEraseTouchEnd}
+              />
+              {eraseRects.map((r, i) => (
+                <View
+                  key={`erase-region-${i}`}
+                  className="absolute pointer-events-none"
+                  style={{
+                    left: r.x * imgW,
+                    top: r.y * imgH,
+                    width: r.w * imgW,
+                    height: r.h * imgH,
+                    borderWidth: 2,
+                    borderStyle: 'solid',
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.18)',
+                    borderRadius: 4,
+                  }}
+                />
+              ))}
+              {eraseDrag && (() => {
+                const dx0 = Math.min(eraseDrag.x0, eraseDrag.x1)
+                const dy0 = Math.min(eraseDrag.y0, eraseDrag.y1)
+                const dw = Math.abs(eraseDrag.x1 - eraseDrag.x0)
+                const dh = Math.abs(eraseDrag.y1 - eraseDrag.y0)
+                return (
+                  <View
+                    className="absolute pointer-events-none"
+                    style={{
+                      left: dx0, top: dy0, width: dw, height: dh,
+                      borderWidth: 2, borderStyle: 'dashed', borderColor: '#fbbf24',
+                      backgroundColor: 'rgba(251,191,36,0.15)', borderRadius: 4,
+                    }}
+                  />
+                )
+              })()}
+            </>
           )}
 
           {/* 矩形裁剪：半透明遮罩 + 裁剪框（纯视觉，不拦截触摸） */}
@@ -1127,6 +1473,25 @@ export default function ImageEditor({
         </View>
       </View>
 
+      {/* 对比滑杆：拖动即可在「擦除前 / 擦除后」之间扫（P3 对标夸克） */}
+      {compareMode && beforeSrc && (
+        <View className="px-6 pb-1 flex flex-row items-center gap-3">
+          <Text className="block text-white text-opacity-70 text-[11px]">前</Text>
+          <Slider
+            className="flex-1"
+            min={0}
+            max={100}
+            value={Math.round(compareRatio * 100)}
+            activeColor="#3b82f6"
+            backgroundColor="rgba(255,255,255,0.25)"
+            blockColor="#ffffff"
+            blockSize={18}
+            onChange={(e: any) => setCompareRatio(clamp((e?.detail?.value ?? 50) / 100, 0, 1))}
+          />
+          <Text className="block text-white text-opacity-70 text-[11px]">后</Text>
+        </View>
+      )}
+
       {/* 底部操作 */}
       <View className="px-4 pb-8 pt-3">
         {/* AI 处理行 */}
@@ -1184,6 +1549,120 @@ export default function ImageEditor({
             </View>
           )}
         </View>
+
+        {/* 去手写模式开关：红/蓝笔批改卷开启「仅彩笔+保印刷」（v18.2 实测误删降 52%~99%） */}
+        <View className="flex flex-row items-center justify-center mb-4" onClick={() => setColorPenMode((v) => !v)}>
+          <View
+            className={`w-10 h-5 rounded-full mr-2 relative ${colorPenMode ? 'bg-primary' : 'bg-white bg-opacity-15'}`}
+          >
+            <View
+              className={`w-4 h-4 rounded-full bg-white absolute top-0 ${colorPenMode ? 'right-0' : 'left-0'}`}
+            />
+          </View>
+          <Text className="block text-white text-opacity-80 text-xs">
+            {colorPenMode ? '红/蓝笔卷模式（保印刷）已开' : '红/蓝笔卷模式（保印刷）'}
+          </Text>
+        </View>
+
+        {/* ⭐ P1 多模式预览自选：智能高清完成后并列渲染五种模式缩略图，点击即切换主图 */}
+        {Object.keys(modeThumbs).length > 0 && (
+          <View className="mb-4">
+            <Text className="block text-white text-opacity-70 text-xs mb-2">
+              选择效果（点击切换{activePreset ? ` · 当前：${ENHANCE_PRESETS.find((p) => p.value === activePreset)?.label ?? activePreset}` : ''}）
+            </Text>
+            <View className="flex flex-row justify-between">
+              {ENHANCE_PRESETS.map((p) => {
+                const active = activePreset === p.value
+                const thumb = modeThumbs[p.value]
+                if (!thumb?.url) return null
+                return (
+                  <View key={p.value} className="flex flex-col items-center" onClick={() => pickEnhanceMode(p.value)}>
+                    <View
+                      className="w-14 h-16 rounded-lg overflow-hidden items-center justify-center"
+                      style={{
+                        borderWidth: active ? 2 : 1,
+                        borderStyle: 'solid',
+                        borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.25)',
+                        backgroundColor: '#000',
+                      }}
+                    >
+                      <TaroImage src={thumb.url} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                    </View>
+                    <Text
+                      className="block text-[10px] mt-1"
+                      style={{ color: active ? '#3b82f6' : 'rgba(255,255,255,0.6)' }}
+                    >
+                      {p.label}
+                    </Text>
+                  </View>
+                )
+              })}
+            </View>
+          </View>
+        )}
+
+        {/* 去手写补正行：做过至少一次去手写后出现（§5.10 R1 框选补擦 / R2 撤销·对比） */}
+        {(eraseMode || eraseStack.length > 0) && (
+          <View className="flex flex-row items-center justify-center gap-6 mb-5">
+            <View className="flex flex-col items-center" onClick={toggleEraseMode}>
+              <View
+                className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
+                  eraseMode ? 'bg-primary' : 'bg-white bg-opacity-15'
+                }`}
+              >
+                <Crop size={20} color="#ffffff" />
+              </View>
+              <Text className="block text-white text-opacity-80 text-xs">框选补擦</Text>
+            </View>
+            <View className="flex flex-col items-center" onClick={undoErase}>
+              <Undo2 size={24} color="#ffffff" />
+              <Text className="block text-white text-opacity-80 text-xs mt-1">撤销</Text>
+            </View>
+            <View className="flex flex-col items-center" onClick={toggleCompare}>
+              <View
+                className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
+                  compareMode ? 'bg-primary' : 'bg-white bg-opacity-15'
+                }`}
+              >
+                <Wand size={20} color="#ffffff" />
+              </View>
+              <Text className="block text-white text-opacity-80 text-xs">对比</Text>
+            </View>
+          </View>
+        )}
+
+        {/* 框选补擦模式下的操作条 */}
+        {eraseMode && (
+          <View className="flex flex-row gap-3 mb-3">
+            <Button
+              className="flex-1 h-10 rounded-xl"
+              style={{ backgroundColor: 'rgba(255,255,255,0.12)' }}
+              disabled={busy || aiBusy}
+              onClick={clearEraseRects}
+            >
+              <Text className="block text-sm text-white">清空重选</Text>
+            </Button>
+            <Button
+              className="flex-1 h-10 rounded-xl"
+              style={{ backgroundColor: 'rgba(255,255,255,0.12)' }}
+              disabled={busy || aiBusy}
+              onClick={toggleEraseMode}
+            >
+              <Text className="block text-sm text-white">取消</Text>
+            </Button>
+            <Button
+              className="flex-1 h-10 rounded-xl"
+              style={{ backgroundColor: '#ef4444' }}
+              disabled={busy || aiBusy}
+              onClick={applyEraseRegions}
+            >
+              <Text className="block text-sm text-white">
+                {aiBusy ? '处理中…' : `应用去手写${eraseRects.length ? `(${eraseRects.length})` : ''}`}
+              </Text>
+            </Button>
+          </View>
+        )}
+
         <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
           <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图（返回）'}</Text>
         </Button>
@@ -1218,7 +1697,7 @@ export default function ImageEditor({
                     onClick={() => setSrScale(s.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{s.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-xs mt-px">{s.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{s.hint}</Text>
                   </View>
                 )
               })}
@@ -1242,7 +1721,30 @@ export default function ImageEditor({
                     onClick={() => setSrMode(m.value)}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-xs mt-px">{m.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
+                  </View>
+                )
+              })}
+            </View>
+
+            {/* 强度档位（P1）：把"是否过头"的把控权交给用户 */}
+            <Text className="block text-white text-opacity-70 text-xs mb-2">增强强度</Text>
+            <View className="flex flex-row gap-2 mb-4">
+              {ENHANCE_STRENGTHS.map((s) => {
+                const active = enhanceStrength === s.value
+                return (
+                  <View
+                    key={s.value}
+                    className="flex-1 rounded-xl py-2 items-center"
+                    style={{
+                      backgroundColor: active ? '#3b82f6' : 'rgba(255,255,255,0.08)',
+                      borderWidth: 1,
+                      borderStyle: 'solid',
+                      borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.15)',
+                    }}
+                    onClick={() => setEnhanceStrength(s.value)}
+                  >
+                    <Text className="block text-white text-sm font-medium">{s.label}</Text>
                   </View>
                 )
               })}

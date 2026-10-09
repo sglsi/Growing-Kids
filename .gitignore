@@ -49,3 +49,6 @@ pnpm-debug.log*
 node-compile-cache/
 /logs
 .codegraph/
+
+# 上传的资源包（zip/原始素材），不进版本库
+assets/

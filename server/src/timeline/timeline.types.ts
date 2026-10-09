@@ -10,6 +10,16 @@ export interface QuestionContent {
   wrong_answer?: string
   images?: string[]
   status?: 'answered' | 'pending'
+  /** 题面图 file_key（与答题卡图区分存储，避免混在 images[] 里分不清） */
+  question_images?: string[]
+  /** 答题卡 / 答案图 file_key */
+  answer_images?: string[]
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题在识别结果数组中的下标；顶层题为 null */
+  parent_index?: number | null
+  /** 所属大题完整题干（子题携带，可脱离父题独立读懂） */
+  stem?: string
 }
 
 export interface TimelineItem {
@@ -47,6 +57,10 @@ export interface TimelineItemWithUrl extends TimelineItem {
   url?: string
   thumb_url?: string
   image_urls?: string[]
+  /** 题面图签名 URL（来自 content.question_images） */
+  question_image_urls?: string[]
+  /** 答题卡/答案图签名 URL（来自 content.answer_images） */
+  answer_image_urls?: string[]
 }
 
 export interface TimelineListQuery {

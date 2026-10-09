@@ -6,6 +6,15 @@ export interface RecognizedItem {
   source: string
   status: 'answered' | 'pending'
   question_image_keys: string[]
+  /**
+   * 层级：1 = 大题/父题（独立成题），2 = 小题/子题（从属于某道大题）。
+   * 用于解决"大题含若干小题时，小题被拆开识别、大题题干被丢弃"的问题。
+   */
+  level?: number
+  /** 所属父题在 items 中的下标（0 起）；顶层题为 null */
+  parent_index?: number | null
+  /** 所属大题的完整题干。子题必须携带它，才能脱离父题独立读懂（无本之木问题） */
+  stem?: string
 }
 
 export interface RecognizeExamDto {

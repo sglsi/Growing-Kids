@@ -21,12 +21,14 @@ export class TimelineController {
     @Query('subject_id') subjectId?: string,
     @Query('tag') tag?: string,
     @Query('keyword') keyword?: string,
+    /** ISO 时间下界：过滤 created_at >= since（review 模式下按 added_to_review_at） */
+    @Query('since') since?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
   ) {
     const userId = requireUserId(req)
     const data = await this.timelineService.list(userId, {
-      scope, subject_id: subjectId, tag, keyword,
+      scope, subject_id: subjectId, tag, keyword, since,
       page: page ? Number(page) : 1,
       page_size: pageSize ? Number(pageSize) : 20,
     })
@@ -50,6 +52,17 @@ export class TimelineController {
     const item = await this.timelineService.create(userId, dto)
     const [withUrl] = await this.timelineService.withUrls([item])
     return { code: 200, msg: 'success', data: withUrl }
+  }
+
+  /** 批量创建（一次提取多道题时替代前端循环单条，一次落库） */
+  @Post('batch')
+  @HttpCode(200)
+  async createBatch(@Req() req: RequestWithUser, @Body() body: { items?: CreateTimelineDto[] }) {
+    const userId = requireUserId(req)
+    if (!Array.isArray(body?.items) || !body.items.length) throw new BadRequestException('items 不能为空')
+    const items = await this.timelineService.createBatch(userId, body.items)
+    const withUrls = await this.timelineService.withUrls(items)
+    return { code: 200, msg: 'success', data: { list: withUrls } }
   }
 
   @Post('review-book')

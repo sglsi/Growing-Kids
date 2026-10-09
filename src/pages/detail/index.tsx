@@ -241,7 +241,43 @@ export default function DetailPage() {
           />
         </Card>
 
-        {item?.image_urls?.length ? (
+        {item?.question_image_urls?.length ? (
+          <View className="mb-4">
+            <Text className="block text-xs text-muted-foreground mb-2">题面图</Text>
+            <View className="flex flex-row flex-wrap gap-2">
+              {item.question_image_urls.map((u) => (
+                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <Image
+                    src={u}
+                    mode="aspectFill"
+                    style={{ width: '100%', height: '100%' }}
+                    onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {item?.answer_image_urls?.length ? (
+          <View className="mb-4">
+            <Text className="block text-xs text-muted-foreground mb-2">答题卡图</Text>
+            <View className="flex flex-row flex-wrap gap-2">
+              {item.answer_image_urls.map((u) => (
+                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <Image
+                    src={u}
+                    mode="aspectFill"
+                    style={{ width: '100%', height: '100%' }}
+                    onClick={() => Taro.previewImage({ current: u, urls: item.answer_image_urls || [u] })}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {!item?.question_image_urls?.length && !item?.answer_image_urls?.length && item?.image_urls?.length ? (
           <View className="flex flex-row flex-wrap gap-2 mb-4">
             {item.image_urls.map((u) => (
               <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">

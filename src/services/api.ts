@@ -329,6 +329,13 @@ export function createTimeline(payload: CreateTimelinePayload) {
   )
 }
 
+/** 批量创建多条 timeline 条目（一次提取多道题时替代循环单条，一次落库） */
+export function createTimelineBatch(payloads: CreateTimelinePayload[]) {
+  return unwrap<{ list: TimelineItem[] }>(
+    Network.request({ url: '/api/timeline/batch', method: 'POST', data: { items: payloads }, header: authHeaders() }),
+  )
+}
+
 /** 兼容旧签名：createQuestion → 创建 kind=question 条目 */
 export function createQuestion(payload: {
   subject_id?: string | null
@@ -595,6 +602,14 @@ export interface RecognizeResult {
   question_image_keys?: string[]
   /** LLM 自动识别出的学科名称（中文，可能不规范），用于自动归类 */
   subject?: string
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题下标；顶层为 null */
+  parent_index?: number | null
+  /** 所属大题的完整题干（子题已自动携带/前置到 question_content） */
+  stem?: string
+  /** 答题卡/答案图 file_key（与题面图区分） */
+  answer_image_keys?: string[]
 }
 
 function normalizeItem(raw: RecognizeResult): RecognizeResult {
@@ -643,7 +658,7 @@ export async function recognizeSeparate(questionFile: string, answerFile: string
   if (!item.question_content) {
     throw new Error('未能将题目与答案关联，请确认两张图片内容清晰')
   }
-  return { matched: [item], unmatched_questions: [] as string[] }
+  return { matched: [item], unmatched_questions: [] as string[], answer_image_keys: data?.answer_image_keys || [a.key] }
 }
 
 // 文档导入识别
@@ -692,6 +707,22 @@ export async function recognizeDocumentByUrl(url: string, subjectId: string) {
   const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) throw new Error('未识别到题目，请确认文档内容为文字')
   return items
+}
+
+/**
+ * 把「识别结果」直接导出为一个 Word 文档。
+ * 后端生成 docx → 上传存储 → 写入 documents 记录（「文档」页可见），返回可直接打开的地址。
+ */
+export async function exportRecognizedDocx(items: RecognizeResult[], title?: string) {
+  const data = await unwrapResponse<{ url: string; file_key: string; title: string }>(
+    Network.request({
+      url: '/api/ocr/export-docx',
+      method: 'POST',
+      data: { items, title: title || '' },
+      header: authHeaders(),
+    }),
+  )
+  return data
 }
 
 // ============================================================
@@ -770,13 +801,26 @@ export type ImageAction = 'auto' | 'enhance' | 'erase' | 'erase_v2'
  *   未识别到歪斜 / 高清未通过内容校验）。前端**必须**据此弹窗告知，
  *   否则用户看到的就是「点了没反应」——这正是连着五轮反馈的根因。
  */
+/** 多模式并列输出中的单项（P1 预览自选） */
+export interface EnhanceModeAsset {
+  url: string
+  key: string
+  width: number
+  height: number
+  sizeBytes: number
+}
+
 export interface ImageProcessResult {
   url: string
   key: string
   timeline_id: string
+  /** 五模式并列输出（multi_modes=true 时返回）：原图/增强/黑白/增亮/灰度 */
+  modes?: Record<'original' | 'enhance' | 'bw' | 'brighten' | 'gray', EnhanceModeAsset>
   debug?: {
     needManual?: boolean
     notice?: { level: 'info' | 'warn'; title: string; message: string }
+    /** 智能默认档：后端单色源检测自动选中的模式（未显式指定 preset 时才有） */
+    autoPreset?: string
     [k: string]: unknown
   }
 }
@@ -813,6 +857,31 @@ export interface ProcessImageOpts {
    * 自动调正(auto)专用：是否尝试曲面展开，默认 false（当前经典法实测不达标，会安全回落平面）。
    */
   dewarp_curved?: boolean
+  /**
+   * 去手写(erase_v2)专用：**框选补擦**区域数组，归一化坐标（相对原图，取值 0~1）。
+   * 用户圈出来的区域在服务端**无条件并入**手写 mask，不参与任何判据。
+   */
+  manual_regions?: Array<{ x: number; y: number; w: number; h: number }>
+  /**
+   * 去手写(erase_v2)专用：擦除模式（v18.2）。
+   *  - 'union'（默认）：三通道并集，适合黑笔/铅笔作答卷
+   *  - 'color'：仅彩色笔迹 + 印刷保护，适合红/蓝笔批改卷
+   */
+  erase_mode?: 'union' | 'color'
+  /**
+   * 智能高清(enhance)专用：⭐ 输出模式（对齐扫描全能王五种模式）。
+   *  - 'original' 原图（不做像素增强）
+   *  - 'enhance'  增强并锐化（彩色，默认）
+   *  - 'bw'       黑白二值化（适合纯文字、避免彩色噪点）
+   *  - 'brighten' 增亮（适合较暗/逆光）
+   *  - 'gray'     灰度（保留层级细节但去色）
+   * 不传则后端基于单色源检测自动选默认档。
+   */
+  enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
+  /** 智能高清(enhance)专用：强度档位（1=轻度 / 2=标准 / 3=强力），默认 2 */
+  enhance_strength?: 1 | 2 | 3
+  /** 是否返回五模式并列输出（true 时后端在 modes 字段中返回五种结果） */
+  multi_modes?: boolean
 }
 
 export async function processImage(action: ImageAction, filePathOrUrl: string, opts: ProcessImageOpts = {}) {
@@ -822,10 +891,21 @@ export async function processImage(action: ImageAction, filePathOrUrl: string, o
   if (action === 'enhance') {
     if (opts.sr_scale) extra.sr_scale = opts.sr_scale
     if (opts.sr_mode) extra.sr_mode = opts.sr_mode
+    // P1 多模式 / 智能默认档 / 强度档位
+    if (opts.enhance_preset) extra.enhance_preset = opts.enhance_preset
+    if (opts.enhance_strength) extra.enhance_strength = opts.enhance_strength
+    if (opts.multi_modes) extra.multi_modes = true
   }
   if (action === 'auto') {
     if (opts.manual_corners?.length === 4) extra.manual_corners = opts.manual_corners
     if (opts.dewarp_curved) extra.dewarp_curved = true
+  }
+  // 去手写框选补擦：用户圈选区域原样透传给后端（仅在有区域时携带）
+  if (action === 'erase_v2') {
+    if (opts.manual_regions && opts.manual_regions.length > 0) {
+      extra.manual_regions = opts.manual_regions
+    }
+    if (opts.erase_mode) extra.erase_mode = opts.erase_mode
   }
   return withTimeout(
     unwrapResponse<ImageProcessResult>(

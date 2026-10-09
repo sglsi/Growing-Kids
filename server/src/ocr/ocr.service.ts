@@ -5,6 +5,11 @@ import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
 import type { RecognizedItem, LocalOcrResult } from './ocr.types'
 import { LocalOcrClient } from './ocr-engine.client'
+import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
+import { structureLocalItems } from './ocr-struct'
+import {
+  Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Footer, PageNumber,
+} from 'docx'
 
 const MODEL = 'doubao-seed-2-0-pro-260215'
 
@@ -13,7 +18,7 @@ const EXAM_TASK =
 const DOC_TASK =
   '现在给你一份作业/试卷文档的文字内容，其中包含若干道题目，可能包含学生作答与正确答案。'
 const PAIR_TASK =
-  '用户将【题目图片】和【答案图片】分开上传。请把答案图片中的标准答案/解析，与题目图片中的题目自动关联匹配成一道题。只输出单题对象，JSON 结构为 {"items":[{...}]}（items 只含一个元素）。'
+  '用户将【题目图片】和【答案图片】分开上传。题目图片中是一份试卷/作业的多道题目（可能含大题与小题），答案图片中是这些题目的标准答案与解析。请按题号将答案图片中的答案与解析，与题目图片中对应题号的题目关联匹配，输出多道题。JSON 结构为 {"items":[{...},...]}，items 为与题目图片题号一一对应的题目数组（可能包含多道，切勿只输出一道）。'
 
 @Injectable()
 export class OcrService {
@@ -30,6 +35,21 @@ export class OcrService {
   private getVlm(): LLMClient {
     if (!this.vlmClient) this.vlmClient = new LLMClient()
     return this.vlmClient
+  }
+
+  /**
+   * VLM 使用策略（降低对 VLM 依赖的总开关）。
+   *  - OCR_USE_VLM=false   / OCR_VLM_MODE=never  → 彻底禁用 VLM（离线 / 省配额场景）
+   *  - OCR_VLM_MODE=always                       → 总是走 VLM（对照 / 灰度用）
+   *  - 默认 auto                                  → 本地结构化达标就不用 VLM
+   *  - OCR_LOCAL_MIN_AVG_LEN=<n>                  → 本地结构化"单题平均字数"门槛，默认 12
+   */
+  private vlmPolicy(): { vlmMode: string; allowVlm: boolean; minAvgLen?: number } {
+    const vlmMode = (process.env.OCR_VLM_MODE || 'auto').toLowerCase()
+    const allowVlm = vlmMode !== 'never' && (process.env.OCR_USE_VLM ?? 'true') !== 'false'
+    const raw = process.env.OCR_LOCAL_MIN_AVG_LEN
+    const minAvgLen = raw && Number.isFinite(Number(raw)) ? Number(raw) : undefined
+    return { vlmMode, allowVlm, minAvgLen }
   }
 
   // 下载文件原始字节并按 UTF-8 解码（针对纯文本，避免 FetchClient 中文乱码）
@@ -163,7 +183,20 @@ export class OcrService {
   }
 
   /** 文字文档直接结构化（recognize-doc 文本类路径）。 */
+  /**
+   * 纯文本文档结构化：本地规则为主，VLM 仅在其质量不达标时兜底。
+   * （此前无论文本多规整都要跑一次大模型，纯属浪费 —— 按题号切题是确定性规则题。）
+   */
   private async structureTextDoc(rawText: string): Promise<{ items: RecognizedItem[] }> {
+    const { vlmMode, allowVlm, minAvgLen } = this.vlmPolicy()
+    if (vlmMode !== 'always') {
+      const struct = structureLocalItems(rawText, { minAvgLen })
+      console.log(
+        `[ocr/doc] 本地结构化 ${struct.quality.count} 题，平均 ${struct.quality.avgLen.toFixed(1)} 字，` +
+          `层级 ${struct.quality.inferred} 条 → ${struct.quality.ok ? '达标' : '不达标（' + struct.quality.reason + '）'}`,
+      )
+      if (struct.quality.ok || !allowVlm) return { items: struct.items }
+    }
     const response = await this.getVlm().invoke(
       [
         { role: 'system', content: this.buildJsonSystem(DOC_TASK) },
@@ -183,25 +216,62 @@ export class OcrService {
     return this.extractJson(response.content)
   }
 
-  // ---------------- 统一图片识别流程：本地优先 → VLM 切分 → VLM 看图 → 纯文字退化 ----------------
-  private async recognizeImages(urls: string[], task: string): Promise<{ items: RecognizedItem[] }> {
+  // ---------------- 统一图片识别流程：本地结构化（主） → VLM 切分（备） → VLM 看图（备） → 纯文字退化 ----------------
+  /**
+   * 主路径是**本地结构化**（ocr-struct.ts：按题号切分 + 本地层级推断），零 VLM 调用。
+   * 只有当本地结构化质量自评不达标（切碎 / OCR 低置信），或显式要求用 VLM 时，才走 VLM。
+   *
+   * 详见 vlmPolicy() 的环境变量说明。
+   */
+  private async recognizeImages(
+    urls: string[],
+    task: string,
+  ): Promise<{ items: RecognizedItem[]; rawText?: string }> {
     const local = await this.recognizeLocalByUrls(urls)
-    // 本地高置信 → 用本地文字让 VLM 做语义切分（VLM 不看图，更稳更快）
-    if (local && !local.low_confidence) {
+    const { vlmMode, allowVlm, minAvgLen } = this.vlmPolicy()
+
+    // ① 本地结构化（主路径）
+    if (local && vlmMode !== 'always') {
+      const struct = structureLocalItems(local.raw_text, {
+        regions: local.text_regions,
+        confidence: local.confidence,
+        lowConfidence: local.low_confidence,
+        minAvgLen,
+      })
+      console.log(
+        `[ocr] 本地结构化 ${struct.quality.count} 题，平均 ${struct.quality.avgLen.toFixed(1)} 字，` +
+          `层级 ${struct.quality.inferred} 条 → ${struct.quality.ok ? '达标' : '不达标（' + struct.quality.reason + '）'}`,
+      )
+      if (struct.quality.ok) {
+        // 本地已达标 → 直接返回，不调 VLM（默认路径：识别一次零大模型调用）
+        return { items: struct.items, rawText: local.raw_text }
+      }
+      if (!allowVlm) {
+        console.warn(`[ocr] 本地不达标但 VLM 已禁用，仍返回本地结果（前端可编辑）: ${struct.quality.reason}`)
+        return { items: struct.items, rawText: local.raw_text }
+      }
+      // ② 不达标 → VLM 用本地文字做语义切分（VLM 不看图，更稳更快）
       try {
-        return await this.structureWithVlm(local, task, '请识别上面的题目、学生错误作答与批改后的正确答案，按题目顺序输出。')
+        const r = await this.structureWithVlm(local, task, '请识别上面的题目、学生错误作答与批改后的正确答案，按题目顺序输出。')
+        return { items: r.items, rawText: local.raw_text }
       } catch (e) {
-        console.warn('[ocr] 本地结构化 VLM 失败，转 VLM 直接看图:', String(e))
+        console.warn('[ocr] VLM 语义切分失败，转 VLM 直接看图:', String(e))
       }
     }
-    // 本地失败/低置信 → VLM 直接看图
+
+    if (!allowVlm) {
+      if (local) return { items: this.degradeToPlainText(local), rawText: local.raw_text }
+      throw new BadRequestException('识别服务暂不可用（VLM 已禁用且本地 OCR 无结果），请稍后重试')
+    }
+
+    // ③ 本地失败 / 低置信 → VLM 直接看图
     try {
       return await this.vlmDirectImages(urls, task)
     } catch (e) {
       console.warn('[ocr] VLM 直接看图也失败:', String(e))
       if (local) {
         console.warn('[ocr] 退化为本地纯文字（前端可编辑）')
-        return { items: this.degradeToPlainText(local) }
+        return { items: this.degradeToPlainText(local), rawText: local.raw_text }
       }
       throw new BadRequestException('识别服务暂不可用，请稍后重试或更换更清晰的图片')
     }
@@ -220,13 +290,9 @@ export class OcrService {
       return { items: result.items, rawText }
     }
     if (isImage) {
-      const local = await this.recognizeLocalByUrls([fileUrl])
-      if (local && !local.low_confidence) {
-        const result = await this.structureWithVlm(local, DOC_TASK, '请识别上面的题目、学生错误作答与批改后的正确答案，按题目顺序输出。')
-        return { items: result.items, rawText: local.raw_text }
-      }
-      const result = await this.vlmDirectImages([fileUrl], DOC_TASK)
-      return { items: result.items, rawText: '' }
+      // 与 recognizeImages 同一策略：本地结构化为主，VLM 仅备用
+      const result = await this.recognizeImages([fileUrl], DOC_TASK)
+      return { items: result.items, rawText: result.rawText ?? '' }
     }
     // 其他文档（如富文本/扫描件）：FetchClient 取文本再结构化
     const rawText = await this.extractDocumentText(fileUrl)
@@ -243,8 +309,17 @@ export class OcrService {
 4. 答案缺失（没有红笔批改、没有标准答案）时 status 必须为 "pending"，否则为 "answered"。
 5. source 填写能识别到的来源，如试卷名/作业名/页码，没有则留空。
 6. question_image_keys 一律返回空数组 []。
+7. 【大题/小题层级，务必处理】试卷常出现"一道大题含若干小题"的结构，例如：
+   "三、阅读理解。阅读下面的文字，完成 1-3 题。…… 1. 下列对…理解正确的一项是（ ）  2. …  3. …"
+   此时**不得**把 1./2./3. 各自孤立成一道题而丢掉"三、阅读理解…"这段大题题干，否则小题就成了无本之木。正确做法：
+   - 用 level 标注层级：1 = 大题/父题（独立成题），2 = 小题/子题。
+   - 子题用 parent_index 指向其所属父题在 items 数组中的下标（从 0 开始）；顶层题 parent_index 为 null。
+   - 用 stem 填写该子题**所属大题的完整题干**（子题必须继承它）。
+   - 子题的 question_content 必须"自带大题题干"：即先写大题题干，再写本小题的设问，
+     使其脱离父题也能独立读懂、可独立作答。
+   - 若该小题在原文中已自带上下文（题干本身完整可答），stem 仍须填写，但 question_content 无需重复拼接。
 只输出 JSON，不要输出任何解释或 markdown 代码块标记。JSON 结构：
-{"items":[{"question_content":"","wrong_answer":"","answer_content":"","solution":"","source":"","status":"answered|pending","question_image_keys":[]}]}`
+{"items":[{"question_content":"","wrong_answer":"","answer_content":"","solution":"","source":"","status":"answered|pending","question_image_keys":[],"level":1,"parent_index":null,"stem":""}]}`
   }
 
   private extractJson(text: string): { items: RecognizedItem[] } {
@@ -266,7 +341,34 @@ export class OcrService {
       if (!Array.isArray(it.question_image_keys)) it.question_image_keys = []
       it.status = it.answer_content ? 'answered' : 'pending'
     })
+    // ① 先做本地层级推断（兜底模型漏填的 parent_index），② 再回填大题题干
+    const inferred = this.applyLocalHierarchy(items)
+    if (inferred > 0) {
+      console.log(`[ocr] 本地层级推断补出父子关系 ${inferred} 条（模型未标注）`)
+    }
+    linkHierarchy(items)
     return { items }
+  }
+
+  /**
+   * 本地父子关系推断兜底：模型常常漏填 parent_index，导致"大题含若干小题"时
+   * 各小题平铺、大题题干丢失。此处用纯规则（编号约定 + "完成 1-3 题"线索）补齐，
+   * 只填未标注的题，已标注的一律尊重。详见 ocr-hierarchy.ts。
+   */
+  private applyLocalHierarchy(items: RecognizedItem[]): number {
+    if (!items.length) return 0
+    try {
+      const res = inferHierarchyRules(items)
+      if (!res.inferred) return 0
+      for (let i = 0; i < items.length; i++) {
+        items[i].parent_index = res.items[i].parent_index
+        items[i].level = res.items[i].level
+      }
+      return res.inferred
+    } catch (e) {
+      console.warn(`[ocr] 层级推断失败，回退模型原始标注: ${e instanceof Error ? e.message : e}`)
+      return 0
+    }
   }
 
   async recognizeExam(subjectId: string, imageKeys: string[]): Promise<{ items: RecognizedItem[] }> {
@@ -282,59 +384,81 @@ export class OcrService {
     return this.recognizeImages(urls, EXAM_TASK)
   }
 
-  async recognizePair(questionKeys: string[], answerKeys: string[]): Promise<RecognizedItem> {
+  /**
+   * 题目 + 答案分传：把多道题目（题目图）与整份答案/解析（答案图）按题号关联成多道题。
+   *
+   * 历史硬伤：原实现硬编码「只输出单题」(PAIR_TASK + items[0])，拍一份卷子 + 一张答题卡只会出 1 题。
+   * 现改为返回多题数组：
+   *  ① 有答案图 + 允许 VLM → VLM 按题号跨图关联（PAIR_TASK 多题版）；
+   *  ② ① 失败或 vlmMode=always → VLM 直接看图关联；
+   *  ③ 无答案图 / VLM 禁用 / 全失败 → 本地结构化多题（仅题目图文字）。
+   * 每题 question_image_keys 统一设为题目图 keys；答案图 keys 由 controller 透传回前端单独存储。
+   */
+  async recognizePair(questionKeys: string[], answerKeys: string[]): Promise<{ items: RecognizedItem[] }> {
     if (!questionKeys?.length) throw new BadRequestException('question_image_keys 不能为空')
 
     const qUrls = await Promise.all(questionKeys.map((k) => this.storageService.getPublicUrl(k)))
     const aUrls = answerKeys?.length ? await Promise.all(answerKeys.map((k) => this.storageService.getPublicUrl(k))) : []
     const local = await this.recognizeLocalByUrls([...qUrls, ...aUrls])
+    const { vlmMode, allowVlm, minAvgLen } = this.vlmPolicy()
 
-    if (local && !local.low_confidence) {
+    // 每道题的题面图统一为题目图（答案图单独挂 answer_image_keys，由 controller 透传前端落库）
+    const finalize = (items: RecognizedItem[]): RecognizedItem[] => {
+      items.forEach((it) => { it.question_image_keys = questionKeys })
+      return items
+    }
+    const hint = `前面 ${questionKeys.length} 张是题目图片（含多道题目），后面 ${aUrls.length} 张是对应答案图片，请按题号把答案关联到对应题目，输出所有题目（不要只输出一道）。`
+
+    // ① 有答案图 + 本地可用 + 允许 VLM（非 always 强制）：用 PAIR_TASK 多题版做跨图题号匹配
+    if (aUrls.length && allowVlm && vlmMode !== 'always' && local && !local.low_confidence) {
       try {
-        const r = await this.structureWithVlm(
-          local,
-          PAIR_TASK,
-          `前面 ${questionKeys.length} 张是题目图片，后面 ${aUrls.length} 张是对应答案图片，请识别并关联。`,
-        )
-        const item = r.items[0] || this.emptyItem()
-        item.question_image_keys = questionKeys
-        return item
+        const r = await this.structureWithVlm(local, PAIR_TASK, hint)
+        if (r.items.length) return { items: finalize(r.items) }
       } catch {
         // 转 VLM 直接看图
       }
     }
 
-    try {
-      const qParts = qUrls.map((u) => ({ type: 'image_url' as const, image_url: { url: u, detail: 'high' as const } }))
-      const aParts = aUrls.map((u) => ({ type: 'image_url' as const, image_url: { url: u, detail: 'high' as const } }))
-      const response = await this.getVlm().invoke(
-        [
-          { role: 'system', content: this.buildJsonSystem(PAIR_TASK) },
-          {
-            role: 'user',
-            content: [
-              ...qParts,
-              ...aParts,
-              { type: 'text', text: `前面 ${questionKeys.length} 张是题目图片，后面 ${aUrls.length} 张是对应答案图片，请识别并关联。` },
-            ],
-          },
-        ],
-        { model: MODEL, temperature: 0.1 },
-      )
-      console.log('[ocr/pair] 模型原始返回:', response.content)
-      const result = this.extractJson(response.content)
-      const item = result.items[0] || this.emptyItem()
-      item.question_image_keys = questionKeys
-      return item
-    } catch (e) {
-      console.warn('[ocr/pair] VLM 失败:', String(e))
-      if (local) {
-        const item = this.degradeToPlainText(local)[0] || this.emptyItem()
-        item.question_image_keys = questionKeys
-        return item
+    // ② VLM 直接看图（含 vlmMode='always'，或 ① 失败兜底）：跨图按题号关联成多题
+    if (aUrls.length && allowVlm) {
+      try {
+        const qParts = qUrls.map((u) => ({ type: 'image_url' as const, image_url: { url: u, detail: 'high' as const } }))
+        const aParts = aUrls.map((u) => ({ type: 'image_url' as const, image_url: { url: u, detail: 'high' as const } }))
+        const response = await this.getVlm().invoke(
+          [
+            { role: 'system', content: this.buildJsonSystem(PAIR_TASK) },
+            {
+              role: 'user',
+              content: [...qParts, ...aParts, { type: 'text', text: hint }],
+            },
+          ],
+          { model: MODEL, temperature: 0.1 },
+        )
+        console.log('[ocr/pair] 模型原始返回:', response.content)
+        const result = this.extractJson(response.content)
+        if (Array.isArray(result.items) && result.items.length) return { items: finalize(result.items) }
+      } catch (e) {
+        console.warn('[ocr/pair] VLM 失败:', String(e))
       }
-      throw new BadRequestException('识别服务暂不可用，请稍后重试')
     }
+
+    // ③ 无答案图 / VLM 禁用 / 全部失败：本地结构化多题（仅基于题目图文字）
+    if (local) {
+      const struct = structureLocalItems(local.raw_text, {
+        regions: local.text_regions,
+        confidence: local.confidence,
+        lowConfidence: local.low_confidence,
+        minAvgLen,
+      })
+      if (struct.quality.ok && struct.items.length) return { items: finalize(struct.items) }
+      const degraded = this.degradeToPlainText(local)
+      if (degraded.length) return { items: finalize(degraded) }
+    }
+
+    // 兜底：至少返回一道空题，保证前端有可编辑草稿
+    const fallback = this.emptyItem()
+    fallback.question_image_keys = questionKeys
+    return { items: [fallback] }
   }
 
   private emptyItem(): RecognizedItem {
@@ -347,6 +471,100 @@ export class OcrService {
       status: 'pending',
       question_image_keys: [],
     }
+  }
+
+  /**
+   * 把识别结果直接导出为 Word（.docx）。
+   * 用户诉求：OCR 识别出的内容直接存储为 word 文档，并在前端提供可直接打开的位置。
+   * 层级（大题/小题）在文档中以「第 N 题（小题）」标注，子题题干已含大题题干，独立可读。
+   */
+  async exportDocx(items: RecognizedItem[], title: string): Promise<Buffer> {
+    const children: Paragraph[] = []
+
+    children.push(
+      new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 240 },
+        children: [new TextRun({ text: title || '识别结果', bold: true })],
+      }),
+    )
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 360 },
+        children: [
+          new TextRun({
+            text: `共 ${items.length} 题 · 生成于 ${new Date().toLocaleString('zh-CN')}`,
+            size: 18,
+            color: '9A948A',
+          }),
+        ],
+      }),
+    )
+
+    const pushLines = (label: string, text: string, color?: string) => {
+      const t = (text || '').trim()
+      if (!t) return
+      children.push(
+        new Paragraph({
+          spacing: { after: 60 },
+          children: [new TextRun({ text: `${label}：`, bold: true })],
+        }),
+      )
+      t.split('\n').forEach((line) => {
+        children.push(
+          new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: line, color })] }),
+        )
+      })
+    }
+
+    if (!items.length) {
+      pushLines('说明', '本次识别未得到任何题目内容。')
+    }
+
+    items.forEach((it, idx) => {
+      const isSub = it.level === 2
+      children.push(
+        new Paragraph({
+          heading: isSub ? HeadingLevel.HEADING_3 : HeadingLevel.HEADING_2,
+          spacing: { before: 240, after: 120 },
+          children: [new TextRun({ text: `第 ${idx + 1} 题${isSub ? '（小题）' : ''}`, bold: true })],
+        }),
+      )
+      pushLines('题干', it.question_content)
+      pushLines('学生作答', it.wrong_answer, 'C0392B')
+      pushLines('正确答案', it.answer_content, '1E8449')
+      pushLines('解析', it.solution)
+      if (it.source) pushLines('来源', it.source)
+    })
+
+    const doc = new Document({
+      styles: { default: { document: { run: { font: '宋体', size: 22 } } } },
+      sections: [
+        {
+          properties: {},
+          footers: {
+            default: new Footer({
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  children: [
+                    new TextRun({
+                      children: ['第 ', PageNumber.CURRENT, ' 页 / 共 ', PageNumber.TOTAL_PAGES, ' 页'],
+                      size: 18,
+                      color: '9A948A',
+                    }),
+                  ],
+                }),
+              ],
+            }),
+          },
+          children,
+        },
+      ],
+    })
+    return Packer.toBuffer(doc)
   }
 
   /**

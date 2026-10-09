@@ -10,15 +10,20 @@ import SegmentedTabs from '@/components/segmented-tabs'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import {
-  fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument, createQuestion,
-  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage,
+  fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument,
+  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction,
 } from '@/services/api'
+import { openStorageFile } from '@/services/net'
 
 type Mode = 'paper' | 'split' | 'doc'
 
 interface Draft extends RecognizeResult {
   subject_id: string
+  /** 题面图 file_key（保存时挂 question_images） */
+  question_image_keys?: string[]
+  /** 答题卡/答案图 file_key（保存时挂 answer_images） */
+  answer_image_keys?: string[]
 }
 
 export default function RecognizePage() {
@@ -33,6 +38,7 @@ export default function RecognizePage() {
   const [docFile, setDocFile] = useState('')
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
@@ -117,7 +123,14 @@ export default function RecognizePage() {
     setUnmatched([])
     try {
       const res = await recognizeSeparate(questionImage, answerImage)
-      setDrafts(res.matched.map((r) => ({ ...r, subject_id: sid })))
+      setDrafts(
+        res.matched.map((r) => ({
+          ...r,
+          subject_id: sid,
+          question_image_keys: r.question_image_keys,
+          answer_image_keys: res.answer_image_keys,
+        })),
+      )
       setUnmatched(res.unmatched_questions)
       Taro.showToast({ title: `已关联 ${res.matched.length} 题`, icon: 'none' })
     } catch (e) {
@@ -202,15 +215,27 @@ export default function RecognizePage() {
     if (!drafts.length) return
     setSaving(true)
     try {
-      await Promise.all(drafts.map((d) => createQuestion({
+      // 一次提取多道题 → 批量落库（POST /api/timeline/batch），不再循环单条请求
+      const payloads = drafts.map((d) => ({
+        kind: 'question' as const,
         subject_id: d.subject_id,
-        question_content: d.question_content,
-        answer_content: d.answer_content,
-        solution: d.solution,
-        wrong_answer: d.wrong_answer,
         source: d.source,
-        status: d.has_answer || d.answer_content ? 'answered' : 'pending',
-      })))
+        content: {
+          question: d.question_content,
+          answer: d.answer_content || '',
+          solution: d.solution || '',
+          wrong_answer: d.wrong_answer || '',
+          images: [...(d.question_image_keys || []), ...(d.answer_image_keys || [])],
+          status: (d.has_answer || d.answer_content ? 'answered' : 'pending') as 'answered' | 'pending',
+          // 题面图 / 答题卡图区分存储，并落地层级（子题携带大题题干）
+          question_images: d.question_image_keys || [],
+          answer_images: d.answer_image_keys || [],
+          level: typeof d.level === 'number' ? d.level : undefined,
+          parent_index: d.parent_index ?? null,
+          stem: d.stem || '',
+        },
+      }))
+      await createTimelineBatch(payloads)
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
@@ -218,6 +243,22 @@ export default function RecognizePage() {
       Taro.showToast({ title: '保存失败', icon: 'none' })
     } finally {
       setSaving(false)
+    }
+  }
+
+  // 把识别结果直接存成一个 Word 文档，并立刻打开（后端同时写入「文档」页，可再次打开）
+  const handleExportDocx = async () => {
+    if (!drafts.length) return
+    setExporting(true)
+    try {
+      const res = await exportRecognizedDocx(drafts, `识别结果 · ${new Date().toLocaleDateString('zh-CN')}`)
+      Taro.showToast({ title: 'Word 已生成', icon: 'success' })
+      if (res?.url) openStorageFile(res.url, false)
+    } catch (e) {
+      console.error('导出 Word 失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '导出失败，请重试', icon: 'none' })
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -259,7 +300,7 @@ export default function RecognizePage() {
           onValueChange={(v) => setMode(v)}
           options={[
             { value: 'paper', label: '拍照识别' },
-            { value: 'split', label: '题答分传' },
+            { value: 'split', label: '错题提取（题+答）' },
             { value: 'doc', label: '导入文档' },
           ]}
         />
@@ -387,7 +428,12 @@ export default function RecognizePage() {
             {drafts.map((d, idx) => (
               <Card key={idx} className="rounded-2xl border-border p-4 mb-3">
                 <View className="flex flex-row items-center justify-between mb-3">
-                  <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
+                  <View className="flex flex-row items-center gap-2">
+                    <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
+                    {d.level === 2 ? (
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>小题（已含大题题干）</Text>
+                    ) : null}
+                  </View>
                   <View className="flex flex-row gap-3">
                     <Picker
                       mode="selector"
@@ -439,6 +485,14 @@ export default function RecognizePage() {
         }}
         >
           <Text className="block text-xs text-muted-foreground shrink-0">共 {drafts.length} 题</Text>
+          <Button
+            className="flex-1 h-11 rounded-xl"
+            variant="outline"
+            disabled={exporting || saving}
+            onClick={handleExportDocx}
+          >
+            <Text className="block text-sm">{exporting ? '生成中…' : '导出 Word'}</Text>
+          </Button>
           <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
             <Text className="block text-sm">{saving ? '保存中…' : '保存到最近题目'}</Text>
           </Button>

@@ -23,6 +23,16 @@ export interface QuestionContent {
   /** 题目关联的图片 key（展示时后端补 image_urls） */
   images?: string[]
   status?: 'answered' | 'pending'
+  /** 题面图 file_key（与答题卡图区分存储） */
+  question_images?: string[]
+  /** 答题卡/答案图 file_key */
+  answer_images?: string[]
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题下标；顶层为 null */
+  parent_index?: number | null
+  /** 所属大题完整题干（子题携带，独立可读） */
+  stem?: string
 }
 
 export type TimelineKind = 'image' | 'question'
@@ -67,6 +77,10 @@ export interface TimelineItem {
   url?: string
   thumb_url?: string
   image_urls?: string[]
+  /** 题面图签名 URL（与答题卡图区分，后端 withUrls 补齐） */
+  question_image_urls?: string[]
+  /** 答题卡图签名 URL（与题面图区分，后端 withUrls 补齐） */
+  answer_image_urls?: string[]
 }
 
 // 资料库文档（外部 PDF / Word / TXT 等）

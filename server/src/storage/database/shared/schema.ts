@@ -60,6 +60,8 @@ export const timelineItems = pgTable("timeline_items", {
   content: jsonb("content").$type<{
     question?: string; answer?: string; solution?: string;
     wrong_answer?: string; images?: string[]; status?: string;
+    question_images?: string[]; answer_images?: string[];
+    level?: number; parent_index?: number | null; stem?: string;
   }>().notNull().default(sql`'{}'::jsonb`),
   source: varchar("source", { length: 24 }),
   in_review_book: boolean("in_review_book").notNull().default(false),

@@ -3,7 +3,7 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import type {
-  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto,
+  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto, TimelineItemWithUrl,
 } from './timeline.types'
 
 const TABLE = 'timeline_items'
@@ -26,12 +26,20 @@ export class TimelineService {
   async withUrls(items: TimelineItem[]): Promise<TimelineItem[]> {
     return Promise.all(
       items.map(async (it) => {
-        const enriched: TimelineItem & { url?: string; thumb_url?: string; image_urls?: string[] } = { ...it }
+        const enriched: TimelineItemWithUrl = { ...it }
         if (it.file_key) enriched.url = await this.storageService.getPublicUrl(it.file_key)
         if (it.thumb_key) enriched.thumb_url = await this.storageService.getPublicUrl(it.thumb_key)
         const imgs = it.content?.images
         if (Array.isArray(imgs) && imgs.length) {
           enriched.image_urls = await Promise.all(imgs.map((k) => this.storageService.getPublicUrl(k)))
+        }
+        const qImgs = it.content?.question_images
+        if (Array.isArray(qImgs) && qImgs.length) {
+          enriched.question_image_urls = await Promise.all(qImgs.map((k) => this.storageService.getPublicUrl(k)))
+        }
+        const aImgs = it.content?.answer_images
+        if (Array.isArray(aImgs) && aImgs.length) {
+          enriched.answer_image_urls = await Promise.all(aImgs.map((k) => this.storageService.getPublicUrl(k)))
         }
         return enriched as TimelineItem
       }),
@@ -68,9 +76,17 @@ export class TimelineService {
       q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw}`)
     }
     if (query.since) {
-      // review 模式按加入复习本的时间过滤；其他按创建时间过滤
-      const field = scope === 'review' ? 'added_to_review_at' : 'created_at'
-      q = q.gte(field, query.since)
+      if (scope === 'review') {
+        // review 模式按加入复习本的时间过滤。
+        // 兼容历史数据：早期加入复习本的记录 added_to_review_at 可能为 NULL，
+        // 直接 gte 会因 NULL 比较为假而被整条排除（表现为"筛选后列表变空"），
+        // 故对空值回退到 created_at 参与过滤。
+        q = q.or(
+          `added_to_review_at.gte.${query.since},and(added_to_review_at.is.null,created_at.gte.${query.since})`,
+        )
+      } else {
+        q = q.gte('created_at', query.since)
+      }
     }
 
     const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
@@ -115,6 +131,15 @@ export class TimelineService {
     }
 
     const client = getSupabaseClient()
+    const payload = this.buildPayload(userId, dto)
+
+    const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
+    if (error) throw new Error(error.message)
+    return data as unknown as TimelineItem
+  }
+
+  /** 组装单条插入 payload（create 与 createBatch 共用） */
+  private buildPayload(userId: string, dto: CreateTimelineDto): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
@@ -141,12 +166,39 @@ export class TimelineService {
         wrong_answer: c.wrong_answer || '',
         images: c.images || [],
         status: c.status || (c.answer ? 'answered' : 'pending'),
+        // 题面图 / 答题卡图区分存储（避免混在 images[] 里分不清哪张是答案）
+        question_images: c.question_images || [],
+        answer_images: c.answer_images || [],
+        level: typeof c.level === 'number' ? c.level : null,
+        parent_index: c.parent_index ?? null,
+        stem: c.stem || '',
       }
     }
+    return payload
+  }
 
-    const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
+  /**
+   * 批量创建：一次提取多道题时替代「循环单条 create」，一次 insert 落库，减少往返。
+   * 每条复用 buildPayload；逐条轻量校验，避免脏数据进库。
+   */
+  async createBatch(userId: string, dtos: CreateTimelineDto[]): Promise<TimelineItem[]> {
+    if (!Array.isArray(dtos) || !dtos.length) return []
+    const client = getSupabaseClient()
+    const payloads = dtos.map((dto) => {
+      if (dto.kind !== 'image' && dto.kind !== 'question') {
+        throw new BadRequestException('kind 仅支持 image / question')
+      }
+      if (dto.kind === 'image' && !dto.file_key) {
+        throw new BadRequestException('图片条目缺少 file_key')
+      }
+      if (dto.kind === 'question' && !dto.content?.question) {
+        throw new BadRequestException('题目条目缺少 content.question')
+      }
+      return this.buildPayload(userId, dto)
+    })
+    const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
-    return data as unknown as TimelineItem
+    return (data || []) as unknown as TimelineItem[]
   }
 
   // ---------- 更新 ----------
