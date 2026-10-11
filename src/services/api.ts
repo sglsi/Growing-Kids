@@ -15,6 +15,7 @@ import { Network } from '@/network'
 import { buildHeaders, captureUserId } from '@/services/net'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
+  SimilarItem, ReviewPlan,
 } from '@/types'
 
 export type { TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged }
@@ -95,6 +96,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
 // 文件上传
 //   purpose='save'  → 让后端把图片/文档归档进「最近题目 / 资料库」
 //   purpose='temp' 或省略 → 仅返回可访问 URL，不落库（用于 AI 处理前的中间上传）
+//   purpose='memory' → 归档进「成长记忆」（2026-10-01 远端新增）
 // ============================================================
 export interface UploadOpts {
   purpose?: 'save' | 'temp' | 'memory'
@@ -305,6 +307,16 @@ export interface TimelineContentPayload {
   wrong_answer?: string
   images?: string[]
   status?: 'answered' | 'pending'
+  /** 题面图 file_key（与答题卡图区分存储） */
+  question_images?: string[]
+  /** 答题卡/答案图 file_key */
+  answer_images?: string[]
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题下标；顶层为 null */
+  parent_index?: number | null
+  /** 所属大题完整题干（子题携带，独立可读） */
+  stem?: string
 }
 
 export interface CreateTimelinePayload {
@@ -348,8 +360,10 @@ export function createQuestion(payload: {
   source?: string
   status?: 'answered' | 'pending'
   mastered?: boolean
+  level?: number
+  parent_index?: number | null
+  stem?: string
 }) {
-  const images = [...(payload.question_image_keys || []), ...(payload.answer_image_keys || [])]
   return createTimeline({
     kind: 'question',
     subject_id: payload.subject_id ?? null,
@@ -359,8 +373,13 @@ export function createQuestion(payload: {
       answer: payload.answer_content || '',
       solution: payload.solution || '',
       wrong_answer: payload.wrong_answer || '',
-      images,
       status: payload.status || (payload.answer_content ? 'answered' : 'pending'),
+      // 题面图 / 答题卡图区分存储，并落地层级（不再混写 images[]，前端只读 question_images/answer_images）
+      question_images: payload.question_image_keys || [],
+      answer_images: payload.answer_image_keys || [],
+      level: typeof payload.level === 'number' ? payload.level : undefined,
+      parent_index: payload.parent_index ?? null,
+      stem: payload.stem || '',
     },
   })
 }
@@ -489,6 +508,20 @@ export function addToReviewBook(ids: string[]) {
 export function removeFromReviewBook(ids: string[]) {
   return unwrap<{ updated: number }>(
     Network.request({ url: '/api/timeline/review-book', method: 'DELETE', data: { ids }, header: authHeaders() }),
+  )
+}
+
+/** P2-17 相似题推荐：基于用户自建错题历史（文本+标签相似） */
+export function fetchSimilar(id: string, limit = 5) {
+  return unwrap<SimilarItem[]>(
+    Network.request({ url: `/api/timeline/${id}/similar`, method: 'POST', data: { limit }, header: authHeaders() }),
+  )
+}
+
+/** P2-18 艾宾浩斯复习：标记本次复习已完成，返回更新后的复习计划 */
+export function markReviewed(id: string) {
+  return unwrap<{ review_count: number; plan: ReviewPlan }>(
+    Network.request({ url: `/api/timeline/${id}/review`, method: 'POST', data: {}, header: authHeaders() }),
   )
 }
 
@@ -621,7 +654,12 @@ function normalizeItem(raw: RecognizeResult): RecognizeResult {
     source: raw.source || '',
     has_answer: !!raw.answer_content,
     question_image_keys: raw.question_image_keys || [],
+    /** 切块流程：每道错题块都自带其答案图 key（按题号关联后的结果） */
+    answer_image_keys: raw.answer_image_keys || [],
     subject: raw.subject || '',
+    level: typeof raw.level === 'number' ? raw.level : 1,
+    parent_index: raw.parent_index ?? null,
+    stem: raw.stem || '',
   }
 }
 
@@ -643,22 +681,30 @@ export async function recognizePaper(filePath: string, subjectId: string) {
   return items
 }
 
-// 题目/答案分传
+// 题目/答案分传：题目图（带红笔批改）+ 答案图，切块→逐块识别→按题号关联成多道题
+//
+// ⚠️ 已切到新的 /api/image/extract-wrong 接口（落实"切块 + 逐块识别"原始意图）：
+//   后端先本地切块（红笔锚定，allowVlm=false）、再对每块单独跑本地 OCR 侧车，
+//   返回的是"切出的题块图 key + 该区域 OCR 文本"（而非整图），并回传每题的 answer_image_keys。
 export async function recognizeSeparate(questionFile: string, answerFile: string) {
   const [q, a] = await Promise.all([uploadFile(questionFile), uploadFile(answerFile)])
-  const data = await unwrapResponse<RecognizeResult>(
+  const data = await unwrapResponse<{ items: RecognizeResult[]; answer_image_keys?: string[]; unmatched_questions?: string[] }>(
     Network.request({
-      url: '/api/ocr/recognize-pair',
+      url: '/api/image/extract-wrong',
       method: 'POST',
-      data: { question_image_keys: [q.key], answer_image_keys: [a.key] },
+      data: { image_url: q.url, answer_image_keys: [a.key] },
       header: authHeaders(),
     }),
   )
-  const item = normalizeItem(data)
-  if (!item.question_content) {
-    throw new Error('未能将题目与答案关联，请确认两张图片内容清晰')
+  const items = (data?.items || []).map(normalizeItem)
+  if (!items.length || !items.some((it) => it.question_content)) {
+    throw new Error('未能从图片中切出错题区域，请确认图片清晰、有红笔批改痕迹')
   }
-  return { matched: [item], unmatched_questions: [] as string[], answer_image_keys: data?.answer_image_keys || [a.key] }
+  return {
+    matched: items,
+    unmatched_questions: data?.unmatched_questions || [],
+    answer_image_keys: data?.answer_image_keys || [a.key],
+  }
 }
 
 // 文档导入识别
@@ -849,6 +895,27 @@ export interface ProcessImageOpts {
    */
   sr_mode?: 'classical' | 'espcn'
   /**
+   * 智能高清(enhance)专用：⭐ 输出模式（P1，对齐扫描全能王五种模式）。
+   *  - 'original' 原图（不做像素增强）
+   *  - 'enhance'  增强并锐化（彩色，默认）
+   *  - 'bw'       黑白/文档（硬二值化，**纯黑白打印件最优**）
+   *  - 'brighten' 增亮（拍摄偏暗/阴影重）
+   *  - 'gray'     灰度（去色但保留灰阶层次）
+   * 不传则由后端**智能默认档**自动判定（单色源→黑白，否则增强）。
+   */
+  enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
+  /**
+   * 智能高清(enhance)专用：⭐ 强度档位 'weak' | 'medium'(默认) | 'strong'。
+   * 把"是否过头"的把控权交给用户（方案 §P1）。
+   */
+  enhance_strength?: 'weak' | 'medium' | 'strong'
+  /**
+   * 智能高清(enhance)专用：⭐ 一次产出**五种模式的预览图**（multi_modes=true），
+   * 结果在 `ImageProcessResult.modes` 返回，用于前端并列渲染缩略图让用户自选
+   * （方案 §P1「预览自选 UX」）。预览为轻量档，选定模式后再请求最终高清画质。
+   */
+  multi_modes?: boolean
+  /**
    * 自动调正(auto)专用：前端手动拉出的试卷四角，**归一化 [0,1]**（相对原图），顺序任意。
    * 提供则后端直接做透视压平（100% 保真，不重画）；缺省则走自动检测。
    */
@@ -859,29 +926,23 @@ export interface ProcessImageOpts {
   dewarp_curved?: boolean
   /**
    * 去手写(erase_v2)专用：**框选补擦**区域数组，归一化坐标（相对原图，取值 0~1）。
-   * 用户圈出来的区域在服务端**无条件并入**手写 mask，不参与任何判据。
+   *
+   * ⭐ 这是「自动检测不可能 100%」的兜底通道（方案 §5.10）：
+   *   用户圈出来的区域在服务端**无条件并入**手写 mask——不参与任何「是否印刷」判据，
+   *   实测框选区掩膜内残留 0.0%。前端口径与后端 `ProcessImageDto.manual_regions` 严格一致。
+   *
+   * ⚠️ 注意：整图 mask 覆盖率 >70% 的兜底保护仍然生效（防止整页被涂白），
+   *    正常框选（几块手写区）远达不到该阈值。
    */
   manual_regions?: Array<{ x: number; y: number; w: number; h: number }>
   /**
-   * 去手写(erase_v2)专用：擦除模式（v18.2）。
-   *  - 'union'（默认）：三通道并集，适合黑笔/铅笔作答卷
-   *  - 'color'：仅彩色笔迹 + 印刷保护，适合红/蓝笔批改卷
+   * 去手写(erase_v2)专用：⭐ 擦除模式（v18.2）。
+   *  - 'union'（默认）：三通道并集，适合**黑笔/铅笔**作答卷；
+   *  - 'color'：仅彩色笔迹 + 印刷保护，适合**红/蓝笔批改/作答卷**——
+   *    红笔卷上深色/槽位通道会把印刷正文连同红笔一起吞掉（实测 mask 内
+   *    被删像素 42.5% 是印刷），color 模式误删降 52%~99%、印刷零误伤。
    */
   erase_mode?: 'union' | 'color'
-  /**
-   * 智能高清(enhance)专用：⭐ 输出模式（对齐扫描全能王五种模式）。
-   *  - 'original' 原图（不做像素增强）
-   *  - 'enhance'  增强并锐化（彩色，默认）
-   *  - 'bw'       黑白二值化（适合纯文字、避免彩色噪点）
-   *  - 'brighten' 增亮（适合较暗/逆光）
-   *  - 'gray'     灰度（保留层级细节但去色）
-   * 不传则后端基于单色源检测自动选默认档。
-   */
-  enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
-  /** 智能高清(enhance)专用：强度档位（1=轻度 / 2=标准 / 3=强力），默认 2 */
-  enhance_strength?: 1 | 2 | 3
-  /** 是否返回五模式并列输出（true 时后端在 modes 字段中返回五种结果） */
-  multi_modes?: boolean
 }
 
 export async function processImage(action: ImageAction, filePathOrUrl: string, opts: ProcessImageOpts = {}) {

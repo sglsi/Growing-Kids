@@ -83,6 +83,25 @@ export class TimelineController {
     return { code: 200, msg: 'success', data }
   }
 
+  /** P2-17 相似题/变式题推荐：基于用户自建错题历史（文本+标签相似） */
+  @Post(':id/similar')
+  @HttpCode(200)
+  async similar(@Req() req: RequestWithUser, @Param('id') id: string, @Body() body: { limit?: number }) {
+    const userId = requireUserId(req)
+    const limit = Math.min(20, Math.max(1, Number(body?.limit) || 5))
+    const data = await this.timelineService.findSimilar(userId, id, limit)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** P2-18 艾宾浩斯复习：标记本次复习已完成，返回更新后的复习计划 */
+  @Post(':id/review')
+  @HttpCode(200)
+  async review(@Req() req: RequestWithUser, @Param('id') id: string) {
+    const userId = requireUserId(req)
+    const data = await this.timelineService.markReviewed(userId, id)
+    return { code: 200, msg: 'success', data }
+  }
+
   @Post('batch-delete')
   @HttpCode(200)
   async batchDelete(@Req() req: RequestWithUser, @Body() body: IdsBody) {

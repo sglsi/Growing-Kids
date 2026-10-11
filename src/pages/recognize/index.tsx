@@ -128,7 +128,8 @@ export default function RecognizePage() {
           ...r,
           subject_id: sid,
           question_image_keys: r.question_image_keys,
-          answer_image_keys: res.answer_image_keys,
+          // 切块流程：每题自带 answer_image_keys（按题号关联后的答案图）；缺省回退整份答案图
+          answer_image_keys: r.answer_image_keys && r.answer_image_keys.length ? r.answer_image_keys : res.answer_image_keys,
         })),
       )
       setUnmatched(res.unmatched_questions)
@@ -225,9 +226,9 @@ export default function RecognizePage() {
           answer: d.answer_content || '',
           solution: d.solution || '',
           wrong_answer: d.wrong_answer || '',
-          images: [...(d.question_image_keys || []), ...(d.answer_image_keys || [])],
           status: (d.has_answer || d.answer_content ? 'answered' : 'pending') as 'answered' | 'pending',
-          // 题面图 / 答题卡图区分存储，并落地层级（子题携带大题题干）
+          // 题面图 / 答题卡图区分存储，并落地层级（子题携带大题题干）。
+          // 不再双写 images[]（P1-15：前端只读 question_images/answer_images，images[] 已无消费者）。
           question_images: d.question_image_keys || [],
           answer_images: d.answer_image_keys || [],
           level: typeof d.level === 'number' ? d.level : undefined,

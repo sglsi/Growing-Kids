@@ -1,7 +1,7 @@
 import { Controller, Post, Get, Body, HttpCode, HttpException, Req } from '@nestjs/common'
 import { ImageService } from './image.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
-import type { ProcessImageDto } from './image.types'
+import type { ProcessImageDto, ExtractWrongDto } from './image.types'
 
 /** 后端图像能力版本号：前端据此判断线上服务是否包含本地处理管线 */
 const IMAGE_CAPABILITIES_VERSION = 3
@@ -104,6 +104,22 @@ export class ImageController {
     const userId = requireUserId(req)
     const headers = (req.headers || {}) as Record<string, string>
     const data = await this.imageService.wrongq(userId, dto, headers)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /**
+   * 错题提取（切块→逐块识别→题号关联）：POST /api/image/extract-wrong
+   *
+   * 与 recognize-pair 的本质区别：先本地切块（wrongq 红线，allowVlm=false），
+   * 再对每块单独跑本地 OCR 侧车，落库的是"切出的题块图 + 该区域 OCR 文本"，而非整图。
+   * 全程本地优先、零 VLM 依赖（契合"切块引擎尽量不依赖大模型"的约束）。
+   */
+  @Post('extract-wrong')
+  @HttpCode(200)
+  async extractWrong(@Body() dto: ExtractWrongDto, @Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    const headers = (req.headers || {}) as Record<string, string>
+    const data = await this.imageService.extractWrong(userId, dto, headers)
     return { code: 200, msg: 'success', data }
   }
 

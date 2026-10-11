@@ -5,7 +5,22 @@ import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
-import type { TimelineItem } from '@/types'
+import type { TimelineItem, ErrorAnalysis } from '@/types'
+
+/**
+ * 错因类型 → 角标配色（与详情页红橙色系呼应，但按错因语义分色，便于列表一眼分拣）
+ * 粗心类用琥珀、概念混用紫、审题偏用橙、步骤错用蓝、未作答/未判分用灰、未知用玫红
+ */
+const ERROR_ANALYSIS_BADGE: Record<ErrorAnalysis['type'], string> = {
+  'no-answer': 'bg-gray-50 text-gray-600 border-gray-200',
+  unscored: 'bg-gray-50 text-gray-600 border-gray-200',
+  'careless-sign': 'bg-amber-50 text-amber-700 border-amber-200',
+  'careless-calc': 'bg-amber-50 text-amber-700 border-amber-200',
+  'concept-mix': 'bg-purple-50 text-purple-700 border-purple-200',
+  misread: 'bg-orange-50 text-orange-700 border-orange-200',
+  'method-step': 'bg-blue-50 text-blue-700 border-blue-200',
+  unknown: 'bg-rose-50 text-rose-700 border-rose-200',
+}
 
 interface Props {
   item: TimelineItem
@@ -121,6 +136,9 @@ export default function ReviewItemCard({
 
   // ---------- 题目条目：学科色条 + 题干 + 答案摘要 ----------
   const c = item.content || {}
+  // 错因角标：草稿/题目卡一眼看出错因分类（详情页也有完整分析）
+  const ea = c.error_analysis
+  const eaBadgeCls = ea?.type ? ERROR_ANALYSIS_BADGE[ea.type] ?? ERROR_ANALYSIS_BADGE.unknown : null
   return (
     <Card
       className={`rounded-2xl border-border overflow-hidden ${checked ? 'border-primary' : ''}`}
@@ -163,6 +181,11 @@ export default function ReviewItemCard({
               {item.in_review_book && timeField === 'created_at' && (
                 <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
                   复习本
+                </Badge>
+              )}
+              {eaBadgeCls && ea?.label && (
+                <Badge className={`${eaBadgeCls} border rounded-full px-2 py-0 text-xs`}>
+                  {ea.label}
                 </Badge>
               )}
             </View>

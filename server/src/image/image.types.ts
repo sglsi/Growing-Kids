@@ -1,5 +1,34 @@
 export type ImageAction = 'auto' | 'enhance' | 'erase' | 'erase_v2'
 
+/**
+ * 错题提取（切块→逐块识别→题号关联）请求体：POST /api/image/extract-wrong
+ * 与 recognize-pair 的区别：本接口先本地切块，再对每块单独 OCR，落库的是"题块图+区域文本"而非整图。
+ */
+export interface ExtractWrongDto {
+  /** 题面图（带红笔批改痕迹）的公网可访问 URL */
+  image_url: string
+  /** 答题卡/答案图 key（可选）；提供则按题号把答案文本关联到每道错题块 */
+  answer_image_keys?: string[]
+}
+
+/** 切块依据来源（诊断用，便于排查"为什么切得不对"） */
+export type WrongqBlockSource = 'red' | 'layout' | 'local-vlm' | 'none'
+
+/** `POST /api/image/extract-wrong` 的响应体 */
+export interface ExtractWrongResult {
+  items: import('../ocr/ocr.types').RecognizedItem[]
+  unmatched_questions: string[]
+  answer_image_keys: string[]
+  /** P1-8：拍摄清晰度门禁（仅提示，不阻断） */
+  quality?: { sharpness: number; sharp: boolean; hint?: string | null; sample_size?: number }
+  /** 本次切块走了哪条路：red=红笔锚定 / layout=纯版面兜底 / local-vlm=自托管 VLM 升级 */
+  block_source?: WrongqBlockSource
+  /** P1-13：被判定为近重复而合并掉的题数 */
+  deduped?: number
+  /** 诊断信息（块数、各分支计数等） */
+  debug?: Record<string, unknown>
+}
+
 export interface ProcessImageDto {
   // 自动调正 auto / 智能高清 enhance / 去手写(图生图) erase / 去手写(局部修复) erase_v2
   action: ImageAction

@@ -2,9 +2,11 @@ import { Injectable, BadRequestException } from '@nestjs/common'
 import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
 import * as http from 'http'
 import * as https from 'https'
+import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
-import type { RecognizedItem, LocalOcrResult } from './ocr.types'
+import type { RecognizedItem, LocalOcrResult, LocalOcrTextRegion, OcrBox } from './ocr.types'
 import { LocalOcrClient } from './ocr-engine.client'
+import { getSidecarSupervisor } from './sidecar.supervisor'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
 import { structureLocalItems } from './ocr-struct'
 import {
@@ -26,10 +28,15 @@ export class OcrService {
   // 仅当真正需要 VLM（语义切分 / 兜底看图）时才实例化。
   private vlmClient?: LLMClient
   private readonly localOcr: LocalOcrClient
+  private readonly sidecar = getSidecarSupervisor()
 
   constructor(private readonly storageService: StorageService) {
-    // 本地 OCR 侧车：失败静默返回 null（见 LocalOcrClient），由下方 VLM 降级接管
+    // 本地 OCR 侧车：失败静默返回 null（见 LocalOcrClient），由下方 VLM 降级接管。
+    // 这里注入的是共享单例 telemetry/alertSink（与 SidecarSupervisor 共用同一份，
+    // 探针与调用埋点视图一致），并启动主动健康探针——侧车失联会触发告警、恢复会通知，
+    // 解决"侧车宕机静默降级、无人知晓"的隐患（见 ocr-health.ts）。
     this.localOcr = new LocalOcrClient()
+    this.localOcr.startProbe()
   }
 
   private getVlm(): LLMClient {
@@ -100,7 +107,11 @@ export class OcrService {
   private async recognizeLocalByUrls(urls: string[]): Promise<LocalOcrResult | null> {
     if ((process.env.OCR_FALLBACK_TO_VLM ?? 'true') === 'false') return null
     try {
-      const results = await Promise.all(urls.map((u) => this.localOcr.recognizeByUrl(u)))
+      // 侧车守护：OCR 调用时按需拉起侧车，空闲/资源紧张时自动回收（见 sidecar.supervisor）
+      const results = await this.sidecar.withSidecar(() =>
+        Promise.all(urls.map((u) => this.localOcr.recognizeByUrl(u))),
+      )
+      if (!results || !results.length) return null
       const ok = results.filter(Boolean) as LocalOcrResult[]
       if (!ok.length) return null
       return {
@@ -586,5 +597,98 @@ export class OcrService {
     }
     const r = await this.recognizeImages(urls, EXAM_TASK)
     return r.items
+  }
+
+  /**
+   * 逐块 OCR：对一张切块（或单张图）跑本地 OCR 侧车，返回其识别文字。
+   *
+   * 用途：切块→逐块识别流程中，每个切出的错题区域单独识别，得到"该区域 OCR 文本"
+   * （这正是错题提取的原始意图，而非存整图）。全程本地优先（PaddleOCR/RapidOCR 侧车），
+   * 零 VLM 依赖。侧车不可用时返回空串（不抛），由调用方决定退化策略。
+   */
+  async recognizeBlockText(url: string): Promise<string> {
+    const local = await this.recognizeLocalByUrls([url])
+    return local?.raw_text?.trim() ?? ''
+  }
+
+  /**
+   * 逐块 OCR（**带坐标**）：返回本地 OCR 侧车识别出的文本区域（text + box + score）。
+   *
+   * 与 `recognizeBlockText` 的区别：后者只有文本，本方法保留每个文本片段的位置与置信度，
+   * 供 P1-9「题干 / 学生作答 / 教师批改」三分离使用 —— 没有坐标就无法把文本区域
+   * 与彩色笔迹掩膜对应起来，也就无从判断"这一行是印刷的还是红笔写的"。
+   *
+   * 坐标语义：**相对于传入图片的左上角**（[x0,y0,x1,y1]，轴对齐包围盒）。
+   * 侧车不可用时返回空数组（不抛），由调用方退化处理。
+   */
+  async recognizeBlockRegions(url: string): Promise<LocalOcrTextRegion[]> {
+    const local = await this.recognizeLocalByUrls([url])
+    if (!local || !Array.isArray(local.text_regions)) return []
+    return local.text_regions.filter((r) => (r.text || '').trim().length > 0)
+  }
+
+  /**
+   * 逐块 OCR（**整块文本 + 带坐标区域，一次返回**）。
+   *
+   * `recognizeBlockText` 只给文本、`recognizeBlockRegions` 只给区域——P1-9「题干/学生作答/
+   * 教师批改」三分离需要**同时**拿到整块文本（作 full text）与各区域的 box（与彩色笔迹掩膜
+   * 对应）。若分两次调用会让同一切块被 OCR 两遍。本方法一次调用 `recognizeLocalByUrls`
+   * 同时取回 `raw_text` 与 `text_regions`，侧车不可用时返回 null（不抛）。
+   */
+  async recognizeBlockFull(url: string): Promise<LocalOcrResult | null> {
+    const local = await this.recognizeLocalByUrls([url])
+    if (!local) return null
+    return local
+  }
+
+  /**
+   * 全页 OCR（**原图尺度**，带坐标）。
+   *
+   * 用途：P1-12 纯版面切块兜底——当没有红笔批改痕迹时，`extractWrongQuestions` 的红笔
+   * 锚定路径产出空 blocks，需要改以"版面 + 题号"在全页 OCR 上切题块，解除"必须红笔"的硬前提。
+   *
+   * 坐标语义：直接对原图 buffer 做 base64 识别，返回的 box 即原图像素坐标，与
+   * `extractWrong` 按 `ctx.flatBuf` 裁图的坐标系一致；**不经过入库的 1600 长边 resize**，
+   * 因此不存在坐标错配（这是相对"先入库再走 URL 识别"方案的取舍修正）。
+   *
+   * 大图先等比缩到长边 ≤2000 再识别（侧车 CPU 推理，过大会超时），坐标按比例回算到原图。
+   * 侧车不可用时返回空数组（不抛），由调用方退化处理。
+   */
+  async recognizePageRegions(buf: Buffer): Promise<LocalOcrTextRegion[]> {
+    try {
+      const meta = await sharp(buf).metadata()
+      const ow = meta.width ?? 0
+      const oh = meta.height ?? 0
+      const maxEdge = 2000
+      let ocrBuf = buf
+      let sx = 1
+      let sy = 1
+      if (ow > maxEdge || oh > maxEdge) {
+        const scale = maxEdge / Math.max(ow, oh)
+        sx = 1 / scale
+        sy = 1 / scale
+        ocrBuf = await sharp(buf)
+          .resize({ width: Math.round(ow * scale), height: Math.round(oh * scale) })
+          .png()
+          .toBuffer()
+      }
+      const local = await this.sidecar.withSidecar(() =>
+        this.localOcr.recognizeByBase64(ocrBuf.toString('base64')),
+      )
+      if (!local || !Array.isArray(local.text_regions)) return []
+      return local.text_regions
+        .filter((r) => (r.text || '').trim().length > 0)
+        .map((r) => ({
+          ...r,
+          box: [
+            Math.round(r.box[0] * sx),
+            Math.round(r.box[1] * sy),
+            Math.round(r.box[2] * sx),
+            Math.round(r.box[3] * sy),
+          ] as OcrBox,
+        }))
+    } catch {
+      return []
+    }
   }
 }

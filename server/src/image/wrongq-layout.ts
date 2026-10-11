@@ -29,6 +29,9 @@ export interface LayoutContext {
   /** 压平后的图像 buffer（供后续 mask/裁图复用，避免重复 straighten） */
   flatBuf: Buffer
   inkRatio: number
+  /** 朝向未经 OCR 消歧确认（侧车不可用时静默回落几何）→ 本页可能整页倒置 */
+  orientSuspect?: boolean
+  orientMethod?: 'projection' | 'ocr' | 'none'
 }
 
 function lumaFrom(data: Buffer, w: number, h: number, ch: number): Float32Array {
@@ -157,5 +160,10 @@ export async function buildLayoutContext(buf: Buffer): Promise<LayoutContext> {
     colRows.push(merged)
   }
 
-  return { w, h, medH, ink: ink2, cols, colRows, luma, flatBuf, inkRatio }
+  return {
+    w, h, medH, ink: ink2, cols, colRows, luma, flatBuf, inkRatio,
+    // 朝向风险透传：true = 摆正未经 OCR 消歧，本页可能整页倒置，结果不可直接采信
+    orientSuspect: st.orientSuspect === true,
+    orientMethod: st.orientMethod,
+  }
 }

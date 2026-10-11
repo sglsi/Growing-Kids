@@ -1,4 +1,11 @@
 import type { LocalOcrResult } from './ocr.types'
+import {
+  type OcrTelemetry,
+  type OcrAlertSink,
+  OcrHealthProbe,
+  getOcrTelemetry,
+  getOcrAlertSink,
+} from './ocr-health'
 
 export type LocalOcrMode = 'both' | 'rapid' | 'paddle'
 
@@ -6,6 +13,22 @@ export interface LocalOcrClientOptions {
   baseUrl?: string
   timeoutMs?: number
   mode?: LocalOcrMode
+  /** 埋点（成功率/降级率统计）。默认共享 getOcrTelemetry 单例。 */
+  telemetry?: OcrTelemetry
+  /** 告警上报。默认共享 getOcrAlertSink 单例。 */
+  alertSink?: OcrAlertSink
+  /** 是否随客户端自动启动健康探针（定时探活 + 失联告警）。默认 true。 */
+  autoProbe?: boolean
+  /** 探针周期（ms）。默认 30s，可用 OCR_HEALTH_PROBE_MS 覆盖。 */
+  probeIntervalMs?: number
+  /** 探针连续失败达此次数才告警（防抖）。默认 3，可用 OCR_HEALTH_FAILS 覆盖。 */
+  probeFailThreshold?: number
+  /** 「可用率跌阈值自动告警」阈值（0~1）。默认 0.8，可用 OCR_AVAIL_WARN_THRESHOLD 覆盖。 */
+  availThreshold?: number
+  /** 评估可用率所需的最小窗口样本数，低于则视为无信号不告警。默认 5，可用 OCR_AVAIL_MIN_SAMPLES 覆盖。 */
+  availMinSamples?: number
+  /** 可用率连续低于阈值的 tick 次数达此值才告警（防抖）。默认 3，可用 OCR_AVAIL_FAILS 覆盖。 */
+  availFailThreshold?: number
 }
 
 /**
@@ -20,6 +43,10 @@ export class LocalOcrClient {
   private readonly baseUrl: string
   private readonly timeoutMs: number
   private readonly mode: LocalOcrMode
+  private readonly telemetry: OcrTelemetry
+  private readonly alertSink: OcrAlertSink
+  private readonly probe: OcrHealthProbe | null
+  private probeStop: (() => void) | null = null
 
   constructor(opts: LocalOcrClientOptions = {}) {
     this.baseUrl = opts.baseUrl ?? process.env.OCR_ENGINE_URL ?? 'http://127.0.0.1:9000'
@@ -27,6 +54,30 @@ export class LocalOcrClient {
     // 并允许通过 OCR_TIMEOUT_MS 覆盖。超时即视为失败 → 降级 VLM。
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.OCR_TIMEOUT_MS ?? 60_000)
     this.mode = opts.mode ?? 'both'
+    this.telemetry = opts.telemetry ?? getOcrTelemetry()
+    this.alertSink = opts.alertSink ?? getOcrAlertSink()
+
+    const autoProbe = opts.autoProbe ?? (process.env.OCR_AUTO_PROBE ?? 'true') !== 'false'
+    const probeIntervalMs = opts.probeIntervalMs ?? Number(process.env.OCR_HEALTH_PROBE_MS ?? 30_000)
+    const probeFailThreshold = opts.probeFailThreshold ?? Number(process.env.OCR_HEALTH_FAILS ?? 3)
+    if (autoProbe) {
+      this.probe = new OcrHealthProbe({
+        probe: () => this.health(),
+        intervalMs: probeIntervalMs,
+        failThreshold: probeFailThreshold,
+        alertSink: this.alertSink,
+        telemetry: this.telemetry,
+        label: this.baseUrl,
+        // 「可用率跌阈值自动告警」：默认 80% 可用率告警、样本≥5、连续 3 次触发
+        availThreshold: opts.availThreshold ?? Number(process.env.OCR_AVAIL_WARN_THRESHOLD ?? 0.8),
+        availMinSamples: opts.availMinSamples ?? Number(process.env.OCR_AVAIL_MIN_SAMPLES ?? 5),
+        availFailThreshold: opts.availFailThreshold ?? Number(process.env.OCR_AVAIL_FAILS ?? 3),
+      })
+    } else {
+      this.probe = null
+    }
+    // autoProbe 即"自动启动探针"：构造后立即开始定时探活（startProbe 幂等，重复调用安全）
+    if (this.probe) this.startProbe()
   }
 
   async recognizeByUrl(imageUrl: string, mode: LocalOcrMode = this.mode): Promise<LocalOcrResult | null> {
@@ -62,14 +113,35 @@ export class LocalOcrClient {
       })
       if (!res.ok) {
         console.warn(`[local-ocr] 侧车返回 ${res.status}，降级 VLM`)
+        this.telemetry.markDegrade(`http_${res.status}`)
         return null
       }
+      this.telemetry.markSuccess()
       return (await res.json()) as LocalOcrResult
     } catch (e) {
       console.warn(`[local-ocr] 调用失败，降级 VLM: ${String((e as Error)?.message ?? e)}`)
+      this.telemetry.markDegrade('error')
       return null
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /** 启动主动健康探针（定时探活 + 连续失败告警）。已启动则 no-op。 */
+  startProbe(): void {
+    this.probe?.start()
+  }
+
+  /** 停止健康探针并释放定时器。 */
+  stopProbe(): void {
+    this.probe?.stop()
+  }
+
+  /** 调试/监控用：返回埋点快照与当前 baseUrl。 */
+  getDiagnostics() {
+    return {
+      baseUrl: this.baseUrl,
+      telemetry: this.telemetry.snapshot(),
     }
   }
 }

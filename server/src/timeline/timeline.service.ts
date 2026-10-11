@@ -1,5 +1,8 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
+import { findSimilarQuestions } from '../ocr/ocr-similar'
+import { buildReviewPlan, nextReviewCount } from './review'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import type {
@@ -135,6 +138,8 @@ export class TimelineService {
 
     const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
     if (error) throw new Error(error.message)
+    // 迁移双写：DB_PROVIDER=dual 时把同一行镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorInsert(TABLE, payload)
     return data as unknown as TimelineItem
   }
 
@@ -172,6 +177,9 @@ export class TimelineService {
         level: typeof c.level === 'number' ? c.level : null,
         parent_index: c.parent_index ?? null,
         stem: c.stem || '',
+        // P2-16 / P2-18：错因分析结论与艾宾浩斯复习阶段计数（jsonb 免迁移，直接存）
+        error_analysis: c.error_analysis ?? null,
+        review_count: typeof c.review_count === 'number' ? c.review_count : 0,
       }
     }
     return payload
@@ -198,6 +206,8 @@ export class TimelineService {
     })
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
+    // 迁移双写：DB_PROVIDER=dual 时把这批行镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorInsert(TABLE, payloads)
     return (data || []) as unknown as TimelineItem[]
   }
 
@@ -245,6 +255,8 @@ export class TimelineService {
     if (!updated || updated.length === 0) {
       throw new NotFoundException('内容不存在或无权修改')
     }
+    // 迁移双写：DB_PROVIDER=dual 时把同一行变更镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorUpdate(TABLE, payload, { user_id: userId, id })
 
     // 2) 单独查询返回完整记录（此时嵌入 subjects 走的是普通 SELECT，稳定返回）
     return this.findOne(userId, id)
@@ -351,6 +363,25 @@ export class TimelineService {
       .select('id')
     if (error) throw new Error(error.message)
     return { updated: (data || []).length }
+  }
+
+  // ---------- P2-17 相似题推荐（基于用户自建错题历史） ----------
+  async findSimilar(userId: string, id: string, limit = 5) {
+    return findSimilarQuestions(userId, id, limit)
+  }
+
+  // ---------- P2-18 艾宾浩斯复习：标记完成一次复习 ----------
+  /**
+   * 把指定题的复习计数 +1（封顶 total 阶段数），返回更新后的计数与现算的复习计划。
+   * 复习计划由 created_at + review_count 现算（见 ./review.ts），不冗余存储。
+   */
+  async markReviewed(userId: string, id: string): Promise<{ review_count: number; plan: ReturnType<typeof buildReviewPlan> }> {
+    const item = await this.findOne(userId, id)
+    const cur = typeof item.content?.review_count === 'number' ? item.content.review_count : 0
+    const next = nextReviewCount(cur)
+    const merged = { ...(item.content || {}), review_count: next }
+    const updated = await this.update(userId, id, { content: merged })
+    return { review_count: next, plan: buildReviewPlan(updated.created_at, next) }
   }
 
   // ---------- 首页概览 ----------

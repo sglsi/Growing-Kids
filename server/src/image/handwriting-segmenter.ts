@@ -180,7 +180,9 @@ export async function segmentByVlm(
         ],
       },
     ],
-    { temperature: 0, thinking: 'disabled', streaming: false, headers },
+    { temperature: 0, thinking: 'disabled', streaming: false },
+    undefined,
+    headers,
   )
 
   const raw = resp?.content || ''

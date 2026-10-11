@@ -2,6 +2,8 @@ export type TimelineKind = 'image' | 'question'
 
 export type TimelineScope = 'recent' | 'review'
 
+import type { ErrorAnalysis } from '../ocr/ocr.types'
+
 /** 题目的结构化内容（存于 timeline_items.content） */
 export interface QuestionContent {
   question?: string
@@ -20,6 +22,10 @@ export interface QuestionContent {
   parent_index?: number | null
   /** 所属大题完整题干（子题携带，可脱离父题独立读懂） */
   stem?: string
+  /** P2-16 错因分析结论（本地规则引擎产出；SBERT 分可选） */
+  error_analysis?: ErrorAnalysis
+  /** P2-18 艾宾浩斯复习阶段计数：已完成的复习次数（计划由 created_at + 该值现算） */
+  review_count?: number
 }
 
 export interface TimelineItem {

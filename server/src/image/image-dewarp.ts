@@ -1,4 +1,5 @@
 import sharp from 'sharp'
+import { estimateOrientation, rotateBuffer, ocrVolumeFromSidecar, type OrientationAngle } from './image-orient'
 
 export type Corner = [number, number]
 
@@ -190,6 +191,19 @@ export interface StraightenOptions {
    * 见 image-perspective.ts 顶部说明。
    */
   perspective?: boolean
+  /**
+   * 是否做**朝向自动摆正**（0/90/180/270° 翻转，默认 true）。
+   *
+   * 纯几何投影法判定文字横排/竖排，确定性修掉 90°/270° 侧翻（零外部依赖）；
+   * 0/180、90/270 的镜像消歧为最佳努力，需侧车 OCR（CV 模型，非大模型）辅助。
+   * 详见 image-orient.ts。
+   */
+  orient?: boolean
+  /**
+   * 朝向镜像消歧是否启用 OCR 侧车细化（默认跟随 env `OCR_ORIENT_REFINE`）。
+   * 关闭则仅用纯几何（侧车不可达时自动回落此项）。
+   */
+  orientOcrRefine?: boolean
 }
 
 export interface StraightenOutput {
@@ -201,6 +215,22 @@ export interface StraightenOutput {
   needManual: boolean
   /** 实际使用的路径（便于 debug / 回归） */
   method?: 'manual' | 'auto' | 'curved' | 'skew' | 'perspective' | 'none'
+  /** 朝向摆正：实际施加的旋转角与判定方式（无旋转时为 0 / 'none'） */
+  orientAngle?: OrientationAngle
+  orientMethod?: 'projection' | 'ocr' | 'none'
+  orientAxis?: 'horizontal' | 'vertical'
+  /**
+   * true = 朝向**未经 OCR 消歧确认**，可能整页倒置（上下颠倒）。
+   *
+   * ⚠️ 由来（实测踩出来的坑）：0°/180°、90°/270° 的"正立与否"**纯几何无法判定**
+   * （投影关于 180° 镜像对称），必须靠 OCR 读文字量来定。若 OCR 侧车不可达
+   * （进程被杀/超时/DRY_RUN），几何法会静默给出一个角度——**可能是反的**。
+   * 实测表现：侧车挂掉后摆正回落 projection、angle=90（正确应为 270），
+   * 整页上下颠倒却照样出结果，medH 28.3→24.7、红笔标记 288→281，
+   * 错题数从 6 掉到 5——这类"静默脏数据"比直接报错危险得多。
+   * 上层（错题提取等）应据此字段决定是否信任本页结果 / 提示用户复核。
+   */
+  orientSuspect?: boolean
   /** skew 路径专用：实际施加的旋转角（度）与置信度 */
   rotateDeg?: number
   confidence?: number
@@ -217,30 +247,64 @@ export interface StraightenOutput {
  * 当前恒回落平面 homography，故行为与 Phase 1 一致、不劣化。
  */
 export async function straightenImage(buf: Buffer, opts: StraightenOptions): Promise<StraightenOutput> {
+  // ⭐ 朝向自动摆正（默认开启，纯几何、零外部依赖）：
+  //   先判定文字横排/竖排并转正，再走后续四角/倾斜/透视流程——否则 90° 侧翻的图
+  //   会让四角检测、deskew、版面切分全部在错误朝向下工作（实测横躺图文字被竖读、切块碎片化）。
+  let workBuf: Buffer = buf
+  const orientResult: {
+    angle: OrientationAngle
+    method: 'none' | 'projection' | 'ocr'
+    axis: 'horizontal' | 'vertical'
+    suspect: boolean
+  } = { angle: 0, method: 'none', axis: 'horizontal', suspect: false }
+  if (opts.orient !== false) {
+    try {
+      const refine = opts.orientOcrRefine ?? process.env.OCR_ORIENT_REFINE !== '0'
+      const ocrVol = refine ? ocrVolumeFromSidecar() : undefined
+      const o = await estimateOrientation(workBuf, ocrVol)
+      orientResult.angle = o.angle
+      orientResult.method = o.method
+      orientResult.axis = o.axis
+      if (o.angle !== 0) workBuf = await rotateBuffer(workBuf, o.angle)
+      console.log(`[image-dewarp] 朝向摆正：旋转 ${o.angle}°（方法 ${o.method}，主轴 ${o.axis}）`)
+      // 落回几何 = OCR 消歧没生效：0/180、90/270 无法区分，本页**可能整页倒置**。
+      // 必须打醒目告警（而不是悄悄继续），否则产出的脏数据会被当成正常结果使用。
+      if (o.method === 'projection' && refine && o.angle !== 0) {
+        orientResult.suspect = true
+        console.warn(
+          `⚠️ [image-dewarp] 朝向未经 OCR 确认（method=projection），本页可能上下颠倒！` +
+            ` 已启用 OCR 细化但侧车不可用/为 DRY_RUN；请检查 OCR 侧车后重跑，勿直接采信本次结果。`,
+        )
+      }
+    } catch (e) {
+      console.warn('[image-dewarp] 朝向摆正失败，沿用原图：', (e as Error).message)
+    }
+  }
+
   // 曲面优先（若启用）：命中则用它，否则继续走平面路径
   if (opts.curved) {
     const { dewarpCurved } = await import('./image-curvedewarp')
-    const curved = await dewarpCurved(buf)
+    const curved = await dewarpCurved(workBuf)
     if (curved) {
-      return { buffer: curved.buffer, width: curved.width, height: curved.height, needManual: false, method: 'curved' }
+      return { buffer: curved.buffer, width: curved.width, height: curved.height, needManual: false, method: 'curved', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
     }
   }
   if (opts.manualCorners && opts.manualCorners.length === 4) {
     // 手动四角：用户拉的四边形可能退化（共线/面积≈0/自交）→ 单应矩阵奇异。
     // 此处捕获并**回落自动检测**，绝不把几何异常抛给上层（否则前端一次误拖就 500）。
     try {
-      const r = await dewarpBuffer(buf, opts.manualCorners)
-      return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'manual' }
+      const r = await dewarpBuffer(workBuf, opts.manualCorners)
+      return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'manual', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
     } catch (e) {
       console.warn('[image-dewarp] 手动四角无效，回落自动检测：', (e as Error).message)
     }
   }
   if (opts.auto) {
-    const corners = await detectDocumentCorners(buf)
+    const corners = await detectDocumentCorners(workBuf)
     if (corners) {
       try {
-        const r = await dewarpBuffer(buf, corners)
-        return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'auto' }
+        const r = await dewarpBuffer(workBuf, corners)
+        return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'auto', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
       } catch (e) {
         console.warn('[image-dewarp] 自动检测四角无效：', (e as Error).message)
       }
@@ -258,7 +322,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
   if (opts.deskew !== false) {
     try {
       const { deskewImage } = await import('./image-deskew')
-      const d = await deskewImage(buf)
+      const d = await deskewImage(workBuf)
       if (d) {
         console.log(
           `[image-dewarp] 四角检测未命中，走文本行倾斜估计：旋转 ${d.rotateDeg}°（置信度 ${d.confidence.toFixed(2)}）`,
@@ -275,7 +339,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
   //   旋转模型修不了「行与行互不平行」，那是透视的指纹。此时整体角度往往≈0，
   //   deskew 会判定"本来就正"而放手不管，用户看到的就是"点了没反应"。
   //   在旋转后的图上继续校正（先去掉整体旋转，剩下的 σ 才干净地代表透视）。
-  const baseForPersp = rotBuf ?? buf
+  const baseForPersp = rotBuf ?? workBuf
   if (opts.perspective !== false) {
     try {
       const { fixPerspectiveFromText } = await import('./image-perspective')
@@ -293,6 +357,9 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
           method: 'perspective',
           orderedCorners: p.corners,
           ...(skewInfo ?? {}),
+          orientAngle: orientResult.angle,
+          orientMethod: orientResult.method,
+          orientAxis: orientResult.axis, orientSuspect: orientResult.suspect,
           parallelBefore: p.beforeStd,
           parallelAfter: p.afterStd,
         }
@@ -311,8 +378,11 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
       needManual: false,
       method: 'skew',
       ...(skewInfo ?? {}),
+      orientAngle: orientResult.angle,
+      orientMethod: orientResult.method,
+      orientAxis: orientResult.axis, orientSuspect: orientResult.suspect,
     }
   }
 
-  return { buffer: null, needManual: true, method: 'none' }
+  return { buffer: null, needManual: true, method: 'none', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
 }

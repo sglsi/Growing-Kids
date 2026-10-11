@@ -8,7 +8,7 @@
  *    配置了 COZE_API_TOKEN 后，只需传 imageUrl（公网可达）即自动启用融合。
  */
 import { buildLayoutContext, type LayoutContext } from './wrongq-layout'
-import { detectRedMarks } from './wrongq-mark'
+import { detectRedMarks, groupWritingClusters } from './wrongq-mark'
 import { buildBlocks } from './wrongq-block'
 import { decideLocal, fuseVlm } from './wrongq-decide'
 import { vlmQuestionBlocks } from './wrongq-vlm'
@@ -22,8 +22,16 @@ export async function extractWrongQuestions(
 ): Promise<WrongqPageResult> {
   const ctx: LayoutContext = prebuiltCtx ?? (await buildLayoutContext(buf))
   const red = await detectRedMarks(ctx.flatBuf, ctx, { chromaMin: opts.chromaMin ?? 14 })
-  const blocks = buildBlocks(red.marks, ctx)
-  decideLocal(blocks, red.marks)
+  // 语义层：邻近红笔笔画聚成"书写簇"= 教师手写订正处（判定与切块的新锚点）
+  const clusters = groupWritingClusters(red.marks, ctx.medH, {
+    gapRatio: opts.clusterGap ?? 0.5,
+    minParts: opts.clusterMinParts ?? 3,
+    minInkRatio: opts.clusterMinInk ?? 0.8,
+  })
+  // mergeIoU：收敛同列内纵向高度重叠的重复块（默认 0.85；opts 显式传 0 可关闭做回归对照）
+  const blocks = buildBlocks(red.marks, ctx, opts.mergeIoU ?? 0.85, clusters)
+  // 传入 medH 以启用"批阅符号尺寸闸门"，过滤红笔连笔被拆出的碎片
+  decideLocal(blocks, red.marks, ctx.medH, clusters)
 
   let vlmUsed = false
   let vlmError: string | undefined
@@ -40,6 +48,7 @@ export async function extractWrongQuestions(
     medH: +ctx.medH.toFixed(1),
     cols: ctx.cols,
     marks: red.marks,
+    clusters,
     blocks,
     vlmUsed,
     vlmError,
@@ -48,6 +57,8 @@ export async function extractWrongQuestions(
       furnitureCount: red.furnitureCount,
       redCoverage: +red.coverage.toFixed(4),
       colRowCounts: ctx.colRows.map((r) => r.length),
+      orientSuspect: ctx.orientSuspect === true,
+      orientMethod: ctx.orientMethod,
     },
   }
 }

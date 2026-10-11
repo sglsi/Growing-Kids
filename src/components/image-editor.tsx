@@ -111,17 +111,20 @@ const SR_SCALES: { value: SRScale; label: string; hint: string }[] = [
 ]
 
 /**
- * P1 五种输出模式（对齐扫描全能王，方案 §P1 taxonomy）。
- * 用户点「智能高清」后并列产出这五种预览图，自行挑选最满意的一张——
- * 不再由算法替用户"定一个最好结果"。
+ * 智能高清的「基础画面模式」（用户直接点选，对应后端 enhance_preset）。
+ * 清单：原图 / 增强并锐化 / 增亮 / 灰度 / 黑白。x2/x3/x4 超分另立为
+ * 「高清扩展」分组（见 SR_SCALES / HD_EXTENSION），默认选中「黑白」。
  */
 const ENHANCE_PRESETS: { value: string; label: string; hint: string }[] = [
   { value: 'original', label: '原图', hint: '不增强' },
-  { value: 'enhance', label: '增强', hint: '彩色·锐化' },
-  { value: 'bw', label: '黑白', hint: '文档·最清晰' },
+  { value: 'enhance', label: '增强并锐化', hint: '彩色·锐化' },
   { value: 'brighten', label: '增亮', hint: '偏暗/阴影' },
   { value: 'gray', label: '灰度', hint: '去色·留层次' },
+  { value: 'bw', label: '黑白', hint: '文档·最清晰' },
 ]
+
+/** 高清扩展：把原「x2/x3/x4 超分」立为独立可选分组（任务 #91 标记「超分=高清扩展」） */
+const HD_EXTENSION = { value: 'hd', label: '高清扩展', hint: 'x2/x3/x4 超分放大' }
 
 /** P1 强度档位：把"是否过头"的把控权交给用户 */
 const ENHANCE_STRENGTHS: { value: 'weak' | 'medium' | 'strong'; label: string }[] = [
@@ -153,7 +156,8 @@ export default function ImageEditor({
   // 满足「该状态只能是点击裁剪后才会出现」。AI/旋转后回到 false（干净预览）。
   const [framing, setFraming] = useState(true)
   const [previewError, setPreviewError] = useState(false)
-  // 智能高清设置：倍率 + 模式（点「智能高清」时弹出小面板选择，选定后再处理）
+  // 智能高清：点开即出「黑白」预览（默认），面板内可切换其他模式实时预览；
+  // 倍率/处理模式仅「高清扩展」分组下使用。
   const [srScale, setSrScale] = useState<SRScale>(2)
   const [srMode, setSrMode] = useState<SRMode>('classical')
   // ── P1 后续：多模式预览自选 ────────────────────────────────────────────
@@ -166,6 +170,12 @@ export default function ImageEditor({
   /** 多模式预览的「原图底稿」：换模式时以它为输入重新生成，避免在处理结果上二次叠加增强 */
   const [enhanceBase, setEnhanceBase] = useState<string>('')
   const [srPanelOpen, setSrPanelOpen] = useState(false)
+  /**
+   * 智能高清面板中选中的模式：基础画面模式（'original'|'enhance'|'brighten'|'gray'|'bw'）
+   * 或「高清扩展」('hd')。默认 'bw'（黑白）——点开即给出黑白预览；点「确定」时
+   * 据此决定走 enhance_preset 还是 sr_scale 路径。
+   */
+  const [activeMode, setActiveMode] = useState<'original' | 'enhance' | 'brighten' | 'gray' | 'bw' | 'hd'>('bw')
 
   // ── 去手写：框选补擦 + 对比 + 撤销（方案 §5.10 R1/R2）────────────────────
   // eraseMode=true：用户在 result 图上划框，圈出「自动漏擦的手写」
@@ -957,12 +967,12 @@ export default function ImageEditor({
       manual_regions?: EraseRegion[]
       /** 去手写擦除模式（v18.2）：'color'=红/蓝笔卷保印刷；缺省 union=黑笔卷 */
       erase_mode?: 'union' | 'color'
-      /** P1 多模式：输出模式选择（original/enhance/bw/brighten/gray） */
+      /** 智能高清输出模式（P1 预览自选） */
       enhance_preset?: 'original' | 'enhance' | 'bw' | 'brighten' | 'gray'
-      /** P1 多模式：强度档位 1/2/3 */
-      enhance_strength?: 1 | 2 | 3
-      /** P1 多模式：是否返回五种并列输出 */
+      /** 一次产出五种模式预览图（P1 预览自选） */
       multi_modes?: boolean
+      /** 智能高清强度档位（P1 档位选择） */
+      enhance_strength?: 'weak' | 'medium' | 'strong'
     },
     /** true = 本次为「限流降级重试」，不再二次降级（防循环） */
     degradedRetry = false,
@@ -1068,7 +1078,9 @@ export default function ImageEditor({
           setModeThumbs(modes)
           setEnhanceBase(srcBefore)
           const auto = (data as any)?.debug?.autoPreset as string | undefined
-          setActivePreset(auto || 'enhance')
+          const reqPreset = (opts as any)?.enhance_preset as string | undefined
+          // 优先用用户刚选中的画面模式高亮，其次后端智能默认档，最后回退增强
+          setActivePreset(reqPreset || auto || 'enhance')
         } else {
           setModeThumbs({})
         }
@@ -1203,14 +1215,19 @@ export default function ImageEditor({
 
   /**
    * AI 动作派发：
-   *  - 智能高清(enhance)：先弹出「倍率 / 模式」选择面板，选定后再处理（让用户可控）。
+   *  - 智能高清(enhance)：先弹出模式选择面板（基础画面模式 + 高清扩展），选定后再处理。
    *  - 自动调正(auto)：若当前处于四角模式，带上手动四角（归一化）提交 → 精准透视压平。
    *  - 其余动作：保持原行为，点击即处理。
    */
   const dispatchAi = (action: ImageAction, label: string) => {
     if (aiBusy || busy) return
     if (action === 'enhance') {
+      setActiveMode('bw') // 默认选中「黑白」，点开即给出黑白预览
       setSrPanelOpen(true)
+      // 点开即生成预览：默认以黑白出图，用户可在面板内切换其他模式实时预览
+      if (Object.keys(modeThumbs).length === 0) {
+        void runEnhance(false)
+      }
       return
     }
     if (action === 'auto') {
@@ -1248,7 +1265,7 @@ export default function ImageEditor({
     await handleAi(
       'enhance',
       '智能高清',
-      { sr_scale: srScale, sr_mode: srMode, enhance_preset: preset as 'original' | 'enhance' | 'bw' | 'brighten' | 'gray', enhance_strength: (({ weak: 1, medium: 2, strong: 3 } as const)[enhanceStrength]) ?? 2 },
+      { sr_scale: srScale, sr_mode: srMode, enhance_preset: preset as any, enhance_strength: enhanceStrength },
       false,
       enhanceBase || undefined,
     )
@@ -1283,16 +1300,47 @@ export default function ImageEditor({
     void handleAi('auto', '自动调正', { manual_corners: quad })
   }
 
-  // 面板里点「开始处理」：带上所选倍率/模式调用后端
-  const runEnhance = () => {
+  // 智能高清处理：按当前选中的模式分支调用后端。
+  // closePanel=true（默认）：处理完关闭面板（用于「确定」直接应用）。
+  // closePanel=false：处理完保留面板（用于点开即出默认预览 / 切换模式实时预览）。
+  const runEnhance = (closePanel = true) => {
+    if (closePanel) setSrPanelOpen(false)
+    if (activeMode === 'hd') {
+      // 高清扩展：走超分倍率（x2/x3/x4）+ 推理模式
+      void handleAi('enhance', '智能高清', {
+        sr_scale: srScale,
+        sr_mode: srMode,
+        multi_modes: true,
+        enhance_strength: enhanceStrength,
+      })
+    } else {
+      // 基础画面模式：直接以所选 enhance_preset 处理（仍一次产出多模式预览供微调）
+      const preset = activeMode as 'original' | 'enhance' | 'brighten' | 'gray' | 'bw'
+      void handleAi('enhance', '智能高清', {
+        enhance_preset: preset,
+        multi_modes: true,
+        enhance_strength: enhanceStrength,
+      })
+    }
+  }
+
+  // 面板「确定」：确认当前选中模式。
+  //  - 基础模式：主预览已实时落到所选模式（点开默认黑白 / 切换即预览），直接确认；
+  //    若当前高亮与最终主图不一致（切换尚未完成），补切一次。
+  //  - 高清扩展：以所选 x2/x3/x4 运行超分并应用。
+  const onConfirmEnhance = () => {
+    if (activeMode === 'hd') {
+      void runEnhance(true)
+      return
+    }
+    if (Object.keys(modeThumbs).length === 0) {
+      void runEnhance(true)
+      return
+    }
+    if (activePreset !== activeMode) {
+      void pickEnhanceMode(activeMode)
+    }
     setSrPanelOpen(false)
-    // ⭐ P1 预览自选：一次产出五模式预览图，让用户挑最满意的一张（方案 §P1）
-    void handleAi('enhance', '智能高清', {
-      sr_scale: srScale,
-      sr_mode: srMode,
-      multi_modes: true,
-      enhance_strength: (({ weak: 1, medium: 2, strong: 3 } as const)[enhanceStrength]) ?? 2,
-    })
   }
 
   return (
@@ -1668,7 +1716,7 @@ export default function ImageEditor({
         </Button>
       </View>
 
-      {/* 智能高清「倍率 / 模式」选择面板 */}
+      {/* 智能高清选择面板：基础画面模式（直接点选） + 高清扩展（x2/x3/x4 超分） */}
       {srPanelOpen && (
         <View className="absolute inset-0 z-[210]" onClick={() => setSrPanelOpen(false)}>
           <View className="absolute inset-0" style={{ backgroundColor: 'rgba(0,0,0,0.55)' }} />
@@ -1677,48 +1725,31 @@ export default function ImageEditor({
             style={{ bottom: 24, backgroundColor: '#1c1c1e' }}
             onClick={(e: any) => e?.stopPropagation?.()}
           >
-            <Text className="block text-white text-base font-medium mb-3">智能高清设置</Text>
+            <Text className="block text-white text-base font-medium mb-3">智能高清</Text>
 
-            {/* 倍率 */}
-            <Text className="block text-white text-opacity-70 text-xs mb-2">放大倍率</Text>
-            <View className="flex flex-row gap-2 mb-4">
-              {SR_SCALES.map((s) => {
-                const active = srScale === s.value
-                return (
-                  <View
-                    key={s.value}
-                    className="flex-1 rounded-xl py-2 items-center"
-                    style={{
-                      backgroundColor: active ? '#3b82f6' : 'rgba(255,255,255,0.08)',
-                      borderWidth: 1,
-                      borderStyle: 'solid',
-                      borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.15)',
-                    }}
-                    onClick={() => setSrScale(s.value)}
-                  >
-                    <Text className="block text-white text-sm font-medium">{s.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{s.hint}</Text>
-                  </View>
-                )
-              })}
-            </View>
-
-            {/* 模式 */}
-            <Text className="block text-white text-opacity-70 text-xs mb-2">处理模式</Text>
-            <View className="flex flex-row gap-2 mb-4">
-              {SR_MODES.map((m) => {
-                const active = srMode === m.value
+            {/* 画面模式 / 高清扩展：用户直接点选 */}
+            <Text className="block text-white text-opacity-70 text-xs mb-2">画面模式（点击选择）</Text>
+            <View className="flex flex-row flex-wrap gap-2 mb-1">
+              {[...ENHANCE_PRESETS, HD_EXTENSION].map((m) => {
+                const active = activeMode === m.value
                 return (
                   <View
                     key={m.value}
-                    className="flex-1 rounded-xl py-2 items-center"
+                    className="flex-1 min-w-[30%] rounded-xl py-2 items-center"
                     style={{
                       backgroundColor: active ? '#3b82f6' : 'rgba(255,255,255,0.08)',
                       borderWidth: 1,
                       borderStyle: 'solid',
                       borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.15)',
                     }}
-                    onClick={() => setSrMode(m.value)}
+                    onClick={() => {
+                      setActiveMode(m.value as 'original' | 'enhance' | 'brighten' | 'gray' | 'bw' | 'hd')
+                      // 高清扩展：仅展开 x2/x3/x4 子选项，不触发预览
+                      if (m.value === 'hd') return
+                      // 基础模式：预览已就绪则实时切换主图；否则先以该模式出图
+                      if (modeThumbs[m.value]?.url) void pickEnhanceMode(m.value)
+                      else void runEnhance(false)
+                    }}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
                     <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
@@ -1727,8 +1758,59 @@ export default function ImageEditor({
               })}
             </View>
 
+            {/* 高清扩展专属：放大倍率 + 处理模式（仅选中「高清扩展」时出现） */}
+            {activeMode === 'hd' && (
+              <View className="mb-1">
+                <Text className="block text-white text-opacity-70 text-xs mb-2 mt-3">放大倍率</Text>
+                <View className="flex flex-row gap-2 mb-3">
+                  {SR_SCALES.map((s) => {
+                    const active = srScale === s.value
+                    return (
+                      <View
+                        key={s.value}
+                        className="flex-1 rounded-xl py-2 items-center"
+                        style={{
+                          backgroundColor: active ? '#3b82f6' : 'rgba(255,255,255,0.08)',
+                          borderWidth: 1,
+                          borderStyle: 'solid',
+                          borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.15)',
+                        }}
+                        onClick={() => setSrScale(s.value)}
+                      >
+                        <Text className="block text-white text-sm font-medium">{s.label}</Text>
+                        <Text className="block text-white text-opacity-60 text-[10px] mt-1">{s.hint}</Text>
+                      </View>
+                    )
+                  })}
+                </View>
+
+                <Text className="block text-white text-opacity-70 text-xs mb-2">处理模式</Text>
+                <View className="flex flex-row gap-2 mb-1">
+                  {SR_MODES.map((m) => {
+                    const active = srMode === m.value
+                    return (
+                      <View
+                        key={m.value}
+                        className="flex-1 rounded-xl py-2 items-center"
+                        style={{
+                          backgroundColor: active ? '#3b82f6' : 'rgba(255,255,255,0.08)',
+                          borderWidth: 1,
+                          borderStyle: 'solid',
+                          borderColor: active ? '#3b82f6' : 'rgba(255,255,255,0.15)',
+                        }}
+                        onClick={() => setSrMode(m.value)}
+                      >
+                        <Text className="block text-white text-sm font-medium">{m.label}</Text>
+                        <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
+                      </View>
+                    )
+                  })}
+                </View>
+              </View>
+            )}
+
             {/* 强度档位（P1）：把"是否过头"的把控权交给用户 */}
-            <Text className="block text-white text-opacity-70 text-xs mb-2">增强强度</Text>
+            <Text className="block text-white text-opacity-70 text-xs mb-2 mt-3">增强强度</Text>
             <View className="flex flex-row gap-2 mb-4">
               {ENHANCE_STRENGTHS.map((s) => {
                 const active = enhanceStrength === s.value
@@ -1758,8 +1840,8 @@ export default function ImageEditor({
               >
                 <Text className="block text-sm text-white">取消</Text>
               </Button>
-              <Button className="flex-1 h-10 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={runEnhance}>
-                <Text className="block text-sm text-white">开始处理</Text>
+              <Button className="flex-1 h-10 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={onConfirmEnhance}>
+                <Text className="block text-sm text-white">确定</Text>
               </Button>
             </View>
           </View>

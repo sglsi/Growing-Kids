@@ -21,6 +21,8 @@ interface RawRow {
     answer?: string
     solution?: string
     wrong_answer?: string
+    error_analysis?: { type?: string; label?: string; reason?: string; suggestion?: string } | null
+    review_count?: number
   }
   source: string | null
   created_at: string
@@ -140,6 +142,32 @@ export class DocumentService {
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '解析：', bold: true, size: 22, font: '宋体' })] }),
           )
           children.push(...this.textParagraphs(c.solution, { size: 22 }))
+        }
+
+        // P2-16 错因分析（本地规则引擎结论；无则跳过）
+        if (c.error_analysis?.label) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 40, after: 20 },
+              children: [new TextRun({ text: `错因分析：${c.error_analysis.label}`, bold: true, size: 20, color: 'BE3E2D', font: '宋体' })],
+            }),
+          )
+          if (c.error_analysis.reason) {
+            children.push(...this.textParagraphs(`原因：${c.error_analysis.reason}`, { size: 20, color: '9A948A' }))
+          }
+          if (c.error_analysis.suggestion) {
+            children.push(...this.textParagraphs(`建议：${c.error_analysis.suggestion}`, { size: 20 }))
+          }
+        }
+
+        // P2-18 艾宾浩斯复习进度
+        if (typeof c.review_count === 'number' && c.review_count > 0) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 20, after: 20 },
+              children: [new TextRun({ text: `复习进度：已复习 ${c.review_count} 次`, size: 18, color: '6B655D', italics: true, font: '宋体' })],
+            }),
+          )
         }
 
         if (row.source) {

@@ -6,10 +6,11 @@ import {
 } from 'coze-coding-dev-sdk'
 import * as http from 'http'
 import * as https from 'https'
+import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
 import { TimelineService } from '../timeline/timeline.service'
-import type { ImageAction, ProcessImageDto, ImageProcessResult } from './image.types'
+import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource } from './image.types'
 import {
   fitSizeToRatio,
   isSizeValid,
@@ -37,7 +38,19 @@ import { OcrService } from '../ocr/ocr.service'
 import { extractWrongQuestions } from './wrongq'
 import { buildLayoutContext } from './wrongq-layout'
 import { renderBlockAssets } from './wrongq-render'
+import { splitBlocksByNumber, type RowSplitContext } from './wrongq-pureblock'
+import { estimateSharpness, sharpnessHint } from './image-sharpness'
 import type { WrongqBlock } from './wrongq.types'
+import { structureLocalItems } from '../ocr/ocr-struct'
+import { parseQuestionNumber, inferHierarchy, linkHierarchy } from '../ocr/ocr-hierarchy'
+import { attachKeywordTags, dedupItems } from '../ocr/ocr-dedup'
+import { attachErrorAnalysis } from '../ocr/ocr-error'
+import { buildColorEvidenceSource, splitBlockRegions } from '../ocr/ocr-semantic'
+import { guardExtractQuota, MAX_EXTRACT_BLOCKS } from './extract-wrong-quota'
+import { mapWithConcurrency } from './concurrency'
+import { localVlmPolicy } from '../ocr/local-vlm.client'
+import type { RecognizedItem } from '../ocr/ocr.types'
+import { QuotaService } from '../quota/quota.service'
 
 /**
  * 提示词：一律加上"锁版式"约束。
@@ -211,6 +224,7 @@ export class ImageService {
     private readonly ingestService: IngestService,
     private readonly timelineService: TimelineService,
     private readonly ocrService: OcrService,
+    private readonly quotaService: QuotaService,
   ) {}
 
   /**
@@ -542,6 +556,333 @@ export class ImageService {
     }
 
     return { blocks: result.blocks, debug }
+  }
+
+  /**
+   * 错题提取（切块 → 逐块识别 → 题号关联）：POST /api/image/extract-wrong
+   *
+   * 落实《错题提取-技术文档.md》方案 v2 的 P0 核心：从"整图关联"纠正为"切块 + 逐块识别"。
+   *
+   * 流程（全程本地优先，零 VLM 依赖）：
+   *  ① 本地切块：wrongq 引擎以红笔为锚点切出单道错题区域（allowVlm=false，绝不调用大模型）；
+   *  ② 逐块识别：每块 → 裁 raw 图 → 入库拿 key/URL → 本地 OCR 侧车识别该区域文本；
+   *  ③ 题号关联：从题面块区域文本与答案图文本各解析题号，按题号把"题面块"与"答案块"配对；
+   *  ④ 返回切块级 items：question_image_keys=切块裁图 key、question_content=该区域 OCR 文本、
+   *     answer_image_keys=整张答案图 key（按题号匹配到的答案文本填入 answer_content）。
+   *
+   * ⚠️ 与 recognize-pair 的本质区别：存的是"切出的题块图 + 区域文本"，而非整图。
+   * 切块与逐块识别全程本地优先（wrongq 本地红线 + 本地 OCR 侧车），满足"尽量不依赖大模型"。
+   */
+  async extractWrong(
+    userId: string,
+    dto: ExtractWrongDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<ExtractWrongResult> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+    const answerKeys = Array.isArray(dto.answer_image_keys) ? dto.answer_image_keys.filter(Boolean) : []
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+
+    // P1-8 清晰度门禁：入口只算一次（拉普拉斯方差），低于阈值只是提示、不拦截（见 image-sharpness.ts）
+    const quality = await estimateSharpness(srcBuffer)
+    const qualityWarn = sharpnessHint(quality)
+
+    // P1-14 自托管 VLM 升级层策略：默认关闭（OCR_LOCAL_VLM_MODE=off），外部依赖恒为 0；
+    // 未配置模型时 enabled=false，下面不会发起任何外部请求。
+    const vlmPolicy = localVlmPolicy()
+
+    // ① 本地切块（红笔锚定 + 版面 + decideLocal），绝不调用 VLM
+    const ctx = await buildLayoutContext(srcBuffer)
+    const result = await extractWrongQuestions(srcBuffer, { chromaMin: 14, allowVlm: false }, ctx)
+
+    // P1-12 纯版面兜底：红笔锚定未切出任何错题块（空白卷/打印卷/答案图等无红笔场景），
+    // 改以"全页 OCR + 版面 + 题号"切块，解除"必须红笔"的硬前提（技术文档 §2.7 局限④）。
+    let blocks = result.blocks
+    let blockSource: WrongqBlockSource = blocks.length ? 'red' : 'none'
+    if (!blocks.length) {
+      try {
+        const pageRegions = await this.ocrService.recognizePageRegions(ctx.flatBuf)
+        if (pageRegions.length) {
+          const splitCtx: RowSplitContext = { w: ctx.w, h: ctx.h, medH: ctx.medH, cols: ctx.cols }
+          const split = splitBlocksByNumber(pageRegions, splitCtx)
+          if (split.blocks.length) {
+            blocks = split.blocks
+            blockSource = 'layout'
+          }
+        }
+      } catch (e) {
+        console.warn('[extract-wrong] 纯版面兜底失败，按无切块处理：', (e as Error)?.message ?? e)
+      }
+    }
+
+    // ③ 题号关联准备：先对答案图做本地 OCR + 结构化，建「题号 → 答案文本」映射
+    const answerMap = new Map<number, string>()
+    if (answerKeys.length) {
+      try {
+        const aUrls = await Promise.all(answerKeys.map((k) => this.storageService.getPublicUrl(k)))
+        const parts: string[] = []
+        for (const u of aUrls) {
+          const t = await this.ocrService.recognizeBlockText(u)
+          if (t) parts.push(t)
+        }
+        if (parts.length) {
+          const struct = structureLocalItems(parts.join('\n\n'), {})
+          for (const it of struct.items) {
+            const p = parseQuestionNumber(it.question_content || '')
+            if (p.num != null) answerMap.set(p.num, it.question_content)
+          }
+        }
+      } catch (e) {
+        console.warn('[extract-wrong] 答案图识别失败，跳过题号关联：', (e as Error)?.message ?? e)
+      }
+    }
+
+    // P1-11 答案侧对称化：对答案图也按题号切块，让每道错题块挂「对应的答案块裁图」
+    // 而非整张答案图（技术文档 §2.7 局限 ③）。仅在切块成功时生效；任何失败都回退为整张
+    // 答案图（P0 行为），不阻断主链路。
+    const answerBlockMap = new Map<number, string[]>()
+    if (answerKeys.length) {
+      try {
+        // ⑧ 答案侧切块同样走 ingest，受同一上限守卫（与错题块共用 MAX_EXTRACT_BLOCKS）
+        let answerIngested = 0
+        answerLoop: for (const ak of answerKeys) {
+          const aUrl = await this.storageService.getPublicUrl(ak)
+          const aBuf = await this.download(aUrl, fwd)
+          const aCtx = await buildLayoutContext(aBuf)
+          const aRegions = await this.ocrService.recognizePageRegions(aCtx.flatBuf)
+          if (!aRegions.length) continue
+          const aSplitCtx: RowSplitContext = { w: aCtx.w, h: aCtx.h, medH: aCtx.medH, cols: aCtx.cols }
+          const aBlocks = splitBlocksByNumber(aRegions, aSplitCtx).blocks
+          for (const ab of aBlocks) {
+            if (answerIngested >= MAX_EXTRACT_BLOCKS) {
+              console.warn(`[extract-wrong] 答案侧切块已达上限 ${MAX_EXTRACT_BLOCKS}，停止切块`)
+              break answerLoop
+            }
+            answerIngested++
+            const { x0: ax0, y0: ay0, x1: ax1, y1: ay1 } = ab.box
+            const aCrop = await sharp(aCtx.flatBuf)
+              .extract({ left: ax0, top: ay0, width: Math.max(1, ax1 - ax0 + 1), height: Math.max(1, ay1 - ay0 + 1) })
+              .png()
+              .toBuffer()
+            const aIng = await this.ingestService.ingest(aCrop, 'image/png')
+            const aCropUrl = await this.storageService.getPublicUrl(aIng.key)
+            const aText = await this.ocrService.recognizeBlockText(aCropUrl)
+            const ap = parseQuestionNumber(aText)
+            if (ap.num != null) {
+              const arr = answerBlockMap.get(ap.num) ?? []
+              arr.push(aIng.key)
+              answerBlockMap.set(ap.num, arr)
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[extract-wrong] 答案侧切块失败，回退整张答案图：', (e as Error)?.message ?? e)
+      }
+    }
+
+    // ② 逐块识别：只取被标记（非"对"）的区域作为错题；若全为"对"则回退取全部块
+    const wrongBlocks = blocks.filter((b) => b.verdict !== 'correct')
+    const blocksToUse = wrongBlocks.length ? wrongBlocks : blocks
+
+    // ⑧ 配额预检 + 切块数上限（技术文档 §2.7 ⑧）：
+    // 此前逐块 ingest 绕过 upload 层 checkUpload，QUOTA_MODE=block 时不拦截；
+    // 此处入库前补预检，仅 block 模式且超限才真正拦截（其余模式只记日志，与上传一致）。
+    const quotaDecision = await guardExtractQuota({
+      blocksToUse,
+      srcBuffer,
+      ctx,
+      userId,
+      quotaService: this.quotaService,
+    })
+
+    const items: RecognizedItem[] = []
+    const unmatched: string[] = []
+
+    // ⑨ 逐块 OCR 有限并发（技术文档 §2.7 ⑨）：
+    // 原串行 for 循环下 N 块 = N 次顺序 IO 往返（ingest→取URL→OCR→分离），主链路被拉慢。
+    // 改为块内链路顺序不变（OCR 依赖落库后的公开 URL）、块间限 OCR_CONCURRENCY 路并发，
+    // 既提速主链路又不打爆本地 OCR 侧车。worker 内保留原「块失败仅 warn+跳过」容错，
+    // 单块异常不连坐其余块；结果按原顺序收集，后续层级合并/查重语义不变。
+    const OCR_CONCURRENCY = 4
+    const blockResults = await mapWithConcurrency(
+      blocksToUse,
+      async (b) => {
+        try {
+          // 只取裁图，不复用 renderBlockAssets：后者会无条件重算 enhanced(2x 超分) 与
+          // clean(去手写 mask+inpainting)，而本流程只用 raw —— 用它会让每块白跑两轮重计算，
+          // N 个切块就是 N 倍浪费。此处直接按块 box 裁图，语义等价且轻量。
+          const { x0, y0, x1, y1 } = b.box
+          const cropW = Math.max(1, x1 - x0 + 1)
+          const cropH = Math.max(1, y1 - y0 + 1)
+          const cropBuf = await sharp(ctx.flatBuf)
+            .extract({ left: x0, top: y0, width: cropW, height: cropH })
+            .png()
+            .toBuffer()
+          const ing = await this.ingestService.ingest(cropBuf, 'image/png')
+          const cropKey = ing.key
+          const cropUrl = await this.storageService.getPublicUrl(cropKey)
+
+          // 一次本地 OCR 同时取回「整块文本 + 带坐标区域」：文本作 full text，区域用于 P1-9 语义分离。
+          const local = await this.ocrService.recognizeBlockFull(cropUrl)
+          const regionText = local?.raw_text?.trim() ?? ''
+
+          // 区域无文字（OCR 侧车不可用/切块为空）：跳过该块，避免落库 content.question 为空被拒
+          if (!regionText) {
+            console.warn(`[extract-wrong] 块#${b.id} 区域文本为空，跳过`)
+            return null
+          }
+
+          // ===== 题号回溯（P1-16）=====
+          // 裁图收紧后框内常只剩学生的手写答案，而印刷题号在**题目行**（与订正不同行）
+          // → 实测 9 条错题题号全部解析不到，用户拿到条目却认不出是哪道题。
+          // 解决办法：额外 OCR 块上方的「题号条带」(b.titleBox) 补出题号与印刷题干，
+          // 并把它拼到 question_content 前部——**裁图仍聚焦订正处，读文有题号**，两全。
+          let titleText = ''
+          if ((b as WrongqBlock).titleBox) {
+            const tb = (b as WrongqBlock).titleBox!
+            try {
+              const tbW = Math.max(1, tb.x1 - tb.x0 + 1)
+              const tbH = Math.max(1, tb.y1 - tb.y0 + 1)
+              const tbBuf = await sharp(ctx.flatBuf)
+                .extract({ left: Math.max(0, tb.x0), top: Math.max(0, tb.y0), width: tbW, height: tbH })
+                .png()
+                .toBuffer()
+              const tbIng = await this.ingestService.ingest(tbBuf, 'image/png')
+              const tbUrl = await this.storageService.getPublicUrl(tbIng.key)
+              const tbLocal = await this.ocrService.recognizeBlockFull(tbUrl)
+              titleText = tbLocal?.raw_text?.trim() ?? ''
+            } catch (e) {
+              console.warn(`[extract-wrong] 块#${b.id} 题号条带识别失败，忽略：`, (e as Error)?.message ?? e)
+            }
+          }
+          // 题号取舍（实测定序，顺序不能反）：
+          //  ① **优先区域文本**：订正就发生在这里，里面的题号最可靠
+          //     （反例：back 某块区域自带 "15."，条带却是上一题的 "11."，取条带会错号）；
+          //  ② 区域无题号时才用条带，且取**最后一个**——条带是订正**上方**若干行，
+          //     越靠下越接近订正（反例：条带 "14.远离 16.高温 18.救援人员"，
+          //     正确题号是 18 而非第一个 14）。
+          // 扫描式取号（兜底 parseQuestionNumber 只认行首的限制）：
+          //  · 取**最后一个**（离订正最近）；
+          //  · 过滤 >100：年份/数量会被误当题号（实测 "961年以来" 被取成题号 961 ❌）。
+          // 扫描式取号（兜底 parseQuestionNumber 只认行首的限制）：
+          //  · 取**最后一个**（离订正最近）；
+          //  · 过滤 >100：年份/数量会被误当题号（实测 "961年以来" 被取成题号 961 ❌）。
+          //  · allowNoDot：题号行常见「数字+空格+中文」无标点写法（如 "10 设法做成 … 12 共同努力"），
+          //    仅对**题号条带**启用——条带是题目行，这种无点号题号更可能是真题号；
+          //    区域作答正文不启用，避免 "17. campers" 这类正文句子被误当题号。
+          const scanLast = (t: string, allowNoDot = false): number | null => {
+            let hits = [...t.matchAll(/(\d{1,3})\s*[.、．](?![0-9])/g)]
+              .map((m) => Number(m[1]))
+              .filter((v) => v > 0 && v <= 100)
+            if (allowNoDot) {
+              const noDot = [...t.matchAll(/(?<![\d.])\s*(\d{1,3})\s+[一-龥]/g)]
+                .map((m) => Number(m[1]))
+                .filter((v) => v > 0 && v <= 100)
+              hits = hits.concat(noDot)
+            }
+            return hits.length ? hits[hits.length - 1] : null
+          }
+          let num = parseQuestionNumber(regionText).num
+          if (num == null || num > 100) num = scanLast(regionText)
+          if (num == null && titleText) num = scanLast(titleText, true)
+          // 展示文本仍把条带放在前部，让用户一眼看到"第几题"；解析已按上面定序完成
+          const mergedText = titleText ? `${titleText}\n${regionText}` : regionText
+          const p = { num } as ReturnType<typeof parseQuestionNumber>
+          let answerContent = ''
+          let ansImgKeys = answerKeys
+          if (p.num != null && answerMap.has(p.num)) {
+            answerContent = answerMap.get(p.num)!
+            // P1-11：命中答案块裁图时，挂对应答案块而非整张答案图
+            if (answerBlockMap.has(p.num)) ansImgKeys = answerBlockMap.get(p.num)!
+          } else if (answerKeys.length) {
+            // 本题面块有答案图但按题号未匹配上 → 计入未匹配反馈
+            unmatched.push(p.num != null ? String(p.num) : `#${b.id}`)
+          }
+
+          // P1-9 区域语义分离（题干 / 学生错答 / 教师批改）：仅在真的分出东西时覆盖字段，
+          // 否则保持 P0 行为（stem=全文），绝不因分离失败而丢信息。
+          let stem = regionText
+          let wrongAnswer = ''
+          let solution = ''
+          try {
+            const colorSrc = await buildColorEvidenceSource(cropBuf)
+            const sem = splitBlockRegions(colorSrc, local?.text_regions ?? [])
+            if (sem.separated) {
+              stem = sem.stem || regionText
+              wrongAnswer = sem.wrongAnswer
+              solution = sem.correction
+            }
+          } catch {
+            // 分离失败退回全文，不阻断主链路
+          }
+
+          return {
+            // 带上题号条带文本：让用户一眼看出这是第几题（区域文本可能只有手写答案）
+            question_content: mergedText,
+            wrong_answer: wrongAnswer,
+            answer_content: answerContent,
+            solution,
+            source: '',
+            // 匹配到答案即视为"已作答/有正确答案"，否则待用户联网搜题
+            status: answerContent ? 'answered' : 'pending',
+            question_image_keys: [cropKey],
+            answer_image_keys: ansImgKeys,
+            level: 1,
+            parent_index: null,
+            stem,
+          } as RecognizedItem
+        } catch (e) {
+          console.warn(`[extract-wrong] 块#${b.id} 处理失败，跳过：`, (e as Error)?.message ?? e)
+          return null
+        }
+      },
+      OCR_CONCURRENCY,
+    )
+    for (const r of blockResults) {
+      if (r) items.push(r)
+    }
+
+    // P1-10 层级合并：大题含小题时，子题继承大题题干、补 level/parent_index（解决"无本之木"）
+    const hier = inferHierarchy(items)
+    const mergedItems = hier.items
+    linkHierarchy(mergedItems)
+
+    // P1-13 知识点关键词候选（本地轻量抽取，非分类器结论；存到 timeline_items.tags）
+    attachKeywordTags(mergedItems)
+
+    // P1-13 题目查重：批内近重复合并（SimHash 汉明距离 ≤3；题面过短不查重，避免误并相似但不同的题）
+    const dedup = dedupItems(mergedItems, { threshold: 3, minLen: 8 })
+    const finalItems = dedup.items
+
+    // P2-16 错因分析：基于已分离的 stem/wrong_answer/solution 做本地规则引擎分类（SBERT 仅可选升级钩子）
+    await attachErrorAnalysis(finalItems)
+
+    return {
+      items: finalItems,
+      unmatched_questions: unmatched,
+      answer_image_keys: answerKeys,
+      quality: {
+        sharpness: quality.score,
+        sharp: quality.sharp,
+        hint: qualityWarn,
+        sample_size: quality.sampleSize,
+      },
+      block_source: blockSource,
+      deduped: dedup.removed,
+      debug: {
+        blockSource,
+        vlmMode: vlmPolicy.mode,
+        vlmEnabled: vlmPolicy.enabled,
+        vlmReason: vlmPolicy.reason,
+        quotaMode: quotaDecision.mode,
+        quotaAllowed: quotaDecision.allowed,
+        estIngestBytes: quotaDecision.estIngestBytes,
+        blocksTotal: blocks.length,
+        itemsBeforeDedup: mergedItems.length,
+        redCoverage: result.debug?.redCoverage,
+        inferredHierarchy: hier.inferred,
+      },
+    }
   }
 
   async straighten(
@@ -1021,3 +1362,4 @@ export class ImageService {
     return { url, key, timeline_id: timelineId }
   }
 }
+// reloaded 15:42:46
