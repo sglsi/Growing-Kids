@@ -57,9 +57,18 @@ const GROUP_WH_MIN = 0.4 // 组宽 ≥ 0.4×组高（排除竖长链）
  * 实测标定（p1 medH=30.9）：错题答案上的红圈/红叉/划改横杠 maxSide 26~44px
  * （0.8~1.4×medH）、n 125~225（0.13~0.24×medH²）；对勾与圈痕碎片 maxSide
  * ≤12px、n≤36。门取 maxSide ≥ 0.5×medH 且 n ≥ 0.035×medH²，两者留一倍余量。
+ *
+ * F5 收紧（#R4 六页全量诊断）：0.5/0.035 门下作业页 FP 泛滥——p1 的 8 个 FP 块
+ * 中 4 组（g2/g23/g47/g58）、gt-front 1 组（g4）、gt-back 1 组（g0）由
+ * 「maxSide 15~20px + n 30~55」的亚阈值碎屑圈/小叉驱动（sub-0.7×medH 形态在
+ * 双栏作业页大量存在：教师批改的圈词痕迹与对勾碎片）。收紧至 0.7/0.06 后：
+ * 上述 6 组全部杀死，GT 全部真证据幸存（最小者 gt-back g1：20px=0.74×medH、
+ * n=50=0.069×medH²，以 ~6% 余量过线）。残余 FP 来自「词级红订正」（答案 Key
+ * 形态，n=350-370/fill 0.22-0.43）——与 GT 真订正词（n=413-1641）无干净几何
+ * 分界，属词级门语义极限（见文件头与验证报告），此处不再盲调。
  */
-const STRIKE_SIDE_MIN = 0.5 // ×medH
-const STRIKE_INK_MIN = 0.035 // ×medH²
+const STRIKE_SIDE_MIN = 0.7 // ×medH
+const STRIKE_INK_MIN = 0.06 // ×medH²
 /**
  * 核心邻域修剪半径（×medH）：以词级核心笔画盒中心为圆心裁掉远抛成员。
  *

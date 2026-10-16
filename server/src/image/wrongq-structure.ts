@@ -19,7 +19,7 @@
  * 二遍重跑切分（保证注入单元的盒与锚点由同一套平铺逻辑产出，不做事后凑框）。
  */
 import type { LayoutContext } from './wrongq-layout'
-import { colsAtY } from './wrongq-layout'
+import { colsAtY, effectiveColsAtY } from './wrongq-layout'
 import type { LocalOcrTextRegion } from '../ocr/ocr.types'
 import type { QuestionUnit, HeaderRegion } from './wrongq-segment'
 import { detectHeaderRegions, detectQuestionUnits, enhanceHeadersWithLayout } from './wrongq-segment'
@@ -117,16 +117,27 @@ export function buildDocStructure(headers: HeaderRegion[], ctx: LayoutContext, r
   const hs = [...headers].sort((a, b) => a.y0 - b.y0 || a.y1 - b.y1)
   const sections: DocSection[] = []
   let curSec: DocSection | null = null
-  let curSub: DocSubsection | null = null
   let prevRoman: number | null = null
-  const closeSub = (y1: number) => { if (curSub) curSub.y1 = y1 }
-  const closeSec = (y1: number) => { closeSub(y1); if (curSec) curSec.y1 = y1 }
+  // 栏感知收口：把当前节里最后一个与新 header 同栏（或通栏 col=null）的小类
+  // 截断到 y1。异栏 header 不截断本栏小类——其内容沿本栏延续（G4 修复）。
+  // 回溯扫描而非只截 curSub：A(栏0)→B(栏1)→C(栏0) 时 C 要截断的是 A。
+  const closeSubAtCol = (y1: number, col: number | null) => {
+    if (!curSec) return
+    for (let i = curSec.subsections.length - 1; i >= 0; i--) {
+      const s = curSec.subsections[i]
+      if (s.col == null || col == null || s.col === col) { s.y1 = y1; return }
+    }
+  }
+  // 节尾收口：节内所有未收口小类一并截断（异栏小类可能仍开着）。
+  const closeSec = (y1: number) => {
+    if (curSec) for (const s of curSec.subsections) if (s.y1 > y1) s.y1 = y1
+    if (curSec) curSec.y1 = y1
+  }
   for (const hd of hs) {
     if (hd.kind === 'section') {
       closeSec(hd.y0)
       curSec = { id: `s${sections.length}`, title: hd.title, y0: hd.y0, y1: pageH, subsections: [], numbering: 'segmented', fromPrevPage: false }
       sections.push(curSec)
-      curSub = null
       prevRoman = null
     } else {
       if (!curSec) {
@@ -135,13 +146,22 @@ export function buildDocStructure(headers: HeaderRegion[], ctx: LayoutContext, r
         sections.push(curSec)
         prevRoman = null
       }
-      closeSub(hd.y0)
+      // G4 修复（#R3 p1 实测）：小类区间截断必须栏感知。旧逻辑无条件把前任
+      // 小类截断在本 header 的 y0，但 header 常只落在某一栏——p1「词形变换」
+      // 头在 x552 右栏、「重点短语」头在 x546 右栏，而「重点单词」内容沿整个
+      // 左栏延续到 y1389（左栏底部 22-27 为词汇释义，裁图实证）。异栏 header
+      // 不该截断本栏内容：左栏底部 21-27 因此掉出「重点单词」[193,287]，被
+      // 分级①挂进右栏「重点短语」的编号空间，真正的重点短语 1-7 反被当重号
+      // 丢弃（units 46→39）。仅当新 header 与前任小类同栏（或任一侧通栏
+      // col=null）时才截断；否则留待同栏 header / 节尾 / 页尾收口。
+      const hdCol = colOfHeader(hd, ctx, regions)
+      closeSubAtCol(hd.y0, hdCol)
       // 罗马序号消歧：IL→III 主/II 备——前序存在时取大于前序的解释（序号只增不减）
       let roman = hd.roman
       if (roman != null && prevRoman != null && roman <= prevRoman && hd.romanAlt != null && hd.romanAlt > prevRoman) {
         roman = hd.romanAlt
       }
-      curSub = {
+      const sub: DocSubsection = {
         id: `${curSec.id}.${curSec.subsections.length}`,
         title: hd.title,
         roman: roman != null && roman >= 1 && roman <= 12 ? roman : null,
@@ -149,9 +169,9 @@ export function buildDocStructure(headers: HeaderRegion[], ctx: LayoutContext, r
         y0: hd.y0,
         y1: pageH,
         fromPrevPage: false,
-        col: colOfHeader(hd, ctx, regions),
+        col: hdCol,
       }
-      curSec.subsections.push(curSub)
+      curSec.subsections.push(sub)
       if (roman != null) prevRoman = roman
     }
   }
@@ -175,16 +195,50 @@ export function buildDocStructure(headers: HeaderRegion[], ctx: LayoutContext, r
       col: null, // 续接小节跨栏承接，不设栏约束
     })
   }
+  // G2 修复（#R3 gt-front 实测）：小类栏约束的「竞争放宽」。
+  // 旧逻辑给小类强制打上 header 所在栏的 col，但通栏小类的 header 常常只落在
+  // 左栏（OCR 只认出左半截标题——gt-front「汉译英。」region 仅 x 0-128），
+  // 右栏内容因此找不到同栏小类，全被倒进 col=null 的页首续接小节：标签错标
+  // 「前页续」，且归属破平的 sameSub 项失效（汉译英18 的红订正墨在右栏，
+  // 却因左栏「汉译英5」同分同小节而挂错）。放宽条件（两条同时满足）：
+  //   ① 该小类纵向区间内确有【其他栏】的内容（region 分居实证，高度门同 span 构建）；
+  //   ② 同一大节内没有 col 不同且纵向区间相接的子节与之竞争——p3「重点句型」
+  //      (col=1) 与「点短语」(col=0) 在 y=842 相接，两栏各自独立练习，栏约束
+  //      必须保留；gt-front 音标写单词/汉译英 在右栏无竞争子节，放宽为通栏。
+  for (const sec of sections) {
+    const minH = Math.round(ctx.medH * 0.55)
+    for (const sub of sec.subsections) {
+      if (sub.col == null) continue
+      let otherColInk = false
+      for (const r of regions) {
+        const t = (r.text || '').trim()
+        if (!t) continue
+        const b = rb(r)
+        if (b.y1 - b.y0 < minH) continue
+        const cyMid = (b.y0 + b.y1) / 2
+        if (cyMid < sub.y0 || cyMid >= sub.y1) continue
+        const ci = colOfX((b.x0 + b.x1) / 2, effectiveColsAtY(ctx, regions, cyMid))
+        if (ci !== sub.col) { otherColInk = true; break }
+      }
+      if (!otherColInk) continue
+      const contested = sec.subsections.some(
+        (o) => o !== sub && o.col != null && o.col !== sub.col && o.y0 <= sub.y1 && o.y1 >= sub.y0,
+      )
+      if (!contested) sub.col = null
+    }
+  }
   return { sections }
 }
 
-/** header 所在栏：region 盒 x 中心经 colsAtY 归类（越界取最近栏） */
+/** header 所在栏：region 盒 x 中心经有效栏归类（越界取最近栏） */
 function colOfHeader(hd: HeaderRegion, ctx: LayoutContext, regions: LocalOcrTextRegion[]): number | null {
   const r = regions[hd.idx]
   if (!r) return null
   const b = (r.box as number[]) || [0, 0, 0, 0]
   const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2
-  return colOfX(cx, colsAtY(ctx, hd.y0))
+  // R2 修复（#R2）：colSections 漏判双栏时按 region 分居实证回落全局栏，
+  // 否则双栏页所有 header 都判 col 0，小类栏约束失效（p3 重点句型/点短语 均判 col 0）
+  return colOfX(cx, effectiveColsAtY(ctx, regions, hd.y0))
 }
 
 /**
@@ -264,12 +318,30 @@ export function assignUnitsToStructure(units: QuestionUnit[], st: DocStructure, 
     let bi = -1
     if (ctx && u.anchor) {
       const ucol = colAtPoint(ctx, u.anchor.x, u.anchor.y)
+      // 分级①：栏匹配（同栏或通栏 col=null）且纵向区间覆盖锚点。
+      // G2 放宽后通栏小类（col=null）与栏定小类并存，覆盖优先保证
+      // gt-front 右栏单元落进「汉译英」[551,980] 而非页首续接 [0,144]。
       for (let i = 0; i < sec.subsections.length; i++) {
         const sub = sec.subsections[i]
-        if (sub.y0 <= y && sub.col != null && sub.col === ucol) bi = i
+        if (sub.y0 <= y && y < sub.y1 && (sub.col == null || sub.col === ucol)) bi = i
+      }
+      if (bi < 0) {
+        // 分级②：栏匹配且 y0 ≤ y（区间不覆盖也保留候选）——栏定小类的 y1 常被
+        // 异栏 header 截断（p3 重点句型 y1=842 但内容延伸到 1439），不能因
+        // y1 截断就把同栏内容踢走。p1 实测：重点短语放宽为 col=null 后，
+        // 旧同栏通道（不查 y1）把 y>1069 的单元错配给词形变换(col=1)当重号丢弃；
+        // 分级①先按覆盖选中重点短语，修复该回归。
+        for (let i = 0; i < sec.subsections.length; i++) {
+          const sub = sec.subsections[i]
+          if (sub.y0 <= y && (sub.col == null || sub.col === ucol)) bi = i
+        }
       }
     }
     if (bi < 0) {
+      // 分级③：纯 y 回退（本栏无任何小类——含 col=null 通栏小类也没有时）。
+      // 保留 R2 修复精神：本页某栏无小类标题的内容续接该栏上方小类，
+      // 而不是错吃进另一栏小类的编号空间（词汇 6/7 与重点句型 1-7 混同
+      // 曾使后者被当重号全丢、纯 y 倒栏还伪造连号投票误判 unified）。
       bi = 0
       for (let i = 0; i < sec.subsections.length; i++) if (sec.subsections[i].y0 <= y) bi = i
     }
@@ -405,6 +477,50 @@ function findBareRegion(
 }
 
 /**
+ * F2 点首区补认（#R2 p3 实测）：题号被 OCR 整吞、仅剩分隔符残留的 region
+ * （".narrow→ide(反义词)…" = "8.narrow→…" 的 8 被吃成 "."；p2 同型 4 处）。
+ * 缺口处 y 窗口内找未占用、以「标点+字母/汉字」开头、左缘落在所在栏题号位
+ * （栏左 25% 内）的 region，注入 expected 题号。防护同 findBareRegion：
+ * 高度门（排除杂散标记）、题号位、未被占用、非标题区。colHint 限定注入列
+ * （栏跳转时的缺号属于上一单元所在栏的延续）。
+ */
+function findDotRegion(
+  want: number,
+  yFrom: number,
+  yTo: number,
+  regions: LocalOcrTextRegion[],
+  ctx: LayoutContext,
+  medH: number,
+  used: Set<number>,
+  skip: Set<number>,
+  colHint?: number,
+): number | null {
+  const s = String(want)
+  if (!/^\d{1,2}$/.test(s)) return null
+  for (let ri = 0; ri < regions.length; ri++) {
+    if (used.has(ri) || skip.has(ri)) continue
+    const t = (regions[ri].text || '').trim()
+    // 点首签名：标点（英/中句点、顿号）+ 可选空白 + 字母或汉字；
+    // 或「小写单词→」（词汇学习条目 "N.word→释义" 的题号与点被整吞后的残茬，
+    // p3 实测 "villager→"/"discussion→" 两处；其他五页零误报）。
+    // 纯标点串（"..."）与 ".5"（点+数字）不算——后者更可能是数字串残片。
+    if (!/^[.。．、]\s*[A-Za-z\u4e00-\u9fff]/.test(t) && !/^[a-z]{2,15}→/.test(t)) continue
+    const b = rb(regions[ri])
+    if (b.y1 - b.y0 < Math.round(medH * 0.55)) continue
+    if (b.y1 < yFrom || b.y0 > yTo) continue
+    // 题号位：region 左缘须落在所在栏左端 25% 内（题号在行首；点首 region 比
+    // 裸数字区长，故按左缘而非中心判定——p3 ".narrow→ide(反义词)…" 中心已超 35%）
+    const colsY = ctx.cols
+    const ci = colOfX(b.x0 + 1, colsY)
+    const [c0, c1] = colsY[ci] ?? [0, ctx.w]
+    if (b.x0 > c0 + (c1 - c0) * 0.25) continue
+    if (colHint != null && ci !== colHint) continue
+    return ri
+  }
+  return null
+}
+
+/**
  * 误读判别：题号头签名是否为目标序号的糊读形态。
  *
  * 签名须含 ≥1 个前缀糊字符（字母/标点吃掉题号首位，如 "M9." = 19 的 1 被 M 吃掉）——
@@ -478,7 +594,12 @@ export function repairSequence(
       const leadFromPrev = !!sec.subsections[sp.subs[0]]?.fromPrevPage
       let expected = 1
       let lastY = sec.subsections[sp.subs[0]]?.y0 ?? 0
+      let prevU: QuestionUnit | null = null
       const spaceBot = sec.subsections[sp.subs[sp.subs.length - 1]]?.y1 ?? ctx.h
+      const unitCol = (u: QuestionUnit): number => {
+        const p = u.anchor ?? { x: (u.box.x0 + u.box.x1) / 2, y: (u.box.y0 + u.box.y1) / 2 }
+        return colAtPoint(ctx, p.x, p.y)
+      }
       for (const u of seq) {
         const n = u.number.num
         if (n == null) continue
@@ -487,16 +608,26 @@ export function repairSequence(
           d.seq.push(n)
           expected++
           lastY = uy
+          prevU = u
           continue
         }
         if (n > expected) {
+          // 栏跳转（阅读序回退：uy < lastY）时严格窗口 [lastY, uy] 是空集——
+          // 缺号属于上一单元所在栏的延续（其下方），窗口扩展到页底并限定该栏。
+          // （p3 实测：左栏词汇 7(y=490) → 右栏汉译英 14(y=9.5)，缺号 8~12
+          //  的点首区全在左栏 y 547~835，严格窗口一个都找不到）
+          const jump = uy < lastY && prevU != null
+          const yTo = jump ? ctx.h : uy
+          const colHint = jump ? unitCol(prevU as QuestionUnit) : undefined
           for (let M = expected; M < n; M++) {
-            const ri = findBareRegion(M, lastY, uy, regions, ctx, medH, usedBare, skip)
+            let ri = findBareRegion(M, lastY, yTo, regions, ctx, medH, usedBare, skip)
+            if (ri == null) ri = findDotRegion(M, lastY, yTo, regions, ctx, medH, usedBare, skip, colHint)
             if (ri != null) {
               usedBare.add(ri)
               forceHeads.set(ri, { kind: 'arabic', num: M, raw: String(M) })
               d.injected.push(M)
               d.seq.push(M)
+              lastY = rb(regions[ri]).y1 // F2：注入后推进窗口，后续缺号在已注入区之下续找
             } else {
               d.gaps.push(M)
               if (M === 1 && leadFromPrev) d.crossPageGap = true
@@ -505,6 +636,7 @@ export function repairSequence(
           d.seq.push(n)
           expected = n + 1
           lastY = uy
+          prevU = u
           continue
         }
         // n < expected：重号或误读
@@ -515,14 +647,16 @@ export function repairSequence(
           d.seq.push(fixed)
           expected = fixed + 1
           lastY = uy
+          prevU = u
         } else {
           d.duplicates.push(n)
           if (u.regionIdx != null && u.regionIdx >= 0) dropRegions.add(u.regionIdx)
         }
       }
-      // 收尾：最后单元之后继续找裸数字区（独立题号区漏产）
+      // 收尾：最后单元之后继续找裸数字区/点首区（独立题号区漏产）
       for (let M = expected; M <= expected + 12; M++) {
-        const ri = findBareRegion(M, lastY, spaceBot, regions, ctx, medH, usedBare, skip)
+        let ri = findBareRegion(M, lastY, spaceBot, regions, ctx, medH, usedBare, skip)
+        if (ri == null) ri = findDotRegion(M, lastY, spaceBot, regions, ctx, medH, usedBare, skip)
         if (ri == null) break
         usedBare.add(ri)
         forceHeads.set(ri, { kind: 'arabic', num: M, raw: String(M) })

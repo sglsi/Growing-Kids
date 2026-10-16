@@ -29,7 +29,7 @@
  *
  * 输出 `QuestionUnit[]` 供阶段 B（wrongq-evidence）把红墨锚点映射到题目单元、取满框。
  */
-import { type LayoutContext, colsAtY, sectionIndexAtY } from './wrongq-layout'
+import { type LayoutContext, colsAtY, sectionIndexAtY, effectiveColsAtY } from './wrongq-layout'
 import type { LocalOcrTextRegion } from '../ocr/ocr.types'
 import type { ParsedNumber } from '../ocr/ocr-hierarchy'
 
@@ -178,7 +178,7 @@ export function findQuestionTokens(text: string): QToken[] {
       num = { kind: 'cjk', num: romanToNum(m[0].replace(/[\s.]/g, '')), raw: m[0].trim() }
     } else if ((m = rest.match(/^[（(]\s*(\d{1,2})\s*[）)]/))) {
       // 选项字母后的括号数字（如 "C.(5)"）不是题号；跳过但仍推进 i 避免死循环
-      if (/[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i))) { i += m[0].length; continue }
+      if (/(?<![（(])[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i))) { i += m[0].length; continue }
       num = { kind: 'arabic', num: Number(m[1]), raw: m[0].trim() }
     } else if ((m = rest.match(/^(\d{3,})(?!\d)\s*[.、.．.)）]/))) {
       // 3 位及以上数字 + 分隔符（961. / 1961.）是年份/大数，不是题号（#124 实测：
@@ -189,22 +189,51 @@ export function findQuestionTokens(text: string): QToken[] {
     } else if ((m = rest.match(/^(\d{1,2})(?!\d)\s*[.、.．.)）]/))) {
       // 分隔符不含逗号 → "5,000"/"1,500" 千分位自然不匹配；
       // 另排除选项字母引导的数字（"C.5." 的 5、"B.4." 的 4 等选择题选项标注）；跳过但仍推进 i
-      if (/[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i))) { i += m[0].length; continue }
+      if (/(?<![（(])[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i))) { i += m[0].length; continue }
       // 年份尾巴防护（#124 实测）："in 1961." 被 OCR 截成 "61.d"——题号后只跟一个
       // 孤立字母即到文本尾，是数字串截断的残留形态而非题号。真实题号后要么直接是
       // 题干内容（多字符），要么无尾巴；"10.hm"（下划线糊化，两个字符）不受影响。
       // 仅 num>20 才启用：保护小题号带单字糊尾的真实题号（如 "10.h"）。
       if (Number(m[1]) > 20 && /^[A-Za-z]$/.test(rest.slice(m[0].length))) { i += m[0].length; continue }
       num = { kind: 'arabic', num: Number(m[1]), raw: m[0].trim() }
+    } else if ((m = rest.match(/^(\d{1,2})(?!\d)\s+([a-z]{1,5})(?![A-Za-z])/))) {
+      // F1 行中裸题号 + 空格 + 短小写词（#R1 gt-back 实测）："...the winds make it
+      // 14 homd d to control."——手写题号嵌在句流里，题号后常跟一个被手写墨渍
+      // 糊化的短词。多重防护（任一命中即跳过）：
+      //  ① 前导数字："1,500 people" 的 "00"/"0" 尾巴、"in 1961" 截断出的 "61"
+      //  ② o'clock："3 o'clock" 点钟表达不是题号
+      //  ③ 单元/章节词："Unit 1" "Page 3" "Lesson 2" 的编号不是题号
+      //  ④ num>20 且前接介词 in/on/at…：年份残片（"in 61 the…"）
+      //  ⑤ 选项字母前缀（同分隔符规则，#124）
+      //  ⑥ 后接计量单位词："20 years ago" 类数量表达（p2 实测 FP）
+      //  ⑦ 前接约数词 about/around…："about 20 students" 类约数表达
+      // 仅小写开头词："Unit 1 Reading" 类标题专名不误伤；糊词 OCR 普遍小写。
+      const head = text.slice(0, i)
+      const tail = rest.slice(m[1].length)
+      if (
+        /\d$/.test(head) ||
+        /^\s*o'?clock/i.test(tail) ||
+        /(?:unit|section|part|lesson|book|grade|class|page|line|activity|project|topic|module|step|stage)\s*$/i.test(head) ||
+        (Number(m[1]) > 20 && /\b(?:in|on|at|since|by|for|before|after|during|until)\s*$/i.test(head)) ||
+        /\b(?:about|around|nearly|almost|approximately)\s*$/i.test(head) ||
+        /^\s+(?:years?|months?|weeks?|days?|hours?|minutes?|seconds?|times?|percent|dollars?|cents?|miles?|meters?|metres?|kilometers?|kilometres?|kilos?|kilograms?)\b/i.test(tail) ||
+        /(?<![（(])[A-E]\s*[.、，,．.)）]/.test(head)
+      ) {
+        i += m[1].length
+        continue
+      }
+      num = { kind: 'arabic', num: Number(m[1]), raw: m[1] }
     } else if (i === 0 && (m = rest.match(/^(\d{1,3})(?=[A-Za-z\u4e00-\u9fff])/))) {
       num = { kind: 'arabic', num: Number(m[1]), raw: m[0].trim() } // 行首被糊进单词：7heat
     } else if ((m = rest.match(/^(\d{1,2})$/))) {
       // 行尾裸题号（#124 实测）：嵌入句里的题号常位于 region 文本末尾且无标点
       // （"...put it out?Becayse 13" / "the winds make it 14"），旧实现漏产 token
-      // 导致背面 13/14 无题目单元。仅当前面有题干内容（字母/汉字 + 空格）时采纳——
+      // 导致背面 13/14 无题目单元。仅当前面有题干内容（字母/汉字，可带一个
+      // 逗号/分号+空白，如 "...the winds were strong, 9"）时采纳——
       // 光秃秃的孤立数字（页眉得分 "26"、选项区 "9"）不采纳：snapTol≈1.5 行高，
-      // 伪单元会把无题号的红笔块吸附成错误题号。
-      if (/[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i)) || !/[A-Za-z\u4e00-\u9fff]\s$/.test(text.slice(0, i))) {
+      // 伪单元会把无题号的红笔块吸附成错误题号。逗号放宽（#R1 gt-back R52 实测）
+      // 不波及千分位："5,000" 的 "00"/"0" 尾巴前面是数字而非字母，仍被拒。
+      if (/(?<![（(])[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i)) || !/[A-Za-z\u4e00-\u9fff]\s*[,，;；]?\s*$/.test(text.slice(0, i))) {
         i += m[0].length; continue
       }
       num = { kind: 'arabic', num: Number(m[1]), raw: m[0].trim() }
@@ -261,9 +290,14 @@ export interface HeaderRegion {
   y1: number
 }
 
-/** 小类"指令行"模式（无罗马前缀时的标题形态）：根据…/用…填空/阅读…/选词填空/汉译英… */
+/**
+ * 小类"指令行"模式（无罗马前缀时的标题形态）：根据…/用…填空/选词填空/阅读…/汉译英…
+ * F3 修复（#R3 gt-front 实测）：「汉译英。」/「英译汉」不在旧模式里（旧 `翻译` 二字不匹配
+ * "汉译英"），导致汉译英节整节落入「音标写单词」编号空间，两节题号交错后大批误判重号
+ * 丢弃（dups=[1,2,4,6,2,4,6,8,10,12,14]，真值 6 题仅命中 1）。
+ */
 const INSTRUCTION_RE =
-  /(根据|按照|用[^，。；;]{0,14}填空|选词|阅读|翻译|写作|完成句子|仿写|改写|回答问题|判断|连线|匹配|仿照)/
+  /(根据|按照|用[^，。；;]{0,14}填空|选词|阅读|翻译|汉译英|英译汉|译成|写作|完成句子|仿写|改写|回答问题|判断|连线|匹配|仿照)/
 /** 英文指令行（罗马前缀后的英文标题，防 "I. am a student." 类句子被误判） */
 const INSTRUCTION_EN_RE = /(reading|choose|choosing|cloze|fill|translat|writ|complet|match|answer|put)/i
 
@@ -532,7 +566,8 @@ export function detectQuestionUnits(ctx: LayoutContext, regions: LocalOcrTextReg
     // 正面词汇区页眉 "13T" 仅 7px，旧实现把它当题号 13 的头并吞掉第 1 题。
     if (b.y1 - b.y0 < Math.round(medH * 0.55)) return
     const cyMid = (b.y0 + b.y1) / 2
-    const colsY = colsAtY(ctx, cyMid)
+    // R2 修复（#R2）：colSections 对照片噪点栏缝漏判时按 region 分居实证回落全局栏
+    const colsY = effectiveColsAtY(ctx, regions, cyMid)
     const col = colOfX((b.x0 + b.x1) / 2, colsY)
     const sec = sectionIndexAtY(ctx, cyMid)
     const sy0 = b.y0
@@ -695,7 +730,9 @@ export function detectQuestionUnits(ctx: LayoutContext, regions: LocalOcrTextReg
     while (j + 1 < raws.length && raws[j + 1].col === raws[i].col && sideBySide(raws[j], raws[j + 1], medH)) j++
     const row = raws.slice(i, j + 1)
     const ru0 = row[0]
-    const secCols = colsAtY(ctx, ru0.yTop)
+    // R2 修复（#R2）：同 span 构建口径——单栏带漏判双栏时按 region 实证回落全局栏，
+    // 否则单元横向取框会拿通栏宽、把另一栏内容框进本题（p3 巨型单元根因）。
+    const secCols = effectiveColsAtY(ctx, regions, ru0.yTop)
     // 横向取框 = 本题内容实际覆盖的栏并集，而非死取「落点那一栏」。
     //
     // 为什么必须这么做（用户反馈根因）：一道题的正文若横向跨越了栏分隔线（探究案 那种
@@ -703,11 +740,18 @@ export function detectQuestionUnits(ctx: LayoutContext, regions: LocalOcrTextReg
     // "右边的内容被分栏斩断了"）。此处以内容自身边界为准：内容在一栏内 → 即该栏（与旧行为一致）；
     // 内容跨栏 → 取跨过的所有栏的并集，右半边自然被纳入。
     const padX = Math.max(0, Math.round(medH * 0.3))
-    const cMin = Math.max(0, Math.round(Math.min(...row.map((r) => r.minX))) - padX)
-    const cMax = Math.min(ctx.w - 1, Math.round(Math.max(...row.map((r) => r.maxX))) + padX)
+    // G1 修复（#R3 gt-front / p3 实测）：栏重叠判定必须用【未加 pad 的内容边界】。
+    // padX 会把贴栏缝的内容衬到邻栏右缘——p3 题21 内容左界 519 + pad 9 = 510，
+    // 恰好够到左栏 [0,510] 的右缘 510（`b < cMin` 不成立）→ 左栏被判重叠，
+    // 单元框吃进全宽 [0,1079]（U17「21」与 U19-24「重点句型2-7」实测；
+    // gt-front U0 音标区同理，R19 右溢 15px + pad 即够到 524）。pad 只做最终框外扩。
+    const rawMin = Math.min(...row.map((r) => r.minX))
+    const rawMax = Math.max(...row.map((r) => r.maxX))
+    const cMin = Math.max(0, Math.round(rawMin) - padX)
+    const cMax = Math.min(ctx.w - 1, Math.round(rawMax) + padX)
     let uX0 = Infinity, uX1 = -Infinity
     for (const [a, b] of secCols) {
-      if (b < cMin || a > cMax) continue
+      if (b < rawMin || a > rawMax) continue
       uX0 = Math.min(uX0, a)
       uX1 = Math.max(uX1, b)
     }

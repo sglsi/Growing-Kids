@@ -71,6 +71,53 @@ export function sectionIndexAtY(ctx: LayoutContext, y: number): number {
   return secs.length - 1
 }
 
+/**
+ * R2 修复（#R2 p3/p2 实测）：版面带的有效栏几何——带 region 分居实证的全局兜底。
+ *
+ * 为什么需要：colSections 的逐带栏缝判空对照片噪点脆弱。p3 实测：x∈[480,540]
+ * 的 360 个采样行里 319 行有 1~3px 噪点墨（cover 判空全程失败）；且右栏题号区
+ * （x≥511）每 ~130px 就侵入 ±12px 验证窗，最长净空 138px < 173px 持续门槛，
+ * 三带全部回退单栏——而全局 cols（投影谷底 + 夹持校验）对噪点稳健、仍是双栏。
+ * 后果：两栏题号按 y 交错 → 跨栏巨型单元、编号空间被另一栏污染、缺号窗口反转。
+ *
+ * 判据（避免把真单栏带误切）：本带内存在「整区落入全局栏 i」的 region 且各全局
+ * 栏都有（高度 ≥0.55×medH，排除杂散标记）——真双栏带（p3/p2 作业页）满足；
+ * 混合版面的真单栏带（通栏内容横跨全页）不落入任何单栏，保持原判。
+ * 与 wrongq-structure 的 colAtPoint/hasMultiCol（#144）同一兜底口径。
+ */
+export function effectiveColsAtY(
+  ctx: LayoutContext,
+  regions: ReadonlyArray<{ box?: number[] | null }> | undefined,
+  y: number,
+): Array<[number, number]> {
+  const colsY = colsAtY(ctx, y)
+  const g = ctx.cols
+  if (!regions || !regions.length || colsY.length > 1 || !g || g.length <= 1) return colsY
+  // 仅当本带判为单栏（通栏几何）而全局多栏时，才查 region 分居证据
+  if (!(colsY.length === 1 && colsY[0][0] <= 0 && colsY[0][1] >= ctx.w - 1)) return colsY
+  const si = sectionIndexAtY(ctx, y)
+  const sec = ctx.colSections?.[si]
+  const by0 = si === 0 ? 0 : sec?.y0 ?? 0
+  const by1 = sec?.y1 ?? ctx.h
+  const hit = new Array<boolean>(g.length).fill(false)
+  const minH = Math.round(ctx.medH * 0.55)
+  for (const r of regions) {
+    const b = r.box
+    if (!b || b.length < 4) continue
+    const x0 = Math.min(b[0] ?? 0, b[2] ?? 0)
+    const x1 = Math.max(b[0] ?? 0, b[2] ?? 0)
+    const ry0 = Math.min(b[1] ?? 0, b[3] ?? 0)
+    const ry1 = Math.max(b[1] ?? 0, b[3] ?? 0)
+    if (ry1 - ry0 < minH) continue // 杂散标记不当栏占据证据
+    const cy = (ry0 + ry1) / 2
+    if (cy < by0 || cy > by1) continue
+    for (let i = 0; i < g.length; i++) {
+      if (x0 >= g[i][0] && x1 <= g[i][1]) { hit[i] = true; break }
+    }
+  }
+  return hit.every(Boolean) ? g : colsY
+}
+
 function lumaFrom(data: Buffer, w: number, h: number, ch: number): Float32Array {
   const n = w * h
   const luma = new Float32Array(n)
