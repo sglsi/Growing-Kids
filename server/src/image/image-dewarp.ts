@@ -1,5 +1,5 @@
 import sharp from 'sharp'
-import { estimateOrientation, rotateBuffer, ocrVolumeFromSidecar, type OrientationAngle } from './image-orient'
+import { estimateOrientation, rotateBuffer, ocrAngleFromSidecar, type OrientationAngle } from './image-orient'
 
 export type Corner = [number, number]
 
@@ -129,12 +129,44 @@ export interface DewarpResult {
 }
 
 /** 主函数：给定四角，把原图透视压平成正面矩形。 */
-export async function dewarpBuffer(buf: Buffer, cornersRaw: Corner[]): Promise<DewarpResult> {
+export async function dewarpBuffer(
+  buf: Buffer,
+  cornersRaw: Corner[],
+  opts: { keepFullCanvas?: boolean } = {},
+): Promise<DewarpResult> {
   if (!cornersRaw || cornersRaw.length !== 4) throw new Error('dewarp 需要 4 个角点')
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const ordered = orderCorners(cornersRaw)
-  const [W, H] = targetSize(ordered)
-  const dst: Corner[] = [[0, 0], [W, 0], [W, H], [0, H]]
+  let dst: Corner[]
+  let W: number
+  let H: number
+  if (opts.keepFullCanvas) {
+    // 「只拉直、不裁边」模式：把原图四个角点经正向单应映射到目标空间，取包围盒作为
+    // 输出画布 —— 原图全部像素（含页面左右/上下留白）都被纳入，边距原样保留。
+    // 否则（默认）以内容包络四角定输出尺寸，会把页面空白整段裁掉，造成用户反馈的
+    // "外框及四周文字被裁剪"（实测横图 1440px 宽被砍到 994px，丢 31%）。
+    const unitDst: Corner[] = [[0, 0], [1, 0], [1, 1], [0, 1]]
+    const F = solveHomography(ordered, unitDst) // src(角) → 单位网格（正向）
+    const apply = (x: number, y: number): Corner => {
+      const d = F[6] * x + F[7] * y + 1
+      return [(F[0] * x + F[1] * y + F[2]) / d, (F[3] * x + F[4] * y + F[5]) / d]
+    }
+    const pts = [apply(0, 0), apply(info.width, 0), apply(info.width, info.height), apply(0, info.height)]
+    const xs = pts.map((p) => p[0])
+    const ys = pts.map((p) => p[1])
+    const margin = Math.max(2, Math.round(Math.max(info.width, info.height) * 0.02))
+    const minX = Math.min(...xs) - margin
+    const minY = Math.min(...ys) - margin
+    W = Math.max(1, Math.round(Math.max(...xs) + margin - minX))
+    H = Math.max(1, Math.round(Math.max(...ys) + margin - minY))
+    // 输出画布坐标系下：src 各角应落到的位置 = 映射点 − 包围盒偏移
+    dst = pts.map((p) => [p[0] - minX, p[1] - minY] as Corner)
+  } else {
+    const sz = targetSize(ordered)
+    W = sz[0]
+    H = sz[1]
+    dst = [[0, 0], [W, 0], [W, H], [0, H]]
+  }
   // 反向采样：对输出像素 (X,Y) 求它在源图中的位置 → 需要 **dst→src** 的单应。
   // 传 solveHomography(dst, ordered) 而非 (ordered, dst)，见 warpRaw 顶部事故档案。
   const homo = solveHomography(dst, ordered)
@@ -183,6 +215,16 @@ export interface StraightenOptions {
    */
   deskew?: boolean
   /**
+   * 是否在「四角检测未命中」后尝试 **UVDoc 矫正**（3.x 侧车 /ppsv3/rectify，默认 true）。
+   *
+   * ⭐ 摆正链路的首选矫正路径（溯源文档 §四决策 1）：UVDoc 是透视/曲面模型（治本），
+   *   投影估计器（deskew）只是旋转模型且密页上已证明不可靠（#135 修复后保守拒动）。
+   *   四角检测要求画面里有纸张外框，而手机拍试卷绝大多数纸面占满画面 → 恒不命中，
+   *   此时 UVDoc 是唯一能修透视/曲面的路径。侧车不可用 → 静默回落 deskew 兜底。
+   *   关闭：`OCR_RECTIFY=0` 或传 `rectify: false`。
+   */
+  rectify?: boolean
+  /**
    * 是否在 deskew 之后继续检测**透视残留**并校正（默认 true）。
    *
    * deskew 是旋转模型，只问「整体歪了多少度」；而真实拍照常常整体不歪
@@ -214,7 +256,7 @@ export interface StraightenOutput {
   /** true 表示未做变换，需要前端提供 manual_corners */
   needManual: boolean
   /** 实际使用的路径（便于 debug / 回归） */
-  method?: 'manual' | 'auto' | 'curved' | 'skew' | 'perspective' | 'none'
+  method?: 'manual' | 'auto' | 'curved' | 'skew' | 'rectify' | 'rectify+skew' | 'rectify+perspective' | 'perspective' | 'orient-only' | 'none'
   /** 朝向摆正：实际施加的旋转角与判定方式（无旋转时为 0 / 'none'） */
   orientAngle?: OrientationAngle
   orientMethod?: 'projection' | 'ocr' | 'none'
@@ -260,20 +302,25 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
   if (opts.orient !== false) {
     try {
       const refine = opts.orientOcrRefine ?? process.env.OCR_ORIENT_REFINE !== '0'
-      const ocrVol = refine ? ocrVolumeFromSidecar() : undefined
-      const o = await estimateOrientation(workBuf, ocrVol)
+      const ocrAngle = refine ? ocrAngleFromSidecar() : undefined
+      const o = await estimateOrientation(workBuf, ocrAngle)
       orientResult.angle = o.angle
       orientResult.method = o.method
       orientResult.axis = o.axis
       if (o.angle !== 0) workBuf = await rotateBuffer(workBuf, o.angle)
       console.log(`[image-dewarp] 朝向摆正：旋转 ${o.angle}°（方法 ${o.method}，主轴 ${o.axis}）`)
-      // 落回几何 = OCR 消歧没生效：0/180、90/270 无法区分，本页**可能整页倒置**。
-      // 必须打醒目告警（而不是悄悄继续），否则产出的脏数据会被当成正常结果使用。
-      if (o.method === 'projection' && refine && o.angle !== 0) {
+      // 落回几何 = OCR 消歧没生效：0/180、90/270 无法区分（投影关于 180° 镜像对称），
+      // 此时几何给的任何「非零」旋转都可能是反的，本页**可能整页倒置**。
+      // ⚠️ 必须无条件打告警（此前错误加了 `&& refine` 门控）：当 OCR 细化被显式关闭
+      // （OCR_ORIENT_REFINE=0）或未配置侧车时，refine 为 false，但若仍走了几何非零旋转，
+      // orientSuspect 竟为 false —— 倒置结果看起来"正常、无报警"，正是这次诊断图静默倒置的根因。
+      // 几何法对 0/180、90/270 的「正立与否」本质无能，故只要 method=projection 且 angle≠0 即 suspect。
+      if (o.method === 'projection' && o.angle !== 0) {
         orientResult.suspect = true
         console.warn(
-          `⚠️ [image-dewarp] 朝向未经 OCR 确认（method=projection），本页可能上下颠倒！` +
-            ` 已启用 OCR 细化但侧车不可用/为 DRY_RUN；请检查 OCR 侧车后重跑，勿直接采信本次结果。`,
+          `⚠️ [image-dewarp] 朝向未经 OCR 确认（method=projection，angle=${o.angle}），本页可能上下颠倒！` +
+            ` OCR 细化${refine ? '已启用但侧车不可用/为 DRY_RUN' : '未启用（OCR_ORIENT_REFINE=0 或侧车缺失）'}；` +
+            `请检查 OCR 侧车或开启细化后重跑，勿直接采信本次结果。`,
         )
       }
     } catch (e) {
@@ -308,6 +355,28 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
       } catch (e) {
         console.warn('[image-dewarp] 自动检测四角无效：', (e as Error).message)
       }
+    }
+  }
+
+  // ⭐ UVDoc 矫正（四角未命中时的首选矫正路径，默认开启）：
+  //   四角检测依赖「画面里有纸张外框」，纸面占满画面时恒不命中；UVDoc 是透视/
+  //   曲面模型（治本），投影估计器（deskew）只是旋转模型且密页上不可靠（#135）。
+  //   矫正成功 → 后续 deskew/透视残留在矫正后的图上继续跑（coarse-to-fine）；
+  //   侧车不可用/超时/失败 → 静默回落 deskew 兜底，主链路不抛错。
+  let rectInfo: { elapsed_ms: number } | null = null
+  if (opts.rectify !== false) {
+    try {
+      const { rectifyBySidecar } = await import('./image-rectify')
+      const r = await rectifyBySidecar(workBuf)
+      if (r) {
+        workBuf = r.buffer
+        rectInfo = { elapsed_ms: r.elapsed_ms }
+        console.log(
+          `[image-dewarp] UVDoc 矫正完成：${r.width}x${r.height}（${r.elapsed_ms}ms）`,
+        )
+      }
+    } catch (e) {
+      console.warn('[image-dewarp] UVDoc 矫正失败，回落投影估计器：', (e as Error).message)
     }
   }
 
@@ -354,7 +423,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
           width: m.width || p.width,
           height: m.height || p.height,
           needManual: false,
-          method: 'perspective',
+          method: rectInfo ? 'rectify+perspective' : 'perspective',
           orderedCorners: p.corners,
           ...(skewInfo ?? {}),
           orientAngle: orientResult.angle,
@@ -376,7 +445,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
       width: m.width || 0,
       height: m.height || 0,
       needManual: false,
-      method: 'skew',
+      method: rectInfo ? 'rectify+skew' : 'skew',
       ...(skewInfo ?? {}),
       orientAngle: orientResult.angle,
       orientMethod: orientResult.method,
@@ -384,5 +453,36 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
     }
   }
 
-  return { buffer: null, needManual: true, method: 'none', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
+  // ⭐ 兜底：即使四角/倾斜/透视三路全部未命中，也【绝不能丢弃已完成的朝向旋转】。
+  // 否则 full-bleed 照片（纸面占满画面、无外框）会一路落到本分支，把 orientAngle
+  // 算出来的旋转结果整个丢掉，buildLayoutContext 回退到原图 → 方向校正名存实亡、
+  // 下游 OCR 在竖排/倒置图上工作（实测表现为「绿框方向上下颠倒、题目范围截错」）。
+  // 故此处返回【已旋转的 workBuf】（可能还含 UVDoc 矫正结果），needManual 视是否真拿到可用图决定。
+  const fbBuf = workBuf ?? buf
+  try {
+    const m = await sharp(fbBuf).metadata()
+    return {
+      buffer: fbBuf,
+      width: m.width || 0,
+      height: m.height || 0,
+      needManual: false,
+      method: rectInfo ? 'rectify' : 'orient-only',
+      orientAngle: orientResult.angle,
+      orientMethod: orientResult.method,
+      orientAxis: orientResult.axis,
+      orientSuspect: orientResult.suspect,
+    }
+  } catch {
+    return {
+      buffer: fbBuf,
+      width: 0,
+      height: 0,
+      needManual: false,
+      method: rectInfo ? 'rectify' : 'orient-only',
+      orientAngle: orientResult.angle,
+      orientMethod: orientResult.method,
+      orientAxis: orientResult.axis,
+      orientSuspect: orientResult.suspect,
+    }
+  }
 }

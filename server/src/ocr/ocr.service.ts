@@ -4,16 +4,71 @@ import * as http from 'http'
 import * as https from 'https'
 import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
-import type { RecognizedItem, LocalOcrResult, LocalOcrTextRegion, OcrBox } from './ocr.types'
-import { LocalOcrClient } from './ocr-engine.client'
-import { getSidecarSupervisor } from './sidecar.supervisor'
+import type {
+  RecognizedItem,
+  ExportDocxItem,
+  LocalOcrResult,
+  LocalOcrTextRegion,
+  LocalOcrLayoutBlock,
+  OcrBox,
+} from './ocr.types'
+import {
+  Ppsv3Client,
+  getPpsv3Client,
+  getPpsv3Supervisor,
+  type Ppsv3Result,
+  type Ppsv3TextRegion,
+} from './ppsv3.client'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
 import { structureLocalItems } from './ocr-struct'
 import {
-  Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Footer, PageNumber,
+  Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, AlignmentType, Footer, PageNumber,
 } from 'docx'
 
 const MODEL = 'doubao-seed-2-0-pro-260215'
+
+// ---------- 3.x 引擎适配层（PP-StructureV3 → LocalOcrResult 契约） ----------
+
+/**
+ * 文本区域轴对齐框：优先 rec_boxes（PP-OCRv5 检测的 [x0,y0,x1,y1]），
+ * 缺失时由 dt_polys 四边形推导（坐标保真模式下与输入图同坐标系）。
+ */
+function ppsv3RegionBox(t: Ppsv3TextRegion): OcrBox {
+  if (t.box && t.box.length >= 4) return [t.box[0], t.box[1], t.box[2], t.box[3]]
+  if (t.quad && t.quad.length >= 4) {
+    const xs = t.quad.map((p) => p[0])
+    const ys = t.quad.map((p) => p[1])
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
+  }
+  return [0, 0, 0, 0]
+}
+
+/**
+ * 3.x 全链路结果 → 2.x LocalOcrResult 契约（下游 wrongq / 复习本链路零改动）。
+ *  - raw_text：行级拼接（保留换行，degradeToPlainText 按行切题号依赖此结构）；无区域时回落块内容
+ *  - text_regions：行级区域（与 2.x 粒度一致，坐标在原图系——侧车以 PPSV3_UNWARP/ORIENT_CLS=0 运行）
+ *  - confidence / low_confidence：沿用 2.x 口径（OCR_LOW_CONF_THRESHOLD，默认 0.6）
+ *  - layout：PP-StructureV3 版面块（label/bbox/content），比 2.x 更语义化
+ */
+export function ppsv3ToLocal(r: Ppsv3Result): LocalOcrResult {
+  const regions: LocalOcrTextRegion[] = (r.text_regions ?? [])
+    .filter((t) => (t.text || '').trim().length > 0)
+    .map((t) => ({ text: t.text, box: ppsv3RegionBox(t), score: t.score ?? 0 }))
+  const rawFromRegions = regions.map((x) => x.text).join('\n')
+  const rawFromBlocks = (r.blocks ?? []).map((b) => b.content).filter(Boolean).join('\n')
+  const conf = regions.length ? regions.reduce((s, x) => s + (x.score ?? 0), 0) / regions.length : 0
+  const lowConfThreshold = Number(process.env.OCR_LOW_CONF_THRESHOLD ?? 0.6)
+  return {
+    raw_text: rawFromRegions || rawFromBlocks,
+    text_regions: regions,
+    layout: (r.blocks ?? []).map((b) => ({ type: b.label ?? 'text', box: b.bbox, text: b.content })),
+    tables: [],
+    formulas: [],
+    confidence: conf,
+    engine_used: ['ppsv3'],
+    low_confidence: regions.length === 0 || conf < lowConfThreshold,
+  }
+}
 
 const EXAM_TASK =
   '现在给你一张或多张作业/试卷图片，其中包含若干道题目，部分题目上有老师批改痕迹（如红叉、红勾、订正）。'
@@ -27,16 +82,22 @@ export class OcrService {
   // VLM 客户端懒加载：本地 OCR 是主路径，不应因缺少 VLM 凭证而在构造期崩溃。
   // 仅当真正需要 VLM（语义切分 / 兜底看图）时才实例化。
   private vlmClient?: LLMClient
-  private readonly localOcr: LocalOcrClient
-  private readonly sidecar = getSidecarSupervisor()
+  // 生产 OCR 引擎：PaddleOCR 3.7.0 侧车（PP-StructureV3，:9001）——2026-10-15 起替换 2.x 融合侧车。
+  // 2.x（LocalOcrClient, :9000）降级为回滚备份，生产代码不再引用。
+  private readonly ppsv3: Ppsv3Client
+  private readonly sidecar = getPpsv3Supervisor()
+  // ④（#143）VL 手写识别配额：进程内计数（VL CPU 推理慢，防主链路被拖垮）
+  private vlCalls = 0
+  private readonly vlMaxCalls = Number(process.env.OCR_VL_MAX_BLOCKS ?? 8)
 
   constructor(private readonly storageService: StorageService) {
-    // 本地 OCR 侧车：失败静默返回 null（见 LocalOcrClient），由下方 VLM 降级接管。
-    // 这里注入的是共享单例 telemetry/alertSink（与 SidecarSupervisor 共用同一份，
-    // 探针与调用埋点视图一致），并启动主动健康探针——侧车失联会触发告警、恢复会通知，
-    // 解决"侧车宕机静默降级、无人知晓"的隐患（见 ocr-health.ts）。
-    this.localOcr = new LocalOcrClient()
-    this.localOcr.startProbe()
+    // 3.x 侧车：失败静默返回 null（见 Ppsv3Client），由下方 VLM 降级接管。
+    // 注入共享单例 telemetry/alertSink（与 SidecarSupervisor 共用同一份），并启动主动健康探针——
+    // 侧车失联触发告警、恢复通知，解决"侧车宕机静默降级、无人知晓"的隐患（见 ocr-health.ts）。
+    this.ppsv3 = new Ppsv3Client({
+      autoProbe: (process.env.PPSV3_AUTO_PROBE ?? 'true') !== 'false',
+    })
+    this.ppsv3.startProbe()
   }
 
   private getVlm(): LLMClient {
@@ -102,27 +163,29 @@ export class OcrService {
     return text.trim()
   }
 
-  // ---------------- 本地 OCR（主识别） ----------------
-  /** 调本地侧车识别一组图片，合并为多图结果；任意失败返回 null（交给 VLM 兜底）。 */
+  // ---------------- 本地 OCR（主识别，3.x PP-StructureV3） ----------------
+  /** 调 3.x 侧车识别一组图片，合并为多图结果；任意失败返回 null（交给 VLM 兜底）。 */
   private async recognizeLocalByUrls(urls: string[]): Promise<LocalOcrResult | null> {
     if ((process.env.OCR_FALLBACK_TO_VLM ?? 'true') === 'false') return null
     try {
-      // 侧车守护：OCR 调用时按需拉起侧车，空闲/资源紧张时自动回收（见 sidecar.supervisor）
-      const results = await this.sidecar.withSidecar(() =>
-        Promise.all(urls.map((u) => this.localOcr.recognizeByUrl(u))),
-      )
-      if (!results || !results.length) return null
-      const ok = results.filter(Boolean) as LocalOcrResult[]
-      if (!ok.length) return null
+      // 侧车守护：OCR 调用时按需拉起 3.x 侧车，空闲/资源紧张时自动回收（见 sidecar.supervisor）
+      // 串行逐张：3.x 推理在侧车内已串行化（_INFER_LOCK），并行发请求只会在服务端排队，
+      // 让后发的请求先在客户端超时；串行的超时语义更干净（2.x 并行是因为其侧车无全局锁）。
+      const results: LocalOcrResult[] = []
+      for (const u of urls) {
+        const r = await this.sidecar.withSidecar(() => this.ppsv3.parse({ image_url: u }, false))
+        if (r) results.push(ppsv3ToLocal(r))
+      }
+      if (!results.length) return null
       return {
-        raw_text: ok.map((r) => r.raw_text).join('\n\n'),
-        layout: ok.flatMap((r) => r.layout),
-        text_regions: ok.flatMap((r) => r.text_regions),
-        tables: ok.flatMap((r) => r.tables as unknown[]),
-        formulas: ok.flatMap((r) => r.formulas as unknown[]),
-        confidence: ok.reduce((s, r) => s + r.confidence, 0) / ok.length,
-        engine_used: ok.flatMap((r) => r.engine_used),
-        low_confidence: ok.some((r) => r.low_confidence),
+        raw_text: results.map((r) => r.raw_text).join('\n\n'),
+        layout: results.flatMap((r) => r.layout),
+        text_regions: results.flatMap((r) => r.text_regions),
+        tables: results.flatMap((r) => r.tables as unknown[]),
+        formulas: results.flatMap((r) => r.formulas as unknown[]),
+        confidence: results.reduce((s, r) => s + r.confidence, 0) / results.length,
+        engine_used: results.flatMap((r) => r.engine_used),
+        low_confidence: results.some((r) => r.low_confidence),
       }
     } catch {
       return null
@@ -489,7 +552,7 @@ export class OcrService {
    * 用户诉求：OCR 识别出的内容直接存储为 word 文档，并在前端提供可直接打开的位置。
    * 层级（大题/小题）在文档中以「第 N 题（小题）」标注，子题题干已含大题题干，独立可读。
    */
-  async exportDocx(items: RecognizedItem[], title: string): Promise<Buffer> {
+  async exportDocx(items: ExportDocxItem[], title: string): Promise<Buffer> {
     const children: Paragraph[] = []
 
     children.push(
@@ -514,7 +577,7 @@ export class OcrService {
       }),
     )
 
-    const pushLines = (label: string, text: string, color?: string) => {
+    const pushLines = (label: string, text: string | undefined, color?: string) => {
       const t = (text || '').trim()
       if (!t) return
       children.push(
@@ -534,7 +597,8 @@ export class OcrService {
       pushLines('说明', '本次识别未得到任何题目内容。')
     }
 
-    items.forEach((it, idx) => {
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx]
       const isSub = it.level === 2
       children.push(
         new Paragraph({
@@ -548,8 +612,30 @@ export class OcrService {
       pushLines('正确答案', it.answer_content, '1E8449')
       pushLines('解析', it.solution)
       if (it.source) pushLines('来源', it.source)
-    })
-
+      // #150 人工辅助整理：用户手动裁剪的错题图片按序嵌入（题干之后）
+      for (const url of it.images ?? []) {
+        const img = await this.fetchDocxImage(url)
+        if (img) {
+          // 宽度上限 600px（docx 以 96dpi 计的像素；A4 正文宽约 602px），等比缩放
+          const w = Math.min(600, img.width)
+          const h = Math.max(1, Math.round((img.height * w) / img.width))
+          children.push(
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              spacing: { before: 80, after: 160 },
+              children: [new ImageRun({ data: img.data, type: img.type, transformation: { width: w, height: h } })],
+            }),
+          )
+        } else {
+          children.push(
+            new Paragraph({
+              spacing: { after: 60 },
+              children: [new TextRun({ text: '（该图片未能嵌入 Word，请回原流程重试）', color: '9A948A', size: 18 })],
+            }),
+          )
+        }
+      }
+    }
     const doc = new Document({
       styles: { default: { document: { run: { font: '宋体', size: 22 } } } },
       sections: [
@@ -576,6 +662,78 @@ export class OcrService {
       ],
     })
     return Packer.toBuffer(doc)
+  }
+
+  /**
+   * 下载导出用图片并量取尺寸（#150 人工辅助整理：手动裁剪图嵌入 Word）。
+   * 失败返回 null（调用方降级为文字说明，不阻断整份文档导出）。
+   *
+   * ⚠️ docx 的 ImageRun 必须显式传 type（"jpg" | "png" | "gif" | "bmp"）：
+   * 漏传时媒体文件扩展名会是 .undefined、[Content_Types].xml 无对应声明，
+   * Word 直接打不开这些图（线上目验：图裂）。webp/tiff 等不支持的格式
+   * 统一转 PNG 再嵌。
+   */
+  private async fetchDocxImage(
+    url: string,
+  ): Promise<{ data: Buffer; width: number; height: number; type: 'jpg' | 'png' | 'gif' | 'bmp' } | null> {
+    const u = (url || '').trim()
+    if (!/^https?:\/\//i.test(u)) return null
+    try {
+      let buf = await this.downloadBinary(u, 10_000, 8 * 1024 * 1024)
+      if (!buf.length) return null
+      let meta = await sharp(buf).metadata()
+      const width = meta.width ?? 0
+      const height = meta.height ?? 0
+      if (!width || !height) return null
+      let type: 'jpg' | 'png' | 'gif' | 'bmp' = 'png'
+      const fmt = meta.format
+      if (fmt === 'jpeg') type = 'jpg'
+      else if (fmt === 'gif') type = 'gif'
+      else if (fmt === 'png') type = 'png'
+      else {
+        // bmp/webp/tiff/svg 等：sharp 量不出或 docx 不直接支持 → 统一转 PNG
+        buf = await sharp(buf).png().toBuffer()
+        meta = await sharp(buf).metadata()
+        type = 'png'
+      }
+      return { data: buf, width: meta.width ?? width, height: meta.height ?? height, type }
+    } catch (e) {
+      console.warn('[export-docx] 图片下载/解析失败，跳过该图:', u, (e as Error)?.message ?? e)
+      return null
+    }
+  }
+
+  /** 二进制下载（http/https，带超时与大小上限；跟随一次重定向） */
+  private downloadBinary(url: string, timeoutMs = 10_000, maxBytes = 8 * 1024 * 1024): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const mod = url.startsWith('https:') ? https : http
+      const req = mod.get(url, (res) => {
+        const code = res.statusCode ?? 0
+        if ([301, 302, 307, 308].includes(code) && res.headers.location) {
+          res.resume()
+          this.downloadBinary(res.headers.location, timeoutMs, maxBytes).then(resolve, reject)
+          return
+        }
+        if (code !== 200) {
+          res.resume()
+          reject(new Error(`HTTP ${code}`))
+          return
+        }
+        const chunks: Buffer[] = []
+        let size = 0
+        res.on('data', (c: Buffer) => {
+          size += c.length
+          if (size > maxBytes) {
+            req.destroy(new Error(`图片超过 ${maxBytes} 字节上限`))
+            return
+          }
+          chunks.push(c)
+        })
+        res.on('end', () => resolve(Buffer.concat(chunks)))
+      })
+      req.setTimeout(timeoutMs, () => req.destroy(new Error('图片下载超时')))
+      req.on('error', reject)
+    })
   }
 
   /**
@@ -642,19 +800,60 @@ export class OcrService {
   }
 
   /**
-   * 全页 OCR（**原图尺度**，带坐标）。
+   * ④（#143）手写答案识别（PaddleOCR-VL 增强）：错题块裁图 → 文本。
    *
-   * 用途：P1-12 纯版面切块兜底——当没有红笔批改痕迹时，`extractWrongQuestions` 的红笔
-   * 锚定路径产出空 blocks，需要改以"版面 + 题号"在全页 OCR 上切题块，解除"必须红笔"的硬前提。
+   * 为什么单开一路（而不是并进 recognizeBlockFull）：PP-OCRv5 是印刷文本优化模型，
+   * 学生手写答案（used to do sth. 类）识别质量差；PaddleOCR-VL-0.9B 是文档解析 VLM，
+   * 对「题干印刷 + 手写答案 + 红笔订正」混合内容更强。但 VL 内存峰值 >8GB（CPU），
+   * 必须门控使用：
+   *   - `OCR_VL_HANDWRITE=1` 才启用（默认关，现网零影响）；
+   *   - 每请求进程内最多 `OCR_VL_MAX_BLOCKS` 块（默认 8）——VL CPU 推理慢（几十秒/块），
+   *     不设上限会把错题提取主链路拖垮；
+   *   - 侧车加载失败/超时/返回空 → 静默返回 null，调用方回落 v5 链路（零回归）。
    *
-   * 坐标语义：直接对原图 buffer 做 base64 识别，返回的 box 即原图像素坐标，与
-   * `extractWrong` 按 `ctx.flatBuf` 裁图的坐标系一致；**不经过入库的 1600 长边 resize**，
-   * 因此不存在坐标错配（这是相对"先入库再走 URL 识别"方案的取舍修正）。
-   *
-   * 大图先等比缩到长边 ≤2000 再识别（侧车 CPU 推理，过大会超时），坐标按比例回算到原图。
-   * 侧车不可用时返回空数组（不抛），由调用方退化处理。
+   * 输入是块裁图 buffer（非 URL）：VL 端点直接吃 base64，省一次 ingest+取 URL。
    */
-  async recognizePageRegions(buf: Buffer): Promise<LocalOcrTextRegion[]> {
+  async recognizeHandwrite(buf: Buffer): Promise<string | null> {
+    if ((process.env.OCR_VL_HANDWRITE ?? '0') !== '1') return null
+    if (this.vlCalls >= this.vlMaxCalls) return null
+    this.vlCalls += 1
+    try {
+      // vlParse 自带 AbortSignal 超时（PPSV3_TIMEOUT_MS，默认 180s）；侧车守护
+      // withSidecar 保证长驻实例在线。失败/超时/空文本 → null，调用方回落 v5。
+      const r = await getPpsv3Supervisor().withSidecar(async () => {
+        const client = getPpsv3Client()
+        return client.vlParse({ image_base64: buf.toString('base64') })
+      })
+      if (!r?.text) return null
+      return r.text
+    } catch (e) {
+      console.warn('[ocr-vl] 手写识别失败，回落 v5：', (e as Error)?.message ?? e)
+      return null
+    }
+  }
+
+  /**
+   * 全页 OCR（**原图尺度**，带坐标 + 版面块）。
+   *
+   * 用途：P1-12 纯版面切块兜底 + ②（#141）错题提取结构增强。
+   *  - `regions`：阶段 A/B 的题号行输入（红笔锚点 → 题号定界整题满框）；
+   *  - `layout`：3.x 版面模型的标题类块（paragraph_title/doc_title/header），
+   *    供 analyzeQuestionUnits 保守融合补出文本规则识别不了的节标题。
+   *
+   * 坐标语义：直接对原图 buffer 跑 3.x 侧车（PP-StructureV3，PPSV3_UNWARP/ORIENT_CLS=0
+   * 坐标保真模式），返回的 box 即原图像素坐标，与 `extractWrong` 按 `ctx.flatBuf` 裁图的
+   * 坐标系一致；**不经过入库的 1600 长边 resize**，因此不存在坐标错配。
+   *
+   * 调用方式：**工具式隔离**（每次独立子进程跑 main3.py --once，崩/卡只影响当次，
+   * 硬超时可 SIGKILL 中断）——与 2.x 时代的 recognizeByBase64 架构一致；任意用户图是
+   * 崩溃风险面，不能让一段卡死的推理污染长驻侧车实例。
+   *
+   * 大图先等比缩到长边 ≤2000 再识别（CPU 推理，过大会超时），坐标按比例回算到原图。
+   * 侧车不可用时返回空数组/空版面（不抛），由调用方退化处理。
+   */
+  async recognizePage(
+    buf: Buffer,
+  ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
     try {
       const meta = await sharp(buf).metadata()
       const ow = meta.width ?? 0
@@ -672,23 +871,103 @@ export class OcrService {
           .png()
           .toBuffer()
       }
-      const local = await this.sidecar.withSidecar(() =>
-        this.localOcr.recognizeByBase64(ocrBuf.toString('base64')),
-      )
-      if (!local || !Array.isArray(local.text_regions)) return []
-      return local.text_regions
-        .filter((r) => (r.text || '').trim().length > 0)
-        .map((r) => ({
-          ...r,
+      const r = await this.ppsv3.parseByBase64(ocrBuf.toString('base64'))
+      if (!r) return { regions: [], layout: [] }
+      const local = ppsv3ToLocal(r)
+      const regions = (Array.isArray(local.text_regions) ? local.text_regions : [])
+        .filter((t) => (t.text || '').trim().length > 0)
+        .map((t) => ({
+          ...t,
           box: [
-            Math.round(r.box[0] * sx),
-            Math.round(r.box[1] * sy),
-            Math.round(r.box[2] * sx),
-            Math.round(r.box[3] * sy),
+            Math.round(t.box[0] * sx),
+            Math.round(t.box[1] * sy),
+            Math.round(t.box[2] * sx),
+            Math.round(t.box[3] * sy),
           ] as OcrBox,
         }))
+      const layout = (local.layout ?? [])
+        .filter((b) => b.box && b.box.length >= 4 && (b.text || '').trim().length > 0)
+        .map((b) => ({
+          ...b,
+          box: [
+            Math.round(b.box[0] * sx),
+            Math.round(b.box[1] * sy),
+            Math.round(b.box[2] * sx),
+            Math.round(b.box[3] * sy),
+          ] as OcrBox,
+        }))
+      return { regions, layout }
     } catch {
-      return []
+      return { regions: [], layout: [] }
+    }
+  }
+
+  /** 只要文本区域的便捷包装（P1-12 纯版面兜底等旧调用点）。 */
+  async recognizePageRegions(buf: Buffer): Promise<LocalOcrTextRegion[]> {
+    const { regions } = await this.recognizePage(buf)
+    return regions
+  }
+
+  /**
+   * 全页 OCR（HTTP 侧车路径）——#150 人工辅助错题整理的「OCR 文本栏」数据源。
+   *
+   * 与 recognizePage 同口径（超长边缩到 2000、box 还原到输入图坐标系），
+   * 但走长驻侧车 HTTP（parse + withSidecar 守护）：recognizePage 用的
+   * parseByBase64 是「工具式子进程」路径（每次独立拉起 main3.py），
+   * 不经侧车守护的探活/回收，首触达代价高；本方法只服务人工整理的单页轻量
+   * OCR，复用 URL 批量路径同一套守护更稳（侧车不可用返回空，不抛）。
+   */
+  async recognizePageForPanel(
+    buf: Buffer,
+  ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+    try {
+      const meta = await sharp(buf).metadata()
+      const ow = meta.width ?? 0
+      const oh = meta.height ?? 0
+      const maxEdge = 2000
+      let ocrBuf = buf
+      let sx = 1
+      let sy = 1
+      if (ow > maxEdge || oh > maxEdge) {
+        const scale = maxEdge / Math.max(ow, oh)
+        sx = 1 / scale
+        sy = 1 / scale
+        ocrBuf = await sharp(buf)
+          .resize({ width: Math.round(ow * scale), height: Math.round(oh * scale) })
+          .png()
+          .toBuffer()
+      }
+      const r = await this.sidecar.withSidecar(() =>
+        this.ppsv3.parse({ image_base64: ocrBuf.toString('base64') }, false),
+      )
+      if (!r) return { regions: [], layout: [] }
+      const local = ppsv3ToLocal(r)
+      const regions = (Array.isArray(local.text_regions) ? local.text_regions : [])
+        .filter((t) => (t.text || '').trim().length > 0)
+        .map((t) => ({
+          ...t,
+          box: [
+            Math.round(t.box[0] * sx),
+            Math.round(t.box[1] * sy),
+            Math.round(t.box[2] * sx),
+            Math.round(t.box[3] * sy),
+          ] as OcrBox,
+        }))
+      const layout = (local.layout ?? [])
+        .filter((b) => b.box && b.box.length >= 4 && (b.text || '').trim().length > 0)
+        .map((b) => ({
+          ...b,
+          box: [
+            Math.round(b.box[0] * sx),
+            Math.round(b.box[1] * sy),
+            Math.round(b.box[2] * sx),
+            Math.round(b.box[3] * sy),
+          ] as OcrBox,
+        }))
+      return { regions, layout }
+    } catch (e) {
+      console.warn('[ocr] 全页 OCR（侧车）失败，返回空文本栏:', (e as Error)?.message ?? e)
+      return { regions: [], layout: [] }
     }
   }
 }

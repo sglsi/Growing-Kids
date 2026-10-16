@@ -3,13 +3,16 @@ import { OcrService } from './ocr.service'
 import { StorageService } from '../storage/storage.service'
 import { DocumentsService } from '../documents/documents.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
-import type { RecognizeExamDto, RecognizePairDto, RecognizeDocDto, RecognizeExamUrlDto, RecognizedItem } from './ocr.types'
+import type { RecognizeExamDto, RecognizePairDto, RecognizeDocDto, RecognizeExamUrlDto, ExportDocxItem } from './ocr.types'
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 interface ExportDocxDto {
-  /** 识别结果（前端把 /recognize-* 返回的 items 原样回传） */
-  items?: RecognizedItem[]
+  /**
+   * 导出条目：既兼容「识别结果原样回传」（RecognizedItem 形状），
+   * 也支持 #150 人工辅助整理的「文本 + 手动裁剪图片 URL」（ExportDocxItem.images）。
+   */
+  items?: ExportDocxItem[]
   /** 文档标题，默认「识别结果」 */
   title?: string
 }

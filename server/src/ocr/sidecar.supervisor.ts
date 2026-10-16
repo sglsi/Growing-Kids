@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import {
   type OcrTelemetry,
@@ -233,7 +234,11 @@ export class SidecarSupervisor {
   }
 
   private async isHealthy(): Promise<boolean> {
-    if (!this.child || this.child.killed) return false
+    // 始终以 HTTP 探活为准（不再要求 this.child 存在）：
+    //  - 自己 spawn 的子进程启动中/僵死 → /healthz 不通 → false（轮询继续/自愈），语义不变；
+    //  - 端口已被**外部健康守护进程**持有（运维预启/上一次探针的 orphan）→ true → 采纳，
+    //    不再 spawn 一个绑不上端口的 doomed child 打架（A/B 部署实测踩过：
+    //    3.x 侧车被 orphan 占端口，supervisor 反复 spawn 失败 → 整条链路假死）。
     try {
       const res = await fetch(`${this.cfg.baseUrl}/healthz`, { signal: AbortSignal.timeout(3000) })
       return res.ok
@@ -249,18 +254,40 @@ export class SidecarSupervisor {
     this.lastUsed = Date.now()
     this.intentionalStop = false
     this.starting = (async () => {
+      // ⭐ stdio 重定向到**文件**而非管道：父进程（探针/短驻 Node）退出会关闭管道读端，
+      // 侧车推理中写 stdout 即报 Errno 32 Broken pipe——/healthz 不写日志所以仍"健康"，
+      // 但 /ppsv3 全 500；后续进程按 HTTP 探活"收养"该半死侧车后静默降级（#144 排查确认）。
+      // 文件 fd 不随父进程退出失效，孤儿侧车保持完全健康。
+      const logPath = path.join(os.tmpdir(), `ocr-sidecar-${this.cfg.port}.log`)
+      let logFd: number
+      try {
+        logFd = fs.openSync(logPath, 'a')
+      } catch {
+        logFd = -1 // 打不开日志文件时退回管道（至少不丢启动能力）
+      }
+      const stdio: ('ignore' | 'pipe' | number)[] = logFd >= 0 ? ['ignore', logFd, logFd] : ['ignore', 'pipe', 'pipe']
       const child = spawn(
         this.cfg.python,
         [this.cfg.script, '--host', this.cfg.host, '--port', String(this.cfg.port)],
-        { cwd: this.cfg.engineDir, env: { ...process.env, ...this.cfg.engineEnv }, stdio: ['ignore', 'pipe', 'pipe'] },
+        { cwd: this.cfg.engineDir, env: { ...process.env, ...this.cfg.engineEnv }, stdio },
       )
-      child.stdout?.on('data', (d) => console.log(`[sidecar] ${String(d).trim()}`))
-      child.stderr?.on('data', (d) => console.warn(`[sidecar] ${String(d).trim()}`))
+      if (logFd < 0) {
+        child.stdout?.on('data', (d) => console.log(`[sidecar] ${String(d).trim()}`))
+        child.stderr?.on('data', (d) => console.warn(`[sidecar] ${String(d).trim()}`))
+      } else {
+        console.log(`[sidecar] 子进程日志：${logPath}`)
+      }
+      const closeLog = () => { if (logFd >= 0) { try { fs.closeSync(logFd) } catch { /* ignore */ } } }
       child.on('exit', (code, signal) => {
+        closeLog()
         this.child = null
         if (!this.intentionalStop && (code || signal)) {
           console.warn(`[sidecar] 进程退出 code=${code} signal=${signal}`)
         }
+      })
+      child.on('error', (e) => {
+        closeLog()
+        console.warn(`[sidecar] 子进程错误: ${(e as Error)?.message ?? e}`)
       })
       this.child = child
       const deadline = Date.now() + timeoutMs
@@ -324,11 +351,29 @@ export class SidecarSupervisor {
     }
     const c = this.child
     if (c && !c.killed) {
+      const pid = c.pid
+      if (pid === undefined) {
+        this.child = null
+        console.log(`[sidecar] 已停止（${reason}）`)
+        return
+      }
       try {
         c.kill('SIGTERM')
       } catch {
         /* ignore */
       }
+      // 兜底升级：uvicorn 优雅关闭可能挂住（Paddle 推理线程/非守护线程不退），
+      // 3s 后仍存活则强杀——否则会留下 orphan 占住端口，后续 spawn 全部绑不上
+      // （实测踩过：探针 stop 后 python 存活占 9001，下一轮 A/B 全量假死）。
+      setTimeout(() => {
+        try {
+          process.kill(pid, 0) // 仍存活？
+          process.kill(pid, 'SIGKILL')
+          console.warn(`[sidecar] 优雅关闭超时，已强杀 pid=${pid}`)
+        } catch {
+          /* 已正常退出 */
+        }
+      }, 3000).unref?.()
     }
     this.child = null
     console.log(`[sidecar] 已停止（${reason}）`)

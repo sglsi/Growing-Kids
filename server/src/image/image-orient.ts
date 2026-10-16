@@ -9,8 +9,8 @@
  *     横排图 → 行投影（每行墨迹和）呈强周期性峰谷；竖排图 → 列投影峰更显著。
  *     该信号能**确定性修掉 90°/270° 侧翻**（把图转为横排），且无需任何模型。
  *   - 0° vs 180°、90° vs 270° 属「同一轴内的镜像」，纯几何无法区分（投影对称）。
- *     此时用 **OCR 侧车（CV 模型，非大模型）做最佳努力细化**：比较两候选朝向的 OCR 文本量，取多者。
- *     侧车不可达时回落纯几何结果（侧车自带每行 0/180 角度分类，识别仍正确）。
+ *     此时用 **3.x OCR 侧车（PP-LCNet 朝向分类，CV 模型非大模型）做细化**：单模型四分类
+ *     （0/90/180/270 校正角），一次性给出可靠朝向。侧车不可达时回落纯几何结果（并打 orientSuspect 告警）。
  *
  * 为什么不直接用大模型：朝向是「结构几何问题」，投影法在 CPU 上毫秒级、离线可用、
  * 不引入外部调用与费用；大模型属杀鸡用牛刀且带来可用性/隐私耦合。
@@ -18,6 +18,8 @@
 
 import sharp from 'sharp'
 import { estimateSkew } from './image-deskew'
+import { getPpsv3Supervisor } from '../ocr/ppsv3.client'
+import { toolOcr, toolInvokeEnabled } from '../ocr/ocr-tool'
 
 export type OrientationAngle = 0 | 90 | 180 | 270
 export type OrientMethod = 'projection' | 'ocr' | 'none'
@@ -30,14 +32,23 @@ export interface OrientationResult {
   axis: 'horizontal' | 'vertical'
   /** 四个候选朝向的几何分（仅调试用） */
   scores?: Record<OrientationAngle, number>
+  /** OCR 4 向投票各候选质量分（仅调试用） */
+  volumes?: Partial<Record<OrientationAngle, number>>
   /** 是否启用了 OCR 细化 */
   ocrRefined?: boolean
 }
 
 const CANDIDATES: OrientationAngle[] = [0, 90, 180, 270]
 
-/** 注入式 OCR 文本量估计（生产用侧车，测试可替换）。返回该图能读出的"文本体量"代理值。 */
-export type OcrVolumeFn = (buf: Buffer) => Promise<number>
+/**
+ * 注入式 OCR 朝向判定（生产用 3.x 侧车 /orient 端点，测试可替换）。
+ * 入参为原始图，返回朝向分类器给出的校正角 + 置信度分。
+ * PP-LCNet 单模型四分类（~0.1s），替代旧版 2.x 的「四向全量 OCR 投票」；
+ * 能确定性消歧 0/180 与 90/270（投影对称、几何无能）。
+ */
+export type OcrAngleProvider = (
+  buf: Buffer,
+) => Promise<{ angle: OrientationAngle; scores?: Partial<Record<OrientationAngle, number>> }>
 
 function localOtsu(hist: Int32Array, total: number): number {
   let sum = 0
@@ -134,31 +145,31 @@ export async function rotateBuffer(buf: Buffer, angle: OrientationAngle): Promis
 
 /**
  * 估计输入图应旋转的角度（度）以转正。
- * @param ocrVolume 可选 OCR 文本量函数（侧车），用于 0/180 与 90/270 的镜像消歧；缺失则纯几何。
+ * @param ocrAngle 可选 OCR 朝向判定（侧车 /orient 端点），用于 0/180 与 90/270 的镜像消歧；缺失则纯几何。
  */
 export async function estimateOrientation(
   buf: Buffer,
-  ocrVolume?: OcrVolumeFn,
+  ocrAngle?: OcrAngleProvider,
 ): Promise<OrientationResult> {
   const { ink, w, h } = await binarize(buf)
   const { scores, axis } = scoreOrientation(ink, w, h)
 
-  // 纯几何初判：横排取 0、竖排取 90（侧车 cls 会兜 0/180；OCR 细化会纠正 90/270 选择）
+  // 纯几何初判（仅作回落与日志）：横排取 0、竖排取 90。
+  // ⚠️ 纯几何对 0/180、90/270 的「正立与否」无能为例（投影关于 180° 镜像对称），
+  // 必须由朝向分类器来定，见下文 ocrAngle。
   let angle: OrientationAngle = axis === 'horizontal' ? 0 : 90
 
-  // 镜像消歧：0 vs 180、90 vs 270
-  if (ocrVolume) {
+  if (ocrAngle) {
     try {
-      const a0 = axis === 'horizontal' ? 0 : 90
-      const a1 = ((a0 + 180) % 360) as OrientationAngle
-      const [v0, v1] = await Promise.all([
-        rotateBuffer(buf, a0).then(ocrVolume),
-        rotateBuffer(buf, a1).then(ocrVolume),
-      ])
-      angle = v1 > v0 ? a1 : a0
-      return { angle, method: 'ocr', axis, scores, ocrRefined: true }
+      // 3.x 侧车 /orient：PP-LCNet 单模型四分类（0/90/180/270 校正角），~0.1s：
+      // 一次性给出可靠朝向，彻底规避「几何轴猜错 → 整页 180° 倒置」的静默脏数据。
+      // 实测：横拍练习卷投影法会选成 90°（倒立），而 270° 才是正立，分类器可正确选出。
+      const r = await ocrAngle(buf)
+      if (r && (r.angle === 0 || r.angle === 90 || r.angle === 180 || r.angle === 270)) {
+        return { angle: r.angle, method: 'ocr', axis, scores, volumes: r.scores, ocrRefined: true }
+      }
     } catch {
-      /* 侧车失败 → 回落纯几何 */
+      /* 侧车失败 → 回落纯几何（上层应据 method=projection 打「可能倒置」告警） */
     }
   }
   return { angle, method: 'projection', axis, scores }
@@ -167,28 +178,45 @@ export async function estimateOrientation(
 /** 便捷封装：直接返回转正后的图与朝向信息 */
 export async function autoOrient(
   buf: Buffer,
-  ocrVolume?: OcrVolumeFn,
+  ocrAngle?: OcrAngleProvider,
 ): Promise<{ buffer: Buffer; angle: OrientationAngle; method: OrientMethod; axis: 'horizontal' | 'vertical' }> {
-  const r = await estimateOrientation(buf, ocrVolume)
+  const r = await estimateOrientation(buf, ocrAngle)
   const buffer = await rotateBuffer(buf, r.angle)
   return { buffer, angle: r.angle, method: r.method, axis: r.axis }
 }
 
 /**
- * 工厂：用 OCR 侧车（CV 模型，非大模型）估计某图的 OCR 文本体量，作为朝向镜像消歧依据。
- * - 侧车是 DRY_RUN（假数据）→ 主动抛错，由调用方回落纯几何结果（避免假数据污染朝向）。
+ * 工厂：用 3.x OCR 侧车（PP-LCNet 朝向分类，CV 模型非大模型）判定文档朝向（0/90/180/270）。
+ * - 2026-10-15 起生产主引擎切到 3.x（main3.py :9001）；2.x /orient 四向投票下线。
+ * - 侧车是 DRY_RUN（无模型）→ 主动抛错，由调用方回落纯几何结果（避免假数据污染朝向）。
  * - 侧车不可达 / 超时 → 抛错，回落纯几何。
  * 注意：90° vs 270°、0° vs 180° 的「正立与否」纯几何无法判定（投影关于 180° 镜像对称），
- * 必须靠「读出文字」来确定——这正是 OCR 侧车的价值，且它属 CV 模型、非大模型。
- * 返回的文本体量以「去空白字符数」为代理：正立文本通常更连贯、字符更多，倒立则被切碎。
+ * 必须靠「读出文字/分类」来确定——这正是朝向分类器的价值，且它属 CV 模型、非大模型。
+ * 单次 HTTP 调用（或工具式子进程），PP-LCNet 单模型 ~0.1s，远比旧版「四向全量 OCR 投票」轻。
  */
-export function ocrVolumeFromSidecar(baseUrl?: string): OcrVolumeFn {
-  const url = baseUrl ?? process.env.OCR_ORIENT_URL ?? process.env.OCR_ENGINE_URL ?? 'http://127.0.0.1:9000'
+export function ocrAngleFromSidecar(baseUrl?: string): OcrAngleProvider {
+  const url = baseUrl ?? process.env.OCR_ORIENT_URL ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9001'
   let checked = false
   let usable = true
-  return async (buf: Buffer): Promise<number> => {
+  // 借 3.x 侧车守护进程做自愈：侧车若中途崩了（段错误等），先 ensureReady 拉动重启再打，
+  // 绝不让"侧车挂掉 → 朝向判定失败 → 静默回落 50% 猜错的投影角 → 整页翻反"发生。
+  let supervisor: ReturnType<typeof getPpsv3Supervisor> | null = null
+  try { supervisor = getPpsv3Supervisor() } catch { supervisor = null }
+  const revive = async () => { if (supervisor) { try { await supervisor.ensureReady(30_000) } catch { /* ignore */ } } }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  return async (buf: Buffer) => {
+    // ① 工具式调用（默认）：每次朝向判定独立子进程（main3.py --once --op orient，venv python），
+    //    崩/卡只影响当次、下条全新进程自动恢复；硬超时 + SIGKILL 可强制中断。
+    if (toolInvokeEnabled()) {
+      const r = await toolOcr(buf, { op: 'orient', engine: 'ppsv3', timeoutMs: Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000) })
+      if (r.ok && r.data && typeof (r.data as { angle?: unknown }).angle === 'number') {
+        const d = r.data as { angle: number; scores?: Partial<Record<OrientationAngle, number>> }
+        return { angle: d.angle as OrientationAngle, scores: d.scores }
+      }
+      throw new Error(`ocr tool orient failed (${r.reason})`)
+    }
+    // ② 回落：长驻服务 HTTP 模式（OCR_INVOKE=server 时）
     if (!usable) throw new Error('ocr sidecar unusable (dry_run or unreachable)')
-    // 首次调用先自检：DRY_RUN 侧车返回的是假数据，不能用它做朝向消歧
     if (!checked) {
       checked = true
       try {
@@ -200,26 +228,36 @@ export function ocrVolumeFromSidecar(baseUrl?: string): OcrVolumeFn {
         }
       } catch (e) {
         if (!usable) throw e
-        // 无 /healthz 也不影响：照常尝试 /recognize，失败再由上层回落
       }
+      // 首次调用即确保侧车活着（自愈第一环）
+      await revive()
     }
     const b64 = buf.toString('base64')
-    const r = await fetch(url + '/recognize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_base64: 'data:image/jpeg;base64,' + b64, mode: 'rapid' }),
-      signal: AbortSignal.timeout(60_000),
-    })
-    if (!r.ok) throw new Error('ocr sidecar ' + r.status)
-    const j = (await r.json()) as unknown
-    let vol = 0
-    const walk = (o: unknown) => {
-      if (typeof o === 'string') vol += o.replace(/\s/g, '').length
-      else if (Array.isArray(o)) o.forEach(walk)
-      else if (o && typeof o === 'object') Object.values(o as Record<string, unknown>).forEach(walk)
+    // 重试 + 自愈：侧车在并发/内存压力下可能偶发超时、瞬时不可达甚至进程段错误。
+    // 朝向判定（0/180、90/270 区分）完全依赖这次分类——一次失败就静默回落到
+    // 50% 概率猜错的投影角，会把整页翻反。故每次尝试前先 ensureReady 拉动侧车，
+    // 失败后也先自愈重启再决定是否放弃，宁可多花几百毫秒也要拿到可靠朝向。
+    let j: { angle?: number; scores?: Partial<Record<OrientationAngle, number>> } | null = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await revive()
+        const r = await fetch(url + '/orient', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_base64: 'data:image/jpeg;base64,' + b64 }),
+          signal: AbortSignal.timeout(60_000),
+        })
+        if (!r.ok) { await sleep(400 * (attempt + 1)); continue }
+        j = (await r.json()) as { angle?: number; scores?: Partial<Record<OrientationAngle, number>> }
+        break
+      } catch {
+        await revive() // 失败后先尝试自愈重启侧车
+        if (attempt === 2) throw new Error('ocr sidecar unreachable after retries')
+        await sleep(400 * (attempt + 1))
+      }
     }
-    walk(j)
-    return vol
+    if (!j || typeof j.angle !== 'number') throw new Error('ocr sidecar /orient returned empty')
+    return { angle: j.angle as OrientationAngle, scores: j.scores }
   }
 }
 

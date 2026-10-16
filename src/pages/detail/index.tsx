@@ -296,7 +296,14 @@ export default function DetailPage() {
           <Switch checked={mastered} onCheckedChange={(v) => setMastered(v)} />
         </View>
 
-        <Text className="block text-sm font-semibold text-foreground mb-2">题目</Text>
+        <View className="flex flex-row items-center justify-between mb-2">
+          <Text className="block text-sm font-semibold text-foreground">题目</Text>
+          {item?.content?.question_label ? (
+            <View style={{ backgroundColor: 'rgba(190,62,45,0.08)', borderRadius: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 2, paddingBottom: 2 }}>
+              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{item.content.question_label}</Text>
+            </View>
+          ) : null}
+        </View>
         <Card className="rounded-2xl border-border p-4 mb-4">
           <Textarea
             className="min-h-32 border-0 ring-0 focus-within:ring-0 rounded-xl"

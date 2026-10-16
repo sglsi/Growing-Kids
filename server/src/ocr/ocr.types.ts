@@ -59,6 +59,40 @@ export interface RecognizedItem {
    * ⚠️ 是"候选"而非分类器结论 —— 本地规则抽取，未接教育词库/语义模型。
    */
   tags?: string[]
+  /**
+   * P2：该题在题面页上的像素框（extract-wrong / recrop 回传，供前端叠加视图与改框）。
+   * 与 wrongq 引擎同口径（flatBuf 像素空间）。落库时不消费（存储只取内容字段）。
+   */
+  box?: { x0: number; y0: number; x1: number; y1: number }
+  /** P2：系统/用户判定（wrong=错题；供叠加视图颜色编码） */
+  verdict?: 'wrong' | 'correct' | 'blank' | 'unknown'
+  /** P1：规范题号标签（如 "预习案·Ⅱ.汉译英 18"；两节重号时可唯一指认题目） */
+  question_label?: string
+  /**
+   * ④（#143）PaddleOCR-VL 手写识别全文（OCR_VL_HANDWRITE=1 时产出）。
+   * VL 对「题干印刷 + 学生手写答案 + 红笔订正」混合内容比 PP-OCRv5 强，
+   * 作 wrong_answer 的兜底源与人工核对材料；未开启/失败时不存在该字段。
+   */
+  vl_full_text?: string
+}
+
+/**
+ * 导出 Word 的条目（#150 人工辅助错题整理）：
+ * 前端把「粘贴栏」每条题目回传——文本 + 手动裁剪的图片 URL 列表。
+ *
+ * 与 RecognizedItem 的关系：后者是自动识别链路的结构化产物（字段多、落库用）；
+ * 本类型只取导出所需字段，images 为公网可访问 URL，服务端下载后嵌入 docx。
+ * 既有的「识别结果导出」调用方传的 items 结构上兼容本类型（多余字段被忽略）。
+ */
+export interface ExportDocxItem {
+  question_content: string
+  /** 手动裁剪的错题图片 URL（公网可访问）；导出时按序嵌入题干之后 */
+  images?: string[]
+  wrong_answer?: string
+  answer_content?: string
+  solution?: string
+  source?: string
+  level?: number
 }
 
 export interface RecognizeExamDto {

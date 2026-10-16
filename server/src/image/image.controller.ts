@@ -1,7 +1,7 @@
 import { Controller, Post, Get, Body, HttpCode, HttpException, Req } from '@nestjs/common'
 import { ImageService } from './image.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
-import type { ProcessImageDto, ExtractWrongDto } from './image.types'
+import type { ProcessImageDto, ExtractWrongDto, RecropWrongDto, OcrPageDto } from './image.types'
 
 /** 后端图像能力版本号：前端据此判断线上服务是否包含本地处理管线 */
 const IMAGE_CAPABILITIES_VERSION = 3
@@ -120,6 +120,38 @@ export class ImageController {
     const userId = requireUserId(req)
     const headers = (req.headers || {}) as Record<string, string>
     const data = await this.imageService.extractWrong(userId, dto, headers)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /**
+   * 错题圈定·用户改框重切重识：POST /api/image/extract-wrong-recrop
+   *
+   * P2（设计文档 §4.7）：结果页上用户拖动/缩放/删除/新画框后，按用户框重走
+   * 「裁图 → 块 OCR → 语义分离」链路（与 extract-wrong 同一 helper），
+   * 保存以用户框为准；系统框存在时回传 IoU/差集作为判定准确率数据源。
+   */
+  @Post('extract-wrong-recrop')
+  @HttpCode(200)
+  async extractWrongRecrop(@Body() dto: RecropWrongDto, @Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    const headers = (req.headers || {}) as Record<string, string>
+    const data = await this.imageService.recropWrongBlock(userId, dto, headers)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /**
+   * 人工辅助错题整理（#150）：全页 OCR 文本栏。POST /api/image/ocr-page
+   *
+   * 与 extract-wrong 的区别：不做红笔检测/切块，只「摆正 + 全页 OCR + 阅读序平铺」。
+   * 返回摆正后的页面图 URL（前端展示与页内裁剪基准）与 OCR 文本片段
+   * （用户在文本栏复制需要的内容，粘进底部粘贴栏——人工判断哪题是错题）。
+   */
+  @Post('ocr-page')
+  @HttpCode(200)
+  async ocrPage(@Body() dto: OcrPageDto, @Req() req: RequestWithUser) {
+    requireUserId(req)
+    const headers = (req.headers || {}) as Record<string, string>
+    const data = await this.imageService.ocrPage(dto, headers)
     return { code: 200, msg: 'success', data }
   }
 

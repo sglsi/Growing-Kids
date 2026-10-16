@@ -11,6 +11,8 @@
  */
 import type { LayoutContext } from './wrongq-layout'
 import type { RedMark, WrongqBlock, WritingCluster } from './wrongq.types'
+import type { QuestionUnit } from './wrongq-segment'
+import { findUnitForY } from './wrongq-segment'
 
 function boxesNear(
   a: { x0: number; y0: number; x1: number; y1: number },
@@ -42,6 +44,61 @@ function boxIoU(
   const bu = (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1)
   const uni = au + bu - inter
   return uni > 0 ? inter / uni : 0
+}
+
+/** 像素框 → 归一化 [x, y, w, h]（0~1，保留 4 位） */
+function normBoxOf(box: { x0: number; y0: number; x1: number; y1: number }, w: number, h: number): [number, number, number, number] {
+  return [
+    +(box.x0 / w).toFixed(4),
+    +(box.y0 / h).toFixed(4),
+    +((box.x1 - box.x0 + 1) / w).toFixed(4),
+    +((box.y1 - box.y0 + 1) / h).toFixed(4),
+  ]
+}
+
+/**
+ * 阶段 B：把红笔锚点块映射到题目单元，取整题满框。
+ *
+ * 对每个块，取其纵向中心 y 与所属栏，在题目单元里查找 y 落入的单元；命中则把裁图框替换为
+ * 该单元**整题满框**（满栏宽 × 题号行到下一题号行），并打 `questionUnitId`。
+ * 同一题的多处红笔 → 各自映射到同一单元 → 框相同 → 后续 mergeOverlappingBlocks 合并为一题。
+ * 未命中（无 OCR / 该 y 不在任何题号定界的单元内）→ 保持原紧框（兜底，不劣化）。
+ *
+ * ⚠️ 两套栏坐标系（#124 正面 15 题标注错误的根因）：
+ *   块的 col 来自页面级 `ctx.cols`（如正面双栏 [0,553]+[554,1462]），
+ *   而题目单元的 col 来自 section 级 `colsAtY`（探究案等通栏 section 只有一栏 → col 全 0）。
+ *   于是探究案里的红笔块（页面级 col=1）永远匹配不到通栏单元（section 级 col=0），
+ *   题号关联全部落空（表现为错题标注无题号 "?"）。
+ *   修复：严格 col 匹配未命中时，回落"块中心点几何包含"匹配（不限 col）——
+ *   通栏单元的 box 本就覆盖块位置，几何命中即同一题。
+ */
+function applyUnits(
+  blocks: WrongqBlock[],
+  units: QuestionUnit[] | undefined,
+  w: number,
+  h: number,
+  /** 吸附容差：块中心未直接落入单元时，归到同栏最近单元（桥接单元间空隙）。 */
+  snapTol = 0,
+): WrongqBlock[] {
+  if (!units || !units.length) return blocks
+  const out: WrongqBlock[] = []
+  for (const b of blocks) {
+    const cy = Math.round((b.box.y0 + b.box.y1) / 2)
+    const cx = Math.round((b.box.x0 + b.box.x1) / 2)
+    let u = findUnitForY(units, b.col, cy, snapTol)
+    // 回落：块中心点 (cx, cy) 几何包含于某单元 box（跨栏坐标系错配时救命）
+    if (!u) {
+      for (const cand of units) {
+        if (cx >= cand.box.x0 && cx <= cand.box.x1 && cy >= cand.box.y0 && cy <= cand.box.y1) { u = cand; break }
+      }
+    }
+    if (u) {
+      out.push({ ...b, box: { ...u.box }, normBox: normBoxOf(u.box, w, h), questionUnitId: u.id })
+    } else {
+      out.push(b)
+    }
+  }
+  return out
 }
 
 /**
@@ -111,6 +168,12 @@ export function buildBlocks(
    * 为空（如无红笔版面、或簇被阈值滤光）时回退到全标记建块，保持 P1-12 兜底能力。
    */
   clusters?: WritingCluster[],
+  /**
+   * 阶段 A 题目单元（本地题号定界的整题框）。非空时进入阶段 B：
+   * 每个红笔簇的 (col, y) 落入某题目单元 → 该块裁图框取**整题满框**（满栏宽 × 题号行到下一题号行），
+   * 不再用红笔重心定边界。OCR 不可用 / 无题号时为 undefined，回落到行对齐紧框兜底（旧行为）。
+   */
+  units?: QuestionUnit[],
 ): WrongqBlock[] {
   const { w, h, medH, cols, colRows } = ctx
   const m = marks.length
@@ -178,17 +241,8 @@ export function buildBlocks(
         by1 = Math.min(h - 1, by0 + minH - 1)
       }
 
-      // ===== 题号回溯条带：块上方最近至多 3 行 =====
-      // 裁图收紧后框内常只剩手写答案，印刷题号在**题目行**（与订正不同行）→ 题号丢失。
-      // 这里额外给出上方行带，服务层单独 OCR 补出题号与印刷题干；
-      // 裁图仍聚焦订正处，两全。行序不定，显式排序后再取末 3 行，避免取到页眉行。
-      let titleBox: { x0: number; y0: number; x1: number; y1: number } | undefined
-      const upRows = rows.filter((r) => r.y1 < by0).sort((a, b) => a.y0 - b.y0).slice(-3)
-      if (upRows.length) {
-        const ty0 = Math.max(0, upRows[0].y0)
-        const ty1 = Math.min(h - 1, upRows[upRows.length - 1].y1)
-        if (ty1 > ty0) titleBox = { x0: cx0, y0: ty0, x1: Math.max(cx0, Math.min(cx1 - 1, bx1)), y1: ty1 }
-      }
+      // 阶段 A/B：题号定界的整题框由外层 applyUnits 统一处理（命中单元→取满框），
+      // 此处不再构造 titleBox 回溯条带——整题框内已含题号行，无需额外补号。
 
       cBlocks.push({
         id: cBlocks.length,
@@ -201,12 +255,14 @@ export function buildBlocks(
         evidence: [],
         source: 'local',
         clusterId: c.id,
-        titleBox,
       })
     }
-    const mergedC = mergeOverlappingBlocks(cBlocks, mergeIoU, true)
+    let mergedC = cBlocks
+    // 阶段 B：先映射到题目单元满框，再合并去重（同单元多红笔→一题）
+    if (units && units.length) mergedC = applyUnits(mergedC, units, w, h, Math.round(ctx.medH * 1.5))
+    mergedC = mergeOverlappingBlocks(mergedC, mergeIoU, true)
     for (const b of mergedC) {
-      b.normBox = [+(b.box.x0 / w).toFixed(4), +(b.box.y0 / h).toFixed(4), +((b.box.x1 - b.box.x0 + 1) / w).toFixed(4), +((b.box.y1 - b.box.y0 + 1) / h).toFixed(4)]
+      b.normBox = normBoxOf(b.box, w, h)
     }
     mergedC.sort((a, b) => (a.col - b.col) || (a.box.y0 - b.box.y0))
     mergedC.forEach((b, i) => { b.id = i })
@@ -298,16 +354,14 @@ export function buildBlocks(
   }
 
   // 收敛：同列内纵向高度重叠的块合并（消除同一题多处批改造成的重复块）
-  const merged = mergeOverlappingBlocks(blocks, mergeIoU)
+  let merged = blocks
+  // 阶段 B：先映射到题目单元满框，再合并去重
+  if (units && units.length) merged = applyUnits(merged, units, w, h, Math.round(ctx.medH * 1.5))
+  merged = mergeOverlappingBlocks(merged, mergeIoU)
 
   // 合并后 x/y 可能变化 → 重算归一化框
   for (const b of merged) {
-    b.normBox = [
-      +(b.box.x0 / w).toFixed(4),
-      +(b.box.y0 / h).toFixed(4),
-      +((b.box.x1 - b.box.x0 + 1) / w).toFixed(4),
-      +((b.box.y1 - b.box.y0 + 1) / h).toFixed(4),
-    ]
+    b.normBox = normBoxOf(b.box, w, h)
   }
 
   // 按阅读顺序（栏 → 纵向）排序

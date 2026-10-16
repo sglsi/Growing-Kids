@@ -6,6 +6,7 @@ import {
   getOcrTelemetry,
   getOcrAlertSink,
 } from './ocr-health'
+import { toolOcr, toolInvokeEnabled } from './ocr-tool'
 
 export type LocalOcrMode = 'both' | 'rapid' | 'paddle'
 
@@ -85,6 +86,17 @@ export class LocalOcrClient {
   }
 
   async recognizeByBase64(b64: string, mode: LocalOcrMode = this.mode): Promise<LocalOcrResult | null> {
+    // 工具式调用（默认）：进程隔离 + 硬超时，崩/卡只影响当次、下条自动恢复（见 ocr-tool.ts）。
+    if (toolInvokeEnabled()) {
+      const raw = b64.includes(',') ? b64.split(',', 1)[1] : b64
+      const r = await toolOcr(Buffer.from(raw, 'base64'), { op: 'recognize', mode })
+      if (r.ok && r.data) {
+        this.telemetry.markSuccess()
+        return r.data as unknown as LocalOcrResult
+      }
+      this.telemetry.markDegrade(`tool_${r.reason ?? 'failed'}`)
+      return null
+    }
     return this.post({ image_base64: b64, mode })
   }
 

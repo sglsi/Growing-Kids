@@ -10,7 +10,7 @@ import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
 import { TimelineService } from '../timeline/timeline.service'
-import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource } from './image.types'
+import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource, RecropWrongDto, RecropWrongResult, BoxFeedback, PageBox, PageTextSegment, OcrPageDto, OcrPageResult } from './image.types'
 import {
   fitSizeToRatio,
   isSizeValid,
@@ -36,7 +36,7 @@ import { compareRecognized, OCR_CONSISTENCY_THRESHOLD, type OcrConsistency } fro
 import { classifySr, srGate, srUserQuota, srGateEnabled } from './sr-gate'
 import { OcrService } from '../ocr/ocr.service'
 import { extractWrongQuestions } from './wrongq'
-import { buildLayoutContext } from './wrongq-layout'
+import { buildLayoutContext, type LayoutContext } from './wrongq-layout'
 import { renderBlockAssets } from './wrongq-render'
 import { splitBlocksByNumber, type RowSplitContext } from './wrongq-pureblock'
 import { estimateSharpness, sharpnessHint } from './image-sharpness'
@@ -49,8 +49,64 @@ import { buildColorEvidenceSource, splitBlockRegions } from '../ocr/ocr-semantic
 import { guardExtractQuota, MAX_EXTRACT_BLOCKS } from './extract-wrong-quota'
 import { mapWithConcurrency } from './concurrency'
 import { localVlmPolicy } from '../ocr/local-vlm.client'
-import type { RecognizedItem } from '../ocr/ocr.types'
+import type { RecognizedItem, LocalOcrTextRegion, LocalOcrLayoutBlock } from '../ocr/ocr.types'
 import { QuotaService } from '../quota/quota.service'
+
+/**
+ * P2：用户框 vs 系统框差集度量（设计文档 §4.7「判定准确率的真实数据源」）。
+ * 两个框均为页图像素坐标；系统框缺失/退化时不应调用（由调用方守卫）。
+ */
+function boxFeedback(sys: PageBox, user: PageBox): BoxFeedback {
+  const inter = (a: PageBox, b: PageBox) =>
+    Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) + 1) *
+    Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) + 1)
+  const area = (a: PageBox) => Math.max(1, (a.x1 - a.x0 + 1) * (a.y1 - a.y0 + 1))
+  const i = inter(sys, user)
+  const union = area(sys) + area(user) - i
+  const cx = (a: PageBox) => (a.x0 + a.x1) / 2
+  const cy = (a: PageBox) => (a.y0 + a.y1) / 2
+  return {
+    iou: union > 0 ? Math.round((i / union) * 1000) / 1000 : 0,
+    area_delta_pct: Math.round(((area(user) - area(sys)) / area(sys)) * 1000) / 10,
+    offset: { dx: Math.round(cx(user) - cx(sys)), dy: Math.round(cy(user) - cy(sys)) },
+  }
+}
+
+/**
+ * P3：全页 OCR regions 按阅读序平铺（设计 §4.8 文本面板数据源）。
+ *
+ * 分栏优先（region 中心 x 落入哪栏，越界取最近栏），栏内按 y 再按 x——
+ * 与「先读完左栏再读右栏」的人工阅读顺序一致；cols 为空按单栏处理。
+ * 与 wrongq-pureblock 的 regionBox/colOf 同口径（box 为 [x0,y0,x1,y1] 元组，
+ * 容忍旋转/逆序输入）。
+ */
+export function toReadingOrderSegments(
+  regions: LocalOcrTextRegion[],
+  cols: Array<[number, number]>,
+): PageTextSegment[] {
+  const boxOf = (r: LocalOcrTextRegion): PageBox => {
+    const [a, b, c, d] = r.box || [0, 0, 0, 0]
+    return { x0: Math.min(a, c), y0: Math.min(b, d), x1: Math.max(a, c), y1: Math.max(b, d) }
+  }
+  const colOf = (cx: number): number => {
+    if (!cols.length) return 0
+    for (let i = 0; i < cols.length; i++) if (cx >= cols[i][0] && cx < cols[i][1]) return i
+    let best = 0
+    let bestD = Infinity
+    for (let i = 0; i < cols.length; i++) {
+      const d = Math.min(Math.abs(cx - cols[i][0]), Math.abs(cx - cols[i][1]))
+      if (d < bestD) { bestD = d; best = i }
+    }
+    return best
+  }
+  return regions
+    .filter((r) => (r.text || '').trim().length > 0)
+    .map((r) => {
+      const box = boxOf(r)
+      return { text: r.text.trim(), box, col: colOf((box.x0 + box.x1) / 2) }
+    })
+    .sort((a, b) => a.col - b.col || a.box.y0 - b.box.y0 || a.box.x0 - b.box.x0)
+}
 
 /**
  * 提示词：一律加上"锁版式"约束。
@@ -511,11 +567,18 @@ export class ImageService {
 
     // 版面上下文单独构建一次：产裁图时要复用同一份（避免重复 straighten）
     const ctx = await buildLayoutContext(srcBuffer)
+    // 阶段 A/B：对摆正后的 flatBuf 做全页 OCR，提供题号定界的题目单元（失败静默降级为紧框）
+    let pageRegions: LocalOcrTextRegion[] = []
+    try {
+      pageRegions = await this.ocrService.recognizePageRegions(ctx.flatBuf)
+    } catch {
+      pageRegions = []
+    }
     const result = await extractWrongQuestions(srcBuffer, {
       chromaMin: dto.wrongq_chroma_min ?? 14,
       allowVlm: dto.wrongq_allow_vlm === true,
       imageUrl: dto.image_url, // VLM 仅接受公网 URL
-    }, ctx)
+    }, ctx, pageRegions)
 
     const debug: Record<string, unknown> = {
       ...result.debug,
@@ -593,22 +656,45 @@ export class ImageService {
 
     // ① 本地切块（红笔锚定 + 版面 + decideLocal），绝不调用 VLM
     const ctx = await buildLayoutContext(srcBuffer)
-    const result = await extractWrongQuestions(srcBuffer, { chromaMin: 14, allowVlm: false }, ctx)
+
+    // P2：叠加视图与改框重切必须基于【同一张】版面图——ctx.flatBuf 是 dewarp/摆正后的
+    // 度量基准（blocks 坐标即它的像素空间），若让前端显示旋转前的原图会整体错位。
+    // 故把 flatBuf 入库，以其 URL 作为 question_url 回传（ingest 带 sha256 去重，重复提取不增容）。
+    const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
+    const pageUrl = await this.storageService.getPublicUrl(pageIng.key)
+
+    // 阶段 A 输入：全页 OCR 一次（侧车不可用时返回空，不阻断）。
+    // regions 既供阶段 B（红笔锚点→题号定界的整题满框），也复用于下方 P1-12 纯版面兜底，避免重复 OCR；
+    // layout（3.x 版面标题块）供 ②（#141）结构增强——补出文本规则识别不了的节标题。
+    let pageRegions: LocalOcrTextRegion[] = []
+    let pageLayout: LocalOcrLayoutBlock[] = []
+    try {
+      const page = await this.ocrService.recognizePage(ctx.flatBuf)
+      pageRegions = page.regions
+      pageLayout = page.layout
+    } catch (e) {
+      console.warn('[extract-wrong] 全页 OCR 不可用，阶段 A/B 回落紧框：', (e as Error)?.message ?? e)
+    }
+
+    const result = await extractWrongQuestions(
+      srcBuffer,
+      { chromaMin: 14, allowVlm: false },
+      ctx,
+      pageRegions,
+      pageLayout,
+    )
 
     // P1-12 纯版面兜底：红笔锚定未切出任何错题块（空白卷/打印卷/答案图等无红笔场景），
     // 改以"全页 OCR + 版面 + 题号"切块，解除"必须红笔"的硬前提（技术文档 §2.7 局限④）。
     let blocks = result.blocks
     let blockSource: WrongqBlockSource = blocks.length ? 'red' : 'none'
-    if (!blocks.length) {
+    if (!blocks.length && pageRegions.length) {
       try {
-        const pageRegions = await this.ocrService.recognizePageRegions(ctx.flatBuf)
-        if (pageRegions.length) {
-          const splitCtx: RowSplitContext = { w: ctx.w, h: ctx.h, medH: ctx.medH, cols: ctx.cols }
-          const split = splitBlocksByNumber(pageRegions, splitCtx)
-          if (split.blocks.length) {
-            blocks = split.blocks
-            blockSource = 'layout'
-          }
+        const splitCtx: RowSplitContext = { w: ctx.w, h: ctx.h, medH: ctx.medH, cols: ctx.cols }
+        const split = splitBlocksByNumber(pageRegions, splitCtx)
+        if (split.blocks.length) {
+          blocks = split.blocks
+          blockSource = 'layout'
         }
       } catch (e) {
         console.warn('[extract-wrong] 纯版面兜底失败，按无切块处理：', (e as Error)?.message ?? e)
@@ -708,129 +794,17 @@ export class ImageService {
       blocksToUse,
       async (b) => {
         try {
-          // 只取裁图，不复用 renderBlockAssets：后者会无条件重算 enhanced(2x 超分) 与
-          // clean(去手写 mask+inpainting)，而本流程只用 raw —— 用它会让每块白跑两轮重计算，
-          // N 个切块就是 N 倍浪费。此处直接按块 box 裁图，语义等价且轻量。
-          const { x0, y0, x1, y1 } = b.box
-          const cropW = Math.max(1, x1 - x0 + 1)
-          const cropH = Math.max(1, y1 - y0 + 1)
-          const cropBuf = await sharp(ctx.flatBuf)
-            .extract({ left: x0, top: y0, width: cropW, height: cropH })
-            .png()
-            .toBuffer()
-          const ing = await this.ingestService.ingest(cropBuf, 'image/png')
-          const cropKey = ing.key
-          const cropUrl = await this.storageService.getPublicUrl(cropKey)
-
-          // 一次本地 OCR 同时取回「整块文本 + 带坐标区域」：文本作 full text，区域用于 P1-9 语义分离。
-          const local = await this.ocrService.recognizeBlockFull(cropUrl)
-          const regionText = local?.raw_text?.trim() ?? ''
-
-          // 区域无文字（OCR 侧车不可用/切块为空）：跳过该块，避免落库 content.question 为空被拒
-          if (!regionText) {
-            console.warn(`[extract-wrong] 块#${b.id} 区域文本为空，跳过`)
-            return null
-          }
-
-          // ===== 题号回溯（P1-16）=====
-          // 裁图收紧后框内常只剩学生的手写答案，而印刷题号在**题目行**（与订正不同行）
-          // → 实测 9 条错题题号全部解析不到，用户拿到条目却认不出是哪道题。
-          // 解决办法：额外 OCR 块上方的「题号条带」(b.titleBox) 补出题号与印刷题干，
-          // 并把它拼到 question_content 前部——**裁图仍聚焦订正处，读文有题号**，两全。
-          let titleText = ''
-          if ((b as WrongqBlock).titleBox) {
-            const tb = (b as WrongqBlock).titleBox!
-            try {
-              const tbW = Math.max(1, tb.x1 - tb.x0 + 1)
-              const tbH = Math.max(1, tb.y1 - tb.y0 + 1)
-              const tbBuf = await sharp(ctx.flatBuf)
-                .extract({ left: Math.max(0, tb.x0), top: Math.max(0, tb.y0), width: tbW, height: tbH })
-                .png()
-                .toBuffer()
-              const tbIng = await this.ingestService.ingest(tbBuf, 'image/png')
-              const tbUrl = await this.storageService.getPublicUrl(tbIng.key)
-              const tbLocal = await this.ocrService.recognizeBlockFull(tbUrl)
-              titleText = tbLocal?.raw_text?.trim() ?? ''
-            } catch (e) {
-              console.warn(`[extract-wrong] 块#${b.id} 题号条带识别失败，忽略：`, (e as Error)?.message ?? e)
-            }
-          }
-          // 题号取舍（实测定序，顺序不能反）：
-          //  ① **优先区域文本**：订正就发生在这里，里面的题号最可靠
-          //     （反例：back 某块区域自带 "15."，条带却是上一题的 "11."，取条带会错号）；
-          //  ② 区域无题号时才用条带，且取**最后一个**——条带是订正**上方**若干行，
-          //     越靠下越接近订正（反例：条带 "14.远离 16.高温 18.救援人员"，
-          //     正确题号是 18 而非第一个 14）。
-          // 扫描式取号（兜底 parseQuestionNumber 只认行首的限制）：
-          //  · 取**最后一个**（离订正最近）；
-          //  · 过滤 >100：年份/数量会被误当题号（实测 "961年以来" 被取成题号 961 ❌）。
-          // 扫描式取号（兜底 parseQuestionNumber 只认行首的限制）：
-          //  · 取**最后一个**（离订正最近）；
-          //  · 过滤 >100：年份/数量会被误当题号（实测 "961年以来" 被取成题号 961 ❌）。
-          //  · allowNoDot：题号行常见「数字+空格+中文」无标点写法（如 "10 设法做成 … 12 共同努力"），
-          //    仅对**题号条带**启用——条带是题目行，这种无点号题号更可能是真题号；
-          //    区域作答正文不启用，避免 "17. campers" 这类正文句子被误当题号。
-          const scanLast = (t: string, allowNoDot = false): number | null => {
-            let hits = [...t.matchAll(/(\d{1,3})\s*[.、．](?![0-9])/g)]
-              .map((m) => Number(m[1]))
-              .filter((v) => v > 0 && v <= 100)
-            if (allowNoDot) {
-              const noDot = [...t.matchAll(/(?<![\d.])\s*(\d{1,3})\s+[一-龥]/g)]
-                .map((m) => Number(m[1]))
-                .filter((v) => v > 0 && v <= 100)
-              hits = hits.concat(noDot)
-            }
-            return hits.length ? hits[hits.length - 1] : null
-          }
-          let num = parseQuestionNumber(regionText).num
-          if (num == null || num > 100) num = scanLast(regionText)
-          if (num == null && titleText) num = scanLast(titleText, true)
-          // 展示文本仍把条带放在前部，让用户一眼看到"第几题"；解析已按上面定序完成
-          const mergedText = titleText ? `${titleText}\n${regionText}` : regionText
-          const p = { num } as ReturnType<typeof parseQuestionNumber>
-          let answerContent = ''
-          let ansImgKeys = answerKeys
-          if (p.num != null && answerMap.has(p.num)) {
-            answerContent = answerMap.get(p.num)!
-            // P1-11：命中答案块裁图时，挂对应答案块而非整张答案图
-            if (answerBlockMap.has(p.num)) ansImgKeys = answerBlockMap.get(p.num)!
-          } else if (answerKeys.length) {
-            // 本题面块有答案图但按题号未匹配上 → 计入未匹配反馈
-            unmatched.push(p.num != null ? String(p.num) : `#${b.id}`)
-          }
-
-          // P1-9 区域语义分离（题干 / 学生错答 / 教师批改）：仅在真的分出东西时覆盖字段，
-          // 否则保持 P0 行为（stem=全文），绝不因分离失败而丢信息。
-          let stem = regionText
-          let wrongAnswer = ''
-          let solution = ''
-          try {
-            const colorSrc = await buildColorEvidenceSource(cropBuf)
-            const sem = splitBlockRegions(colorSrc, local?.text_regions ?? [])
-            if (sem.separated) {
-              stem = sem.stem || regionText
-              wrongAnswer = sem.wrongAnswer
-              solution = sem.correction
-            }
-          } catch {
-            // 分离失败退回全文，不阻断主链路
-          }
-
-          return {
-            // 带上题号条带文本：让用户一眼看出这是第几题（区域文本可能只有手写答案）
-            question_content: mergedText,
-            wrong_answer: wrongAnswer,
-            answer_content: answerContent,
-            solution,
-            source: '',
-            // 匹配到答案即视为"已作答/有正确答案"，否则待用户联网搜题
-            status: answerContent ? 'answered' : 'pending',
-            question_image_keys: [cropKey],
-            answer_image_keys: ansImgKeys,
-            level: 1,
-            parent_index: null,
-            stem,
-          } as RecognizedItem
+          const item = await this.recognizeBlockRegion({
+            ctx,
+            box: b.box,
+            answerMap,
+            answerBlockMap,
+            answerKeys,
+            onUnmatched: (tag) => unmatched.push(tag),
+            blockId: b.id,
+          })
+          if (!item) return null
+          return { ...item, box: b.box, verdict: b.verdict, question_label: b.questionLabel }
         } catch (e) {
           console.warn(`[extract-wrong] 块#${b.id} 处理失败，跳过：`, (e as Error)?.message ?? e)
           return null
@@ -861,6 +835,8 @@ export class ImageService {
       items: finalItems,
       unmatched_questions: unmatched,
       answer_image_keys: answerKeys,
+      // P3：全页 OCR 文本（阅读序）——与 items 同源 regions，供选择粘贴面板补全题干/答案
+      page_text: toReadingOrderSegments(pageRegions, ctx.cols),
       quality: {
         sharpness: quality.score,
         sharp: quality.sharp,
@@ -882,6 +858,229 @@ export class ImageService {
         redCoverage: result.debug?.redCoverage,
         inferredHierarchy: hier.inferred,
       },
+      // P2 叠加视图：全部系统块（含非错题块，供用户改框/补捞）+ 页面尺寸 + 题面图 URL
+      blocks: blocks.map((b) => ({ id: b.id, box: b.box, verdict: b.verdict, question_label: b.questionLabel })),
+      page: { w: ctx.w, h: ctx.h },
+      question_url: pageUrl,
+    }
+  }
+
+  /**
+   * #150 人工辅助错题整理：全页 OCR 文本栏（POST /api/image/ocr-page）。
+   *
+   * 摆正（dewarp/纠偏）→ 全页 OCR（侧车）→ 阅读序平铺。
+   * 不做红笔检测、不切块、不落库 items——用户在右侧文本栏自行选择拷贝，
+   * 再把文字/裁剪图粘进底部粘贴栏（人工完成"哪题是错题"的判断）。
+   * OCR 侧车不可用不抛错：返回空文本栏，前端提示重试或手动输入。
+   */
+  async ocrPage(
+    dto: OcrPageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<OcrPageResult> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+
+    // 与 extract-wrong 同基准：摆正后的 flatBuf 既是 OCR 输入，也是前端展示/裁剪的图
+    // （blocks/OCR box 坐标都在它的像素空间；前端若显示原图会整体错位）。
+    const ctx = await buildLayoutContext(srcBuffer)
+    const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
+    const pageUrl = await this.storageService.getPublicUrl(pageIng.key)
+
+    let pageRegions: LocalOcrTextRegion[] = []
+    try {
+      const page = await this.ocrService.recognizePageForPanel(ctx.flatBuf)
+      pageRegions = page.regions
+    } catch (e) {
+      console.warn('[ocr-page] 全页 OCR 不可用，返回空文本栏:', (e as Error)?.message ?? e)
+    }
+
+    return {
+      page: { w: ctx.w, h: ctx.h },
+      page_text: toReadingOrderSegments(pageRegions, ctx.cols),
+      image_url: pageUrl,
+    }
+  }
+
+  /**
+   * P2：单块「裁图 → ingest → 块 OCR → 题号扫描 → 答案解析 → 语义分离」链路。
+   *
+   * extract-wrong（系统框批量）与 extract-wrong-recrop（用户框单个）共用——
+   * 改框前后识别质量一致，避免两套逻辑漂移。答案解析两条路径：
+   *  - presetAnswer：前端透传（recrop；框变更不重跑整张答案图 OCR）；
+   *  - answerMap/answerBlockMap：按区域扫出的题号现查（extract-wrong 批量）。
+   */
+  private async recognizeBlockRegion(opts: {
+    ctx: LayoutContext
+    box: PageBox
+    presetAnswer?: { content: string; imageKeys: string[] }
+    answerMap?: Map<number, string>
+    answerBlockMap?: Map<number, string[]>
+    answerKeys?: string[]
+    onUnmatched?: (tag: string) => void
+    blockId?: number
+  }): Promise<RecognizedItem | null> {
+    const { ctx, box } = opts
+    const { x0, y0, x1, y1 } = box
+    const cropW = Math.max(1, x1 - x0 + 1)
+    const cropH = Math.max(1, y1 - y0 + 1)
+    // 只取裁图，不复用 renderBlockAssets：后者会无条件重算 enhanced(2x 超分) 与
+    // clean(去手写 mask+inpainting)，而本流程只用 raw —— 用它会让每块白跑两轮重计算。
+    const cropBuf = await sharp(ctx.flatBuf)
+      .extract({ left: x0, top: y0, width: cropW, height: cropH })
+      .png()
+      .toBuffer()
+    const ing = await this.ingestService.ingest(cropBuf, 'image/png')
+    const cropKey = ing.key
+    const cropUrl = await this.storageService.getPublicUrl(cropKey)
+
+    // 一次本地 OCR 同时取回「整块文本 + 带坐标区域」：文本作 full text，区域用于 P1-9 语义分离。
+    const local = await this.ocrService.recognizeBlockFull(cropUrl)
+    const regionText = local?.raw_text?.trim() ?? ''
+
+    // 区域无文字（OCR 侧车不可用/切块为空）：返回 null，调用方跳过该块
+    if (!regionText) {
+      console.warn(`[recognize-block] 块#${opts.blockId ?? '-'} 区域文本为空，跳过`)
+      return null
+    }
+
+    // 题号扫描式取号（P1-16 实测定序）：
+    //  · parseQuestionNumber 行首优先；兜底扫全文取**最后一个**（离订正最近）；
+    //  · 过滤 >100：年份/数量会被误当题号（实测 "961年以来" 被取成题号 961 ❌）。
+    const scanLast = (t: string): number | null => {
+      const hits = [...t.matchAll(/(\d{1,3})\s*[.、．](?![0-9])/g)]
+        .map((m) => Number(m[1]))
+        .filter((v) => v > 0 && v <= 100)
+      return hits.length ? hits[hits.length - 1] : null
+    }
+    let num = parseQuestionNumber(regionText).num
+    if (num == null || num > 100) num = scanLast(regionText)
+
+    // 答案解析：preset（recrop 透传）优先；否则按题号现查映射
+    let answerContent = ''
+    let ansImgKeys = opts.answerKeys ?? []
+    if (opts.presetAnswer) {
+      answerContent = opts.presetAnswer.content
+      ansImgKeys = opts.presetAnswer.imageKeys.length ? opts.presetAnswer.imageKeys : ansImgKeys
+    } else if (num != null && opts.answerMap?.has(num)) {
+      answerContent = opts.answerMap.get(num)!
+      // P1-11：命中答案块裁图时，挂对应答案块而非整张答案图
+      if (opts.answerBlockMap?.has(num)) ansImgKeys = opts.answerBlockMap.get(num)!
+    } else if ((opts.answerKeys?.length ?? 0) > 0) {
+      // 本题面块有答案图但按题号未匹配上 → 计入未匹配反馈
+      opts.onUnmatched?.(num != null ? String(num) : `#${opts.blockId ?? '?'}`)
+    }
+
+    // P1-9 区域语义分离（题干 / 学生错答 / 教师批改）：仅在真的分出东西时覆盖字段，
+    // 否则保持 P0 行为（stem=全文），绝不因分离失败而丢信息。
+    let stem = regionText
+    let wrongAnswer = ''
+    let solution = ''
+    try {
+      const colorSrc = await buildColorEvidenceSource(cropBuf)
+      const sem = splitBlockRegions(colorSrc, local?.text_regions ?? [])
+      if (sem.separated) {
+        stem = sem.stem || regionText
+        wrongAnswer = sem.wrongAnswer
+        solution = sem.correction
+      }
+    } catch {
+      // 分离失败退回全文，不阻断主链路
+    }
+
+    // ④（#143）PaddleOCR-VL 手写答案识别增强（OCR_VL_HANDWRITE=1 才跑）：
+    // PP-OCRv5 印刷优化，学生手写答案（used to do sth. 类）是识别短板；VL 对混合
+    // 内容更强但 CPU 慢（几十秒/块）且有 >8GB 内存门槛，故默认关、限量、失败静默。
+    // 策略：VL 全文存 vl_full_text（人工核对材料）；仅当 v5 链路没分离出手写答案时
+    // 兜底填 wrong_answer（有 P1-9 颜色证据的分离结果更准，不被覆盖——零回归）。
+    let vlFullText: string | undefined
+    try {
+      const vlText = await this.ocrService.recognizeHandwrite(cropBuf)
+      if (vlText) {
+        vlFullText = vlText
+        if (!wrongAnswer) wrongAnswer = vlText
+      }
+    } catch {
+      // VL 失败不回落影响主链路（recognizeHandwrite 内部已兜底返回 null）
+    }
+
+    return {
+      question_content: regionText,
+      wrong_answer: wrongAnswer,
+      answer_content: answerContent,
+      solution,
+      source: '',
+      // 匹配到答案即视为"已作答/有正确答案"，否则待用户联网搜题
+      status: answerContent ? 'answered' : 'pending',
+      question_image_keys: [cropKey],
+      answer_image_keys: ansImgKeys,
+      level: 1,
+      parent_index: null,
+      stem,
+      ...(vlFullText ? { vl_full_text: vlFullText } : {}),
+    } as RecognizedItem
+  }
+
+  /**
+   * P2：用户手动改框后的重切重识：POST /api/image/extract-wrong-recrop
+   *
+   * 输入用户框（页图像素）→ 与 extract-wrong 共用 recognizeBlockRegion 链路 →
+   * 回传按新框裁图/OCR 的题目；系统框存在时计算 IoU/差集并记录，
+   * 作为「系统框 vs 用户框」判定准确率的真实数据源（设计文档 §4.7）。
+   */
+  async recropWrongBlock(
+    userId: string,
+    dto: RecropWrongDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<RecropWrongResult> {
+    if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
+    if (!dto.box) throw new BadRequestException('box 不能为空')
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.download(dto.image_url, fwd)
+    const ctx = await buildLayoutContext(srcBuffer)
+
+    // 夹紧到页面范围并保证至少 1px（防越界/退化框把 sharp extract 打翻）
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)))
+    const box: PageBox = {
+      x0: clamp(dto.box.x0, 0, ctx.w - 1),
+      y0: clamp(dto.box.y0, 0, ctx.h - 1),
+      x1: clamp(dto.box.x1, 0, ctx.w - 1),
+      y1: clamp(dto.box.y1, 0, ctx.h - 1),
+    }
+    if (box.x1 < box.x0) [box.x0, box.x1] = [box.x1, box.x0]
+    if (box.y1 < box.y0) [box.y0, box.y1] = [box.y1, box.y0]
+    if (box.x1 - box.x0 < 1 || box.y1 - box.y0 < 1) {
+      throw new BadRequestException('框选范围过小，请重新框选')
+    }
+
+    const item = await this.recognizeBlockRegion({
+      ctx,
+      box,
+      presetAnswer: {
+        content: dto.answer_content || '',
+        imageKeys: dto.answer_image_keys ?? [],
+      },
+    })
+    if (!item) {
+      throw new BadRequestException('该区域未识别到文字，请调整框选范围后重试')
+    }
+
+    // 用户框 vs 系统框差集（判定准确率数据源）：结构化日志 + 响应回传
+    let feedback: BoxFeedback | undefined
+    if (dto.system_box) {
+      feedback = boxFeedback(dto.system_box, box)
+      console.log(
+        `[extract-wrong-recrop] 框修正 label=${dto.question_label ?? '-'} iou=${feedback.iou.toFixed(3)} ` +
+          `areaΔ=${feedback.area_delta_pct}% offset=(${feedback.offset.dx},${feedback.offset.dy})`,
+      )
+    }
+
+    return {
+      // 结构级 label 原样带回（框变更不重跑整页结构分析，节/小类归属不变）；
+      // verdict 按错题提取场景固定为 wrong（本接口只服务错题圈定修正）。
+      item: { ...item, box, verdict: 'wrong', question_label: dto.question_label },
+      box,
+      feedback,
     }
   }
 
@@ -1362,4 +1561,3 @@ export class ImageService {
     return { url, key, timeline_id: timelineId }
   }
 }
-// reloaded 15:42:46

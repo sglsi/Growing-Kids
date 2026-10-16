@@ -32,6 +32,8 @@ export interface QuestionContent {
   stem?: string
   /** P2-16 错因分析结论（本地规则引擎产出） */
   error_analysis?: ErrorAnalysis
+  /** P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"），错题库唯一指认题目 */
+  question_label?: string
   /** P2-18 艾宾浩斯复习阶段计数：已完成复习次数 */
   review_count?: number
 }

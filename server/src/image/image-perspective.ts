@@ -360,7 +360,8 @@ export async function fixPerspectiveFromText(
 
   let warped
   try {
-    warped = await dewarpBuffer(buf, corners)
+    // keepFullCanvas：透视校正只拉直、不裁边（保留页面边距与四周文字，见 image-dewarp）
+    warped = await dewarpBuffer(buf, corners, { keepFullCanvas: true })
   } catch {
     return null
   }

@@ -24,6 +24,12 @@ export interface QuestionContent {
   stem?: string
   /** P2-16 错因分析结论（本地规则引擎产出；SBERT 分可选） */
   error_analysis?: ErrorAnalysis
+  /**
+   * P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"）。
+   * 两节各自重起题号时数字有歧义，标签才能唯一指认题目（#129 P1 产出，
+   * P3 起随保存落库，供错题库查看/检索/复习时识别「这是哪一节哪一道」）。
+   */
+  question_label?: string
   /** P2-18 艾宾浩斯复习阶段计数：已完成的复习次数（计划由 created_at + 该值现算） */
   review_count?: number
 }

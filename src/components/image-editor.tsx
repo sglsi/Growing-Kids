@@ -18,6 +18,14 @@ interface ImageEditorProps {
    * false/省略 = 只做编辑并把结果回传（onConfirm），不直接落库。
    */
   enableSaveToInbox?: boolean
+  /**
+   * #150 人工辅助错题整理：「页内裁剪入图」专用模式。
+   * 只保留裁剪相关交互（拖框 / 旋转 / 四角拉框 / 确定裁剪），
+   * 隐藏 AI 处理行与去手写相关开关——用户目标只有一个：裁出错题图。
+   */
+  cropOnly?: boolean
+  /** cropOnly 模式下底部主按钮文案，默认「使用此图（返回）」 */
+  confirmText?: string
 }
 
 interface Rect {
@@ -140,6 +148,7 @@ const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
 
 export default function ImageEditor({
   visible, src, onCancel, onConfirm, autoAction = null, enableSaveToInbox = true,
+  cropOnly = false, confirmText,
 }: ImageEditorProps) {
   const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
@@ -661,11 +670,11 @@ export default function ImageEditor({
   /**
    * 加载图片（node.createImage），返回 Image 对象。
    */
-  const loadImageOnCanvas = async (node: any, srcUrl: string): Promise<any> => {
+  const loadImageOnCanvas = async (node: any, imgUrl: string): Promise<any> => {
     let img: any = null
     if (node.createImage) img = node.createImage()
     else img = new Image()
-    img.src = srcUrl
+    img.src = imgUrl
     await new Promise<void>((resolve) => {
       let done = false
       const finish = () => { if (!done) { done = true; resolve() } }
@@ -707,7 +716,7 @@ export default function ImageEditor({
 
     await waitLayout()
 
-    const imgLocal = await toLocalIfRemote(currentSrc)
+    const srcLocal = await toLocalIfRemote(currentSrc)
 
     // 输出缓冲尺寸计算（先按 state 估算，加载实际图片后再校正，见下方防御分支）
     const fitWhole = Math.min(1, MAX_CANVAS_SIDE / Math.max(naturalW, naturalH, 1))
@@ -748,7 +757,7 @@ export default function ImageEditor({
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, outW, outH)
 
-    const img = await loadImageOnCanvas(node, imgLocal)
+    const img = await loadImageOnCanvas(node, srcLocal)
 
     // ★ 防御：state 尺寸与实际文件不符时，以实际文件为准重算（源坐标/输出尺寸全部按实际）。
     //   不一致常见于：远程图 EXIF 旋转、getImageInfo 与 Image 解码差异、异步替换竞态。
@@ -1222,12 +1231,16 @@ export default function ImageEditor({
   const dispatchAi = (action: ImageAction, label: string) => {
     if (aiBusy || busy) return
     if (action === 'enhance') {
+      // 以「当前图」作为本次智能高清会话的原图底稿，并清空上次会话的预览缓存，
+      // 避免基于不同底稿的缓存错配（也避免拿过滤镜的图二次叠加增强）。
+      setEnhanceBase(currentSrc)
+      setModeThumbs({})
       setActiveMode('bw') // 默认选中「黑白」，点开即给出黑白预览
+      setActivePreset('bw')
       setSrPanelOpen(true)
-      // 点开即生成预览：默认以黑白出图，用户可在面板内切换其他模式实时预览
-      if (Object.keys(modeThumbs).length === 0) {
-        void runEnhance(false)
-      }
+      // ⭐ 前端实时预览：基础模式（含默认黑白）本地即时出图，点击即显，
+      //    不再走后端（对标扫描王/夸克的即时滤镜，规避秒级网络往返）。
+      void pickEnhanceModeLocal('bw')
       return
     }
     if (action === 'auto') {
@@ -1244,31 +1257,80 @@ export default function ImageEditor({
    * 第二步：以「增强前底稿」为输入，按该模式重新生成**最终高清画质**并替换主图
    *        （若不换底稿，就是在已增强的成品上再增强一次 → 效果叠加失真）。
    */
-  const pickEnhanceMode = async (preset: string) => {
+  /**
+   * ⭐ 基础画面模式（原图/增强并锐化/增亮/灰度/黑白）：前端本地实时处理。
+   * 点击即出预览（百毫秒级），不走后端；结果缓存到 modeThumbs 复用（二次点击秒切）。
+   * 仅「高清扩展」超分才走后端（见 runEnhance）。
+   */
+  const pickEnhanceModeLocal = async (preset: string) => {
     if (aiBusy || busy) return
-    const thumb = modeThumbs[preset]
-    if (!thumb?.url) return
     setActivePreset(preset)
-    try {
-      const dl: any = await downloadWithTimeout(thumb.url, 30000)
-      if (dl?.tempFilePath) {
-        setCurrentSrc(dl.tempFilePath)
-        const info = await Taro.getImageInfo({ src: dl.tempFilePath })
-        if (info?.width && info?.height) resetBox(info.width, info.height)
-      }
-    } catch { /* 预览切换失败不阻断，继续走高清重生成 */ }
-    // 原图模式不需要再走一遍管线（本就是原样直出）
+    // 原图模式直接回退底稿（无需计算）
     if (preset === 'original') {
-      setCurrentSrc(enhanceBase || currentSrc)
+      const base = enhanceBase || currentSrc
+      setCurrentSrc(base)
       return
     }
-    await handleAi(
-      'enhance',
-      '智能高清',
-      { sr_scale: srScale, sr_mode: srMode, enhance_preset: preset as any, enhance_strength: enhanceStrength },
-      false,
-      enhanceBase || undefined,
-    )
+    // 缓存命中：直接切换主图（秒切，无等待）
+    const cached = modeThumbs[preset]?.url
+    if (cached) {
+      setCurrentSrc(cached)
+      return
+    }
+    // 本地即时渲染（白底黑字二值化 / 灰度 / 增亮 / 增强锐化）
+    setAiBusy(true)
+    Taro.showLoading({ title: '预览中…', mask: true })
+    try {
+      const base = enhanceBase || currentSrc
+      const out = await renderLocalPreset(base, preset)
+      setModeThumbs((m) => ({ ...m, [preset]: { url: out } }))
+      setCurrentSrc(out)
+    } catch (e) {
+      console.warn('[image-editor] 本地预览失败', e)
+      Taro.showToast({ title: '预览生成失败，请重试', icon: 'none' })
+    } finally {
+      setAiBusy(false)
+      Taro.hideLoading()
+    }
+  }
+
+  /**
+   * 把指定「基础画面模式」应用到原图底稿，前端 Canvas 实时渲染并返回临时文件。
+   * 不依赖后端，规避网络往返；像素操作（灰度/增亮/二值化/锐化）在客户端完成，点击即显。
+   */
+  const renderLocalPreset = async (baseSrc: string, preset: string): Promise<string> => {
+    const node = await waitCanvasNode()
+    if (!node) throw new Error('画布未就绪，请稍后重试')
+    const presetSrc = await toLocalIfRemote(baseSrc)
+    const img = await loadImageOnCanvas(node, presetSrc)
+    let w = img.width
+    let h = img.height
+    // 限幅到安全上限（预览无需原分辨率，小尺寸更快更即时；超分请走「高清扩展」）
+    const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(w, h, 1))
+    w = Math.max(1, Math.round(w * fit))
+    h = Math.max(1, Math.round(h * fit))
+    setCanvasCss({ w, h })
+    await waitCanvasCss(w, h)
+    node.width = w
+    node.height = h
+    const ctx = node.getContext('2d')
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, w, h)
+    ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, w, h)
+    const imageData = ctx.getImageData(0, 0, w, h)
+    applyPresetPixels(imageData.data, imageData.data.length / 4, w, h, preset, enhanceStrength)
+    ctx.putImageData(imageData, 0, 0)
+    await waitCanvasCss(w, h)
+    return new Promise<string>((resolve, reject) => {
+      Taro.canvasToTempFilePath({
+        canvas: node,
+        x: 0, y: 0, width: w, height: h,
+        destWidth: w, destHeight: h,
+        fileType: 'jpg', quality: 0.95,
+        success: (res: any) => resolve(res.tempFilePath),
+        fail: (err: any) => reject(err),
+      } as any)
+    })
   }
 
   /** 切换「矩形裁剪 / 四角拉框」两种模式（互斥）。 */
@@ -1306,7 +1368,7 @@ export default function ImageEditor({
   const runEnhance = (closePanel = true) => {
     if (closePanel) setSrPanelOpen(false)
     if (activeMode === 'hd') {
-      // 高清扩展：走超分倍率（x2/x3/x4）+ 推理模式
+      // 高清扩展：走超分倍率（x2/x3/x4）+ 推理模式（后端）
       void handleAi('enhance', '智能高清', {
         sr_scale: srScale,
         sr_mode: srMode,
@@ -1314,32 +1376,21 @@ export default function ImageEditor({
         enhance_strength: enhanceStrength,
       })
     } else {
-      // 基础画面模式：直接以所选 enhance_preset 处理（仍一次产出多模式预览供微调）
-      const preset = activeMode as 'original' | 'enhance' | 'brighten' | 'gray' | 'bw'
-      void handleAi('enhance', '智能高清', {
-        enhance_preset: preset,
-        multi_modes: true,
-        enhance_strength: enhanceStrength,
-      })
+      // 基础画面模式已改为前端本地实时处理（见 pickEnhanceModeLocal），
+      // 此处仅作兜底：若尚未生成预览则补一次本地渲染（正常不应走到）。
+      void pickEnhanceModeLocal(activeMode)
     }
   }
 
   // 面板「确定」：确认当前选中模式。
-  //  - 基础模式：主预览已实时落到所选模式（点开默认黑白 / 切换即预览），直接确认；
-  //    若当前高亮与最终主图不一致（切换尚未完成），补切一次。
-  //  - 高清扩展：以所选 x2/x3/x4 运行超分并应用。
+  //  - 基础模式：主预览已实时落到所选模式（前端本地处理），直接确认即可；
+  //  - 高清扩展：以所选 x2/x3/x4 运行超分并应用（后端）。
   const onConfirmEnhance = () => {
     if (activeMode === 'hd') {
       void runEnhance(true)
       return
     }
-    if (Object.keys(modeThumbs).length === 0) {
-      void runEnhance(true)
-      return
-    }
-    if (activePreset !== activeMode) {
-      void pickEnhanceMode(activeMode)
-    }
+    // 基础画面模式：主图已是本地处理结果，直接确认。
     setSrPanelOpen(false)
   }
 
@@ -1542,17 +1593,19 @@ export default function ImageEditor({
 
       {/* 底部操作 */}
       <View className="px-4 pb-8 pt-3">
-        {/* AI 处理行 */}
-        <View className="flex flex-row items-center justify-around mb-4">
-          {AI_ACTIONS.map(({ action, label, icon: Icon }) => (
-            <View key={action} className="flex flex-col items-center" onClick={() => dispatchAi(action, label)}>
-              <View className="w-11 h-11 rounded-full bg-white bg-opacity-15 flex items-center justify-center mb-1">
-                <Icon size={20} color="#ffffff" />
+        {/* AI 处理行（cropOnly 模式隐藏：只做裁剪） */}
+        {!cropOnly && (
+          <View className="flex flex-row items-center justify-around mb-4">
+            {AI_ACTIONS.map(({ action, label, icon: Icon }) => (
+              <View key={action} className="flex flex-col items-center" onClick={() => dispatchAi(action, label)}>
+                <View className="w-11 h-11 rounded-full bg-white bg-opacity-15 flex items-center justify-center mb-1">
+                  <Icon size={20} color="#ffffff" />
+                </View>
+                <Text className="block text-white text-opacity-80 text-xs">{label}</Text>
               </View>
-              <Text className="block text-white text-opacity-80 text-xs">{label}</Text>
-            </View>
-          ))}
-        </View>
+            ))}
+          </View>
+        )}
 
         <View className="flex flex-row items-center justify-center gap-8 mb-5">
           <View className="flex flex-col items-center" onClick={handleRotate}>
@@ -1598,21 +1651,23 @@ export default function ImageEditor({
           )}
         </View>
 
-        {/* 去手写模式开关：红/蓝笔批改卷开启「仅彩笔+保印刷」（v18.2 实测误删降 52%~99%） */}
-        <View className="flex flex-row items-center justify-center mb-4" onClick={() => setColorPenMode((v) => !v)}>
-          <View
-            className={`w-10 h-5 rounded-full mr-2 relative ${colorPenMode ? 'bg-primary' : 'bg-white bg-opacity-15'}`}
-          >
+        {/* 去手写模式开关：红/蓝笔批改卷开启「仅彩笔+保印刷」（v18.2 实测误删降 52%~99%）；cropOnly 模式隐藏 */}
+        {!cropOnly && (
+          <View className="flex flex-row items-center justify-center mb-4" onClick={() => setColorPenMode((v) => !v)}>
             <View
-              className={`w-4 h-4 rounded-full bg-white absolute top-0 ${colorPenMode ? 'right-0' : 'left-0'}`}
-            />
+              className={`w-10 h-5 rounded-full mr-2 relative ${colorPenMode ? 'bg-primary' : 'bg-white bg-opacity-15'}`}
+            >
+              <View
+                className={`w-4 h-4 rounded-full bg-white absolute top-0 ${colorPenMode ? 'right-0' : 'left-0'}`}
+              />
+            </View>
+            <Text className="block text-white text-opacity-80 text-xs">
+              {colorPenMode ? '红/蓝笔卷模式（保印刷）已开' : '红/蓝笔卷模式（保印刷）'}
+            </Text>
           </View>
-          <Text className="block text-white text-opacity-80 text-xs">
-            {colorPenMode ? '红/蓝笔卷模式（保印刷）已开' : '红/蓝笔卷模式（保印刷）'}
-          </Text>
-        </View>
+        )}
 
-        {/* ⭐ P1 多模式预览自选：智能高清完成后并列渲染五种模式缩略图，点击即切换主图 */}
+        {/* 基础画面模式实时预览：缩略图来自前端本地渲染缓存（点击即出主图），高亮当前选中模式 */}
         {Object.keys(modeThumbs).length > 0 && (
           <View className="mb-4">
             <Text className="block text-white text-opacity-70 text-xs mb-2">
@@ -1624,7 +1679,7 @@ export default function ImageEditor({
                 const thumb = modeThumbs[p.value]
                 if (!thumb?.url) return null
                 return (
-                  <View key={p.value} className="flex flex-col items-center" onClick={() => pickEnhanceMode(p.value)}>
+                  <View key={p.value} className="flex flex-col items-center" onClick={() => pickEnhanceModeLocal(p.value)}>
                     <View
                       className="w-14 h-16 rounded-lg overflow-hidden items-center justify-center"
                       style={{
@@ -1712,7 +1767,7 @@ export default function ImageEditor({
         )}
 
         <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
-          <Text className="block text-sm text-white">{busy ? '处理中…' : '使用此图（返回）'}</Text>
+          <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '使用此图（返回）')}</Text>
         </Button>
       </View>
 
@@ -1746,9 +1801,8 @@ export default function ImageEditor({
                       setActiveMode(m.value as 'original' | 'enhance' | 'brighten' | 'gray' | 'bw' | 'hd')
                       // 高清扩展：仅展开 x2/x3/x4 子选项，不触发预览
                       if (m.value === 'hd') return
-                      // 基础模式：预览已就绪则实时切换主图；否则先以该模式出图
-                      if (modeThumbs[m.value]?.url) void pickEnhanceMode(m.value)
-                      else void runEnhance(false)
+                      // 基础模式：前端本地即时预览（秒切主图），不走后端
+                      void pickEnhanceModeLocal(m.value)
                     }}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
@@ -2031,4 +2085,166 @@ function clampCrop(r: Rect): Rect {
   x = clamp(x, 0, 1 - w)
   y = clamp(y, 0, 1 - h)
   return { x, y, w, h }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 智能高清·基础画面模式：前端像素级滤镜（对标扫描王/夸克的即时预览）
+// 这些运算在客户端 Canvas 完成，点击即出预览，不依赖后端推理与网络往返。
+// 仅「高清扩展」(x2/x3/x4 超分) 才走后端模型。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function clamp255(v: number): number {
+  return v < 0 ? 0 : v > 255 ? 255 : v
+}
+
+/**
+ * 基础模式像素处理：
+ *  - original：原样直出
+ *  - gray：灰度（保留层次）
+ *  - brighten：增亮 + 轻度提对比（偏暗/阴影图）
+ *  - enhance：增强并锐化（提对比 + 3x3 非锐化，让印刷体更清晰）
+ *  - bw：白底黑字二值化（Otsu 阈值 + 自动反相纠正，确保背景白、文字黑）
+ */
+function applyPresetPixels(
+  d: Uint8ClampedArray,
+  n: number,
+  w: number,
+  h: number,
+  preset: string,
+  strength: 'weak' | 'medium' | 'strong',
+) {
+  if (preset === 'original') return
+
+  if (preset === 'gray') {
+    for (let i = 0; i < n; i++) {
+      const g = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
+      d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = g
+    }
+    return
+  }
+
+  if (preset === 'brighten') {
+    const a = 1.18
+    const b = 42
+    for (let i = 0; i < n; i++) {
+      d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
+      d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
+      d[4 * i + 2] = clamp255((d[4 * i + 2] - 128) * a + 128 + b)
+    }
+    return
+  }
+
+  if (preset === 'enhance') {
+    const a = 1.3 + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
+    const b = 12
+    for (let i = 0; i < n; i++) {
+      d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
+      d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
+      d[4 * i + 2] = clamp255((d[4 * i + 2] - 128) * a + 128 + b)
+    }
+    sharpen3x3(d, w, h, strength === 'strong' ? 1.2 : strength === 'weak' ? 0.6 : 0.9)
+    return
+  }
+
+  if (preset === 'bw') {
+    binarizeWhiteBgBlackInk(d, n, w, h)
+    return
+  }
+}
+
+/**
+ * 白底黑字二值化：
+ *  1) 灰度；2) 3x3 盒式模糊轻度降噪；3) Otsu 全局阈值；
+ *  4) 暗笔画留黑、亮背景留白；5) 若黑像素过半（黑底白字/曝光异常），
+ *     自动反相，确保最终「背景白、文字黑、干净清晰」。
+ */
+function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number) {
+  const gray = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    gray[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
+  }
+  const blurred = boxBlur(gray, w, h, 1)
+  const thr = otsu(blurred, n)
+  let black = 0
+  for (let i = 0; i < n; i++) if (blurred[i] < thr) black++
+  const invert = black / n > 0.55
+  for (let i = 0; i < n; i++) {
+    let v = blurred[i] < thr ? 0 : 255
+    if (invert) v = 255 - v
+    d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v
+    d[4 * i + 3] = 255
+  }
+}
+
+/** 3x3 盒式模糊（轻度降噪，保边） */
+function boxBlur(src: Float64Array, w: number, h: number, r: number): Float64Array {
+  const out = new Float64Array(src.length)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0
+      let cnt = 0
+      for (let dy = -r; dy <= r; dy++) {
+        const ny = y + dy
+        if (ny < 0 || ny >= h) continue
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = x + dx
+          if (nx < 0 || nx >= w) continue
+          sum += src[ny * w + nx]
+          cnt++
+        }
+      }
+      out[y * w + x] = sum / cnt
+    }
+  }
+  return out
+}
+
+/** Otsu 全局阈值：在双峰直方图下最大化类间方差，自动求最佳分割点 */
+function otsu(gray: Float64Array, n: number): number {
+  const hist = new Array(256).fill(0)
+  for (let i = 0; i < n; i++) {
+    let v = gray[i] | 0
+    if (v < 0) v = 0
+    else if (v > 255) v = 255
+    hist[v]++
+  }
+  let sum = 0
+  for (let t = 0; t < 256; t++) sum += t * hist[t]
+  let sumB = 0
+  let wB = 0
+  let maxVar = 0
+  let thr = 127
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]
+    if (wB === 0) continue
+    const wF = n - wB
+    if (wF === 0) break
+    sumB += t * hist[t]
+    const mB = sumB / wB
+    const mF = (sum - sumB) / wF
+    const varBetween = wB * wF * (mB - mF) * (mB - mF)
+    if (varBetween > maxVar) {
+      maxVar = varBetween
+      thr = t
+    }
+  }
+  return thr
+}
+
+/** 3x3 非锐化（拉普拉斯边缘增强），amount 控制强度，不过冲 */
+function sharpen3x3(d: Uint8ClampedArray, w: number, h: number, amount: number) {
+  const lum = new Float64Array(w * h)
+  for (let i = 0; i < w * h; i++) {
+    lum[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
+  }
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      const lap = lum[i] * 4 - lum[i - 1] - lum[i + 1] - lum[i - w] - lum[i + w]
+      const add = lap * amount
+      d[4 * i] = clamp255(d[4 * i] + add)
+      d[4 * i + 1] = clamp255(d[4 * i + 1] + add)
+      d[4 * i + 2] = clamp255(d[4 * i + 2] + add)
+    }
+  }
 }

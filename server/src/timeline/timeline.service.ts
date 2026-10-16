@@ -6,7 +6,7 @@ import { buildReviewPlan, nextReviewCount } from './review'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import type {
-  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto, TimelineItemWithUrl,
+  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto, TimelineItemWithUrl, QuestionContent,
 } from './timeline.types'
 
 const TABLE = 'timeline_items'
@@ -75,8 +75,8 @@ export class TimelineService {
     if (query.tag) q = q.contains('tags', [query.tag])
     if (query.keyword) {
       const kw = `%${query.keyword}%`
-      // 题目按题干/答案搜；图片按 title 搜（content->>question / title）
-      q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw}`)
+      // 题目按题干/答案/题号标签搜；图片按 title 搜（content->>question / content->>question_label / title）
+      q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw},content->>question_label.ilike.${kw}`)
     }
     if (query.since) {
       if (scope === 'review') {
@@ -180,6 +180,8 @@ export class TimelineService {
         // P2-16 / P2-18：错因分析结论与艾宾浩斯复习阶段计数（jsonb 免迁移，直接存）
         error_analysis: c.error_analysis ?? null,
         review_count: typeof c.review_count === 'number' ? c.review_count : 0,
+        // P3：规范题号标签（错题库唯一指认「节·小类 题号」）
+        question_label: c.question_label ?? null,
       }
     }
     return payload
@@ -227,11 +229,26 @@ export class TimelineService {
    */
   async update(userId: string, id: string, dto: UpdateTimelineDto): Promise<TimelineItem> {
     const client = getSupabaseClient()
+    // 内容局部更新合并（P3 链路复核发现的数据丢失）：content 为局部 patch 时
+    // 先读现价再合并——详情页等调用方只传题干/答案/解答/状态，全量替换会把
+    // question_images/question_label/level/stem/error_analysis/review_count 清空。
+    // 显式传值（含空串/null）照常覆盖；未传的字段保留原值。
+    let mergedContent: QuestionContent | undefined
+    if (dto.content !== undefined) {
+      const { data: cur } = await client
+        .from(TABLE)
+        .select('content')
+        .eq('user_id', userId)
+        .eq('id', id)
+        .maybeSingle()
+      const curContent = (cur as { content?: QuestionContent } | null)?.content ?? {}
+      mergedContent = { ...curContent, ...dto.content }
+    }
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (dto.title !== undefined) payload.title = dto.title
     if (dto.subject_id !== undefined) payload.subject_id = dto.subject_id
     if (dto.tags !== undefined) payload.tags = dto.tags
-    if (dto.content !== undefined) payload.content = dto.content
+    if (mergedContent !== undefined) payload.content = mergedContent
     // 图片字段（kind=image 的「原位替换」）：
     // ⚠️ 必须支持原位替换（前端编辑已入库图片时直接 PUT file_key/thumb_key）。
     // 旧方案「新建条目+软删旧条目」会让新条目插到列表最前、旧条目软删失败时残留，

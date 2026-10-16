@@ -317,6 +317,8 @@ export interface TimelineContentPayload {
   parent_index?: number | null
   /** 所属大题完整题干（子题携带，独立可读） */
   stem?: string
+  /** P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"），错题库唯一指认题目 */
+  question_label?: string
 }
 
 export interface CreateTimelinePayload {
@@ -643,6 +645,12 @@ export interface RecognizeResult {
   stem?: string
   /** 答题卡/答案图 file_key（与题面图区分） */
   answer_image_keys?: string[]
+  /** P2：该题在题面页上的像素框（叠加视图 + 用户改框基线） */
+  box?: { x0: number; y0: number; x1: number; y1: number }
+  /** P2：系统判定（wrong=错题；叠加视图颜色编码） */
+  verdict?: 'wrong' | 'correct' | 'blank' | 'unknown'
+  /** P1：规范题号标签（如 "预习案·Ⅱ.汉译英 18"） */
+  question_label?: string
 }
 
 function normalizeItem(raw: RecognizeResult): RecognizeResult {
@@ -660,6 +668,9 @@ function normalizeItem(raw: RecognizeResult): RecognizeResult {
     level: typeof raw.level === 'number' ? raw.level : 1,
     parent_index: raw.parent_index ?? null,
     stem: raw.stem || '',
+    box: raw.box,
+    verdict: raw.verdict,
+    question_label: raw.question_label,
   }
 }
 
@@ -686,9 +697,18 @@ export async function recognizePaper(filePath: string, subjectId: string) {
 // ⚠️ 已切到新的 /api/image/extract-wrong 接口（落实"切块 + 逐块识别"原始意图）：
 //   后端先本地切块（红笔锚定，allowVlm=false）、再对每块单独跑本地 OCR 侧车，
 //   返回的是"切出的题块图 key + 该区域 OCR 文本"（而非整图），并回传每题的 answer_image_keys。
+// P2：响应另带 blocks（全部系统题块，供叠加视图）/page（页尺寸）/question_url（改框重切源）。
 export async function recognizeSeparate(questionFile: string, answerFile: string) {
   const [q, a] = await Promise.all([uploadFile(questionFile), uploadFile(answerFile)])
-  const data = await unwrapResponse<{ items: RecognizeResult[]; answer_image_keys?: string[]; unmatched_questions?: string[] }>(
+  const data = await unwrapResponse<{
+    items: RecognizeResult[]
+    answer_image_keys?: string[]
+    unmatched_questions?: string[]
+    blocks?: WrongBlockSummary[]
+    page?: { w: number; h: number }
+    question_url?: string
+    page_text?: PageTextSegment[]
+  }>(
     Network.request({
       url: '/api/image/extract-wrong',
       method: 'POST',
@@ -704,6 +724,54 @@ export async function recognizeSeparate(questionFile: string, answerFile: string
     matched: items,
     unmatched_questions: data?.unmatched_questions || [],
     answer_image_keys: data?.answer_image_keys || [a.key],
+    blocks: data?.blocks || [],
+    page: data?.page || { w: 0, h: 0 },
+    question_url: data?.question_url || q.url,
+    page_text: data?.page_text || [],
+  }
+}
+
+/** P2：系统切出的题块摘要（叠加视图渲染 + 改框基线） */
+export interface WrongBlockSummary {
+  id: number
+  box: { x0: number; y0: number; x1: number; y1: number }
+  verdict: 'wrong' | 'correct' | 'blank' | 'unknown'
+  question_label?: string
+}
+
+/** P3：全页 OCR 文本片段（阅读序：分栏 → 行序），供选择粘贴面板补全题干/答案 */
+export interface PageTextSegment {
+  text: string
+  box: { x0: number; y0: number; x1: number; y1: number }
+  /** 所属栏索引（0 起；单栏页恒 0） */
+  col: number
+}
+
+/** P2：用户改框后的重切重识（与 extract-wrong 同链路，保存以用户框为准） */
+export async function recropWrongBlock(params: {
+  image_url: string
+  box: { x0: number; y0: number; x1: number; y1: number }
+  system_box?: { x0: number; y0: number; x1: number; y1: number }
+  question_label?: string
+  answer_content?: string
+  answer_image_keys?: string[]
+}) {
+  const data = await unwrapResponse<{
+    item: RecognizeResult
+    box: { x0: number; y0: number; x1: number; y1: number }
+    feedback?: { iou: number; area_delta_pct: number; offset: { dx: number; dy: number } }
+  }>(
+    Network.request({
+      url: '/api/image/extract-wrong-recrop',
+      method: 'POST',
+      data: params,
+      header: authHeaders(),
+    }),
+  )
+  return {
+    item: normalizeItem(data.item),
+    box: data.box,
+    feedback: data.feedback,
   }
 }
 
@@ -760,6 +828,55 @@ export async function recognizeDocumentByUrl(url: string, subjectId: string) {
  * 后端生成 docx → 上传存储 → 写入 documents 记录（「文档」页可见），返回可直接打开的地址。
  */
 export async function exportRecognizedDocx(items: RecognizeResult[], title?: string) {
+  const data = await unwrapResponse<{ url: string; file_key: string; title: string }>(
+    Network.request({
+      url: '/api/ocr/export-docx',
+      method: 'POST',
+      data: { items, title: title || '' },
+      header: authHeaders(),
+    }),
+  )
+  return data
+}
+
+// ---------- #150 人工辅助错题整理（OCR 文本栏 + 粘贴栏） ----------
+
+/**
+ * 全页 OCR 文本栏：摆正 + 全页 OCR + 阅读序平铺。
+ * 不做红笔检测/切块——文本供用户在右侧栏复制，粘进底部粘贴栏。
+ * 返回摆正后的页面图 URL：前端展示与「页内裁剪」都用它（与 OCR 同一坐标系）。
+ */
+export async function ocrPage(imageUrl: string) {
+  const data = await unwrapResponse<{
+    page: { w: number; h: number }
+    page_text: PageTextSegment[]
+    image_url: string
+  }>(
+    Network.request({
+      url: '/api/image/ocr-page',
+      method: 'POST',
+      data: { image_url: imageUrl },
+      header: authHeaders(),
+    }),
+  )
+  return {
+    page: data?.page || { w: 0, h: 0 },
+    page_text: data?.page_text || [],
+    image_url: data?.image_url || imageUrl,
+  }
+}
+
+/** 粘贴栏条目：文本 + 手动裁剪的错题图片 URL 列表 */
+export interface BoardExportItem {
+  question_content: string
+  images?: string[]
+}
+
+/**
+ * 粘贴栏导出 Word（#150）：与 exportRecognizedDocx 同一端点，
+ * items 带 images 时服务端把裁剪图嵌入 docx（题干之后，宽度自适应）。
+ */
+export async function exportBoardDocx(items: BoardExportItem[], title?: string) {
   const data = await unwrapResponse<{ url: string; file_key: string; title: string }>(
     Network.request({
       url: '/api/ocr/export-docx',

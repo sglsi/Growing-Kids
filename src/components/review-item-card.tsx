@@ -188,6 +188,12 @@ export default function ReviewItemCard({
                   {ea.label}
                 </Badge>
               )}
+              {/* P3：规范题号标签（节·小类 题号）——复习本/错题库列表唯一指认题目 */}
+              {c.question_label ? (
+                <Badge className="border rounded-full px-2 py-0 text-xs" style={{ backgroundColor: 'rgba(190,62,45,0.08)', color: '#BE3E2D', borderColor: 'rgba(190,62,45,0.25)' }}>
+                  {c.question_label}
+                </Badge>
+              ) : null}
             </View>
             <View className="flex flex-row items-center gap-1 shrink-0">
               <Text className="block text-xs text-muted-foreground">{time}</Text>

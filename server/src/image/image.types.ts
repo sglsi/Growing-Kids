@@ -14,6 +14,23 @@ export interface ExtractWrongDto {
 /** 切块依据来源（诊断用，便于排查"为什么切得不对"） */
 export type WrongqBlockSource = 'red' | 'layout' | 'local-vlm' | 'none'
 
+/** 页面像素框（与 wrongq 引擎同口径：flatBuf 像素空间） */
+export interface PageBox {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+/** 系统切出的题块摘要（P2 叠加视图用：全部块，含非错题块） */
+export interface WrongBlockSummary {
+  id: number
+  box: PageBox
+  verdict: import('./wrongq.types').WrongqVerdict
+  /** P1 规范题号标签（如 "预习案·Ⅱ.汉译英 18"） */
+  question_label?: string
+}
+
 /** `POST /api/image/extract-wrong` 的响应体 */
 export interface ExtractWrongResult {
   items: import('../ocr/ocr.types').RecognizedItem[]
@@ -25,8 +42,91 @@ export interface ExtractWrongResult {
   block_source?: WrongqBlockSource
   /** P1-13：被判定为近重复而合并掉的题数 */
   deduped?: number
+  /** P2：全部系统题块（叠加视图渲染 + 用户改框的基线）；verdict/box/label 与 items 内字段一致 */
+  blocks?: WrongBlockSummary[]
+  /** P2：页面像素尺寸（叠加视图坐标换算用） */
+  page?: { w: number; h: number }
+  /** P2：题面图 URL（用户改框后重切重识的输入源） */
+  question_url?: string
+  /**
+   * P3：全页 OCR 文本片段（阅读序：分栏 → 行序）。
+   * 侧车全页 regions 平铺展示，供「选择粘贴」面板补全题干/答案（设计 §4.8）。
+   */
+  page_text?: PageTextSegment[]
   /** 诊断信息（块数、各分支计数等） */
   debug?: Record<string, unknown>
+}
+
+/** P3：全页 OCR 文本片段（阅读序平铺的一个 region） */
+export interface PageTextSegment {
+  text: string
+  /** 页图像素框（与 blocks[].box 同口径） */
+  box: PageBox
+  /** 所属栏索引（0 起；单栏页恒 0） */
+  col: number
+}
+
+/**
+ * #150 人工辅助错题整理：全页 OCR 文本栏请求。
+ * 与 ExtractWrongDto 的本质区别：**不做红笔检测/切块**，只「摆正 + 全页 OCR + 阅读序平铺」，
+ * 把"机器判错题"降级为"机器给全文、人工来挑选"（自动检测效果不达标的过渡方案）。
+ */
+export interface OcrPageDto {
+  /** 页面图公网 URL */
+  image_url: string
+}
+
+export interface OcrPageResult {
+  /** 摆正后的页面像素尺寸（与 image_url 同图） */
+  page: { w: number; h: number }
+  /** 全页 OCR 文本片段（阅读序：分栏 → 行序），OCR 不可用时为空数组 */
+  page_text: PageTextSegment[]
+  /**
+   * 摆正后的页面图 URL。前端展示与「页内裁剪」均基于此图——
+   * 与 OCR 文本同一坐标系，裁剪入题的图即用户看到的图。
+   */
+  image_url: string
+}
+
+/**
+ * P2：用户手动改框后的「重切重识」请求体：POST /api/image/extract-wrong-recrop
+ *
+ * 与 extract-wrong 共享同一条块内链路（裁图 → ingest → 块 OCR → 语义分离），
+ * 只是输入框从「系统框」换成「用户框」——保证改框前后识别质量一致。
+ */
+export interface RecropWrongDto {
+  /** 题面图公网 URL（与 extract-wrong 的 image_url 一致） */
+  image_url: string
+  /** 用户框（页图像素坐标，与 blocks[].box 同口径） */
+  box: PageBox
+  /** 系统原框（提供则回传 IoU/差集，作为判定准确率的真实数据源） */
+  system_box?: PageBox
+  /** 题号指认标签（反馈归因用；框变更不重跑结构分析，标签原样带回） */
+  question_label?: string
+  /** 已知答案文本（框变更不重跑答案图 OCR，由前端透传） */
+  answer_content?: string
+  /** 答案图 key（同上，原样挂回） */
+  answer_image_keys?: string[]
+}
+
+/** 用户框 vs 系统框的差集度量（P2 反馈） */
+export interface BoxFeedback {
+  /** 交并比 [0,1]；1 = 完全重合 */
+  iou: number
+  /** 面积变化百分比（正=用户框更大） */
+  area_delta_pct: number
+  /** 框心偏移（页图像素） */
+  offset: { dx: number; dy: number }
+}
+
+/** `POST /api/image/extract-wrong-recrop` 的响应体 */
+export interface RecropWrongResult {
+  /** 按用户框重切重识出的题目（box/verdict/question_label 已按用户框回填） */
+  item: import('../ocr/ocr.types').RecognizedItem
+  /** 服务端夹紧后的有效用户框 */
+  box: PageBox
+  /** 系统框存在时的差集度量 */
+  feedback?: BoxFeedback
 }
 
 export interface ProcessImageDto {
