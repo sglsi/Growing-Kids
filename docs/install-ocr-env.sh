@@ -28,6 +28,12 @@ else
   echo "[1/5] venv 已存在：$VENV"
 fi
 
+# 骨架残留场景：venv 目录在但 site-packages 被清空（沙箱重置），pip 随之丢失——缺则补装
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  echo "[1/5] venv 内 pip 缺失（骨架残留），补装..."
+  python3 -m pip --python "$PY" install --quiet pip
+fi
+
 echo "[2/5] 安装 Web/进程依赖（fastapi/uvicorn/psutil）..."
 $PIP install --quiet --timeout 600 fastapi uvicorn python-multipart psutil
 

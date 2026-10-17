@@ -15,6 +15,8 @@ import { Injectable } from '@nestjs/common'
  *  2. OCR 调用点（快速/精准入口）毫秒级轻量自检（目录存在性 + 15min 免检 TTL）；
  *  3. 恢复过程模块级互斥（并发触发只装一次），恢复完成后强制 import 实测验证；
  *  4. 全部过程输出进 console（dev.log 可检索 `[ocr-env]`）。
+ *     2026-10-17：venv 骨架残留（目录在、site-packages 空）时 pip 会随之丢失，
+ *     install 脚本已补"venv 存在但 pip 缺失 → 补装 pip"分支。
  *
  * 恢复执行体：docs/install-ocr-env.sh（幂等：venv 已存在则复用，pip 自动跳过已装包；
  * pip 下载缓存持久化在 /workspace/projects/.cache-pip，重装零下载）。
