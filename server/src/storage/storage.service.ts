@@ -27,4 +27,9 @@ export class StorageService {
   async getPublicUrl(key: string): Promise<string> {
     return this.storage.generatePresignedUrl({ key, expireTime: 86400 })
   }
+
+  /** 删除对象存储文件（匿名用户清理等场景使用）；key 不存在时返回 false 不抛错 */
+  async deleteObject(key: string): Promise<boolean> {
+    return this.storage.deleteFile({ fileKey: key })
+  }
 }
