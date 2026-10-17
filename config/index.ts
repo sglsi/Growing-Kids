@@ -54,7 +54,15 @@ export default defineConfig<'vite'>(async (merge, _env) => {
   const isH5 = process.env.TARO_ENV === 'h5';
 
   const buildMiniCIPluginConfig = () => {
-    const hasWeappConfig = !!process.env.TARO_APP_WEAPP_APPID;
+    // 微信 appid：优先显式 TARO_APP_WEAPP_APPID，回退平台注入的 WX_APPID
+    const weappAppid = process.env.TARO_APP_WEAPP_APPID || process.env.WX_APPID;
+    // 微信 CI 上传必须同时具备有效的「代码上传密钥」（公众平台下载，非 AppSecret）。
+    // 密钥为空/0 字节时不启用 CI 插件，保持“仅编译”行为，避免构建因无效密钥失败。
+    const weappKeyPath = path.resolve(__dirname, '../key/private.appid.key');
+    const hasWeappConfig =
+      !!weappAppid &&
+      fs.existsSync(weappKeyPath) &&
+      fs.statSync(weappKeyPath).size > 0;
     const hasTTConfig = !!process.env.TARO_APP_TT_EMAIL;
     if (!hasWeappConfig && !hasTTConfig) {
       return [];
@@ -65,7 +73,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
     };
     if (hasWeappConfig) {
       miniCIConfig.weapp = {
-        appid: process.env.TARO_APP_WEAPP_APPID,
+        appid: weappAppid,
         privateKeyPath: 'key/private.appid.key',
       };
     }
