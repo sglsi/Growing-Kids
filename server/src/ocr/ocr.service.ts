@@ -1,4 +1,8 @@
-import { Injectable, BadRequestException } from '@nestjs/common'
+import {
+  Injectable,
+  BadRequestException,
+  type OnApplicationBootstrap,
+} from '@nestjs/common'
 import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
 import * as http from 'http'
 import * as https from 'https'
@@ -21,6 +25,7 @@ import {
   type Ppsv3TextRegion,
 } from './ppsv3.client'
 import { toolOcr, resolvePython } from './ocr-tool'
+import { EnvRecoveryService } from './env-recovery.service'
 import { getDiagnoseProbeBuffer } from './diagnose-probe'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
 import { structureLocalItems } from './ocr-struct'
@@ -81,7 +86,7 @@ const PAIR_TASK =
   '用户将【题目图片】和【答案图片】分开上传。题目图片中是一份试卷/作业的多道题目（可能含大题与小题），答案图片中是这些题目的标准答案与解析。请按题号将答案图片中的答案与解析，与题目图片中对应题号的题目关联匹配，输出多道题。JSON 结构为 {"items":[{...},...]}，items 为与题目图片题号一一对应的题目数组（可能包含多道，切勿只输出一道）。'
 
 @Injectable()
-export class OcrService {
+export class OcrService implements OnApplicationBootstrap {
   // VLM 客户端懒加载：本地 OCR 是主路径，不应因缺少 VLM 凭证而在构造期崩溃。
   // 仅当真正需要 VLM（语义切分 / 兜底看图）时才实例化。
   private vlmClient?: LLMClient
@@ -93,7 +98,10 @@ export class OcrService {
   private vlCalls = 0
   private readonly vlMaxCalls = Number(process.env.OCR_VL_MAX_BLOCKS ?? 8)
 
-  constructor(private readonly storageService: StorageService) {
+  constructor(
+    private readonly storageService: StorageService,
+    private readonly envRecovery: EnvRecoveryService,
+  ) {
     // 3.x 侧车：失败静默返回 null（见 Ppsv3Client），由下方 VLM 降级接管。
     // 注入共享单例 telemetry/alertSink（与 SidecarSupervisor 共用同一份），并启动主动健康探针——
     // 侧车失联触发告警、恢复通知，解决"侧车宕机静默降级、无人知晓"的隐患（见 ocr-health.ts）。
@@ -101,6 +109,15 @@ export class OcrService {
       autoProbe: (process.env.PPSV3_AUTO_PROBE ?? 'true') !== 'false',
     })
     this.ppsv3.startProbe()
+  }
+
+  /**
+   * 启动自检（沙箱重置自愈，用户要求全流程自动、无需人工命令）：
+   * 后台延迟 3s 全量 import 自检 OCR venv，缺失/损坏即自动重装（约 3~6 分钟），
+   * 不阻塞服务启动；过程日志可检索 `[ocr-env]`。
+   */
+  onApplicationBootstrap(): void {
+    void this.envRecovery.bootstrap()
   }
 
   private getVlm(): LLMClient {
@@ -974,6 +991,12 @@ export class OcrService {
   async recognizePageFast(
     buf: Buffer,
   ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+    // 沙箱重置自愈：venv 缺失时自动重装并等待（上限 45s）；未完成则显式报错而非静默空结果
+    if (!(await this.envRecovery.ensureReady())) {
+      throw new Error(
+        'OCR 运行环境缺失且自动恢复未完成（恢复仍在后台进行，稍后重试；状态见 /api/image/ocr-diagnose 的 envRecovery 段）',
+      )
+    }
     const { ocrBuf, sx, sy } = await this.shrinkForOcr(buf)
     const r = await toolOcr(ocrBuf, {
       op: 'recognize',
@@ -1014,6 +1037,12 @@ export class OcrService {
   async recognizePageForPanel(
     buf: Buffer,
   ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+    // 沙箱重置自愈：venv 缺失时自动重装并等待（上限 45s），再拉起侧车
+    if (!(await this.envRecovery.ensureReady())) {
+      throw new Error(
+        'OCR 运行环境缺失且自动恢复未完成（恢复仍在后台进行，稍后重试；状态见 /api/image/ocr-diagnose 的 envRecovery 段）',
+      )
+    }
     const { ocrBuf, sx, sy } = await this.shrinkForOcr(buf)
     // 托管模式：先确保侧车就绪。auto 判定 venv/python 缺失时 supervisor.disabled=true
     // （外部侧车模式，透传）；PPSV3_SUPERVISE=1 强制托管但 spawn 失败时这里显式失败。
@@ -1130,6 +1159,7 @@ export class OcrService {
         disabledReason: sup.disabled ? sup.disabledReason() : '(已启用)',
         state: sup.getState(),
       },
+      envRecovery: this.envRecovery.snapshot(),
       fastEngine,
       preciseEngine,
     }

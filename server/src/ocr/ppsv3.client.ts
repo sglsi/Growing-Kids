@@ -67,13 +67,18 @@ export interface Ppsv3ClientOptions {
   probeFailThreshold?: number
 }
 
-/** 3.x 引擎 python：优先隔离 venv；venv 未落地时回退系统 python3（本沙箱已装 paddleocr 3.7.0 + paddlepaddle 3.2.2）。
+/** 3.x 引擎 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
  *  常量保留函数形式：Supervisor 构造在模块加载期执行，需即时探测文件系统。 */
 function defaultPpsv3Python(): string {
-  const venvPython = '/opt/pocr3-venv/bin/python'
-  try {
-    if (fs.existsSync(venvPython)) return venvPython
-  } catch { /* ignore */ }
+  const candidates = [
+    '/workspace/projects/.venv-py/bin/python',
+    '/opt/pocr3-venv/bin/python'
+  ]
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p
+    } catch { /* ignore */ }
+  }
   return 'python3'
 }
 const DEFAULT_PPSV3_PYTHON = defaultPpsv3Python()

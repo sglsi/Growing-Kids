@@ -45,6 +45,10 @@ import time
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+# 模型缓存持久化：HOME(/root) 在沙箱重置后不丢内容但有清理风险，指到项目卷保证命中
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
+os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 

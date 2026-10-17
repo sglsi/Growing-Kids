@@ -37,17 +37,29 @@ function resolveEngine(engine: ToolEngine = 'legacy'): { dir: string; script: st
   return { dir: candidates[0] ?? '', script: '' }
 }
 
-/** 3.x 引擎的 python：优先隔离 venv（paddlepaddle 3.2.2，可用 PPSV3_PYTHON 覆盖）；
- *  venv 未落地时回退系统 python3（本沙箱系统已装 paddleocr 3.7.0 + paddlepaddle 3.2.2）。 */
+/** 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
+ *  可用 PPSV3_PYTHON 环境变量覆盖。 */
 export function resolvePython(engine: ToolEngine): string {
   if (engine === 'ppsv3') {
     const fromEnv = process.env.PPSV3_PYTHON
     if (fromEnv) return fromEnv
-    const venvPython = '/opt/pocr3-venv/bin/python'
-    try {
-      if (fs.existsSync(venvPython)) return venvPython
-    } catch { /* ignore */ }
+    const candidates = [
+      '/workspace/projects/.venv-py/bin/python',
+      '/opt/pocr3-venv/bin/python'
+    ]
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) return p
+      } catch { /* ignore */ }
+    }
     return 'python3'
+  }
+  // legacy 引擎同样优先持久化 venv（含 cv2/rapidocr；系统 python3 无 cv2 会启动即崩）
+  const candidates = ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p
+    } catch { /* ignore */ }
   }
   return process.env.OCR_PYTHON ?? 'python3'
 }

@@ -100,6 +100,15 @@ function pythonUsable(python: string): boolean {
   }
 }
 
+/** legacy（2.x 融合）侧车 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 系统 python3。 */
+function defaultLegacyPython(): string {
+  try {
+    const venvPython = '/workspace/projects/.venv-py/bin/python'
+    if (fs.existsSync(venvPython)) return venvPython
+  } catch { /* ignore */ }
+  return 'python3'
+}
+
 function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
   // 默认端口 9300（沙箱 9000 被 Coze 平台内部 uvicorn 代理占用）
   const { host, port } = parseBaseUrl(process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9300')
@@ -113,7 +122,7 @@ function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
     supervise,
     engineDir: dir,
     script,
-    python: process.env.OCR_PYTHON || 'python3',
+    python: process.env.OCR_PYTHON || defaultLegacyPython(),
     host,
     port,
     baseUrl: `http://${host}:${port}`,

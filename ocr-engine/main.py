@@ -36,6 +36,10 @@ import threading
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+# 模型缓存持久化：指到项目卷，避免沙箱重置后重复下载（paddlex/paddleocr 均识别这两个变量）
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
+os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
