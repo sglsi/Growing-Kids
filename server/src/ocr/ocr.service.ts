@@ -9,11 +9,16 @@ const MODEL = 'doubao-seed-2-0-pro-260215'
 
 @Injectable()
 export class OcrService {
-  private readonly client: LLMClient
+  private clientInstance?: LLMClient
 
-  constructor(private readonly storageService: StorageService) {
-    this.client = new LLMClient()
+  // 延迟初始化：SDK 构造时即校验 COZE_API_TOKEN，
+  // 自托管/无 token 时不应阻塞服务启动（识别功能用到时才报错）
+  private get client(): LLMClient {
+    if (!this.clientInstance) this.clientInstance = new LLMClient()
+    return this.clientInstance
   }
+
+  constructor(private readonly storageService: StorageService) {}
 
   // 下载文件原始字节并按 UTF-8 解码（针对纯文本，避免 FetchClient 中文乱码）
   private downloadAsUtf8(url: string): Promise<string> {

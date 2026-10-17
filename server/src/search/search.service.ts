@@ -5,12 +5,19 @@ const MODEL = 'doubao-seed-2-0-pro-260215'
 
 @Injectable()
 export class SearchService {
-  private readonly llm: LLMClient
-  private readonly searchClient: SearchClient
+  private llmInstance?: LLMClient
+  private searchClientInstance?: SearchClient
 
-  constructor() {
-    this.llm = new LLMClient()
-    this.searchClient = new SearchClient()
+  // 延迟初始化：SDK 构造时即校验 COZE_API_TOKEN，
+  // 自托管/无 token 时不应阻塞服务启动（AI 功能用到时才报错）
+  private get llm(): LLMClient {
+    if (!this.llmInstance) this.llmInstance = new LLMClient()
+    return this.llmInstance
+  }
+
+  private get searchClient(): SearchClient {
+    if (!this.searchClientInstance) this.searchClientInstance = new SearchClient()
+    return this.searchClientInstance
   }
 
   async solveQuestion(questionContent: string): Promise<{
