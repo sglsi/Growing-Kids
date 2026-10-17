@@ -49,3 +49,4 @@ pnpm-debug.log*
 node-compile-cache/
 /logs
 .codegraph/
+.workbuddy/
