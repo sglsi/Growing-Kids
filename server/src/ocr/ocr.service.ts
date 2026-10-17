@@ -2,6 +2,7 @@ import { Injectable, BadRequestException } from '@nestjs/common'
 import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
 import * as http from 'http'
 import * as https from 'https'
+import { execFileSync } from 'child_process'
 import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
 import type {
@@ -19,7 +20,8 @@ import {
   type Ppsv3Result,
   type Ppsv3TextRegion,
 } from './ppsv3.client'
-import { toolOcr } from './ocr-tool'
+import { toolOcr, resolvePython } from './ocr-tool'
+import { getDiagnoseProbeBuffer } from './diagnose-probe'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
 import { structureLocalItems } from './ocr-struct'
 import {
@@ -83,8 +85,8 @@ export class OcrService {
   // VLM 客户端懒加载：本地 OCR 是主路径，不应因缺少 VLM 凭证而在构造期崩溃。
   // 仅当真正需要 VLM（语义切分 / 兜底看图）时才实例化。
   private vlmClient?: LLMClient
-  // 生产 OCR 引擎：PaddleOCR 3.7.0 侧车（PP-StructureV3，:9001）——2026-10-15 起替换 2.x 融合侧车。
-  // 2.x（LocalOcrClient, :9000）降级为回滚备份，生产代码不再引用。
+  // 生产 OCR 引擎：PaddleOCR 3.7.0 侧车（PP-StructureV3，:9301）——2026-10-15 起替换 2.x 融合侧车。
+  // 2.x（LocalOcrClient, :9300）降级为回滚备份，生产代码不再引用。
   private readonly ppsv3: Ppsv3Client
   private readonly sidecar = getPpsv3Supervisor()
   // ④（#143）VL 手写识别配额：进程内计数（VL CPU 推理慢，防主链路被拖垮）
@@ -965,7 +967,9 @@ export class OcrService {
    * 与 recognizePageForPanel 同口径（长边缩 2000、坐标回算），但跳过 UVDoc 矫正/
    * 版面分析/PP-StructureV3 全链路：单页 1~3s（精准模式 15~20s）。
    *  - 引擎缺失（脚本/python/rapidocr 未部署）→ 显式抛错，调用方提示改用精准模式；
-   *  - 超时/单次失败 → 空（不抛），用户重试即可。
+   *  - 引擎在但本次执行失败（超时/崩溃退出/输出损坏）→ **显式抛错并附 stderr 摘录**——
+   *    2026-10 用户实测「未识别到文字」却无任何线索，根因即这些失败被静默吞成空文本栏；
+   *  - 正常执行但图中无文字 → 空（不抛），用户重试或换图即可。
    */
   async recognizePageFast(
     buf: Buffer,
@@ -978,11 +982,13 @@ export class OcrService {
       timeoutMs: Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000),
     })
     if (!r.ok || !r.data) {
+      const detail = r.stderr ? `：${r.stderr}` : ''
       if (r.reason === 'no-script' || r.reason === 'spawn-error') {
-        throw new Error(`快速识别引擎不可用（${r.reason}）：RapidOCR 侧车（main.py）未部署？`)
+        throw new Error(`快速识别引擎不可用（${r.reason}）：RapidOCR 侧车（main.py）未部署？${detail}`)
       }
-      console.warn(`[ocr] 快速识别（RapidOCR）本次失败: ${r.reason ?? 'unknown'}`)
-      return { regions: [], layout: [] }
+      throw new Error(
+        `快速识别引擎执行失败（${r.reason ?? 'unknown'}，${r.ms}ms）${detail}——请查看后端日志或改用精准识别`,
+      )
     }
     // 2.x main.py --once 输出：{ raw_text, text_regions: [{text, box:[x0,y0,x1,y1], score}] }
     const local = r.data as unknown as LocalOcrResult
@@ -1000,8 +1006,9 @@ export class OcrService {
    *
    * 可用性语义（2026-10 修复，用户实测"未能识别出文字"却无任何服务不可用提示）：
    *  - 托管模式侧车自动启动失败（venv 缺失/spawn 失败/启动超时）→ **抛错**；
-   *  - 侧车不可达（外部模式 :9001 无监听 / healthz 无响应）→ **抛错**；
-   *  - 侧车可达但本次请求失败/图中无文字 → 空（不抛），用户重试或换图即可。
+   *  - 侧车不可达（外部模式 :9301 无监听 / healthz 无响应）→ **抛错**；
+   *  - parse 返回 null 只可能是失败（侧车 5xx/超时/响应缺 blocks）——**一律抛错并附原因**；
+   *    真正的「图中无文字」是 200 + blocks:[]（r 为真、regions 为空），返回空文本栏不抛。
    * 抛出的错误由 image.service.ocrPage 转成模式化 BadRequest，前端明确提示。
    */
   async recognizePageForPanel(
@@ -1017,13 +1024,114 @@ export class OcrService {
       this.ppsv3.parse({ image_base64: ocrBuf.toString('base64') }, false),
     )
     if (!r) {
-      // withSidecar 返回 null ⇒ fn 返回 null（侧车起来了但这次请求失败/结果异常），
-      // 或外部模式下无监听。探一次 health 区分「服务不可用」与「本次无文字」。
+      // parse 返回 null 只可能是失败：侧车 5xx / 超时 / 响应缺 blocks 字段。
+      // 「图中无文字」的合法形态是 200 + blocks:[]（r 为真、regions 为空）——那条路不抛。
+      // 2026-10 用户实测「未识别到文字」无任何线索：旧代码在这里静默返回空文本栏。
       const healthy = await this.ppsv3.health()
       if (!healthy) throw new Error('OCR 侧车不可达（PPSV3_URL /healthz 无响应）')
-      console.warn('[ocr] 全页 OCR 侧车可达但本次请求失败，返回空文本栏')
-      return { regions: [], layout: [] }
+      const detail = this.ppsv3.getLastParseError()
+      throw new Error(
+        `OCR 侧车本次解析失败${detail ? `：${detail}` : ''}（侧车健康检查通过，可能是推理崩溃/超时，请查看侧车日志 /tmp/ocr-sidecar-*.log）`,
+      )
     }
     return this.scaleRegions(ppsv3ToLocal(r), sx, sy)
+  }
+
+  /**
+   * OCR 诊断端点核心：在不影响生产链路的前提下，逐项实测两条识别路径与侧车状态，
+   * 返回结构化报告，帮助定位「本页未检测到文本」这类静默空结果的根因。
+   *  - 快速路径：用内置已知文字探针图跑 RapidOCR（main.py --mode rapid），验证引擎可调用且能出文字；
+   *  - 精准路径：用同一探针图跑 PP-StructureV3 侧车 /ppsv3，验证侧车可达且能出 blocks；
+   *  - 侧车状态：disabled 原因 / 健康 / 最近一次 parse 失败原因；
+   *  - 环境：python 解析路径与版本、端口配置。
+   */
+  async diagnose(): Promise<Record<string, unknown>> {
+    const probe = getDiagnoseProbeBuffer()
+    const pyVersion = (py: string): string | null => {
+      try {
+        return execFileSync(py, ['--version'], { timeout: 8000 }).toString().trim().split('\n')[0] || null
+      } catch (e) {
+        return `不可用：${String((e as Error)?.message ?? e).split('\n')[0]}`
+      }
+    }
+
+    const fastPython = resolvePython('legacy')
+    const precisePython = resolvePython('ppsv3')
+    const sup = this.sidecar
+
+    // 1) 快速路径实测
+    let fastEngine: Record<string, unknown> = { status: 'UNKNOWN' }
+    try {
+      const fast = await toolOcr(probe, {
+        op: 'recognize',
+        engine: 'legacy',
+        mode: 'rapid',
+        timeoutMs: 60_000,
+      })
+      const regions = ((fast.data as { text_regions?: unknown[] } | null)?.text_regions ?? []) as Array<{ text?: string }>
+      fastEngine = {
+        status: fast.ok && regions.length > 0 ? 'OK' : fast.ok ? 'EMPTY（引擎可跑但无文字）' : 'FAIL',
+        ok: fast.ok,
+        reason: fast.reason ?? null,
+        ms: fast.ms,
+        stderr: fast.stderr ?? null,
+        regionCount: regions.length,
+        sample: regions.slice(0, 3).map((r) => r.text ?? ''),
+      }
+    } catch (e) {
+      fastEngine = { status: 'ERROR', error: String((e as Error)?.message ?? e) }
+    }
+
+    // 2) 精准路径实测（侧车）
+    let preciseEngine: Record<string, unknown> = { status: 'UNKNOWN' }
+    try {
+      const healthy = await this.ppsv3.health()
+      preciseEngine = { healthz: healthy }
+      if (healthy) {
+        const r = await this.ppsv3.parse({ image_base64: probe.toString('base64') }, false)
+        if (r && Array.isArray(r.blocks) && r.blocks.length > 0) {
+          preciseEngine.status = 'OK'
+          preciseEngine.blockCount = r.blocks.length
+          preciseEngine.sample = r.blocks.slice(0, 3).map((b) => b.content ?? b.label ?? '')
+        } else if (r) {
+          preciseEngine.status = 'EMPTY（侧车可达但无文字）'
+          preciseEngine.blockCount = 0
+        } else {
+          preciseEngine.status = 'FAIL'
+          preciseEngine.lastParseError = this.ppsv3.getLastParseError()
+        }
+      } else {
+        preciseEngine.status = 'UNREACHABLE'
+        preciseEngine.lastParseError = this.ppsv3.getLastParseError() ?? '侧车 /healthz 无响应'
+      }
+    } catch (e) {
+      preciseEngine = {
+        status: 'ERROR',
+        error: String((e as Error)?.message ?? e),
+        lastParseError: this.ppsv3.getLastParseError(),
+      }
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      env: {
+        fastPython,
+        precisePython,
+        ppsv3Url: process.env.PPSV3_URL ?? 'http://127.0.0.1:9301',
+        ocrEngineUrl: process.env.OCR_ENGINE_URL ?? 'http://127.0.0.1:9300',
+        supervise: process.env.PPSV3_SUPERVISE ?? 'auto',
+      },
+      pythonVersions: {
+        fast: pyVersion(fastPython),
+        precise: pyVersion(precisePython),
+      },
+      sidecar: {
+        disabled: sup.disabled,
+        disabledReason: sup.disabled ? sup.disabledReason() : '(已启用)',
+        state: sup.getState(),
+      },
+      fastEngine,
+      preciseEngine,
+    }
   }
 }

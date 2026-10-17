@@ -499,6 +499,16 @@ export async function fetchImageCapabilities(): Promise<{
   }
 }
 
+/** OCR 诊断（GET /api/image/ocr-diagnose）。
+ *  逐项实测快速/精准两条识别路径与侧车状态，返回结构化报告，
+ *  用于定位「本页未检测到文本」这类静默空结果的根因。
+ *  失败（如 404 旧版后端无此路由）时 rejected，调用方提示「请先更新后端」。 */
+export async function diagnoseOcr(): Promise<Record<string, unknown>> {
+  return unwrap<Record<string, unknown>>(
+    Network.request({ url: '/api/image/ocr-diagnose', method: 'GET', header: authHeaders() }),
+  )
+}
+
 /** 加入复习本 */
 export function addToReviewBook(ids: string[]) {
   return unwrap<{ updated: number }>(

@@ -7,8 +7,8 @@
 
 | 服务 | 脚本 | 端口 | 引擎 | 定位 |
 |---|---|---|---|---|
-| **3.x 主链路** | `main3.py` | 9001 | PaddleOCR 3.7.0 + PP-StructureV3（UVDoc 矫正/版面/OCR/阅读序） | **生产主引擎**（错题提取/去手写/文本面板/朝向） |
-| 2.x 回滚备份 | `main.py` | 9000 | RapidOCR + PaddleOCR 2.7.3 融合 | 回滚备份（默认不驻留，见根目录 DEPLOY.md 第 6 章回滚步骤） |
+| **3.x 主链路** | `main3.py` | 9301 | PaddleOCR 3.7.0 + PP-StructureV3（UVDoc 矫正/版面/OCR/阅读序） | **生产主引擎**（错题提取/去手写/文本面板/朝向） |
+| 2.x 回滚备份 | `main.py` | 9300 | RapidOCR + PaddleOCR 2.7.3 融合 | 回滚备份（默认不驻留，见根目录 DEPLOY.md 第 6 章回滚步骤） |
 
 > A/B 结论与摆正估计器 -16° 假峰溯源见根目录《侧车3.x-A_B试点与摆正估计器假峰溯源.md》（4 页编号召回持平、UVDoc 矫正后 OCR 行角中位数 0.00°、估计器边界饱和假峰机制）。生产切换 e2e 验证见 `/workspace/homework-eval/prod-switch-result.json`。
 
@@ -19,7 +19,7 @@
 
 ## 接口
 
-**3.x（main3.py, :9001，生产主引擎）**
+**3.x（main3.py, :9301，生产主引擎）**
 - `GET /healthz` → `{status, service:"ppsv3", dry_run, paddle}`
 - `POST /ppsv3` body `{image_url | image_base64 | image_path, return_image}` → `{blocks:[{label,bbox,order,num_lines,content}], block_count, text_regions:[{text,box,quad,score}], angle, width, height, rectified_image_base64?, elapsed_ms, engine, paddle_version}`
   （`quad` = PP-OCRv5 检测四边形四点 [[x,y]×4]，文本行倾斜度的可靠度量；轴对齐 `box` 测不了行角）
@@ -30,7 +30,7 @@
   - `python main3.py --once --op orient --image <path>`（容忍 `--mode` 参数占位）
   - `python main3.py --once --op rectify --image <path>`
 
-**2.x（main.py, :9000，回滚备份）**
+**2.x（main.py, :9300，回滚备份）**
 - `GET /healthz` → `{status, dry_run, mode}`
 - `POST /recognize` body `{image_url | image_base64, mode}` → `{raw_text, text_regions, layout, tables, formulas, confidence, engine_used, low_confidence}`
 - `POST /orient` → 4 向朝向投票 `{angle, scores, method}`
@@ -44,14 +44,14 @@
 | `OCR_DEVICE` | `cpu` | 2.x：`cpu` / `gpu` |
 | `OCR_LOW_CONF_THRESHOLD` | `0.6` | 2.x：低于则触发 Node 端 VLM 兜底 |
 | `OCR_DRY_RUN` | `0` | `1` 时不加载模型，返回样例结构（契约验证用） |
-| `OCR_HOST` / `OCR_PORT` | `127.0.0.1` / `9000` | 2.x（回滚备份）监听地址 |
-| `PPSV3_PORT` | `9001` | 3.x（生产主引擎）监听端口 |
+| `OCR_HOST` / `OCR_PORT` | `127.0.0.1` / `9300` | 2.x（回滚备份）监听地址 |
+| `PPSV3_PORT` | `9301` | 3.x（生产主引擎）监听端口 |
 | `PPSV3_DEVICE` | `cpu` | 3.x 推理设备 |
 | `PPSV3_UNWARP` | `1` | 3.x UVDoc 矫正开关；**生产默认由 Node 侧 supervisor 注入 `0`（坐标保真，勿改）** |
 | `PPSV3_ORIENT_CLS` | `1` | 3.x 整页方向分类开关；**生产默认由 Node 侧 supervisor 注入 `0`（坐标保真，勿改）** |
 | `PPSV3_LAYOUT_MODEL` | `PP-DocLayout_plus-L` | 3.x 版面模型 |
 
-Node 侧托管环境变量：`PPSV3_URL`（默认 `http://127.0.0.1:9001`）、`PPSV3_PYTHON`
+Node 侧托管环境变量：`PPSV3_URL`（默认 `http://127.0.0.1:9301`）、`PPSV3_PYTHON`
 （默认 `/opt/pocr3-venv/bin/python`）、`PPSV3_SUPERVISE`（`auto`/`1`/`0`）、
 `PPSV3_IDLE_TIMEOUT_MS`（默认 15min，3.x 管线驻留 ~2-3GB 需及时回收）。
 
@@ -61,11 +61,11 @@ Node 侧托管环境变量：`PPSV3_URL`（默认 `http://127.0.0.1:9001`）、`
 # 3.x（隔离 venv，一次性搭建）——生产主引擎
 python3.11 -m venv /opt/pocr3-venv
 /opt/pocr3-venv/bin/pip install "paddlepaddle==3.2.2" "paddleocr==3.7.0" "paddlex[ocr]==3.7.2" fastapi uvicorn
-/opt/pocr3-venv/bin/python main3.py  # 默认 127.0.0.1:9001
+/opt/pocr3-venv/bin/python main3.py  # 默认 127.0.0.1:9301
 
 # 2.x（系统 python）——回滚备份
 pip install -r requirements.txt
-python main.py                       # 默认 127.0.0.1:9000
+python main.py                       # 默认 127.0.0.1:9300
 OCR_DRY_RUN=1 python main.py        # 不下载模型，先验证 HTTP 契约
 ```
 

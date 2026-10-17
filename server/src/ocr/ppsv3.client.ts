@@ -15,7 +15,7 @@ import {
  *
  * 定位：**生产主 OCR 引擎**（2026-10-15 起，替换 2.x LocalOcrClient）。
  *   - OcrService 的生产识别路径（recognizeLocalByUrls / recognizePageRegions）走本客户端
- *   - 2.x 侧车（LocalOcrClient, :9000）与 main.py 降级为回滚备份，生产代码不再引用
+ *   - 2.x 侧车（LocalOcrClient, :9300）与 main.py 降级为回滚备份，生产代码不再引用
  *
  * 设计原则（与 LocalOcrClient 一致）：
  *   - 任何失败返回 null，绝不抛错，交由调用方决定降级
@@ -105,6 +105,8 @@ export class Ppsv3Client {
   private readonly telemetry: OcrTelemetry
   private readonly alertSink: OcrAlertSink
   private readonly probe: OcrHealthProbe | null
+  /** 最近一次 parse 失败原因（成功时清空）——上层区分「侧车故障」与「图中无文字」用 */
+  private lastParseError: string | null = null
 
   constructor(opts: Ppsv3ClientOptions = {}) {
     this.baseUrl = opts.baseUrl ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9301'
@@ -147,13 +149,22 @@ export class Ppsv3Client {
         body: JSON.stringify({ ...input, return_image: returnImage }),
         signal: AbortSignal.timeout(this.timeoutMs),
       })
-      if (!res.ok) return null
+      if (!res.ok) {
+        const body = (await res.text().catch(() => '')).slice(0, 200)
+        this.lastParseError = `侧车 /ppsv3 返回 HTTP ${res.status}${body ? `：${body}` : ''}`
+        return null
+      }
       const data = (await res.json()) as Ppsv3Result
-      if (!data || !Array.isArray(data.blocks)) return null
+      if (!data || !Array.isArray(data.blocks)) {
+        this.lastParseError = '侧车 /ppsv3 响应缺少 blocks 字段（版本不匹配或进程异常）'
+        return null
+      }
+      this.lastParseError = null
       return data
     } catch (e) {
       // 侧车不可达/超时：静默返回 null 是降级链的设计，但必须留痕——
       // 否则"侧车挂了、OCR 全空"在日志里与"正常识别无文字"完全同形（#150 用户报障根因即此）。
+      this.lastParseError = `侧车请求失败：${String((e as Error)?.message ?? e)}`
       this.telemetry.markDegrade('unreachable')
       throttledAlert(this.alertSink, 'sidecar-unreachable', {
         baseUrl: this.baseUrl,
@@ -161,6 +172,11 @@ export class Ppsv3Client {
       })
       return null
     }
+  }
+
+  /** 最近一次 parse 失败原因（无失败为 null）。注意：200 + blocks:[] 是「图中无文字」，不算失败。 */
+  getLastParseError(): string | null {
+    return this.lastParseError
   }
 
   /**

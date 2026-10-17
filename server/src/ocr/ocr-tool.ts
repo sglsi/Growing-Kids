@@ -39,7 +39,7 @@ function resolveEngine(engine: ToolEngine = 'legacy'): { dir: string; script: st
 
 /** 3.x 引擎的 python：优先隔离 venv（paddlepaddle 3.2.2，可用 PPSV3_PYTHON 覆盖）；
  *  venv 未落地时回退系统 python3（本沙箱系统已装 paddleocr 3.7.0 + paddlepaddle 3.2.2）。 */
-function resolvePython(engine: ToolEngine): string {
+export function resolvePython(engine: ToolEngine): string {
   if (engine === 'ppsv3') {
     const fromEnv = process.env.PPSV3_PYTHON
     if (fromEnv) return fromEnv
@@ -72,6 +72,8 @@ export interface ToolOcrResult {
   ms: number
   /** 失败/超时原因（ok=false 时） */
   reason?: 'no-script' | 'timeout' | 'spawn-error' | 'nonzero-exit' | 'bad-json' | 'empty'
+  /** 子进程 stderr 摘录（最后几行，≤300 字符）——引擎崩溃/缺依赖时上层要能拿到真实原因 */
+  stderr?: string
 }
 
 export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
@@ -101,7 +103,7 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
     const timer = setTimeout(() => {
       console.warn(`[ocr-tool] ${opts.op} 超时 ${timeoutMs}ms → SIGKILL 中断（下次全新进程自动恢复）`)
       try { child.kill('SIGKILL') } catch { /* ignore */ }
-      done(fail('timeout'))
+      done({ ok: false, data: null, ms: Date.now() - t0, reason: 'timeout', stderr: errTail() })
     }, timeoutMs)
 
     const child = spawn(python, [script, '--once', '--op', opts.op, '--mode', mode], {
@@ -112,6 +114,12 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
 
     let out = ''
     let err = ''
+    /** stderr 摘录：取最后 3 行拼到 300 字符内（Traceback 的根因行通常在尾部） */
+    const errTail = (): string | undefined => {
+      const lines = err.trim().split('\n').filter(Boolean)
+      if (!lines.length) return undefined
+      return lines.slice(-3).join(' | ').slice(-300)
+    }
     child.stdout.on('data', (d) => { out += String(d) })
     child.stderr.on('data', (d) => { err += String(d) })
     // stdin 写入失败（子进程已退出）不应崩溃：吞掉 EPIPE
@@ -130,20 +138,20 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
           const j = JSON.parse(payload) as Record<string, unknown>
           if (j && typeof j.error === 'string') {
             console.warn(`[ocr-tool] ${opts.op} 子进程报错: ${j.error}`)
-            done(fail('nonzero-exit'))
+            done({ ok: false, data: null, ms: Date.now() - t0, reason: 'nonzero-exit', stderr: String(j.error).slice(0, 300) })
             return
           }
           done({ ok: true, data: j, ms: Date.now() - t0 })
           return
         } catch {
           console.warn(`[ocr-tool] ${opts.op} JSON 解析失败: ${payload.slice(0, 120)}`)
-          done(fail('bad-json'))
+          done({ ok: false, data: null, ms: Date.now() - t0, reason: 'bad-json', stderr: payload.slice(0, 300) })
           return
         }
       }
       const lastErr = err.trim().split('\n').pop()?.slice(0, 160) ?? ''
       console.warn(`[ocr-tool] ${opts.op} 退出 code=${code} 且无结果标记${lastErr ? `: ${lastErr}` : ''}`)
-      done(fail('nonzero-exit'))
+      done({ ok: false, data: null, ms: Date.now() - t0, reason: 'nonzero-exit', stderr: errTail() ?? `exit code ${code}` })
     })
 
     // 图片字节走 stdin

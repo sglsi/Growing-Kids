@@ -199,7 +199,7 @@ export async function autoOrient(
 
 /**
  * 工厂：用 3.x OCR 侧车（PP-LCNet 朝向分类，CV 模型非大模型）判定文档朝向（0/90/180/270）。
- * - 2026-10-15 起生产主引擎切到 3.x（main3.py :9001）；2.x /orient 四向投票下线。
+ * - 2026-10-15 起生产主引擎切到 3.x（main3.py :9301）；2.x /orient 四向投票下线。
  * - 侧车是 DRY_RUN（无模型）→ 主动抛错，由调用方回落纯几何结果（避免假数据污染朝向）。
  * - 侧车不可达 / 超时 → 抛错，回落纯几何。
  * 注意：90° vs 270°、0° vs 180° 的「正立与否」纯几何无法判定（投影关于 180° 镜像对称），
@@ -207,7 +207,7 @@ export async function autoOrient(
  * 单次 HTTP 调用（或工具式子进程），PP-LCNet 单模型 ~0.1s，远比旧版「四向全量 OCR 投票」轻。
  */
 export function ocrAngleFromSidecar(baseUrl?: string): OcrAngleProvider {
-  const url = baseUrl ?? process.env.OCR_ORIENT_URL ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9001'
+  const url = baseUrl ?? process.env.OCR_ORIENT_URL ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9301'
   let checked = false
   let usable = true
   // 借 3.x 侧车守护进程做自愈：侧车若中途崩了（段错误等），先 ensureReady 拉动重启再打，

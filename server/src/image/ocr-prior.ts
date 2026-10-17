@@ -38,7 +38,8 @@ function pctl(arr: Float64Array, q: number): number {
 
 /** 调本地 OCR 侧车拿文字框坐标 */
 export async function callOcrSidecar(imageBuffer: Buffer): Promise<OcrBox[] | null> {
-  const url = process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9000'
+  // 默认端口 9300（9000 在部分部署环境被平台内部代理占用，见 2ff820a）
+  const url = process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9300'
   const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 60000)
   const b64 = imageBuffer.toString('base64')
   const ctrl = new AbortController()

@@ -15,7 +15,7 @@ import WrongqOcrPanel from '@/components/wrongq-ocr-panel'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument,
   recognizeDocumentByUrl, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
-  recropWrongBlock, ocrPage, exportBoardDocx,
+  recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
@@ -104,6 +104,11 @@ export default function RecognizePage() {
   /** 页内裁剪编辑器：{ src, entryIdx }——裁出的图进入指定题目 */
   const [cropEditor, setCropEditor] = useState<{ src: string; entryIdx: number } | null>(null)
   const boardIdRef = useRef(0)
+
+  // #150 诊断：OCR 自检弹层（定位「未检测到文本」根因）
+  const [diagLoading, setDiagLoading] = useState(false)
+  const [diagText, setDiagText] = useState<string | null>(null)
+  const [diagError, setDiagError] = useState<string | null>(null)
 
   // 进入错题提取模式时给一条空题目，降低「从哪开始」的迷茫（用户删光后不补）
   useEffect(() => {
@@ -700,6 +705,69 @@ export default function RecognizePage() {
     setTimeout(() => pw.print(), 400)
   }
 
+  /**
+   * OCR 诊断（#150）：拉取后端 /api/image/ocr-diagnose 的结构化报告并格式化展示，
+   * 帮助定位「本页未检测到文本」这类静默空结果的根因——端口/侧车/引擎缺哪环一目了然。
+   */
+  const handleDiagnose = async () => {
+    setDiagLoading(true)
+    setDiagError(null)
+    setDiagText(null)
+    try {
+      const r = await diagnoseOcr()
+      const lines: string[] = []
+      const env = (r.env ?? {}) as Record<string, unknown>
+      const py = (r.pythonVersions ?? {}) as Record<string, unknown>
+      const side = (r.sidecar ?? {}) as Record<string, unknown>
+      const fast = (r.fastEngine ?? {}) as Record<string, unknown>
+      const precise = (r.preciseEngine ?? {}) as Record<string, unknown>
+      lines.push('— 环境与端口 —')
+      lines.push(`快速引擎 python: ${env.fastPython ?? '?'} → ${py.fast ?? '未知'}`)
+      lines.push(`精准侧车 python: ${env.precisePython ?? '?'} → ${py.precise ?? '未知'}`)
+      lines.push(`PPSV3 侧车地址: ${env.ppsv3Url ?? '?'}`)
+      lines.push(`2.x 引擎地址: ${env.ocrEngineUrl ?? '?'}`)
+      lines.push(`侧车托管(supervise): ${env.supervise ?? '?'}`)
+      lines.push('')
+      lines.push('— 侧车状态 —')
+      lines.push(`disabled: ${side.disabled === false ? '否（已启用）' : '是'}`)
+      if (side.disabledReason && side.disabledReason !== '(已启用)') lines.push(`未启用原因: ${side.disabledReason}`)
+      lines.push('')
+      lines.push('— 快速引擎（RapidOCR 探针实测） —')
+      lines.push(`状态: ${fast.status ?? '?'}` + (fast.regionCount != null ? `（识别到 ${fast.regionCount} 段文本）` : ''))
+      if (fast.sample && (fast.sample as string[]).length) lines.push(`样例: ${(fast.sample as string[]).join(' / ')}`)
+      if (fast.stderr) lines.push(`stderr: ${String(fast.stderr).slice(0, 160)}`)
+      if (fast.reason) lines.push(`原因: ${String(fast.reason)}`)
+      lines.push('')
+      lines.push('— 精准引擎（PaddleOCR 侧车探针实测） —')
+      lines.push(`状态: ${precise.status ?? '?'}`)
+      if (precise.healthz != null) lines.push(`healthz: ${precise.healthz ? '通过' : '不通'}`)
+      if (precise.blockCount != null) lines.push(`blocks: ${precise.blockCount}`)
+      if (precise.sample && (precise.sample as string[]).length) lines.push(`样例: ${(precise.sample as string[]).join(' / ')}`)
+      if (precise.lastParseError) lines.push(`最近解析错误: ${String(precise.lastParseError).slice(0, 200)}`)
+      lines.push('')
+      const verdict = verdictOf(fast.status as string, precise.status as string)
+      lines.push(`结论: ${verdict}`)
+      setDiagText(lines.join('\n'))
+    } catch (e) {
+      setDiagError(`诊断失败（后端可能未更新或无此接口）: ${String((e as Error)?.message ?? e)}`)
+    } finally {
+      setDiagLoading(false)
+    }
+  }
+
+  /** 根据两引擎状态给出一句话结论 */
+  const verdictOf = (fastStatus?: string, preciseStatus?: string): string => {
+    const bothOk = fastStatus === 'OK' && preciseStatus === 'OK'
+    if (bothOk) return '两条识别路径均正常——若你仍看到空结果，多半是上传图本身无文字/太模糊，或识别模式未点。'
+    if (fastStatus === 'FAIL' || fastStatus === 'ERROR')
+      return '快速引擎已失败——检查系统 python3 是否已装 rapidocr_onnxruntime 与 main.py 是否随部署落地。'
+    if (preciseStatus === 'UNREACHABLE' || preciseStatus === 'FAIL' || preciseStatus === 'ERROR')
+      return '精准侧车不可达/失败——检查 PPSV3 侧车是否启动、端口 9301 是否被占用、venv 是否就绪。'
+    if (fastStatus === 'OK')
+      return '快速引擎正常、精准侧车异常——可先用「快速识别」应急，并修复精准侧车。'
+    return '两条路径均异常——优先按上方端口/侧车/引擎逐项排查部署环境。'
+  }
+
   /** 面板草稿选择器数据：题号标签 + 序号 */
   const textPanelDrafts: TextPanelDraft[] = drafts.map((d, idx) => ({
     idx,
@@ -931,6 +999,16 @@ export default function RecognizePage() {
                       </Text>
                       <Text className="block text-[9px] mt-1" style={{ color: 'rgba(255,255,255,0.75)' }}>PaddleOCR · 15~20 秒/页</Text>
                     </View>
+                  </View>
+
+                  {/* OCR 诊断入口：识别不出字时自查端口/侧车/引擎是否就绪 */}
+                  <View
+                    className="flex-row items-center justify-center py-2"
+                    onClick={() => { if (!diagLoading) void handleDiagnose() }}
+                  >
+                    <Text className="block text-xs" style={{ color: diagLoading ? '#B08D84' : '#8a8a8a' }}>
+                      {diagLoading ? '诊断中…（约 30 秒）' : '识别不出字？点此「识别诊断」自查'}
+                    </Text>
                   </View>
 
                   {/* 多图切换条 */}
@@ -1229,6 +1307,41 @@ export default function RecognizePage() {
             >
               <Text className="block text-xs">打印</Text>
             </Button>
+          </View>
+        </View>
+      ) : null}
+
+      {/* #150 OCR 诊断结果弹层 */}
+      {(diagText !== null || diagError !== null) ? (
+        <View style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 200,
+          display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: 16,
+        }}
+          onClick={() => { setDiagText(null); setDiagError(null) }}
+        >
+          <View
+            style={{
+              backgroundColor: '#fff', borderRadius: 12, maxHeight: '80vh',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}
+            onClick={(e) => { e?.stopPropagation?.() }}
+          >
+            <View style={{ padding: '12px 16px', borderBottom: '1px solid #ece8e0' }}>
+              <Text className="block text-sm font-medium">OCR 诊断结果</Text>
+            </View>
+            <ScrollView scrollY style={{ padding: 16, fontSize: 12, lineHeight: '1.7' }}>
+              {diagError ? (
+                <Text style={{ color: '#BE3E2D' }}>{diagError}</Text>
+              ) : (
+                <Text style={{ whiteSpace: 'pre-wrap', color: '#333', fontSize: 12 }}>{diagText}</Text>
+              )}
+            </ScrollView>
+            <View style={{ padding: 12, borderTop: '1px solid #ece8e0' }}>
+              <Button className="h-9 rounded-xl" variant="outline" onClick={() => { setDiagText(null); setDiagError(null) }}>
+                <Text className="block text-xs">关闭</Text>
+              </Button>
+            </View>
           </View>
         </View>
       ) : null}

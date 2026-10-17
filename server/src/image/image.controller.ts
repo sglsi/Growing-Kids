@@ -1,5 +1,6 @@
 import { Controller, Post, Get, Body, HttpCode, HttpException, Req } from '@nestjs/common'
 import { ImageService } from './image.service'
+import { OcrService } from '../ocr/ocr.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
 import type { ProcessImageDto, ExtractWrongDto, RecropWrongDto, OcrPageDto } from './image.types'
 
@@ -8,7 +9,10 @@ const IMAGE_CAPABILITIES_VERSION = 3
 
 @Controller('image')
 export class ImageController {
-  constructor(private readonly imageService: ImageService) {}
+  constructor(
+    private readonly imageService: ImageService,
+    private readonly ocrService: OcrService,
+  ) {}
 
   // ⭐ 能力自检端点（无需登录也可访问的轻量 GET）：
   //   GET /api/image/capabilities → 200 = 新版后端（含本地 straighten/enhance/erase_v2）；
@@ -32,6 +36,18 @@ export class ImageController {
         external_fallback: MODE === 'hybrid' || MODE === 'gen', // 仅兜底用（需 COZE_API_TOKEN）
       },
     }
+  }
+
+  // ⭐ OCR 诊断端点（无需登录也可访问的轻量 GET）：
+  //   GET /api/image/ocr-diagnose → 逐项实测快速/精准两条识别路径与侧车状态，
+  //   返回结构化报告，用于定位「本页未检测到文本」这类静默空结果的根因。
+  //   2026-10 用户报障：小程序端 OCR 返回空、前端只提示「未识别到文字」无任何线索，
+  //   故新增该端点，让部署方自查引擎/侧车/端口是否就绪。
+  @Get('ocr-diagnose')
+  @HttpCode(200)
+  async ocrDiagnose() {
+    const report = await this.ocrService.diagnose()
+    return { code: 200, msg: 'success', data: report }
   }
 
   // 图片处理：

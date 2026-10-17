@@ -1,12 +1,13 @@
 #!/bin/bash
 # OCR 侧车部署自检（#150 错题提取双模式）——在部署 server 的机器上执行
 # 用法：bash ocr-sidecar-selfcheck.sh
-# 背景：精准模式依赖 3.x 侧车（/opt/pocr3-venv + main3.py :9001）；
+# 背景：精准模式依赖 3.x 侧车（/opt/pocr3-venv + main3.py :9301）；
 #       快速模式依赖 2.x 引擎（python3 + main.py，rapidocr 包）。
+#       端口已从 9000/9001 迁到 9300/9301（避开小程序端被占用的 9000/9001）。
 # 任何一项 ❌ 都会让错题提取显示「未能识别出文字」或「快速识别服务暂不可用」。
 
 PPSV3_PYTHON="${PPSV3_PYTHON:-/opt/pocr3-venv/bin/python}"
-PPSV3_URL="${PPSV3_URL:-http://127.0.0.1:9001}"
+PPSV3_URL="${PPSV3_URL:-http://127.0.0.1:9301}"
 
 echo "════════ 1. 3.x 侧车 venv（精准模式必需） ════════"
 if [ -x "$PPSV3_PYTHON" ]; then
@@ -41,8 +42,8 @@ for name in main3.py main.py; do
 done
 
 echo ""
-echo "════════ 3. 端口监听（9001=3.x 生产 / 9000=2.x 备份） ════════"
-(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ':(9000|9001)\b' || echo "⚠️  9000/9001 均无监听（托管模式会自动按需拉起；外部模式需手动常驻）"
+echo "════════ 3. 端口监听（9301=3.x 生产 / 9300=2.x 备份） ════════"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ':(9300|9301)\b' || echo "⚠️  9300/9301 均无监听（托管模式会自动按需拉起；外部模式需手动常驻）"
 
 echo ""
 echo "════════ 4. /healthz 探测 ════════"

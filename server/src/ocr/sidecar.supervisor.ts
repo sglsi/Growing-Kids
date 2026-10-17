@@ -75,7 +75,7 @@ function resolveScript(): { dir: string; script: string } {
 
 function parseBaseUrl(raw: string): { host: string; port: number } {
   const m = raw.match(/^https?:\/\/([^:/]+)(?::(\d+))?/)
-  return { host: m?.[1] ?? '127.0.0.1', port: m?.[2] ? Number(m[2]) : 9000 }
+  return { host: m?.[1] ?? '127.0.0.1', port: m?.[2] ? Number(m[2]) : 9300 }
 }
 
 /**
@@ -199,7 +199,8 @@ export class SidecarSupervisor {
   }
 
   /** 托管未启用的具体原因（auto 模式排查侧车"静默不通"的第一现场） */
-  private disabledReason(): string {
+  /** 守护未启用的具体原因（supervise=0 / 脚本缺失 / python 不可用）——诊断端点要暴露它。 */
+  disabledReason(): string {
     const raw = this.cfg.supervise
     if (raw === '0') return 'supervise=0（外部侧车模式）'
     if (raw === '1') return ''
@@ -406,7 +407,7 @@ export class SidecarSupervisor {
       }
       // 兜底升级：uvicorn 优雅关闭可能挂住（Paddle 推理线程/非守护线程不退），
       // 3s 后仍存活则强杀——否则会留下 orphan 占住端口，后续 spawn 全部绑不上
-      // （实测踩过：探针 stop 后 python 存活占 9001，下一轮 A/B 全量假死）。
+      // （实测踩过：探针 stop 后 python 存活占 9301，下一轮 A/B 全量假死）。
       setTimeout(() => {
         try {
           process.kill(pid, 0) // 仍存活？

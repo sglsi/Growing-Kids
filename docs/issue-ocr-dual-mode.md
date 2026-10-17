@@ -18,7 +18,7 @@
 
 1. **`/opt/pocr3-venv/bin/python` 不存在**（venv 未随部署落地）——工具式调用 `spawn-error`；`PPSV3_SUPERVISE=1` 时托管 spawn ENOENT，且 `start()` 的 error 事件不 reject 启动 promise，**每次 OCR 先卡 30s 启动超时再静默失败**；
 2. **`ocr-engine/main3.py` 未找到**（四候选解析路径都没有）；
-3. `PPSV3_SUPERVISE=0` 且 :9001 无外部侧车。
+3. `PPSV3_SUPERVISE=0` 且 :9301 无外部侧车。
 
 ## 2. 代码修复（本次改动）
 
@@ -51,13 +51,13 @@
 bash ocr-sidecar-selfcheck.sh
 ```
 
-检查项：3.x venv（paddle 可 import）、`main3.py`/`main.py` 位置、:9001/:9000 监听、`/healthz` 响应、`PPSV3_*` 环境变量、工具式子进程冒烟（orient）。
+检查项：3.x venv（paddle 可 import）、`main3.py`/`main.py` 位置、:9301/:9300 监听、`/healthz` 响应、`PPSV3_*` 环境变量、工具式子进程冒烟（orient）。
 
 **三种修复路径**（按自检结果选一）：
 
 1. **补 venv（推荐，精准模式必需）**：按 `ocr-engine/README.md` 建 `/opt/pocr3-venv`（paddlepaddle ≤3.2.2 + paddleocr 3.7.0），确保 `PPSV3_ENGINE_DIR` 或相对路径能解析到 `main3.py`；
-2. **外部侧车**：`PPSV3_SUPERVISE=0` + 手动/系统服务常驻 `python main3.py --host 0.0.0.0 --port 9001`；
-3. **仅快速模式**（无 venv 时的降级）：2.x 引擎 `python3 main.py` 常驻 :9000，或保持工具式子进程（需 `rapidocr` 包 + 模型）。
+2. **外部侧车**：`PPSV3_SUPERVISE=0` + 手动/系统服务常驻 `python main3.py --host 0.0.0.0 --port 9301`；
+3. **仅快速模式**（无 venv 时的降级）：2.x 引擎 `python3 main.py` 常驻 :9300，或保持工具式子进程（需 `rapidocr` 包 + 模型）。
 
 **修复后验证**：小程序进「错题提取」→ 选图 → 点「精准识别」→ 后端日志应出现
 `[image-dewarp] 朝向摆正：旋转 0°（方法 ocr，主轴 horizontal）`（侧车在场）与
@@ -70,22 +70,61 @@ bash ocr-sidecar-selfcheck.sh
 
 | # | 场景 | 结果 |
 |---|---|---|
-| 1 | 精准模式（:9001 侧车在场）`recognizePageForPanel` | ✅ 22.3s，11 regions，「一、选择题 / 1.春眠不觉晓…」全对，score 0.99+，坐标在原图系 |
+| 1 | 精准模式（:9301 侧车在场）`recognizePageForPanel` | ✅ 22.3s，11 regions，「一、选择题 / 1.春眠不觉晓…」全对，score 0.99+，坐标在原图系 |
 | 2 | 快速模式 `recognizePageFast`（系统 python3 + rapidocr_onnxruntime） | ✅ 9.5s，11 regions，文本与精准一致——**快速通道真实可用，非摆设** |
 | 3 | 朝向·正排横排图（用户报障"被转 90°"） | ✅ `angle=0, method=ocr, axis=horizontal`——侧车消歧生效，不再误转 |
 | 4 | 朝向·真侧躺 90° 图 | ✅ `angle=90, method=ocr, axis=vertical`——正确转正 |
-| 5 | 侧车不可达（9001 停 + SUPERVISE=0 透传） | ✅ **511ms 内显式抛错**「OCR 侧车不可达」→ 前端提示"精准识别服务暂不可用"，不再静默空栏 |
+| 5 | 侧车不可达（9301 停 + SUPERVISE=0 透传） | ✅ **511ms 内显式抛错**「OCR 侧车不可达」→ 前端提示"精准识别服务暂不可用"，不再静默空栏 |
 | 6 | 托管模式 venv 缺失（SUPERVISE=1 + PPSV3_PYTHON 不存在） | ✅ **511ms 快速失败**（修复前卡满 30s），日志 `[sidecar] 子进程错误: spawn … ENOENT` + 告警 `sidecar-startup-failed` |
 
 构建验证：前端 `tsc --noEmit` ✓ / `eslint --max-warnings=0` ✓ / `build:web` ✓ / `build:weapp` ✓；server `tsc --noEmit` ✓ / `nest build` ✓。
 
 **注意**：快速模式的 2.x 引擎用**系统 python3**（`OCR_PYTHON`，默认 `python3`）+ `rapidocr_onnxruntime` 包，与 3.x venv 相互独立——部署时需确认系统 python3 也装了该包，否则快速模式降级为"本次失败返回空"（前端提示重试/换精准）。
 
+## 4.1 续修：静默空结果 → 显式报错 + OCR 诊断端点（2026-10-17 第二批）
+
+**用户二次反馈**：端口已迁到 9300/9301（避开小程序端被占用的 9000/9001），但小程序端仍显示「本页未识别到文字」。**根因仍是"失败被静默吞成空结果"**——侧车挂掉 / 端口冲突 / 引擎缺包 时，前端收到的 `page_text` 永远是 `[]`，与"图上真没字"完全同形，无从定位。
+
+### 4.1.1 端口迁移收尾（本批）
+
+上一批端口迁移有遗漏：`image-orient.ts`（朝向细化默认 9001）、`ocr-prior.ts`（2.x 引擎默认 9000）、`sidecar.supervisor.ts` 的 `parseBaseUrl` 回落值（9000）未跟上。本批全部补为 9301（3.x）/ 9300（2.x），全仓再无 9000/9001 的生效引用（仅剩注释里的"旧端口说明"）。
+
+### 4.1.2 静默空 → 显式报错（核心修复）
+
+| 文件 | 改动 |
+|---|---|
+| `ocr/ocr-tool.ts` | `ToolOcrResult` 新增 `stderr?` 字段；超时/失败（nonzero-exit/bad-json）携带 stderr 尾部 3 行（Traceback 根因）；spawn 失败/超时也带 stderr |
+| `ocr/ppsv3.client.ts` | `parse()` 记录 `lastParseError`（HTTP 非 200 / 响应缺 blocks / 请求异常三类）；新增 `getLastParseError()` 供上层区分"侧车故障"与"图中无文字" |
+| `ocr/ocr.service.ts` | `recognizePageFast`：`no-script`/`spawn-error`/超时/非零退出 **一律抛错**（附 stderr 摘录）——不再静默返回空；`recognizePageForPanel`：`parse` 返回 null **一律抛错**（带 `lastParseError` 与 `/healthz` 状态区分），仅 `200 + blocks:[]` 才是真正的"图中无文字" |
+| `pages/recognize/index.tsx` | `runPageOcr` 的 catch 已记录 `err` 并显示在面板；`page_text` 为空但**无报错**时才提示「本页未识别到文字，可手动输入」（合法空图）；真正失败走 `error` 态 + 真实原因 |
+
+> 效果：过去"侧车挂了→前端只看到未识别到文字"，现在变为"精准识别服务暂不可用：侧车 /healthz 无响应"等明确报错。
+
+### 4.1.3 OCR 诊断端点（自助排查）
+
+新增 `GET /api/image/ocr-diagnose`（无需登录），逐项实测两条识别路径与侧车状态，返回结构化报告：
+
+- **环境与端口**：快速/精准引擎 python 解析路径与版本、`PPSV3_URL`/`OCR_ENGINE_URL`/`supervise`；
+- **侧车状态**：`disabled` 与未启用原因；
+- **快速引擎实测**：用内置已知文字探针图（`diagnose-probe.ts`，"OCR诊断测试12345"）跑 RapidOCR，报告状态 / 段数 / 样例 / stderr；
+- **精准侧车实测**：`/healthz` 健康检查 + 同一探针图 `/ppsv3`，报告 status（OK / UNREACHABLE / FAIL / EMPTY）、blocks 数、最近 parse 错误。
+
+前端 `recognize` 页在「快速/精准」双按钮下方新增「识别不出字？点此「识别诊断」自查」入口，点击调用 `diagnoseOcr()`，弹层展示可读报告 + 一句话结论（哪条路径挂了、优先查端口/侧车/引擎）。
+
+### 4.1.4 实测（本批，沙箱 /opt/pocr3-venv + 系统 python3 均具备）
+
+| # | 场景 | 结果 |
+|---|---|---|
+| A | `diagnose()` 正常环境 | fastEngine=OK（7 段，样例"诊断测试"）、preciseEngine=OK（blockCount 1，样例"OCR诊断测试12345"）、侧车 disabled=false |
+| B | 精准侧车不可达（PPSV3_URL 指向死端口 9999） | preciseEngine=**UNREACHABLE**，lastParseError="侧车 /healthz 无响应"，fastEngine 仍 OK——可定位"只精准挂了" |
+| C | 全链路 harness（前处理→快速/精准双模式） | 快速 13 段 / 精准 13 段，侧车自动起在 9301，与 #150 验收一致 |
+
+
 ## 5. 环境变量速查（ocr-page 链路相关）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PPSV3_URL` | `http://127.0.0.1:9001` | 3.x 侧车地址 |
+| `PPSV3_URL` | `http://127.0.0.1:9301` | 3.x 侧车地址 |
 | `PPSV3_PYTHON` | `/opt/pocr3-venv/bin/python` | 3.x venv python（**部署缺失即精准模式全挂**） |
 | `PPSV3_SUPERVISE` | `auto` | auto=脚本+python 可用才托管；1=强制；0=外部侧车 |
 | `PPSV3_IDLE_TIMEOUT_MS` | 900000 | 空闲回收（3.x 驻留 2~3GB） |
