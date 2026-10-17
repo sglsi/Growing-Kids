@@ -2,8 +2,8 @@
 """
 OCR 侧车 3.x 服务（PaddleOCR 3.7.0 + PP-StructureV3 全链路）
 
-定位：**生产主 OCR 引擎**（2026-10-15 起，替换 2.x 融合侧车 main.py :9000）。
-  2.x 侧车（main.py, :9000）：rapid + paddle 双引擎融合 + 自建 orient 四向投票——降级为回滚备份，
+定位：**生产主 OCR 引擎**（2026-10-15 起，替换 2.x 融合侧车 main.py :9300）。
+  2.x 侧车（main.py, :9300）：rapid + paddle 双引擎融合 + 自建 orient 四向投票——降级为回滚备份，
     生产代码不再引用（LocalOcrClient / getSidecarSupervisor 仅探针与回滚用）。
   3.x 侧车（本服务）：PP-StructureV3 官方管线（UVDoc 矫正 → 版面检测 → OCR → 阅读序）
     + DocImgOrientationClassification 朝向分类（替代 2.x 的 orient 四向投票）。
@@ -11,7 +11,7 @@ OCR 侧车 3.x 服务（PaddleOCR 3.7.0 + PP-StructureV3 全链路）
 设计要点（与 main.py 同构）：
 - 重依赖（paddleocr）延迟导入：--dry-run 与 import 检查不依赖它
 - 管线单例延迟初始化（首次请求加载，~9s）；_INFER_LOCK 串行化推理（ONNX/Paddle 实例非线程安全）
-- 端口默认 9001（PPSV3_PORT 可改）；健康检查 /healthz 供 Node 侧 SidecarSupervisor 托管
+- 端口默认 9301（PPSV3_PORT 可改）；健康检查 /healthz 供 Node 侧 SidecarSupervisor 托管
 - 版本红线：paddlepaddle 必须 ≤3.2.2（3.3.x 在 AMD EPYC 上 oneDNN PIR 崩溃，见升级评估报告）
 
 坐标保真（生产默认，由 Node 侧 getPpsv3Supervisor 注入 env）：
@@ -27,8 +27,8 @@ OCR 侧车 3.x 服务（PaddleOCR 3.7.0 + PP-StructureV3 全链路）
   GET  /healthz
 
 运行：
-  python main3.py                          # 默认 127.0.0.1:9001（venv python）
-  PPSV3_PORT=9001 python main3.py --port 9001
+  python main3.py                          # 默认 127.0.0.1:9301（venv python）
+  PPSV3_PORT=9301 python main3.py --port 9301
   python main3.py --once --op ppsv3 --image /path/to.webp   # 工具式单次（探针/生产 base64 路径用）
   cat img.png | python main3.py --once --op orient          # stdin 进图（Node 工具式调用契约）
 """
@@ -51,7 +51,7 @@ from pydantic import BaseModel
 # Paddle/PaddleX 推理实例非线程安全：FastAPI 同步路由用线程池并发，必须串行化。
 _INFER_LOCK = threading.Lock()
 
-PPSV3_PORT = int(os.getenv("PPSV3_PORT", "9001"))
+PPSV3_PORT = int(os.getenv("PPSV3_PORT", "9301"))
 PPSV3_DEVICE = os.getenv("PPSV3_DEVICE", "cpu")
 PPSV3_UNWARP = os.getenv("PPSV3_UNWARP", "1") == "1"          # UVDoc 矫正开关
 PPSV3_ORIENT_CLS = os.getenv("PPSV3_ORIENT_CLS", "1") == "1"  # 整页方向分类开关

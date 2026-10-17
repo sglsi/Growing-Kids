@@ -19,8 +19,8 @@ OCR 侧车服务（PaddleOCR 3.0 全家桶 + RapidOCR 互为备份）
     }
 
 运行：
-  python main.py                         # 默认 127.0.0.1:9000
-  python main.py --port 9000 --host 0.0.0.0
+  python main.py                         # 默认 127.0.0.1:9300
+  python main.py --port 9300 --host 0.0.0.0
   OCR_DRY_RUN=1 python main.py          # 不加载模型，/recognize 返回样例结构（契约验证用）
 """
 from __future__ import annotations
@@ -156,16 +156,67 @@ def _run_rapid(bgr) -> List[Dict[str, Any]]:
 
 
 # ---------- 引擎：PaddleOCR + PP-StructureV3 ----------
+def _paddle_major() -> int:
+    """paddleocr 主版本号（3.x 用新 API，2.x 用旧 API）。"""
+    try:
+        import paddleocr as _p
+        return int(str(getattr(_p, "__version__", "3")).split(".")[0])
+    except Exception:
+        return 3
+
+
 def _get_paddle() -> Any:
     if "paddle" not in _ENGINES:
         from paddleocr import PaddleOCR
-        _ENGINES["paddle"] = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, det_limit_side_len=OCR_DET_LIMIT)
+        if _paddle_major() >= 3:
+            # PaddleOCR 3.x：use_angle_cls/show_log 已删除；det_limit_side_len 移入 paddleX 配置（保持默认）
+            _ENGINES["paddle"] = PaddleOCR(use_textline_orientation=True, lang="ch")
+        else:
+            _ENGINES["paddle"] = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, det_limit_side_len=OCR_DET_LIMIT)
     return _ENGINES["paddle"]
 
 
+def _norm_box(box) -> List[float]:
+    """PaddleOCR 3.x 盒子归一化：兼容 [x1,y1,x2,y2] 扁平与 4×2 poly 两种格式。"""
+    try:
+        if box is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        flat = [float(v) for v in list(box)]
+        if len(flat) == 4 and all(abs(flat[j]) < 1e9 for j in range(4)):
+            # 无法仅凭数值区分扁平/poly——用 x2>=x1 且 y2>=y1 判扁平；poly 场景下 max 语义等价
+            xs, ys = flat[0::2], flat[1::2]
+            if xs[1] >= xs[0] and ys[1] >= ys[0] and flat[2] >= flat[0]:
+                return [flat[0], flat[1], flat[2], flat[3]]
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except Exception:
+        return [0.0, 0.0, 0.0, 0.0]
+
+
 def _run_paddle(bgr) -> List[Dict[str, Any]]:
-    res = _get_paddle().ocr(bgr, cls=True)
+    eng = _get_paddle()
     regions: List[Dict[str, Any]] = []
+    if _paddle_major() >= 3:
+        # 3.x：predict() 返回结果对象列表（rec_texts/rec_scores/rec_polys 或 rec_boxes）
+        res = eng.predict(bgr)
+        for r in res:
+            d = r.to_dict() if hasattr(r, "to_dict") else r
+            texts = list(d.get("rec_texts") or [])
+            scores = list(d.get("rec_scores") or [])
+            # ⚠️ rec_boxes 可能是 numpy 数组，禁止 `arr or other`（触发 truth-value 歧义）：
+            #   显式 None/长度判断，优先 rec_boxes（[x1,y1,x2,y2] 扁平），回退 rec_polys（4×2）
+            raw_boxes = d.get("rec_boxes")
+            if raw_boxes is None or len(raw_boxes) == 0:
+                raw_boxes = d.get("rec_polys")
+            boxes = raw_boxes if raw_boxes is not None else []
+            for i, txt in enumerate(texts):
+                score = float(scores[i]) if i < len(scores) else 0.0
+                box = boxes[i] if i < len(boxes) else None
+                bb = _norm_box(box)
+                regions.append({"text": str(txt), "box": bb, "score": score, "engine": "paddle"})
+        return regions
+    res = eng.ocr(bgr, cls=True)
     if not res or not res[0]:
         return regions
     for line in res[0]:
@@ -180,7 +231,11 @@ def _run_structure(pil) -> Dict[str, Any]:
     """PP-StructureV3 版面/表格/公式（可选，失败不影响文字提取）。"""
     global _STRUCTURE_WARNED
     try:
-        from ppstructurev3 import PPSStructureV3
+        # paddleocr 3.x 把 PP-StructureV3 收进主包；2.x 时代是独立包 ppstructurev3
+        try:
+            from paddleocr import PPStructureV3 as PPSStructureV3
+        except ImportError:
+            from ppstructurev3 import PPSStructureV3
         if "structure" not in _ENGINES:
             _ENGINES["structure"] = PPSStructureV3()
         out = _ENGINES["structure"](pil)
@@ -547,7 +602,7 @@ def run_once(op: str, mode: str) -> int:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("OCR_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("OCR_PORT", "9000")))
+    parser.add_argument("--port", type=int, default=int(os.getenv("OCR_PORT", "9300")))
     # 工具式单次调用：python main.py --once --op recognize|orient [--mode rapid|both|paddle]
     parser.add_argument("--once", action="store_true", help="单次工具模式：stdin 进图、stdout 出 JSON 即退")
     parser.add_argument("--op", default="recognize", choices=["recognize", "orient"])

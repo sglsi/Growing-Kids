@@ -50,7 +50,8 @@ export class LocalOcrClient {
   private probeStop: (() => void) | null = null
 
   constructor(opts: LocalOcrClientOptions = {}) {
-    this.baseUrl = opts.baseUrl ?? process.env.OCR_ENGINE_URL ?? 'http://127.0.0.1:9000'
+    // 默认端口 9300（沙箱 9000 被 Coze 平台内部 uvicorn 代理占用，/recognize 会 401）
+    this.baseUrl = opts.baseUrl ?? process.env.OCR_ENGINE_URL ?? 'http://127.0.0.1:9300'
     // 本地 OCR 在 CPU 上首帧/大图可能需数十秒（模型推理），默认放宽到 60s，
     // 并允许通过 OCR_TIMEOUT_MS 覆盖。超时即视为失败 → 降级 VLM。
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.OCR_TIMEOUT_MS ?? 60_000)

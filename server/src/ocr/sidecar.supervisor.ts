@@ -101,7 +101,8 @@ function pythonUsable(python: string): boolean {
 }
 
 function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
-  const { host, port } = parseBaseUrl(process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9000')
+  // 默认端口 9300（沙箱 9000 被 Coze 平台内部 uvicorn 代理占用）
+  const { host, port } = parseBaseUrl(process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9300')
   const { dir, script } = resolveScript()
   const engineEnv: Record<string, string> = {}
   for (const k of ['OCR_ENGINE_MODE', 'OCR_DEVICE', 'OCR_LOW_CONF_THRESHOLD', 'OCR_DRY_RUN']) {

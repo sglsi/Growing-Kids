@@ -67,7 +67,16 @@ export interface Ppsv3ClientOptions {
   probeFailThreshold?: number
 }
 
-const DEFAULT_PPSV3_PYTHON = '/opt/pocr3-venv/bin/python'
+/** 3.x 引擎 python：优先隔离 venv；venv 未落地时回退系统 python3（本沙箱已装 paddleocr 3.7.0 + paddlepaddle 3.2.2）。
+ *  常量保留函数形式：Supervisor 构造在模块加载期执行，需即时探测文件系统。 */
+function defaultPpsv3Python(): string {
+  const venvPython = '/opt/pocr3-venv/bin/python'
+  try {
+    if (fs.existsSync(venvPython)) return venvPython
+  } catch { /* ignore */ }
+  return 'python3'
+}
+const DEFAULT_PPSV3_PYTHON = defaultPpsv3Python()
 
 /** 告警节流：同事件 60s 内只报一次（parse 失败可能每次请求都触发，防 webhook 风暴） */
 const alertCooldown = new Map<string, number>()
@@ -98,7 +107,7 @@ export class Ppsv3Client {
   private readonly probe: OcrHealthProbe | null
 
   constructor(opts: Ppsv3ClientOptions = {}) {
-    this.baseUrl = opts.baseUrl ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9001'
+    this.baseUrl = opts.baseUrl ?? process.env.PPSV3_URL ?? 'http://127.0.0.1:9301'
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.PPSV3_TIMEOUT_MS ?? 180_000)
     this.telemetry = opts.telemetry ?? getOcrTelemetry()
     this.alertSink = opts.alertSink ?? getOcrAlertSink()
@@ -240,7 +249,7 @@ let ppsv3Supervisor: SidecarSupervisor | null = null
 
 /**
  * 3.x 侧车守护单例。配置来源：
- *   PPSV3_URL          默认 http://127.0.0.1:9001
+ *   PPSV3_URL          默认 http://127.0.0.1:9301
  *   PPSV3_PYTHON       默认 /opt/pocr3-venv/bin/python（隔离 venv，paddlepaddle ≤3.2.2）
  *   PPSV3_SUPERVISE    auto（默认，脚本+python 可用才托管）| 1 | 0
  *   PPSV3_IDLE_TIMEOUT_MS  默认 15min（3.x 管线驻留 ~2-3GB，空闲及时回收）
@@ -252,10 +261,10 @@ let ppsv3Supervisor: SidecarSupervisor | null = null
  */
 export function getPpsv3Supervisor(): SidecarSupervisor {
   if (!ppsv3Supervisor) {
-    const raw = process.env.PPSV3_URL ?? 'http://127.0.0.1:9001'
+    const raw = process.env.PPSV3_URL ?? 'http://127.0.0.1:9301'
     const m = raw.match(/^https?:\/\/([^:/]+)(?::(\d+))?/)
     const host = m?.[1] ?? '127.0.0.1'
-    const port = m?.[2] ? Number(m[2]) : 9001
+    const port = m?.[2] ? Number(m[2]) : 9301
     const engineEnv: Record<string, string> = {}
     for (const k of ['PPSV3_UNWARP', 'PPSV3_ORIENT_CLS']) {
       engineEnv[k] = process.env[k] ?? '0'
