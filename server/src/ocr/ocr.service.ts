@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   type OnApplicationBootstrap,
+  type OnApplicationShutdown,
 } from '@nestjs/common'
 import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
 import * as http from 'http'
@@ -24,7 +25,7 @@ import {
   type Ppsv3Result,
   type Ppsv3TextRegion,
 } from './ppsv3.client'
-import { toolOcr, resolvePython } from './ocr-tool'
+import { toolOcr, resolvePython, warmupFastOcr, shutdownFastOcr } from './ocr-tool'
 import { EnvRecoveryService } from './env-recovery.service'
 import { getDiagnoseProbeBuffer } from './diagnose-probe'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
@@ -86,7 +87,7 @@ const PAIR_TASK =
   '用户将【题目图片】和【答案图片】分开上传。题目图片中是一份试卷/作业的多道题目（可能含大题与小题），答案图片中是这些题目的标准答案与解析。请按题号将答案图片中的答案与解析，与题目图片中对应题号的题目关联匹配，输出多道题。JSON 结构为 {"items":[{...},...]}，items 为与题目图片题号一一对应的题目数组（可能包含多道，切勿只输出一道）。'
 
 @Injectable()
-export class OcrService implements OnApplicationBootstrap {
+export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown {
   // VLM 客户端懒加载：本地 OCR 是主路径，不应因缺少 VLM 凭证而在构造期崩溃。
   // 仅当真正需要 VLM（语义切分 / 兜底看图）时才实例化。
   private vlmClient?: LLMClient
@@ -117,7 +118,14 @@ export class OcrService implements OnApplicationBootstrap {
    * 不阻塞服务启动；过程日志可检索 `[ocr-env]`。
    */
   onApplicationBootstrap(): void {
+    // 沙箱重置自愈 + 快速识别常驻进程预热（均后台进行，不阻塞服务启动）
     void this.envRecovery.bootstrap()
+    void warmupFastOcr()
+  }
+
+  /** 服务关闭时释放快速识别常驻进程，避免残留孤儿子进程。 */
+  onApplicationShutdown(): void {
+    shutdownFastOcr()
   }
 
   private getVlm(): LLMClient {

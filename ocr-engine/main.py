@@ -566,6 +566,66 @@ def _orient_regions(bgr, mode: str) -> List[Dict[str, Any]]:
     return regions
 
 
+def run_loop(op: str, mode: str) -> int:
+    """常驻循环模式（2026-10 新增，供快速识别预热进程复用）。
+    与 run_once 复用同一批底层函数，但模型**只加载一次**，随后循环从 stdin 收帧处理：
+
+      stdin 协议：4 字节大端图片长度 N + N 字节图片字节；EOF 退出循环。
+      stdout 协议：每行一条 `<<<OCR_RESULT>>>` + 紧凑 JSON（无内嵌换行），Node 侧按行截取。
+
+    串行单进程单模型实例，天然规避 ONNX 并发段错误（见文件头 _INFER_LOCK 说明）；
+    单请求超时由 Node 侧 SIGKILL 中断并重 Spawn，本进程不维护跨请求状态。
+    """
+    import struct
+
+    m = mode if mode in ("both", "rapid", "paddle") else "rapid"
+    # 预热：显式实例化引擎（rapid 必加载；paddle 视模式而定），让首次请求免冷加载
+    try:
+        _get_rapid()
+        if m in ("both", "paddle"):
+            _get_paddle()
+    except Exception as e:
+        print(f"[ocr-loop] 模型加载失败: {e}", file=sys.stderr, flush=True)
+        return 1
+    # 就绪信号（仅这一行上 stdout，保持干净供 Node 解析）
+    print("<<<OCR_READY>>>", flush=True)
+
+    def _read_exactly(stream, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = stream.read(n - len(buf))
+            if not chunk:
+                return buf  # EOF
+            buf += chunk
+        return buf
+
+    while True:
+        header = _read_exactly(sys.stdin.buffer, 4)
+        if len(header) < 4:
+            break  # EOF：客户端关闭 stdin
+        n = struct.unpack(">I", header)[0]
+        raw = _read_exactly(sys.stdin.buffer, n)
+        if len(raw) < n:
+            break  # 截断，退出
+        try:
+            bgr, pil = _decode_image_bytes(raw)
+            if op == "orient":
+                out = _orient_impl(bgr, m)
+            elif op == "recognize":
+                req = RecognizeRequest(image_base64=base64.b64encode(raw).decode(), mode=m)
+                out = recognize_with_fusion(req)
+            else:
+                out = {"error": f"unknown op {op}"}
+            payload = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+            sys.stdout.write("<<<OCR_RESULT>>>" + payload + "\n")
+            sys.stdout.flush()
+        except Exception as e:
+            err = json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False)
+            sys.stdout.write("<<<OCR_RESULT>>>" + err + "\n")
+            sys.stdout.flush()
+    return 0
+
+
 def run_once(op: str, mode: str) -> int:
     """工具式单次调用：从 stdin 读图片字节 → 跑一次 OCR → JSON 打到 stdout → 进程退出。
 
@@ -609,9 +669,13 @@ def main():
     parser.add_argument("--port", type=int, default=int(os.getenv("OCR_PORT", "9300")))
     # 工具式单次调用：python main.py --once --op recognize|orient [--mode rapid|both|paddle]
     parser.add_argument("--once", action="store_true", help="单次工具模式：stdin 进图、stdout 出 JSON 即退")
+    # 常驻循环模式：模型仅加载一次，stdin 收帧、stdout 回结果（供快速识别预热进程复用）
+    parser.add_argument("--loop", action="store_true", help="常驻循环模式：stdin 收帧、stdout 回结果，模型只加载一次")
     parser.add_argument("--op", default="recognize", choices=["recognize", "orient"])
     parser.add_argument("--mode", default=os.getenv("OCR_ENGINE_MODE", "both"))
     args = parser.parse_args()
+    if args.loop:
+        sys.exit(run_loop(args.op, args.mode))
     if args.once:
         sys.exit(run_once(args.op, args.mode))
     import uvicorn

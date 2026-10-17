@@ -981,7 +981,6 @@ export default function RecognizePage() {
                       <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
                         {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '快速识别中…' : '快速识别'}
                       </Text>
-                      <Text className="block text-[9px] mt-1" style={{ color: '#B08D84' }}>RapidOCR · 1~3 秒/页</Text>
                     </View>
                     <View
                       className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
@@ -997,17 +996,24 @@ export default function RecognizePage() {
                       <Text className="block text-xs font-medium text-white">
                         {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '精准识别中…' : '精准识别'}
                       </Text>
-                      <Text className="block text-[9px] mt-1" style={{ color: 'rgba(255,255,255,0.75)' }}>PaddleOCR · 15~20 秒/页</Text>
                     </View>
                   </View>
 
-                  {/* OCR 诊断入口：识别不出字时自查端口/侧车/引擎是否就绪 */}
+                  {/* OCR 诊断入口：识别异常时一键自查端口·侧车·引擎是否就绪（显眼样式，避免找不到） */}
                   <View
-                    className="flex-row items-center justify-center py-2"
+                    className="flex-row items-center justify-center mt-1 py-2 px-3 rounded-lg"
+                    style={{
+                      backgroundColor: 'rgba(190,62,45,0.08)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(190,62,45,0.35)',
+                    }}
                     onClick={() => { if (!diagLoading) void handleDiagnose() }}
                   >
-                    <Text className="block text-xs" style={{ color: diagLoading ? '#B08D84' : '#8a8a8a' }}>
-                      {diagLoading ? '诊断中…（约 30 秒）' : '识别不出字？点此「识别诊断」自查'}
+                    <Text
+                      className="block text-xs"
+                      style={{ color: diagLoading ? '#B08D84' : '#BE3E2D', fontWeight: '500' }}
+                    >
+                      {diagLoading ? '诊断中…（约 30 秒）' : 'OCR 识别异常？点此「一键诊断」'}
                     </Text>
                   </View>
 

@@ -899,13 +899,11 @@ export class ImageService {
           : await this.ocrService.recognizePageForPanel(ctx.flatBuf)
       pageRegions = page.regions
     } catch (e) {
-      // 侧车/引擎不可用：显式报错（不再吞成空文本栏让用户干等）
-      console.warn(`[ocr-page] ${mode} 模式识别服务不可用:`, (e as Error)?.message ?? e)
-      throw new BadRequestException(
-        mode === 'fast'
-          ? '快速识别服务暂不可用（RapidOCR 引擎未部署？），请改用精准识别或手动输入'
-          : '精准识别服务暂不可用（OCR 侧车未启动？），请稍后重试或手动输入',
-      )
+      // 透传真实错误（含 stderr 摘录/侧车不可达原因），不再换成泛化文案——
+      // 否则前端只能看到「识别失败，请重试」，用户与排查者都无从下手。
+      const reason = (e as Error)?.message ?? String(e)
+      console.warn(`[ocr-page] ${mode} 模式识别失败:`, reason)
+      throw new BadRequestException(`${mode === 'fast' ? '快速' : '精准'}识别失败：${reason}`)
     }
 
     return {

@@ -1,6 +1,8 @@
-import { spawn } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
+import type { ChildProcessWithoutNullStreams } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
+import zlib from 'zlib'
 
 /**
  * OCR 工具式调用器（进程隔离，治「侧车崩溃/卡死」）
@@ -14,6 +16,11 @@ import * as path from 'path'
  *
  * 契约：图片字节走 stdin（避免 base64 超命令行长度）；结果以 `<<<OCR_RESULT>>>` 哨兵单行 JSON
  * 打到 stdout；任何失败（spawn 失败/非零退出/超时/JSON 损坏）都返回 null，交由上层降级，绝不抛错。
+ *
+ * 常驻预热进程（2026-10 新增）：「快速识别」每次都冷加载 RapidOCR 模型（实测 ~12s）。对
+ * `engine==='legacy' && op==='recognize' && mode==='rapid'` 这一高频路径，改用单例常驻进程
+ * （main.py --loop）：模型仅预热一次，后续请求走 stdin/stdout 帧式协议串行处理，首次识别即从
+ * ~12s 降到纯推理耗时（数秒）。详见文件末尾的 PersistentOcr。
  */
 
 const MARKER = '<<<OCR_RESULT>>>'
@@ -37,31 +44,55 @@ function resolveEngine(engine: ToolEngine = 'legacy'): { dir: string; script: st
   return { dir: candidates[0] ?? '', script: '' }
 }
 
-/** 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
- *  可用 PPSV3_PYTHON 环境变量覆盖。 */
+/** 探测某 python 是否能 import 指定模块（结果缓存，避免每次 OCR 都 fork 子进程）。 */
+const importProbeCache = new Map<string, boolean>()
+function pythonCanImport(py: string, mod: string): boolean {
+  const key = `${py}::${mod}`
+  const hit = importProbeCache.get(key)
+  if (hit !== undefined) return hit
+  let ok = false
+  try {
+    execFileSync(py, ['-c', `import ${mod}`], { timeout: 8000, stdio: 'ignore' })
+    ok = true
+  } catch {
+    ok = false
+  }
+  importProbeCache.set(key, ok)
+  return ok
+}
+
+/** 从候选里挑第一个能 import 全部 requiredModules 的 python；都不行返回 null。 */
+function pickUsablePython(candidates: string[], requiredModules: string[]): string | null {
+  for (const py of candidates) {
+    if (!py) continue
+    if (requiredModules.every((m) => pythonCanImport(py, m))) return py
+  }
+  return null
+}
+
+/**
+ * 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
+ * 可用 PPSV3_PYTHON 环境变量覆盖。
+ * 探测 paddle + paddlex 是否可用，缺包则回退，避免用「存在但损坏」的 venv。
+ */
 export function resolvePython(engine: ToolEngine): string {
   if (engine === 'ppsv3') {
     const fromEnv = process.env.PPSV3_PYTHON
-    if (fromEnv) return fromEnv
-    const candidates = [
-      '/workspace/projects/.venv-py/bin/python',
-      '/opt/pocr3-venv/bin/python'
-    ]
-    for (const p of candidates) {
-      try {
-        if (fs.existsSync(p)) return p
-      } catch { /* ignore */ }
-    }
-    return 'python3'
+    if (fromEnv && pythonCanImport(fromEnv, 'paddle')) return fromEnv
+    const ppsv3Candidates = ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']
+    return pickUsablePython(ppsv3Candidates, ['paddle', 'paddlex']) ?? 'python3'
   }
-  // legacy 引擎同样优先持久化 venv（含 cv2/rapidocr；系统 python3 无 cv2 会启动即崩）
-  const candidates = ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return p
-    } catch { /* ignore */ }
-  }
-  return process.env.OCR_PYTHON ?? 'python3'
+  // legacy 引擎：RapidOCR 依赖 rapidocr_onnxruntime。部分 /opt venv **未安装该包**，
+  // 直接返回会让 main.py 启动即捕获 ImportError → 静默输出空结果（raw_text:""），
+  // recognizePageFast 收到空 data 不抛错 → 快速模式「伪成功实为空白」。
+  // 故按「持久化 venv → 旧 venv → 系统 python3(三者齐全)」探测，取第一个真能 import 的。
+  const legacyCandidates = [
+    process.env.OCR_PYTHON,
+    '/workspace/projects/.venv-py/bin/python',
+    '/opt/pocr3-venv/bin/python',
+    'python3',
+  ].filter(Boolean) as string[]
+  return pickUsablePython(legacyCandidates, ['rapidocr_onnxruntime']) ?? 'python3'
 }
 
 export type ToolOcrOp = 'recognize' | 'orient' | 'ppsv3' | 'rectify'
@@ -88,7 +119,8 @@ export interface ToolOcrResult {
   stderr?: string
 }
 
-export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
+/** 一次性工具式调用（每次独立子进程，崩/卡只影响当次，可被硬超时 SIGKILL 中断）。 */
+export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
   const t0 = Date.now()
   const engine: ToolEngine = opts.engine ?? 'legacy'
   const { dir, script } = resolveEngine(engine)
@@ -105,7 +137,15 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
   if (!imageBuf || imageBuf.length === 0) return Promise.resolve(fail('empty'))
 
   return new Promise<ToolOcrResult>((resolve) => {
+    let out = ''
+    let err = ''
     let settled = false
+    /** stderr 摘录：取最后 3 行拼到 300 字符内（Traceback 的根因行通常在尾部） */
+    const errTail = (): string | undefined => {
+      const lines = err.trim().split('\n').filter(Boolean)
+      if (!lines.length) return undefined
+      return lines.slice(-3).join(' | ').slice(-300)
+    }
     const done = (r: ToolOcrResult) => {
       if (settled) return
       settled = true
@@ -124,14 +164,6 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    let out = ''
-    let err = ''
-    /** stderr 摘录：取最后 3 行拼到 300 字符内（Traceback 的根因行通常在尾部） */
-    const errTail = (): string | undefined => {
-      const lines = err.trim().split('\n').filter(Boolean)
-      if (!lines.length) return undefined
-      return lines.slice(-3).join(' | ').slice(-300)
-    }
     child.stdout.on('data', (d) => { out += String(d) })
     child.stderr.on('data', (d) => { err += String(d) })
     // stdin 写入失败（子进程已退出）不应崩溃：吞掉 EPIPE
@@ -181,4 +213,344 @@ export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrRes
 /** 是否启用工具式调用（默认启用；OCR_INVOKE=server 可切回长驻服务模式）。 */
 export function toolInvokeEnabled(): boolean {
   return (process.env.OCR_INVOKE ?? 'tool') !== 'server'
+}
+
+// ============================ 常驻预热进程（快速识别优化） ============================
+// 单例常驻进程：模型仅预热一次，后续请求走 stdin/stdout 帧式协议串行处理，
+// 首次识别即从 ~12s 降到纯推理耗时（数秒）。具备：
+//  - 串行队列：单进程单模型实例，天然规避 ONNX 并发段错误（见文件头）；
+//  - 看门狗：单请求超时即强杀并重 Spawn，失败不级联；
+//  - 自动回落：Spawn 失败/环境缺包时，把在途请求转一次性调用（toolOcrOnce），保证可用；
+//  - 启动预热：warmupFastOcr() 在后端 bootstrap 调用，不阻塞服务启动。
+//
+// 协议（与 main.py --loop 对应）：
+//   Node → Python：4 字节大端图片长度 N + N 字节图片；
+//   Python → Node：单行 `<<<OCR_RESULT>>>` + 紧凑 JSON + '\n'（紧凑 JSON 无内嵌换行，按行切分）。
+
+const LOOP_READY = '<<<OCR_READY>>>'
+
+/** 生成一张极小的纯色 PNG（无文字）：仅供常驻进程启动预热时触发 ONNX 计算图首次编译，结果忽略。 */
+function makeWarmupImage(): Buffer {
+  const S = 160
+  // 每行：1 字节 filter(0) + S*3 字节 RGB
+  const raw = Buffer.alloc(S * (S * 3 + 1))
+  for (let y = 0; y < S; y++) {
+    raw[y * (S * 3 + 1)] = 0
+    for (let x = 0; x < S; x++) {
+      const o = y * (S * 3 + 1) + 1 + x * 3
+      raw[o] = 255; raw[o + 1] = 255; raw[o + 2] = 255
+    }
+  }
+  const idat = zlib.deflateSync(raw)
+  const crc32 = (buf: Buffer): number => {
+    let c = ~0
+    for (let i = 0; i < buf.length; i++) {
+      c ^= buf[i]
+      for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1))
+    }
+    return ~c >>> 0
+  }
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0)
+    const tb = Buffer.from(type, 'ascii')
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([tb, data])) >>> 0, 0)
+    return Buffer.concat([len, tb, data, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(S, 0); ihdr.writeUInt32BE(S, 4)
+  ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', idat),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+interface PendingReq {
+  buf: Buffer
+  timeoutMs: number
+  t0: number
+  resolve: (r: ToolOcrResult) => void
+}
+
+interface InFlight {
+  resolve: (r: ToolOcrResult) => void
+  t0: number
+  timer: NodeJS.Timeout | null
+}
+
+class PersistentOcr {
+  private child: ChildProcessWithoutNullStreams | null = null
+  private alive = false
+  private starting = false
+  private startPromise: Promise<boolean> | null = null
+  private readyResolve: ((ok: boolean) => void) | null = null
+  private readyTimer: NodeJS.Timeout | null = null
+  private buf = ''
+  private queue: PendingReq[] = []
+  private inFlight: InFlight | null = null
+  private lastSpawnFail = 0
+  private readonly warmupTimeoutMs = 60_000
+  private warmed = false
+  private warmupImg: Buffer | null = null
+
+  constructor(private readonly python: string, private readonly script: string, private readonly cwd: string) {}
+
+  /** 启动预热（不阻塞）。失败静默，后续请求会回落一次性调用。 */
+  warmup(): void {
+    if (this.alive || this.child || this.starting) return
+    void this.startChild()
+  }
+
+  /** 用常驻进程识别一张图（fast 路径）。串行处理，单请求超时则强杀重 Spawn。 */
+  recognize(buf: Buffer, timeoutMs: number): Promise<ToolOcrResult> {
+    return new Promise<ToolOcrResult>((resolve) => {
+      this.queue.push({ buf, timeoutMs, t0: Date.now(), resolve })
+      this.pump()
+    })
+  }
+
+  /** 服务关闭时清理常驻进程。 */
+  shutdown(): void {
+    this.killChild()
+  }
+
+  private pump(): void {
+    if (this.inFlight) return
+    if (this.queue.length === 0) return
+    if (!this.alive || !this.child) {
+      if (!this.starting && !this.child) void this.startChild()
+      return
+    }
+    const next = this.queue.shift()!
+    this.inFlight = { resolve: next.resolve, t0: next.t0, timer: null }
+    try {
+      const header = Buffer.alloc(4)
+      header.writeUInt32BE(next.buf.length, 0)
+      this.child.stdin.write(header)
+      this.child.stdin.write(next.buf)
+    } catch (e) {
+      this.inFlight = null
+      next.resolve({
+        ok: false,
+        data: null,
+        ms: Date.now() - next.t0,
+        reason: 'spawn-error',
+        stderr: String((e as Error)?.message ?? e),
+      })
+      this.onDeath('stdin 写入失败')
+      this.pump()
+      return
+    }
+    this.inFlight.timer = setTimeout(() => {
+      console.warn(`[persistent-ocr] 识别超时 ${next.timeoutMs}ms → 强杀并重 Spawn`)
+      this.killChild()
+      if (this.inFlight) {
+        this.inFlight.resolve({ ok: false, data: null, ms: Date.now() - this.inFlight.t0, reason: 'timeout' })
+        this.inFlight = null
+      }
+      this.pump()
+    }, next.timeoutMs)
+  }
+
+  private startChild(): Promise<boolean> {
+    if (this.starting) return this.startPromise ?? Promise.resolve(false)
+    // 近期 spawn 失败（环境缺包/venv 损坏）：直接回落一次性调用，避免反复尝试
+    if (Date.now() - this.lastSpawnFail < 60_000) {
+      this.dumpQueueToFallback()
+      return Promise.resolve(false)
+    }
+    this.starting = true
+    const p = new Promise<boolean>((resolve) => {
+      this.readyResolve = resolve
+      let child: ChildProcessWithoutNullStreams
+      try {
+        child = spawn(this.python, [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid'], {
+          cwd: this.cwd || undefined,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, OCR_ENGINE_MODE: 'rapid' },
+        })
+      } catch (e) {
+        console.warn(`[persistent-ocr] Spawn 失败: ${(e as Error)?.message ?? e}`)
+        this.lastSpawnFail = Date.now()
+        this.starting = false
+        resolve(false)
+        return
+      }
+      this.child = child
+      this.buf = ''
+      this.alive = false
+      child.stdout.on('data', (d: Buffer) => this.onStdout(d.toString('utf8')))
+      child.stderr.on('data', () => { /* 引擎日志忽略 */ })
+      child.on('error', (e) => console.warn(`[persistent-ocr] 子进程错误: ${(e as Error)?.message ?? e}`))
+      child.on('exit', (code) => {
+        if (!this.alive) {
+          this.lastSpawnFail = Date.now()
+          this.dumpQueueToFallback()
+        }
+        this.onDeath(`exit code ${code}`)
+      })
+      this.readyTimer = setTimeout(() => {
+        console.warn('[persistent-ocr] 预热超时（60s 未就绪）→ 回落一次性调用')
+        this.lastSpawnFail = Date.now()
+        this.killChild()
+        this.dumpQueueToFallback()
+        this.resolveReady(false)
+      }, this.warmupTimeoutMs)
+    })
+    this.startPromise = p
+    void p.then(() => { this.startPromise = null })
+    return p
+  }
+
+  private resolveReady(ok: boolean): void {
+    if (this.readyTimer) {
+      clearTimeout(this.readyTimer)
+      this.readyTimer = null
+    }
+    this.starting = false
+    const r = this.readyResolve
+    this.readyResolve = null
+    if (r) r(ok)
+  }
+
+  private onStdout(s: string): void {
+    this.buf += s
+    // 先找就绪信号（模型预热完成）
+    if (!this.alive) {
+      const ri = this.buf.indexOf(LOOP_READY)
+      if (ri >= 0) {
+        this.alive = true
+        this.buf = this.buf.slice(ri + LOOP_READY.length)
+        console.log('[persistent-ocr] 快速识别常驻进程就绪（模型已预热，后续识别免冷加载）')
+        this.resolveReady(true)
+        // 再补一次空图推理，把 ONNX 计算图首次编译也挪到启动期付掉，
+        // 避免首个真实请求额外承担 ~4s 编译开销（结果忽略）。
+        if (!this.warmed) {
+          this.warmed = true
+          try {
+            if (!this.warmupImg) this.warmupImg = makeWarmupImage()
+            void this.recognize(this.warmupImg, 30_000)
+          } catch (e) {
+            console.warn(`[persistent-ocr] 空图预热失败（非致命，首个请求将承担编译开销）: ${(e as Error)?.message ?? e}`)
+          }
+        }
+        this.pump()
+      }
+    }
+    // 再处理已收完整的结果行（每行一个）
+    let ni: number
+    while ((ni = this.buf.indexOf(MARKER)) >= 0) {
+      const after = ni + MARKER.length
+      const nl = this.buf.indexOf('\n', after)
+      if (nl < 0) break // 结果行未收完，等下次
+      const payload = this.buf.slice(after, nl).trim()
+      this.buf = this.buf.slice(nl + 1)
+      this.onResult(payload)
+    }
+  }
+
+  private onResult(payload: string): void {
+    const req = this.inFlight
+    if (!req) return // 没有在途请求却收到结果，丢弃
+    if (req.timer) clearTimeout(req.timer)
+    let result: ToolOcrResult
+    try {
+      const j = JSON.parse(payload) as Record<string, unknown>
+      if (j && typeof j.error === 'string') {
+        result = { ok: false, data: null, ms: Date.now() - req.t0, reason: 'nonzero-exit', stderr: String(j.error).slice(0, 300) }
+      } else {
+        result = { ok: true, data: j, ms: Date.now() - req.t0 }
+      }
+    } catch {
+      result = { ok: false, data: null, ms: Date.now() - req.t0, reason: 'bad-json', stderr: payload.slice(0, 300) }
+    }
+    this.inFlight = null
+    req.resolve(result)
+    this.pump()
+  }
+
+  /** 环境不可用：把在途请求全转一次性调用，保证可用性（性能回落而非功能失效）。 */
+  private dumpQueueToFallback(): void {
+    while (this.queue.length) {
+      const n = this.queue.shift()!
+      void toolOcrOnce(n.buf, {
+        op: 'recognize',
+        engine: 'legacy',
+        mode: 'rapid',
+        timeoutMs: n.timeoutMs,
+        python: this.python,
+      }).then((r) => n.resolve(r))
+    }
+  }
+
+  private onDeath(reason: string): void {
+    console.warn(`[persistent-ocr] 常驻进程退出：${reason}`)
+    if (this.child) {
+      try {
+        this.child.stdout.removeAllListeners()
+        this.child.stderr.removeAllListeners()
+      } catch { /* ignore */ }
+    }
+    this.child = null
+    this.alive = false
+    if (this.readyTimer) {
+      clearTimeout(this.readyTimer)
+      this.readyTimer = null
+    }
+    if (this.inFlight) {
+      const inf = this.inFlight
+      this.inFlight = null
+      if (inf.timer) clearTimeout(inf.timer)
+      inf.resolve({ ok: false, data: null, ms: Date.now() - inf.t0, reason: 'spawn-error', stderr: reason })
+    }
+    this.resolveReady(false)
+    this.pump()
+  }
+
+  private killChild(): void {
+    if (!this.child) return
+    try { this.child.stdin.end() } catch { /* ignore */ }
+    try { this.child.kill('SIGKILL') } catch { /* ignore */ }
+    this.child = null
+    this.alive = false
+  }
+}
+
+let persistent: PersistentOcr | null = null
+
+function getPersistent(): PersistentOcr | null {
+  if (persistent) return persistent
+  const engine = resolveEngine('legacy')
+  if (!engine.script) return null
+  const python = resolvePython('legacy')
+  persistent = new PersistentOcr(python, engine.script, engine.dir)
+  return persistent
+}
+
+/** 启动预热快速识别常驻进程（后端 bootstrap 调用，不阻塞）。 */
+export function warmupFastOcr(): void {
+  getPersistent()?.warmup()
+}
+
+/** 服务关闭时释放常驻进程。 */
+export function shutdownFastOcr(): void {
+  persistent?.shutdown()
+  persistent = null
+}
+
+/** 快速识别（legacy + recognize + rapid）：走常驻预热进程，冷加载成本仅付一次。 */
+function fastOcrRecognize(buf: Buffer, timeoutMs: number): Promise<ToolOcrResult> {
+  const p = getPersistent()
+  if (!p) return toolOcrOnce(buf, { op: 'recognize', engine: 'legacy', mode: 'rapid', timeoutMs, python: resolvePython('legacy') })
+  return p.recognize(buf, timeoutMs)
+}
+
+/** 统一入口：快速识别高频路径走常驻进程，其余（orient/ppsv3/非 rapid）走一次性调用。 */
+export function toolOcr(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
+  if (opts.engine === 'legacy' && opts.op === 'recognize' && (opts.mode ?? 'both') === 'rapid') {
+    return fastOcrRecognize(imageBuf, opts.timeoutMs ?? Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000))
+  }
+  return toolOcrOnce(imageBuf, opts)
 }
