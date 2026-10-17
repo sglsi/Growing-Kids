@@ -101,6 +101,8 @@ export interface ToolOcrOpts {
   op: ToolOcrOp
   /** both | rapid | paddle；默认 orient→rapid（快），recognize→both（融合提质）。3.x 引擎忽略。 */
   mode?: string
+  /** 分栏处理：auto=多栏时自动切分逐栏识别；off=关闭。默认 auto。 */
+  layout?: string
   /** 硬超时（毫秒）。超时即 SIGKILL 当中断并返回 null。默认 OCR_TOOL_TIMEOUT_MS 或 120s。 */
   timeoutMs?: number
   python?: string
@@ -158,7 +160,7 @@ export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOc
       done({ ok: false, data: null, ms: Date.now() - t0, reason: 'timeout', stderr: errTail() })
     }, timeoutMs)
 
-    const child = spawn(python, [script, '--once', '--op', opts.op, '--mode', mode], {
+    const child = spawn(python, [script, '--once', '--op', opts.op, '--mode', mode, '--layout', opts.layout ?? 'auto'], {
       cwd: dir || undefined,
       env: { ...process.env, OCR_ENGINE_MODE: mode },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -366,7 +368,7 @@ class PersistentOcr {
       this.readyResolve = resolve
       let child: ChildProcessWithoutNullStreams
       try {
-        child = spawn(this.python, [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid'], {
+        child = spawn(this.python, [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid', '--layout', 'auto'], {
           cwd: this.cwd || undefined,
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...process.env, OCR_ENGINE_MODE: 'rapid' },

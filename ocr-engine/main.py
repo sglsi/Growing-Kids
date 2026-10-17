@@ -63,6 +63,10 @@ DRY_RUN = os.getenv("OCR_DRY_RUN", "0") == "1"
 # （如 "got 11. their hands ... Even 12."）整行漏检；提到 1920（1440 宽不缩放）
 # 后 11/12/13 全部召回。CPU 耗时 16s→20s，可接受。
 OCR_DET_LIMIT = int(os.getenv("OCR_DET_LIMIT", "1920"))
+# 分栏识别：文本区域 x 投影间隙 ≥ 图宽此比例（或 20px 兜底）即判为栏间空白。
+OCR_COLUMN_GAP = float(os.getenv("OCR_COLUMN_GAP", "0.04"))
+# 分栏处理总开关：auto=检测到多栏时自动切分逐栏识别；off=关闭（单栏平铺，旧行为）。
+OCR_LAYOUT = os.getenv("OCR_LAYOUT", "auto")
 
 app = FastAPI(title="OCR Engine Sidecar", version="1.0.0")
 
@@ -75,6 +79,7 @@ class RecognizeRequest(BaseModel):
     image_url: Optional[str] = None        # 公网可达的图片 URL（优先）
     image_base64: Optional[str] = None     # 或 base64（可带 data: 前缀）
     mode: str = "both"                      # both | rapid | paddle
+    layout: str = "auto"                    # auto=多栏时自动切分逐栏识别；off=仅单栏平铺
 
 
 class OrientRequest(BaseModel):
@@ -419,13 +424,13 @@ def _fuse(regions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return kept
 
 
-def recognize_with_fusion(req: RecognizeRequest) -> Dict[str, Any]:
-    bgr, pil = _load_image(req)
-    mode = req.mode if req.mode in ("both", "rapid", "paddle") else OCR_ENGINE_MODE
+def _recognize_regions(bgr, mode: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """跑 rapid(+paddle) 检测+识别，融合去重，返回 (regions, engine_used)。
+
+    不跑版面分析、不做最终排序（_fuse 内部已按 y 带+x 排序）。供全页识别与分栏逐栏重识别复用。
+    """
     regions: List[Dict[str, Any]] = []
     engine_used: List[str] = []
-
-    # 推理段必须串行（见 _INFER_LOCK 说明），避免共享模型被并发访问段错误。
     with _INFER_LOCK:
         if mode in ("both", "rapid"):
             try:
@@ -439,22 +444,95 @@ def recognize_with_fusion(req: RecognizeRequest) -> Dict[str, Any]:
                 engine_used.append("paddleocr")
             except Exception as e:
                 print(f"[ocr] PaddleOCR 失败: {e}", flush=True)
+    fused = _fuse(regions)
+    return fused, engine_used
 
-        fused = _fuse(regions)
-        structure = _run_structure(pil) if "paddleocr" in engine_used else {"layout": [], "tables": [], "formulas": []}
 
-    raw_text = "\n".join(r["text"] for r in fused)
-    conf = sum(r["score"] for r in fused) / len(fused) if fused else 0.0
+def _column_spans(regions: List[Dict[str, Any]], img_w: int) -> List[Tuple[float, float]]:
+    """按 x 投影间隙把文本区域聚成阅读栏（左→右）。返回 [(x0,x1), ...]；不足两栏返回 []。
+
+    以文本区域的 x 区间并集做合并：相邻区间间隙 ≥ gap 才断开新栏。gap 取图宽比例与 20px 的较大值，
+    避免把同一栏内行间距误判为栏间空白（#分栏：英文多栏试卷旧逻辑按 round(y/30) 分带 + x 排序，
+    两栏行数不等时会交错成"左1右1左2右2…"，与人工先读左栏再读右栏的顺序冲突）。
+    """
+    if len(regions) < 2:
+        return []
+    ivs = sorted((r["box"][0], r["box"][2]) for r in regions)
+    gap = max(20.0, img_w * OCR_COLUMN_GAP)
+    spans: List[Tuple[float, float]] = []
+    cs, ce = ivs[0]
+    for x0, x1 in ivs[1:]:
+        if x0 <= ce + gap:
+            ce = max(ce, x1)
+        else:
+            spans.append((cs, ce))
+            cs, ce = x0, x1
+    spans.append((cs, ce))
+    return spans
+
+
+def _assemble(bgr, pil, regions: List[Dict[str, Any]], engine_used: List[str], mode: str) -> Dict[str, Any]:
+    """单栏装配：raw_text + 版面 + 置信度（分栏路径的逐栏结果也走此结构，layout 在分栏路径置空）。"""
+    structure = _run_structure(pil) if "paddleocr" in engine_used else {"layout": [], "tables": [], "formulas": []}
+    raw_text = "\n".join(r["text"] for r in regions)
+    conf = sum(r["score"] for r in regions) / len(regions) if regions else 0.0
     return {
         "raw_text": raw_text,
-        "text_regions": fused,
+        "text_regions": regions,
         "layout": structure["layout"],
         "tables": structure["tables"],
         "formulas": structure["formulas"],
         "confidence": round(conf, 3),
         "engine_used": engine_used,
-        "low_confidence": (len(fused) == 0) or (conf < OCR_LOW_CONF_THRESHOLD),
+        "low_confidence": (len(regions) == 0) or (conf < OCR_LOW_CONF_THRESHOLD),
     }
+
+
+def recognize_with_fusion(req: RecognizeRequest) -> Dict[str, Any]:
+    bgr, pil = _load_image(req)
+    mode = req.mode if req.mode in ("both", "rapid", "paddle") else OCR_ENGINE_MODE
+    layout = req.layout or OCR_LAYOUT
+
+    regions, engine_used = _recognize_regions(bgr, mode)
+
+    # 分栏自动切分再逐栏识别（auto 且检测到多栏）：
+    # 全页先识别一遍拿到文本区域与栏边界，再把每栏裁图单独重识别（单栏输入更干净，
+    # 杜绝跨栏行被误检成一行），结果按栏序（左→右）+ 栏内 y 序拼接。单栏页或裁剪识别全失败时
+    # 落回全页单栏路径（性能零回归：单栏页只跑一遍）。
+    if layout != "off" and bgr.shape[1] > 0:
+        spans = _column_spans(regions, bgr.shape[1])
+        if len(spans) > 1:
+            out: List[Dict[str, Any]] = []
+            used: List[List[float]] = []
+            for (x0, x1) in spans:
+                pad = max(10, int((x1 - x0) * 0.02))
+                cx0 = max(0, int(x0 - pad))
+                cx1 = min(bgr.shape[1], int(x1 + pad))
+                if cx1 - cx0 < 8:
+                    continue
+                crop = bgr[:, cx0:cx1].copy()
+                col_regions, _ = _recognize_regions(crop, mode)
+                for r in col_regions:
+                    r["box"][0] += cx0
+                    r["box"][2] += cx0
+                out += col_regions
+                used.append([cx0, cx1])
+            if out:
+                raw_text = "\n".join(r["text"] for r in out)
+                conf = sum(r["score"] for r in out) / len(out) if out else 0.0
+                return {
+                    "raw_text": raw_text,
+                    "text_regions": out,
+                    "layout": [],
+                    "tables": [],
+                    "formulas": [],
+                    "confidence": round(conf, 3),
+                    "engine_used": engine_used,
+                    "low_confidence": (len(out) == 0) or (conf < OCR_LOW_CONF_THRESHOLD),
+                    "columns": used,
+                }
+
+    return _assemble(bgr, pil, regions, engine_used, mode)
 
 
 # ---------- 路由 ----------
@@ -612,7 +690,7 @@ def run_loop(op: str, mode: str) -> int:
             if op == "orient":
                 out = _orient_impl(bgr, m)
             elif op == "recognize":
-                req = RecognizeRequest(image_base64=base64.b64encode(raw).decode(), mode=m)
+                req = RecognizeRequest(image_base64=base64.b64encode(raw).decode(), mode=m, layout=OCR_LAYOUT)
                 out = recognize_with_fusion(req)
             else:
                 out = {"error": f"unknown op {op}"}
@@ -650,7 +728,7 @@ def run_once(op: str, mode: str) -> int:
             m = mode if mode in ("both", "rapid", "paddle") else "rapid"
             out = _orient_impl(bgr, m)
         elif op == "recognize":
-            req = RecognizeRequest(image_base64=base64.b64encode(raw).decode(), mode=mode)
+            req = RecognizeRequest(image_base64=base64.b64encode(raw).decode(), mode=mode, layout=OCR_LAYOUT)
             out = recognize_with_fusion(req)
         else:
             print(json.dumps({"error": f"unknown op {op}"}), flush=True)
@@ -673,7 +751,11 @@ def main():
     parser.add_argument("--loop", action="store_true", help="常驻循环模式：stdin 收帧、stdout 回结果，模型只加载一次")
     parser.add_argument("--op", default="recognize", choices=["recognize", "orient"])
     parser.add_argument("--mode", default=os.getenv("OCR_ENGINE_MODE", "both"))
+    parser.add_argument("--layout", default=os.getenv("OCR_LAYOUT", "auto"), choices=["auto", "off"],
+                        help="auto=检测到多栏时自动切分逐栏识别；off=仅单栏平铺（旧行为）")
     args = parser.parse_args()
+    # 把 --layout 透传到模块级 OCR_LAYOUT，供 run_loop/run_once 内的 RecognizeRequest 使用
+    OCR_LAYOUT = args.layout
     if args.loop:
         sys.exit(run_loop(args.op, args.mode))
     if args.once:

@@ -49,7 +49,7 @@ import { buildColorEvidenceSource, splitBlockRegions } from '../ocr/ocr-semantic
 import { guardExtractQuota, MAX_EXTRACT_BLOCKS } from './extract-wrong-quota'
 import { mapWithConcurrency } from './concurrency'
 import { localVlmPolicy } from '../ocr/local-vlm.client'
-import type { RecognizedItem, LocalOcrTextRegion, LocalOcrLayoutBlock } from '../ocr/ocr.types'
+import type { RecognizedItem, LocalOcrTextRegion, LocalOcrLayoutBlock, OcrBox } from '../ocr/ocr.types'
 import { QuotaService } from '../quota/quota.service'
 
 /**
@@ -106,6 +106,41 @@ export function toReadingOrderSegments(
       return { text: r.text.trim(), box, col: colOf((box.x0 + box.x1) / 2) }
     })
     .sort((a, b) => a.col - b.col || a.box.y0 - b.box.y0 || a.box.x0 - b.box.x0)
+}
+
+/**
+ * 从 OCR 文本区域按 x 投影间隙聚合成阅读栏（左→右）。
+ *
+ * 「分栏自动切分」的排序依据：版面分析（ctx.cols，图像投影）在分栏页常漏检成单栏，
+ * 导致 toReadingOrderSegments 回退「按 y 再按 x」，两栏行数不等时交错成"左1右1左2右2…"。
+ * 改用实际文本位置的 x 区间聚类出栏边界，让文本严格按「先左栏后右栏」排序。
+ * 单列（或聚类不足两栏）返回空数组，toReadingOrderSegments 按单栏处理（零回归）。
+ * 两引擎（快速 RapidOCR / 精准 PP-StructureV3）的 regions 都经此归一，通用。
+ */
+function deriveColumnsFromRegions(regions: LocalOcrTextRegion[]): Array<[number, number]> {
+  const boxes = (regions || [])
+    .map((r) => r.box)
+    .filter((b): b is OcrBox => Array.isArray(b) && b.length >= 4)
+  if (boxes.length < 2) return []
+  const ivs = boxes
+    .map((b) => [Math.min(b[0], b[2]), Math.max(b[0], b[2])] as [number, number])
+    .sort((a, b) => a[0] - b[0])
+  const maxX = ivs[ivs.length - 1][1]
+  const gap = Math.max(20, maxX * 0.04)
+  const spans: Array<[number, number]> = []
+  let cs = ivs[0][0]
+  let ce = ivs[0][1]
+  for (let i = 1; i < ivs.length; i++) {
+    const [x0, x1] = ivs[i]
+    if (x0 <= ce + gap) ce = Math.max(ce, x1)
+    else {
+      spans.push([cs, ce])
+      cs = x0
+      ce = x1
+    }
+  }
+  spans.push([cs, ce])
+  return spans.length > 1 ? spans : []
 }
 
 /**
@@ -906,9 +941,11 @@ export class ImageService {
       throw new BadRequestException(`${mode === 'fast' ? '快速' : '精准'}识别失败：${reason}`)
     }
 
+    // 分栏排序：优先用 OCR 文本区域聚类出的阅读栏（比图像投影更可靠），再交给 toReadingOrderSegments
+    const columns = deriveColumnsFromRegions(pageRegions)
     return {
       page: { w: ctx.w, h: ctx.h },
-      page_text: toReadingOrderSegments(pageRegions, ctx.cols),
+      page_text: toReadingOrderSegments(pageRegions, columns),
       image_url: pageUrl,
       // 朝向未经 OCR 消歧（侧车缺席）：前端可提示"本页可能侧躺，识别结果供参考"
       orient_suspect: ctx.orientSuspect === true,
