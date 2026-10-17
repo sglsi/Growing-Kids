@@ -1,3 +1,7 @@
+// 必须先于其他模块加载：.env 需要在任何读取 process.env 的代码之前进入环境
+// （扣子平台由运行时注入 env；自托管/本地运行时必须靠 dotenv 显式加载）
+import 'dotenv/config';
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '@/app.module';
 import * as express from 'express';
@@ -11,6 +15,12 @@ function parsePort(): number {
     if (!isNaN(port) && port > 0 && port < 65536) {
       return port;
     }
+  }
+
+  // 托管平台（如 WorkBuddy）通过 PORT 注入端口，优先级高于 SERVER_PORT
+  const platformPort = parseInt(process.env.PORT || '', 10);
+  if (!isNaN(platformPort) && platformPort > 0 && platformPort < 65536) {
+    return platformPort;
   }
 
   const envPort = parseInt(process.env.SERVER_PORT || '', 10);
@@ -42,8 +52,9 @@ async function bootstrap() {
   // 2. 解析端口
   const port = parsePort();
   try {
-    await app.listen(port);
-    console.log(`Server running on http://localhost:${port}`);
+    // 显式绑定 0.0.0.0：容器/托管平台要求监听全部网卡，不能只绑 localhost
+    await app.listen(port, '0.0.0.0');
+    console.log(`Server running on http://0.0.0.0:${port}`);
   } catch (err) {
     if (err.code === 'EADDRINUSE') {
       console.error(`❌ 端口 ${port} 被占用，请设置其他 SERVER_PORT 后重试。`);
