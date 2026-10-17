@@ -36,6 +36,11 @@ export interface OrientationResult {
   volumes?: Partial<Record<OrientationAngle, number>>
   /** 是否启用了 OCR 细化 */
   ocrRefined?: boolean
+  /**
+   * 朝向未经 OCR 消歧且存在侧躺/倒置风险（method=projection 且几何判为竖排时）。
+   * true = 本页可能侧躺，结果勿直接采信（摆正链路据此打告警，见 image-dewarp）。
+   */
+  suspect?: boolean
 }
 
 const CANDIDATES: OrientationAngle[] = [0, 90, 180, 270]
@@ -146,6 +151,14 @@ export async function rotateBuffer(buf: Buffer, angle: OrientationAngle): Promis
 /**
  * 估计输入图应旋转的角度（度）以转正。
  * @param ocrAngle 可选 OCR 朝向判定（侧车 /orient 端点），用于 0/180 与 90/270 的镜像消歧；缺失则纯几何。
+ *
+ * ⚠️ 侧车细化缺席时的保守回落（2026-10 修复，用户实测"正排图被转 90°"）：
+ * 纯几何只能判「横排/竖排」轴，且投影关于 180° 镜像对称——0/180、90/270 的正立与否
+ * 几何本质无能，此前竖排直接转 90°，横排图被 peakCount 误判时即整页侧翻。
+ * 新策略：**不猜转**——
+ *   · 横排 → 0°（横排无需旋转，安全，同旧行为）；
+ *   · 竖排 → 仍取 0°（不施加旋转）：误转正排图比漏摆正更糟，漏摆正由 OCR/人工兜底，
+ *     同时 suspect=true 告知上层"本页可能侧躺，勿直接采信朝向"。
  */
 export async function estimateOrientation(
   buf: Buffer,
@@ -154,10 +167,8 @@ export async function estimateOrientation(
   const { ink, w, h } = await binarize(buf)
   const { scores, axis } = scoreOrientation(ink, w, h)
 
-  // 纯几何初判（仅作回落与日志）：横排取 0、竖排取 90。
-  // ⚠️ 纯几何对 0/180、90/270 的「正立与否」无能为例（投影关于 180° 镜像对称），
-  // 必须由朝向分类器来定，见下文 ocrAngle。
-  let angle: OrientationAngle = axis === 'horizontal' ? 0 : 90
+  // 保守回落角：恒 0（不猜转，理由见上方注释）
+  let angle: OrientationAngle = 0
 
   if (ocrAngle) {
     try {
@@ -169,10 +180,11 @@ export async function estimateOrientation(
         return { angle: r.angle, method: 'ocr', axis, scores, volumes: r.scores, ocrRefined: true }
       }
     } catch {
-      /* 侧车失败 → 回落纯几何（上层应据 method=projection 打「可能倒置」告警） */
+      /* 侧车失败 → 回落纯几何（保守不转 + suspect 告警） */
     }
   }
-  return { angle, method: 'projection', axis, scores }
+  // 纯几何且判为竖排：不转，但本页可能侧躺——标记 suspect 供上层告警/人工复核
+  return { angle, method: 'projection', axis, scores, suspect: axis === 'vertical' }
 }
 
 /** 便捷封装：直接返回转正后的图与朝向信息 */

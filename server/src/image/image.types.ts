@@ -74,6 +74,12 @@ export interface PageTextSegment {
 export interface OcrPageDto {
   /** 页面图公网 URL */
   image_url: string
+  /**
+   * OCR 模式（#150 人工辅助，用户手动触发，默认精准）：
+   *  - precise = 精准（PaddleOCR PP-StructureV3 全链路，15~20s/页，识别率最高）
+   *  - fast    = 快速（RapidOCR 轻量通道，1~3s/页，引擎未部署时明确报错）
+   */
+  mode?: 'precise' | 'fast'
 }
 
 export interface OcrPageResult {
@@ -86,6 +92,11 @@ export interface OcrPageResult {
    * 与 OCR 文本同一坐标系，裁剪入题的图即用户看到的图。
    */
   image_url: string
+  /**
+   * 朝向未经 OCR 消歧（侧车缺席时几何保守不转）：true = 本页可能侧躺，
+   * 识别结果仅供参考，前端可提示用户手动旋转后重试。
+   */
+  orient_suspect?: boolean
 }
 
 /**

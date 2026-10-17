@@ -21,9 +21,11 @@ interface Props {
   pageLabel?: string
   /** 上传/OCR/导出进行中：禁操作 */
   busy?: boolean
+  /** 识别失败原因（服务不可用等）；有值时空态显示错误而非引导文案 */
+  error?: string
 }
 
-export default function WrongqOcrPanel({ segments, pageLabel, busy }: Props) {
+export default function WrongqOcrPanel({ segments, pageLabel, busy, error }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expanded, setExpanded] = useState(true)
   const n = selected.size
@@ -81,8 +83,17 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy }: Props) {
             {segments.length === 0 ? (
               <View className="px-2 py-6 items-center">
                 <Text className="block text-[10px] text-muted-foreground text-center">
-                  {busy ? 'OCR 识别中…' : '本页暂未识别到文字，可在下方手动输入'}
+                  {busy
+                    ? 'OCR 识别中…'
+                    : error
+                      ? error
+                      : '尚未识别 · 点下方「快速/精准」开始，也可直接手动输入'}
                 </Text>
+                {error && !busy ? (
+                  <Text className="block text-[10px] mt-2 text-center" style={{ color: '#BE3E2D' }}>
+                    修复后重试，或改用另一种识别模式
+                  </Text>
+                ) : null}
               </View>
             ) : (
               segments.map((seg, i) => {

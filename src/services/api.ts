@@ -845,17 +845,19 @@ export async function exportRecognizedDocx(items: RecognizeResult[], title?: str
  * 全页 OCR 文本栏：摆正 + 全页 OCR + 阅读序平铺。
  * 不做红笔检测/切块——文本供用户在右侧栏复制，粘进底部粘贴栏。
  * 返回摆正后的页面图 URL：前端展示与「页内裁剪」都用它（与 OCR 同一坐标系）。
+ * @param mode fast=快速（RapidOCR 1~3s/页）| precise=精准（PaddleOCR 全链路 15~20s/页，默认）
  */
-export async function ocrPage(imageUrl: string) {
+export async function ocrPage(imageUrl: string, mode: 'fast' | 'precise' = 'precise') {
   const data = await unwrapResponse<{
     page: { w: number; h: number }
     page_text: PageTextSegment[]
     image_url: string
+    orient_suspect?: boolean
   }>(
     Network.request({
       url: '/api/image/ocr-page',
       method: 'POST',
-      data: { image_url: imageUrl },
+      data: { image_url: imageUrl, mode },
       header: authHeaders(),
     }),
   )
@@ -863,6 +865,7 @@ export async function ocrPage(imageUrl: string) {
     page: data?.page || { w: 0, h: 0 },
     page_text: data?.page_text || [],
     image_url: data?.image_url || imageUrl,
+    orient_suspect: data?.orient_suspect === true,
   }
 }
 

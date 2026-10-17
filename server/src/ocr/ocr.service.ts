@@ -19,6 +19,7 @@ import {
   type Ppsv3Result,
   type Ppsv3TextRegion,
 } from './ppsv3.client'
+import { toolOcr } from './ocr-tool'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
 import { structureLocalItems } from './ocr-struct'
 import {
@@ -909,65 +910,120 @@ export class OcrService {
   }
 
   /**
+   * OCR 前处理：长边 >2000 等比缩图（CPU 推理，过大会超时），返回缩放后 buffer
+   * 与坐标回算比例（regions/layout 的 box 乘回原图系）。
+   */
+  private async shrinkForOcr(buf: Buffer): Promise<{ ocrBuf: Buffer; sx: number; sy: number }> {
+    const meta = await sharp(buf).metadata()
+    const ow = meta.width ?? 0
+    const oh = meta.height ?? 0
+    const maxEdge = 2000
+    if (ow <= maxEdge && oh <= maxEdge) return { ocrBuf: buf, sx: 1, sy: 1 }
+    const scale = maxEdge / Math.max(ow, oh)
+    const ocrBuf = await sharp(buf)
+      .resize({ width: Math.round(ow * scale), height: Math.round(oh * scale) })
+      .png()
+      .toBuffer()
+    return { ocrBuf, sx: 1 / scale, sy: 1 / scale }
+  }
+
+  /** regions/layout 的 box 按比例回算到输入图坐标系（缩图识别的坐标还原） */
+  private scaleRegions(
+    local: LocalOcrResult,
+    sx: number,
+    sy: number,
+  ): { regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] } {
+    const regions = (Array.isArray(local.text_regions) ? local.text_regions : [])
+      .filter((t) => (t.text || '').trim().length > 0)
+      .map((t) => ({
+        ...t,
+        box: [
+          Math.round(t.box[0] * sx),
+          Math.round(t.box[1] * sy),
+          Math.round(t.box[2] * sx),
+          Math.round(t.box[3] * sy),
+        ] as OcrBox,
+      }))
+    const layout = (local.layout ?? [])
+      .filter((b) => b.box && b.box.length >= 4 && (b.text || '').trim().length > 0)
+      .map((b) => ({
+        ...b,
+        box: [
+          Math.round(b.box[0] * sx),
+          Math.round(b.box[1] * sy),
+          Math.round(b.box[2] * sx),
+          Math.round(b.box[3] * sy),
+        ] as OcrBox,
+      }))
+    return { regions, layout }
+  }
+
+  /**
+   * 「快速」模式全页 OCR（#150 人工辅助）：2.x 融合侧车 RapidOCR 通道
+   * （main.py --once --op recognize --mode rapid，工具式独立子进程）。
+   *
+   * 与 recognizePageForPanel 同口径（长边缩 2000、坐标回算），但跳过 UVDoc 矫正/
+   * 版面分析/PP-StructureV3 全链路：单页 1~3s（精准模式 15~20s）。
+   *  - 引擎缺失（脚本/python/rapidocr 未部署）→ 显式抛错，调用方提示改用精准模式；
+   *  - 超时/单次失败 → 空（不抛），用户重试即可。
+   */
+  async recognizePageFast(
+    buf: Buffer,
+  ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+    const { ocrBuf, sx, sy } = await this.shrinkForOcr(buf)
+    const r = await toolOcr(ocrBuf, {
+      op: 'recognize',
+      engine: 'legacy',
+      mode: 'rapid',
+      timeoutMs: Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000),
+    })
+    if (!r.ok || !r.data) {
+      if (r.reason === 'no-script' || r.reason === 'spawn-error') {
+        throw new Error(`快速识别引擎不可用（${r.reason}）：RapidOCR 侧车（main.py）未部署？`)
+      }
+      console.warn(`[ocr] 快速识别（RapidOCR）本次失败: ${r.reason ?? 'unknown'}`)
+      return { regions: [], layout: [] }
+    }
+    // 2.x main.py --once 输出：{ raw_text, text_regions: [{text, box:[x0,y0,x1,y1], score}] }
+    const local = r.data as unknown as LocalOcrResult
+    return this.scaleRegions(local, sx, sy)
+  }
+
+  /**
    * 全页 OCR（HTTP 侧车路径）——#150 人工辅助错题整理的「OCR 文本栏」数据源。
    *
    * 与 recognizePage 同口径（超长边缩到 2000、box 还原到输入图坐标系），
    * 但走长驻侧车 HTTP（parse + withSidecar 守护）：recognizePage 用的
    * parseByBase64 是「工具式子进程」路径（每次独立拉起 main3.py），
    * 不经侧车守护的探活/回收，首触达代价高；本方法只服务人工整理的单页轻量
-   * OCR，复用 URL 批量路径同一套守护更稳（侧车不可用返回空，不抛）。
+   * OCR，复用 URL 批量路径同一套守护更稳。
+   *
+   * 可用性语义（2026-10 修复，用户实测"未能识别出文字"却无任何服务不可用提示）：
+   *  - 托管模式侧车自动启动失败（venv 缺失/spawn 失败/启动超时）→ **抛错**；
+   *  - 侧车不可达（外部模式 :9001 无监听 / healthz 无响应）→ **抛错**；
+   *  - 侧车可达但本次请求失败/图中无文字 → 空（不抛），用户重试或换图即可。
+   * 抛出的错误由 image.service.ocrPage 转成模式化 BadRequest，前端明确提示。
    */
   async recognizePageForPanel(
     buf: Buffer,
   ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
-    try {
-      const meta = await sharp(buf).metadata()
-      const ow = meta.width ?? 0
-      const oh = meta.height ?? 0
-      const maxEdge = 2000
-      let ocrBuf = buf
-      let sx = 1
-      let sy = 1
-      if (ow > maxEdge || oh > maxEdge) {
-        const scale = maxEdge / Math.max(ow, oh)
-        sx = 1 / scale
-        sy = 1 / scale
-        ocrBuf = await sharp(buf)
-          .resize({ width: Math.round(ow * scale), height: Math.round(oh * scale) })
-          .png()
-          .toBuffer()
-      }
-      const r = await this.sidecar.withSidecar(() =>
-        this.ppsv3.parse({ image_base64: ocrBuf.toString('base64') }, false),
-      )
-      if (!r) return { regions: [], layout: [] }
-      const local = ppsv3ToLocal(r)
-      const regions = (Array.isArray(local.text_regions) ? local.text_regions : [])
-        .filter((t) => (t.text || '').trim().length > 0)
-        .map((t) => ({
-          ...t,
-          box: [
-            Math.round(t.box[0] * sx),
-            Math.round(t.box[1] * sy),
-            Math.round(t.box[2] * sx),
-            Math.round(t.box[3] * sy),
-          ] as OcrBox,
-        }))
-      const layout = (local.layout ?? [])
-        .filter((b) => b.box && b.box.length >= 4 && (b.text || '').trim().length > 0)
-        .map((b) => ({
-          ...b,
-          box: [
-            Math.round(b.box[0] * sx),
-            Math.round(b.box[1] * sy),
-            Math.round(b.box[2] * sx),
-            Math.round(b.box[3] * sy),
-          ] as OcrBox,
-        }))
-      return { regions, layout }
-    } catch (e) {
-      console.warn('[ocr] 全页 OCR（侧车）失败，返回空文本栏:', (e as Error)?.message ?? e)
+    const { ocrBuf, sx, sy } = await this.shrinkForOcr(buf)
+    // 托管模式：先确保侧车就绪。auto 判定 venv/python 缺失时 supervisor.disabled=true
+    // （外部侧车模式，透传）；PPSV3_SUPERVISE=1 强制托管但 spawn 失败时这里显式失败。
+    if (!this.sidecar.disabled && !(await this.sidecar.ensureReady())) {
+      throw new Error('OCR 侧车自动启动失败（检查 PPSV3_PYTHON venv 与 main3.py 是否随部署落地）')
+    }
+    const r = await this.sidecar.withSidecar(() =>
+      this.ppsv3.parse({ image_base64: ocrBuf.toString('base64') }, false),
+    )
+    if (!r) {
+      // withSidecar 返回 null ⇒ fn 返回 null（侧车起来了但这次请求失败/结果异常），
+      // 或外部模式下无监听。探一次 health 区分「服务不可用」与「本次无文字」。
+      const healthy = await this.ppsv3.health()
+      if (!healthy) throw new Error('OCR 侧车不可达（PPSV3_URL /healthz 无响应）')
+      console.warn('[ocr] 全页 OCR 侧车可达但本次请求失败，返回空文本栏')
       return { regions: [], layout: [] }
     }
+    return this.scaleRegions(ppsv3ToLocal(r), sx, sy)
   }
 }

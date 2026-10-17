@@ -69,6 +69,16 @@ export interface Ppsv3ClientOptions {
 
 const DEFAULT_PPSV3_PYTHON = '/opt/pocr3-venv/bin/python'
 
+/** 告警节流：同事件 60s 内只报一次（parse 失败可能每次请求都触发，防 webhook 风暴） */
+const alertCooldown = new Map<string, number>()
+function throttledAlert(sink: OcrAlertSink, event: string, detail: Record<string, unknown>): void {
+  const now = Date.now()
+  const last = alertCooldown.get(event) ?? 0
+  if (now - last < 60_000) return
+  alertCooldown.set(event, now)
+  sink.alert(event, detail)
+}
+
 function resolveMain3Script(): string {
   const candidates = [
     process.env.PPSV3_ENGINE_DIR && path.join(process.env.PPSV3_ENGINE_DIR, 'main3.py'),
@@ -132,7 +142,14 @@ export class Ppsv3Client {
       const data = (await res.json()) as Ppsv3Result
       if (!data || !Array.isArray(data.blocks)) return null
       return data
-    } catch {
+    } catch (e) {
+      // 侧车不可达/超时：静默返回 null 是降级链的设计，但必须留痕——
+      // 否则"侧车挂了、OCR 全空"在日志里与"正常识别无文字"完全同形（#150 用户报障根因即此）。
+      this.telemetry.markDegrade('unreachable')
+      throttledAlert(this.alertSink, 'sidecar-unreachable', {
+        baseUrl: this.baseUrl,
+        error: String((e as Error)?.message ?? e),
+      })
       return null
     }
   }

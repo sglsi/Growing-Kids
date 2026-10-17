@@ -871,7 +871,10 @@ export class ImageService {
    * 摆正（dewarp/纠偏）→ 全页 OCR（侧车）→ 阅读序平铺。
    * 不做红笔检测、不切块、不落库 items——用户在右侧文本栏自行选择拷贝，
    * 再把文字/裁剪图粘进底部粘贴栏（人工完成"哪题是错题"的判断）。
-   * OCR 侧车不可用不抛错：返回空文本栏，前端提示重试或手动输入。
+   * OCR 由用户手动触发（快速/精准二选一，见 OcrPageDto.mode），不再选图后自动跑。
+   *
+   * 服务不可用（侧车未启动/引擎未部署）显式抛 BadRequest，前端提示重试或手动输入；
+   * 侧车可达但本次无文字 → 返回空文本栏（正常）。
    */
   async ocrPage(
     dto: OcrPageDto,
@@ -887,18 +890,30 @@ export class ImageService {
     const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
     const pageUrl = await this.storageService.getPublicUrl(pageIng.key)
 
+    const mode = dto.mode === 'fast' ? 'fast' : 'precise'
     let pageRegions: LocalOcrTextRegion[] = []
     try {
-      const page = await this.ocrService.recognizePageForPanel(ctx.flatBuf)
+      const page =
+        mode === 'fast'
+          ? await this.ocrService.recognizePageFast(ctx.flatBuf)
+          : await this.ocrService.recognizePageForPanel(ctx.flatBuf)
       pageRegions = page.regions
     } catch (e) {
-      console.warn('[ocr-page] 全页 OCR 不可用，返回空文本栏:', (e as Error)?.message ?? e)
+      // 侧车/引擎不可用：显式报错（不再吞成空文本栏让用户干等）
+      console.warn(`[ocr-page] ${mode} 模式识别服务不可用:`, (e as Error)?.message ?? e)
+      throw new BadRequestException(
+        mode === 'fast'
+          ? '快速识别服务暂不可用（RapidOCR 引擎未部署？），请改用精准识别或手动输入'
+          : '精准识别服务暂不可用（OCR 侧车未启动？），请稍后重试或手动输入',
+      )
     }
 
     return {
       page: { w: ctx.w, h: ctx.h },
       page_text: toReadingOrderSegments(pageRegions, ctx.cols),
       image_url: pageUrl,
+      // 朝向未经 OCR 消歧（侧车缺席）：前端可提示"本页可能侧躺，识别结果供参考"
+      orient_suspect: ctx.orientSuspect === true,
     }
   }
 

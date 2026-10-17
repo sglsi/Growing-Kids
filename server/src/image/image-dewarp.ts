@@ -309,18 +309,18 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
       orientResult.axis = o.axis
       if (o.angle !== 0) workBuf = await rotateBuffer(workBuf, o.angle)
       console.log(`[image-dewarp] 朝向摆正：旋转 ${o.angle}°（方法 ${o.method}，主轴 ${o.axis}）`)
-      // 落回几何 = OCR 消歧没生效：0/180、90/270 无法区分（投影关于 180° 镜像对称），
-      // 此时几何给的任何「非零」旋转都可能是反的，本页**可能整页倒置**。
+      // 落回几何 = OCR 消歧没生效：0/180、90/270 无法区分（投影关于 180° 镜像对称）。
+      // 保守策略下不再猜转（正排图误转 90° 是用户实测事故），但竖排图可能侧躺——
+      // method=projection 且（suspect 或非零旋转）即标记不可直接采信。
       // ⚠️ 必须无条件打告警（此前错误加了 `&& refine` 门控）：当 OCR 细化被显式关闭
       // （OCR_ORIENT_REFINE=0）或未配置侧车时，refine 为 false，但若仍走了几何非零旋转，
       // orientSuspect 竟为 false —— 倒置结果看起来"正常、无报警"，正是这次诊断图静默倒置的根因。
-      // 几何法对 0/180、90/270 的「正立与否」本质无能，故只要 method=projection 且 angle≠0 即 suspect。
-      if (o.method === 'projection' && o.angle !== 0) {
+      if (o.suspect === true || (o.method === 'projection' && o.angle !== 0)) {
         orientResult.suspect = true
         console.warn(
-          `⚠️ [image-dewarp] 朝向未经 OCR 确认（method=projection，angle=${o.angle}），本页可能上下颠倒！` +
+          `⚠️ [image-dewarp] 朝向未经 OCR 确认（method=${o.method}，主轴 ${o.axis}，旋转 ${o.angle}°），本页可能侧躺/颠倒！` +
             ` OCR 细化${refine ? '已启用但侧车不可用/为 DRY_RUN' : '未启用（OCR_ORIENT_REFINE=0 或侧车缺失）'}；` +
-            `请检查 OCR 侧车或开启细化后重跑，勿直接采信本次结果。`,
+            `已按保守策略不猜转，请检查 OCR 侧车或开启细化后重跑，勿直接采信本次结果。`,
         )
       }
     } catch (e) {

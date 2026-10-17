@@ -16,7 +16,7 @@ import {
   fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument,
   recognizeDocumentByUrl, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   recropWrongBlock, ocrPage, exportBoardDocx,
-  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem,
+  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 
@@ -50,7 +50,14 @@ interface BoardPage {
   w: number
   h: number
   segments: PageTextSegment[]
-  ocr: 'busy' | 'done' | 'error'
+  /** idle=未识别（等用户手动触发）| busy=识别中 | done=已识别 | error=识别失败 */
+  ocr: 'idle' | 'busy' | 'done' | 'error'
+  /** 识别失败原因（面板内提示，区别于"未识别到文字"） */
+  err?: string
+  /** 上次使用的识别模式（失败重试沿用） */
+  lastMode?: 'fast' | 'precise'
+  /** 朝向未经 OCR 消歧（侧车缺席时几何保守不转，本页可能侧躺） */
+  suspect?: boolean
 }
 
 /** 人工整理流程的上限（防滥用 + 控导出体积） */
@@ -103,6 +110,12 @@ export default function RecognizePage() {
     if (mode === 'split' && board.length === 0) {
       setBoard([{ id: ++boardIdRef.current, text: '', images: [] }])
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
+
+  // #150 人工整理入库需要学科：进入 split 模式即预拉学科列表（原流程不落库故未拉）
+  useEffect(() => {
+    if (mode === 'split' && subjects.length === 0) void ensureSubjects()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
 
@@ -417,7 +430,7 @@ export default function RecognizePage() {
 
   // ---------- #150 人工辅助错题整理：页面 / OCR / 粘贴栏 ----------
 
-  /** 选择（可多选）作业页图片：上传 → 追加页 → 串行跑全页 OCR（侧车推理串行，避免打满） */
+  /** 选择（可多选）作业页图片：上传 → 追加页（不自动 OCR，等用户点「快速/精准」手动触发） */
   const addBoardPages = async () => {
     if (boardBusy) return
     const room = MAX_BOARD_PAGES - boardPages.length
@@ -438,7 +451,7 @@ export default function RecognizePage() {
     try {
       for (const f of files) {
         const up = await uploadImage(f.tempFilePath)
-        added.push({ id: ++boardIdRef.current, url: up.url, w: 0, h: 0, segments: [], ocr: 'busy' })
+        added.push({ id: ++boardIdRef.current, url: up.url, w: 0, h: 0, segments: [], ocr: 'idle' })
       }
     } catch (e) {
       console.error('页面图上传失败', e)
@@ -449,37 +462,53 @@ export default function RecognizePage() {
     const firstNew = boardPages.length
     setBoardPages((prev) => [...prev, ...added])
     setActivePage(firstNew)
-    // 逐页 OCR：后一页等前一页完成（侧车 _INFER_LOCK 本就串行，客户端再排队只会超时）
-    for (const p of added) {
-      await runPageOcr(p)
-    }
+    // #150 双模式：默认不自动识别——由用户按需点「快速」（RapidOCR 1~3s/页）
+    // 或「精准」（PaddleOCR 全链路 15~20s/页），避免选图后长时间无反馈的自动等待。
     setBoardBusy(false)
   }
 
-  /** 单页全页 OCR（新增与「重新识别」共用）；失败置 error 态，不抛 */
-  const runPageOcr = async (p: BoardPage) => {
+  /** 单页全页 OCR（用户手动触发：快速/精准）；失败置 error 态并记录原因，不抛 */
+  const runPageOcr = async (p: BoardPage, ocrMode: 'fast' | 'precise') => {
+    setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
     try {
-      const r = await ocrPage(p.url)
+      const r = await ocrPage(p.url, ocrMode)
       setBoardPages((prev) =>
         prev.map((x) =>
           x.id === p.id
-            ? { ...x, url: r.image_url || x.url, w: r.page.w, h: r.page.h, segments: r.page_text, ocr: 'done' as const }
+            ? {
+                ...x,
+                url: r.image_url || x.url,
+                w: r.page.w,
+                h: r.page.h,
+                segments: r.page_text,
+                ocr: 'done' as const,
+                err: undefined,
+                lastMode: ocrMode,
+                suspect: r.orient_suspect,
+              }
             : x,
         ),
       )
+      if (r.orient_suspect) {
+        Taro.showToast({ title: '本页可能侧躺，识别结果仅供参考', icon: 'none' })
+      } else if (!r.page_text.length) {
+        Taro.showToast({ title: '本页未识别到文字，可手动输入', icon: 'none' })
+      } else {
+        Taro.showToast({ title: `识别到 ${r.page_text.length} 段文字`, icon: 'success' })
+      }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : '识别失败，请重试'
       console.error('全页 OCR 失败', e)
-      setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const } : x)))
+      setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const, err: msg, lastMode: ocrMode } : x)))
     }
   }
 
-  /** 重新识别某一页（OCR 失败重试） */
+  /** 重新识别某一页（OCR 失败重试，沿用上次模式） */
   const retryPageOcr = async (idx: number) => {
     const p = boardPages[idx]
     if (!p || boardBusy) return
     setBoardBusy(true)
-    setBoardPages((prev) => prev.map((x, i) => (i === idx ? { ...x, ocr: 'busy' as const } : x)))
-    await runPageOcr(p)
+    await runPageOcr(p, p.lastMode ?? 'precise')
     setBoardBusy(false)
   }
 
@@ -577,6 +606,98 @@ export default function RecognizePage() {
     } finally {
       setExporting(false)
     }
+  }
+
+  /** 粘贴栏有效条目（有文字或有图） */
+  const boardValidItems = () => board.filter((e) => e.text.trim() || e.images.length)
+
+  /**
+   * 粘贴栏存入错题库（#150）：条目 → kind=question timeline 批量落库。
+   * 文字进 content.question，手动裁剪图进 content.question_images（file_key）。
+   */
+  const handleBoardSave = async () => {
+    const items = boardValidItems()
+    if (!items.length) {
+      Taro.showToast({ title: '请先输入文字或裁剪入图', icon: 'none' })
+      return
+    }
+    const subs = await ensureSubjects()
+    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    if (!sid) {
+      Taro.showToast({ title: '请先选择学科', icon: 'none' })
+      return
+    }
+    setSaving(true)
+    try {
+      const payloads: CreateTimelinePayload[] = items.map((e) => ({
+        kind: 'question' as const,
+        subject_id: sid,
+        source: '人工整理',
+        content: {
+          question: e.text.trim(),
+          answer: '',
+          solution: '',
+          wrong_answer: '',
+          status: 'pending' as const,
+          question_images: e.images.map((i) => i.key),
+        },
+      }))
+      await createTimelineBatch(payloads)
+      Taro.showToast({ title: `已存入错题库 ${payloads.length} 题`, icon: 'success' })
+    } catch (e) {
+      console.error('存入错题库失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '保存失败，请重试', icon: 'none' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /**
+   * 打印（#150）：
+   *  - H5：新开窗口写打印视图（题目文字 + 裁剪图）→ window.print()，走浏览器打印；
+   *  - 小程序/tt：无打印 API，引导「导出 Word」后在微信内打印/转发。
+   */
+  const handleBoardPrint = () => {
+    const items = boardValidItems()
+    if (!items.length) {
+      Taro.showToast({ title: '请先输入文字或裁剪入图', icon: 'none' })
+      return
+    }
+    if (Taro.getEnv() !== Taro.ENV_TYPE.WEB) {
+      Taro.showToast({ title: '小程序端请「导出 Word」后打印/转发', icon: 'none' })
+      return
+    }
+    const w = (globalThis as { window?: Window }).window
+    if (!w) return
+    const esc = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>')
+    const html =
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>错题打印</title>` +
+      `<style>body{font-family:-apple-system,"PingFang SC",sans-serif;padding:24px;color:#1a1a1a}` +
+      `h1{font-size:18px;margin:0 0 16px}.q{margin-bottom:22px;page-break-inside:avoid}` +
+      `.q .no{font-weight:600;font-size:14px;margin-bottom:6px}` +
+      `.q .tx{font-size:14px;line-height:1.7;white-space:pre-wrap}` +
+      `.q img{max-width:100%;margin-top:8px;border:1px solid #eee;border-radius:4px}</style></head>` +
+      `<body><h1>错题整理 · ${new Date().toLocaleDateString('zh-CN')}</h1>` +
+      items
+        .map(
+          (e, i) =>
+            `<div class="q"><div class="no">第 ${i + 1} 题</div>` +
+            `<div class="tx">${esc(e.text.trim())}</div>` +
+            e.images.map((im) => `<img src="${im.url}"/>`).join('') +
+            `</div>`,
+        )
+        .join('') +
+      `</body></html>`
+    const pw = w.open('', '_blank')
+    if (!pw) {
+      Taro.showToast({ title: '请允许弹出窗口后重试', icon: 'none' })
+      return
+    }
+    pw.document.write(html)
+    pw.document.close()
+    pw.focus()
+    setTimeout(() => pw.print(), 400)
   }
 
   /** 面板草稿选择器数据：题号标签 + 序号 */
@@ -698,22 +819,21 @@ export default function RecognizePage() {
           ]}
         />
 
-        {/* 学科选择（人工整理流程不落库，无需学科） */}
-        {mode !== 'split' ? (
-          <View className="flex flex-row items-center justify-between mb-4">
-            <Text className="block text-sm text-muted-foreground">默认归类学科</Text>
-            <Picker
-              mode="selector"
-              range={subjects}
-              rangeKey="name"
-              onChange={(e) => setDefaultSubject(subjects[Number(e.detail.value)]?.id || '')}
-            >
-              <View className="bg-muted rounded-lg px-4 py-2">
-                <Text className="block text-sm text-primary">{subjects.find((s) => s.id === defaultSubject)?.name || '点击选择'}</Text>
-              </View>
-            </Picker>
-          </View>
-        ) : null}
+        {/* 学科选择（人工整理的粘贴栏内容也要入错题库，故 split 模式同样需要学科） */}
+        <View className="flex flex-row items-center justify-between mb-4">
+          <Text className="block text-sm text-muted-foreground">默认归类学科</Text>
+          <Picker
+            mode="selector"
+            range={subjects}
+            rangeKey="name"
+            value={subjectIndex(defaultSubject)}
+            onChange={(e) => setDefaultSubject(subjects[Number(e.detail.value)]?.id || '')}
+          >
+            <View className="bg-muted rounded-lg px-4 py-2">
+              <Text className="block text-sm text-primary">{subjects.find((s) => s.id === defaultSubject)?.name || '点击选择'}</Text>
+            </View>
+          </Picker>
+        </View>
 
         {mode === 'paper' ? (
           <Card className="rounded-2xl border-border p-4 mb-4">
@@ -745,13 +865,13 @@ export default function RecognizePage() {
             {/* #150 人工辅助流程：选图 → 右侧 OCR 文本栏 → 底部粘贴栏（文字 + 裁剪图）→ 导出 Word */}
             <Card className="rounded-2xl border-border p-4 mb-4">
               <Text className="block text-xs text-muted-foreground mb-3">
-                选择作业图片，系统自动识别整页文字：在右侧文本栏复制需要的内容，粘到下方题目的文本框；也可直接在图片上框选裁剪错题区域入题
+                选择作业图片后，点下方「快速/精准」手动识别整页文字：在右侧文本栏复制需要的内容，粘到下方题目的文本框；也可直接在图片上框选裁剪错题区域入题
               </Text>
               {!curPage ? (
                 <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={() => void addBoardPages()}>
                   <View className="flex flex-col items-center">
                     <Text className="block text-sm text-muted-foreground">点击拍照 / 选择作业图片</Text>
-                    <Text className="block text-[10px] text-muted-foreground mt-1">支持一次多选，稍后逐页识别</Text>
+                    <Text className="block text-[10px] text-muted-foreground mt-1">支持一次多选，选好后手动触发识别</Text>
                   </View>
                 </View>
               ) : (
@@ -771,7 +891,45 @@ export default function RecognizePage() {
                         segments={curPage.segments}
                         pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
                         busy={curPage.ocr === 'busy'}
+                        error={curPage.err}
                       />
+                    </View>
+                  </View>
+
+                  {/* OCR 触发（#150 双模式）：默认不自动识别，用户按需选快速/精准 */}
+                  <View className="flex flex-row items-center gap-2 mb-3">
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#FFF7F0',
+                        border: '1px solid rgba(190,62,45,0.3)',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'fast')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                        {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '快速识别中…' : '快速识别'}
+                      </Text>
+                      <Text className="block text-[9px] mt-1" style={{ color: '#B08D84' }}>RapidOCR · 1~3 秒/页</Text>
+                    </View>
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#BE3E2D',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'precise')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium text-white">
+                        {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '精准识别中…' : '精准识别'}
+                      </Text>
+                      <Text className="block text-[9px] mt-1" style={{ color: 'rgba(255,255,255,0.75)' }}>PaddleOCR · 15~20 秒/页</Text>
                     </View>
                   </View>
 
@@ -1036,18 +1194,42 @@ export default function RecognizePage() {
         </View>
       )}
 
-      {/* #150 人工整理：粘贴栏底部操作条（有内容才出现） */}
+      {/* #150 人工整理：粘贴栏底部操作条（有内容才出现）：入库 / Word / 打印 */}
       {mode === 'split' && board.some((e) => e.text.trim() || e.images.length) ? (
         <View style={{
           position: 'fixed', bottom: 0, left: 0, right: 0,
-          display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '12px',
+          display: 'flex', flexDirection: 'column', gap: 8,
           padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
         }}
         >
-          <Text className="block text-xs text-muted-foreground shrink-0">共 {board.length} 题</Text>
-          <Button className="flex-1 h-11 rounded-xl" disabled={exporting || boardBusy} onClick={handleBoardExport}>
-            <Text className="block text-sm">{exporting ? '生成中…' : '导出 Word'}</Text>
-          </Button>
+          <View className="flex flex-row items-center gap-3">
+            <Text className="block text-xs text-muted-foreground shrink-0">共 {board.length} 题</Text>
+            <Button
+              className="flex-1 h-11 rounded-xl"
+              disabled={saving || exporting}
+              onClick={handleBoardSave}
+            >
+              <Text className="block text-sm">{saving ? '保存中…' : '存入错题库'}</Text>
+            </Button>
+          </View>
+          <View className="flex flex-row items-center gap-3">
+            <Button
+              className="flex-1 h-9 rounded-xl"
+              variant="outline"
+              disabled={exporting || saving}
+              onClick={handleBoardExport}
+            >
+              <Text className="block text-xs">{exporting ? '生成中…' : '导出 Word'}</Text>
+            </Button>
+            <Button
+              className="flex-1 h-9 rounded-xl"
+              variant="outline"
+              disabled={exporting || saving}
+              onClick={handleBoardPrint}
+            >
+              <Text className="block text-xs">打印</Text>
+            </Button>
+          </View>
         </View>
       ) : null}
 

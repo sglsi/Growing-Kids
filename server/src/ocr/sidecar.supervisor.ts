@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, execSync, type ChildProcess } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -76,6 +76,28 @@ function resolveScript(): { dir: string; script: string } {
 function parseBaseUrl(raw: string): { host: string; port: number } {
   const m = raw.match(/^https?:\/\/([^:/]+)(?::(\d+))?/)
   return { host: m?.[1] ?? '127.0.0.1', port: m?.[2] ? Number(m[2]) : 9000 }
+}
+
+/**
+ * python 可执行判定：
+ *  - 绝对/相对路径（含分隔符，如 PPSV3_PYTHON 默认的 /opt/pocr3-venv/bin/python）：
+ *    直接查文件存在 + 可执行位。venv 未随部署落地时这里必须判失败——否则 auto 模式
+ *    会显示"守护已启用"，随后 spawn ENOENT 把每次 OCR 拖进 30s 启动超时再静默失败。
+ *  - 裸命令（python3）：走 PATH 查找。
+ */
+function pythonUsable(python: string): boolean {
+  try {
+    if (python.includes('/')) {
+      const st = fs.statSync(python)
+      if (!st.isFile()) return false
+      fs.accessSync(python, fs.constants.X_OK)
+      return true
+    }
+    execSync('command -v ' + python, { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
 }
 
 function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
@@ -158,7 +180,11 @@ export class SidecarSupervisor {
             : ''),
       )
     } else {
-      console.log('[sidecar] 守护未启用（OCR_SUPERVISE=0 或脚本缺失），按外部侧车模式运行')
+      const reason = this.disabledReason()
+      console.log(
+        `[sidecar] 守护未启用（${reason || '未知原因'}），按外部侧车模式运行；` +
+          `若 OCR 结果持续为空，请检查 ${this.cfg.baseUrl} 是否有侧车在监听`,
+      )
     }
   }
 
@@ -168,12 +194,19 @@ export class SidecarSupervisor {
     if (raw === '1') return false
     // auto：脚本存在且 python 可用才启用
     if (!this.cfg.script || !fs.existsSync(this.cfg.script)) return true
-    try {
-      require('child_process').execSync('command -v ' + this.cfg.python, { stdio: 'ignore' })
-      return false
-    } catch {
-      return true
+    return !pythonUsable(this.cfg.python)
+  }
+
+  /** 托管未启用的具体原因（auto 模式排查侧车"静默不通"的第一现场） */
+  private disabledReason(): string {
+    const raw = this.cfg.supervise
+    if (raw === '0') return 'supervise=0（外部侧车模式）'
+    if (raw === '1') return ''
+    if (!this.cfg.script || !fs.existsSync(this.cfg.script)) {
+      return `脚本缺失（${this.cfg.script || '未解析到 main.py/main3.py'}）`
     }
+    if (!pythonUsable(this.cfg.python)) return `python 不可用（${this.cfg.python}）`
+    return ''
   }
 
   /** 当前是否应回收侧车（纯函数，便于测试）。不在使用中、超过容忍窗口即停。 */
@@ -278,6 +311,10 @@ export class SidecarSupervisor {
         console.log(`[sidecar] 子进程日志：${logPath}`)
       }
       const closeLog = () => { if (logFd >= 0) { try { fs.closeSync(logFd) } catch { /* ignore */ } } }
+      // spawn 失败（python 不存在/无权限/脚本语法错误退出）→ 立即记下，轮询里优先抛错，
+      // 不耗满 startTimeout（此前 ENOENT 要卡 30s 才"启动超时"，每次 OCR 都白等）。
+      // 用对象承载：闭包内赋值后 while 里的 truthy 窄化才不会被 TS 收窄成 never。
+      const spawnState: { err: Error | null } = { err: null }
       child.on('exit', (code, signal) => {
         closeLog()
         this.child = null
@@ -287,11 +324,15 @@ export class SidecarSupervisor {
       })
       child.on('error', (e) => {
         closeLog()
-        console.warn(`[sidecar] 子进程错误: ${(e as Error)?.message ?? e}`)
+        spawnState.err = e instanceof Error ? e : new Error(String(e))
+        console.warn(`[sidecar] 子进程错误: ${spawnState.err.message}`)
       })
       this.child = child
       const deadline = Date.now() + timeoutMs
       while (Date.now() < deadline) {
+        if (spawnState.err) {
+          throw new Error(`侧车启动失败（spawn ${this.cfg.python}）: ${spawnState.err.message}`)
+        }
         if (await this.isHealthy()) return
         await new Promise((r) => setTimeout(r, 500))
       }
