@@ -6,9 +6,9 @@
   "scripts": {
     "build": "nest build",
     "dev": "nest start --watch",
-    "start": "nest start",
+    "start": "nest build && node dist/main",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main"
+    "start:prod": "nest build && node dist/main"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.958.0",
@@ -39,7 +39,7 @@
     "drizzle-kit": "^0.31.8",
     "typescript": "^5.7.2"
   },
-  "main": "index.js",
+  "main": "dist/main.js",
   "keywords": [],
   "author": "",
   "license": "ISC",
