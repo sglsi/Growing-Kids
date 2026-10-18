@@ -1,142 +1,267 @@
-// ============================================================
-// 成长学习伙伴 · shared/schema.ts（v4）
-// 位置：server/src/storage/database/shared/schema.ts
-// 说明：v4「合表 + 多租户」完整重写，整体替换原文件。
-// 依据：数据库重新设计-v4.md §C / migrations/0002_fresh_schema.sql
-// ============================================================
-
-import {
-  pgTable, varchar, text, timestamp, jsonb, integer, bigint,
-  boolean, serial, index, uniqueIndex,
-} from "drizzle-orm/pg-core"
+// @ts-nocheck
+import { pgTable, serial, timestamp, index, unique, varchar, integer, foreignKey, text, jsonb, boolean, bigint } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
-// ---------- health_check：平台探活（保留） ----------
+
+
 export const healthCheck = pgTable("health_check", {
-  id: serial().notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow(),
+	id: serial().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 });
 
-// ---------- users：用户（匿名可读写，1 天后清理） ----------
+export const subjectsLegacy = pgTable("subjects_legacy", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	name: varchar({ length: 50 }).notNull(),
+	color: varchar({ length: 30 }).default('gray-500').notNull(),
+	sortOrder: integer("sort_order").default(0).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("subjects_sort_order_idx").using("btree", table.sortOrder.asc().nullsLast().op("int4_ops")),
+	unique("subjects_name_unique").on(table.name),
+]);
+
+export const questionsLegacy = pgTable("questions_legacy", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	subjectId: varchar("subject_id", { length: 36 }).notNull(),
+	questionContent: text("question_content").notNull(),
+	questionImageKeys: jsonb("question_image_keys").default([]).notNull(),
+	answerContent: text("answer_content").default('').notNull(),
+	answerImageKeys: jsonb("answer_image_keys").default([]).notNull(),
+	solution: text().default('').notNull(),
+	wrongAnswer: text("wrong_answer").default('').notNull(),
+	source: varchar({ length: 100 }).default('').notNull(),
+	status: varchar({ length: 20 }).default('answered').notNull(),
+	recognizedAt: timestamp("recognized_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	mastered: boolean().default(false).notNull(),
+	masteredAt: timestamp("mastered_at", { withTimezone: true, mode: 'string' }),
+}, (table) => [
+	index("questions_created_at_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	index("questions_status_idx").using("btree", table.status.asc().nullsLast().op("text_ops")),
+	index("questions_subject_created_idx").using("btree", table.subjectId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	index("questions_subject_id_idx").using("btree", table.subjectId.asc().nullsLast().op("text_ops")),
+	foreignKey({
+			columns: [table.subjectId],
+			foreignColumns: [subjectsLegacy.id],
+			name: "questions_subject_id_subjects_id_fk"
+		}).onDelete("cascade"),
+]);
+
+export const materialsLegacy = pgTable("materials_legacy", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	name: varchar({ length: 255 }).notNull(),
+	type: varchar({ length: 20 }).default('image').notNull(),
+	fileKey: varchar("file_key", { length: 500 }).notNull(),
+	url: text().notNull(),
+	mimeType: varchar("mime_type", { length: 100 }).default('').notNull(),
+	sizeBytes: integer("size_bytes").default(0).notNull(),
+	subjectId: varchar("subject_id", { length: 36 }),
+	used: boolean().default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("materials_created_at_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	index("materials_type_idx").using("btree", table.type.asc().nullsLast().op("text_ops")),
+]);
+
+export const documentsLegacy = pgTable("documents_legacy", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	title: varchar({ length: 255 }).notNull(),
+	type: varchar({ length: 20 }).default('docx').notNull(),
+	fileKey: varchar("file_key", { length: 500 }).notNull(),
+	url: text().notNull(),
+	mimeType: varchar("mime_type", { length: 100 }).default('').notNull(),
+	sizeBytes: integer("size_bytes").default(0).notNull(),
+	createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("documents_created_at_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamp_ops")),
+]);
+
 export const users = pgTable("users", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  open_id: varchar("open_id", { length: 64 }).unique(),
-  nickname: varchar("nickname", { length: 64 }),
-  avatar_url: text("avatar_url"),
-  is_anonymous: boolean("is_anonymous").notNull().default(false),
-  expire_at: timestamp("expire_at", { withTimezone: true }),
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	openId: varchar("open_id", { length: 64 }),
+	nickname: varchar({ length: 64 }),
+	avatarUrl: text("avatar_url"),
+	isAnonymous: boolean("is_anonymous").default(false).notNull(),
+	expireAt: timestamp("expire_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-  index("users_anon_expire_idx").on(table.expire_at),
+	index("users_anon_expire_idx").using("btree", table.expireAt.asc().nullsLast().op("timestamptz_ops")).where(sql`is_anonymous`),
+	unique("users_open_id_key").on(table.openId),
 ]);
 
-// ---------- subjects：学科（每用户独立） ----------
-export const subjects = pgTable("subjects", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  user_id: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 32 }).notNull(),
-  color: varchar("color", { length: 16 }).notNull().default("gray-500"),
-  sort_order: integer("sort_order").notNull().default(0),
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-}, (table) => [
-  uniqueIndex("subjects_user_name_idx").on(table.user_id, table.name),
-  index("subjects_user_sort_idx").on(table.user_id, table.sort_order),
-]);
-
-// ---------- timeline_items：统一收件箱（最近题目 / 复习本） ----------
 export const timelineItems = pgTable("timeline_items", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  user_id: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
-  subject_id: varchar("subject_id", { length: 36 }).references(() => subjects.id, { onDelete: "set null" }),
-  kind: varchar("kind", { length: 16 }).notNull(),               // 'image' | 'question'
-  title: text("title"),
-  file_key: text("file_key"),
-  thumb_key: text("thumb_key"),
-  mime_type: varchar("mime_type", { length: 64 }),
-  width: integer("width"),
-  height: integer("height"),
-  size_bytes: bigint("size_bytes", { mode: "number" }),
-  file_hash: varchar("file_hash", { length: 64 }),
-  content: jsonb("content").$type<{
-    question?: string; answer?: string; solution?: string;
-    wrong_answer?: string; images?: string[]; status?: string;
-    question_images?: string[]; answer_images?: string[];
-    level?: number; parent_index?: number | null; stem?: string;
-  }>().notNull().default(sql`'{}'::jsonb`),
-  source: varchar("source", { length: 24 }),
-  in_review_book: boolean("in_review_book").notNull().default(false),
-  added_to_review_at: timestamp("added_to_review_at", { withTimezone: true }),
-  tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
-  mastered: boolean("mastered").notNull().default(false),
-  mastered_at: timestamp("mastered_at", { withTimezone: true }),
-  deleted_at: timestamp("deleted_at", { withTimezone: true }),
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	userId: varchar("user_id", { length: 36 }).notNull(),
+	subjectId: varchar("subject_id", { length: 36 }),
+	kind: varchar({ length: 16 }).notNull(),
+	title: text(),
+	fileKey: text("file_key"),
+	thumbKey: text("thumb_key"),
+	mimeType: varchar("mime_type", { length: 64 }),
+	width: integer(),
+	height: integer(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sizeBytes: bigint("size_bytes", { mode: "number" }),
+	fileHash: varchar("file_hash", { length: 64 }),
+	content: jsonb().default({}).notNull(),
+	source: varchar({ length: 24 }),
+	inReviewBook: boolean("in_review_book").default(false).notNull(),
+	addedToReviewAt: timestamp("added_to_review_at", { withTimezone: true, mode: 'string' }),
+	tags: text().array().default([""]).notNull(),
+	mastered: boolean().default(false).notNull(),
+	masteredAt: timestamp("mastered_at", { withTimezone: true, mode: 'string' }),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-  index("timeline_user_created_idx").on(table.user_id, table.created_at),
-  index("timeline_review_idx").on(table.user_id, table.added_to_review_at),
-  index("timeline_subject_idx").on(table.user_id, table.subject_id),
-  index("timeline_hash_idx").on(table.user_id, table.file_hash),
-  // 注：GIN(tags) 与部分索引（where deleted_at is null）在 SQL 脚本中建
+	index("timeline_hash_idx").using("btree", table.userId.asc().nullsLast().op("text_ops"), table.fileHash.asc().nullsLast().op("text_ops")),
+	index("timeline_review_idx").using("btree", table.userId.asc().nullsLast().op("timestamptz_ops"), table.addedToReviewAt.desc().nullsFirst().op("text_ops")).where(sql`(in_review_book AND (deleted_at IS NULL))`),
+	index("timeline_subject_idx").using("btree", table.userId.asc().nullsLast().op("text_ops"), table.subjectId.asc().nullsLast().op("text_ops")),
+	index("timeline_tags_gin").using("gin", table.tags.asc().nullsLast().op("array_ops")),
+	index("timeline_user_created_idx").using("btree", table.userId.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("text_ops")).where(sql`(deleted_at IS NULL)`),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "timeline_items_user_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.subjectId],
+			foreignColumns: [subjects.id],
+			name: "timeline_items_subject_id_fkey"
+		}).onDelete("set null"),
 ]);
 
-// ---------- library_docs：资料库（外部文档） ----------
 export const libraryDocs = pgTable("library_docs", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  user_id: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
-  subject_id: varchar("subject_id", { length: 36 }).references(() => subjects.id, { onDelete: "set null" }),
-  name: varchar("name", { length: 128 }).notNull(),
-  file_key: text("file_key").notNull(),
-  thumb_key: text("thumb_key"),                                 // 缩略图（WebP，宽<=400）
-  mime_type: varchar("mime_type", { length: 64 }),
-  width: integer("width"),
-  height: integer("height"),
-  size_bytes: bigint("size_bytes", { mode: "number" }),
-  file_hash: varchar("file_hash", { length: 64 }),               // sha256，内容去重
-  source: varchar("source", { length: 24 }),
-  tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
-  deleted_at: timestamp("deleted_at", { withTimezone: true }),
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	userId: varchar("user_id", { length: 36 }).notNull(),
+	subjectId: varchar("subject_id", { length: 36 }),
+	name: varchar({ length: 128 }).notNull(),
+	fileKey: text("file_key").notNull(),
+	mimeType: varchar("mime_type", { length: 64 }),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sizeBytes: bigint("size_bytes", { mode: "number" }),
+	source: varchar({ length: 24 }),
+	tags: text().array().default([""]).notNull(),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	thumbKey: text("thumb_key"),
+	width: integer(),
+	height: integer(),
+	fileHash: varchar("file_hash", { length: 64 }),
 }, (table) => [
-  index("library_user_created_idx").on(table.user_id, table.created_at),
-  index("library_hash_idx").on(table.user_id, table.file_hash),
+	index("library_hash_idx").using("btree", table.userId.asc().nullsLast().op("text_ops"), table.fileHash.asc().nullsLast().op("text_ops")),
+	index("library_user_created_idx").using("btree", table.userId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("text_ops")).where(sql`(deleted_at IS NULL)`),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "library_docs_user_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.subjectId],
+			foreignColumns: [subjects.id],
+			name: "library_docs_subject_id_fkey"
+		}).onDelete("set null"),
 ]);
 
-// ---------- documents：文档页（小程序生成） ----------
 export const documents = pgTable("documents", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  user_id: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
-  title: varchar("title", { length: 128 }).notNull(),
-  type: varchar("type", { length: 8 }).notNull(),                // 'docx'|'pdf'
-  file_key: text("file_key").notNull(),
-  mime_type: varchar("mime_type", { length: 64 }),
-  size_bytes: bigint("size_bytes", { mode: "number" }),
-  file_hash: varchar("file_hash", { length: 64 }),               // sha256，内容去重
-  meta: jsonb("meta").notNull().default(sql`'{}'::jsonb`),
-  deleted_at: timestamp("deleted_at", { withTimezone: true }),
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	userId: varchar("user_id", { length: 36 }).notNull(),
+	title: varchar({ length: 128 }).notNull(),
+	type: varchar({ length: 8 }).notNull(),
+	fileKey: text("file_key").notNull(),
+	mimeType: varchar("mime_type", { length: 64 }),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sizeBytes: bigint("size_bytes", { mode: "number" }),
+	meta: jsonb().default({}).notNull(),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	fileHash: varchar("file_hash", { length: 64 }),
 }, (table) => [
-  index("documents_user_created_idx").on(table.user_id, table.created_at),
-  index("documents_hash_idx").on(table.user_id, table.file_hash),
+	index("documents_hash_idx").using("btree", table.userId.asc().nullsLast().op("text_ops"), table.fileHash.asc().nullsLast().op("text_ops")),
+	index("documents_user_created_idx").using("btree", table.userId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("text_ops")).where(sql`(deleted_at IS NULL)`),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "documents_user_id_fkey"
+		}).onDelete("cascade"),
 ]);
 
-// ---------- blob_objects：内容寻址 + 引用计数（全局去重） ----------
-// 依据：复习本与项目设计.md §11.3 策略 4
-// content_hash 作主键 ⇒ 同一份内容再多用户也只占一个对象存储对象；
-// ref_count 归零才真删文件 ⇒ 跨用户共享的文件不会被误删。
 export const blobObjects = pgTable("blob_objects", {
-  content_hash: varchar("content_hash", { length: 64 }).primaryKey(), // sha256 hex
-  storage_key: text("storage_key").notNull(),                        // 主对象 key
-  ref_count: integer("ref_count").notNull().default(0),              // 引用计数
-  size_bytes: bigint("size_bytes", { mode: "number" }),
-  mime_type: varchar("mime_type", { length: 64 }),
-  kind: varchar("kind", { length: 16 }).notNull().default("image"),  // 'image' | 'doc'
-  width: integer("width"),
-  height: integer("height"),
-  variants: jsonb("variants").notNull().default(sql`'{}'::jsonb`),   // { original, display, thumb }
-  created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  last_ref_at: timestamp("last_ref_at", { withTimezone: true }).defaultNow().notNull(),
+	contentHash: varchar("content_hash", { length: 64 }).primaryKey().notNull(),
+	storageKey: text("storage_key").notNull(),
+	refCount: integer("ref_count").default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sizeBytes: bigint("size_bytes", { mode: "number" }),
+	mimeType: varchar("mime_type", { length: 64 }),
+	kind: varchar({ length: 16 }).default('image').notNull(),
+	width: integer(),
+	height: integer(),
+	variants: jsonb().default({}).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastRefAt: timestamp("last_ref_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	originalBytes: bigint("original_bytes", { mode: "number" }),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	thumbBytes: bigint("thumb_bytes", { mode: "number" }),
 }, (table) => [
-  index("blob_created_idx").on(table.created_at),
-  index("blob_gc_idx").on(table.ref_count, table.last_ref_at),
+	index("blob_created_idx").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	index("blob_gc_idx").using("btree", table.refCount.asc().nullsLast().op("int4_ops"), table.lastRefAt.asc().nullsLast().op("int4_ops")).where(sql`(ref_count = 0)`),
+]);
+
+export const subjects = pgTable("subjects", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	userId: varchar("user_id", { length: 36 }).notNull(),
+	name: varchar({ length: 32 }).notNull(),
+	color: varchar({ length: 16 }).default('gray-500').notNull(),
+	sortOrder: integer("sort_order").default(0).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "subjects_user_id_fkey"
+		}).onDelete("cascade"),
+	unique("subjects_user_id_name_key").on(table.userId, table.name),
+]);
+
+export const userQuota = pgTable("user_quota", {
+	userId: text("user_id").primaryKey().notNull(),
+	tier: varchar({ length: 20 }).default('free').notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	quotaBytes: bigint("quota_bytes", { mode: "number" }).default(524288000).notNull(),
+	quotaCount: integer("quota_count").default(300).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	monthlyBytes: bigint("monthly_bytes", { mode: "number" }).default(209715200).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	usedBytes: bigint("used_bytes", { mode: "number" }).default(0).notNull(),
+	usedCount: integer("used_count").default(0).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("user_quota_tier_idx").using("btree", table.tier.asc().nullsLast().op("text_ops")),
+]);
+
+export const knowledgeArticles = pgTable("knowledge_articles", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	title: varchar({ length: 255 }).notNull(),
+	content: text().notNull(),
+	category: varchar({ length: 64 }),
+	tags: text().array().default([]).notNull(),
+	isActive: boolean("is_active").default(true).notNull(),
+	sortOrder: integer("sort_order").default(0).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("knowledge_tags_gin").using("gin", table.tags.asc().nullsLast().op("array_ops")),
+]);
+
+export const chatMessages = pgTable("chat_messages", {
+	id: varchar({ length: 36 }).default(gen_random_uuid()).primaryKey().notNull(),
+	sessionId: varchar("session_id", { length: 36 }).notNull(),
+	userId: varchar("user_id", { length: 36 }),
+	role: varchar({ length: 20 }).notNull(),
+	content: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("chat_session_created_idx").using("btree", table.sessionId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
 ]);

@@ -8,6 +8,8 @@ export default defineAppConfig({
     'pages/detail/index',
     'pages/library/index',
     'pages/profile/index',
+    'pages/chat/index',
+    'pages/chat/admin',
     'pages/memory/edit',
     'pages/memory/detail'
   ],

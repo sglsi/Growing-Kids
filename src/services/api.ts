@@ -1139,3 +1139,105 @@ export async function saveQuestionAsImage(
     source: 'camera',
   })
 }
+
+// ============================================================
+// 智能客服（chat）
+// ============================================================
+export interface KnowledgeArticle {
+  id: string
+  title: string
+  content: string
+  category: string | null
+  tags: string[]
+  is_active: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatMessage {
+  id: string
+  session_id: string
+  user_id: string | null
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export interface ChatSendResult {
+  session_id: string
+  reply: string
+  user_message_id: string
+  assistant_message_id: string
+}
+
+export function fetchKnowledgeList() {
+  return unwrap<KnowledgeArticle[]>(
+    Network.request({ url: '/api/chat/knowledge', method: 'GET', header: authHeaders() }),
+  )
+}
+
+export function createKnowledgeArticle(input: {
+  title: string
+  content: string
+  category?: string
+  tags?: string[]
+  is_active?: boolean
+  sort_order?: number
+}) {
+  return unwrap<KnowledgeArticle>(
+    Network.request({
+      url: '/api/chat/knowledge',
+      method: 'POST',
+      data: input,
+      header: authHeaders(),
+    }),
+  )
+}
+
+export function updateKnowledgeArticle(
+  id: string,
+  patch: Partial<
+    Pick<KnowledgeArticle, 'title' | 'content' | 'category' | 'tags' | 'is_active' | 'sort_order'>
+  >,
+) {
+  return unwrap<KnowledgeArticle>(
+    Network.request({
+      url: `/api/chat/knowledge/${id}`,
+      method: 'PATCH',
+      data: patch,
+      header: authHeaders(),
+    }),
+  )
+}
+
+export function deleteKnowledgeArticle(id: string) {
+  return unwrap<{ id: string }>(
+    Network.request({
+      url: `/api/chat/knowledge/${id}`,
+      method: 'DELETE',
+      header: authHeaders(),
+    }),
+  )
+}
+
+export function sendChatMessage(sessionId: string | null, content: string) {
+  return unwrap<ChatSendResult>(
+    Network.request({
+      url: '/api/chat/message',
+      method: 'POST',
+      data: { session_id: sessionId || '', content },
+      header: authHeaders(),
+    }),
+  )
+}
+
+export function fetchChatHistory(sessionId: string) {
+  return unwrap<ChatMessage[]>(
+    Network.request({
+      url: `/api/chat/messages?session_id=${encodeURIComponent(sessionId)}`,
+      method: 'GET',
+      header: authHeaders(),
+    }),
+  )
+}

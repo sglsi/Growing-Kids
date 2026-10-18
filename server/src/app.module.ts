@@ -23,6 +23,7 @@ import { SearchModule } from './search/search.module'
 import { MaintenanceModule } from './maintenance/maintenance.module'
 import { QuotaModule } from './quota/quota.module'
 import { MemoryModule } from './memory/memory.module'
+import { ChatModule } from './chat/chat.module'
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { MemoryModule } from './memory/memory.module'
     MaintenanceModule,
     QuotaModule, // 策略 6：配额
     MemoryModule, // 成长记忆
+    ChatModule, // 智能客服
   ],
   controllers: [AppController],
   providers: [AppService],

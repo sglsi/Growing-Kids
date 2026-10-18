@@ -1,7 +1,7 @@
 import { View, Text, Image, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive } from 'lucide-react-taro'
+import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
@@ -181,6 +181,28 @@ export default function ProfilePage() {
                 </Button>
               </>
             )}
+          </Card>
+
+          {/* 智能客服 */}
+          <Card
+            className="rounded-2xl border-border p-4 mb-5"
+            onClick={() => Taro.navigateTo({ url: '/pages/chat/index' })}
+          >
+            <View className="flex flex-row items-center gap-3">
+              <View
+                className="rounded-xl flex items-center justify-center"
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(190,62,45,0.10)' }}
+              >
+                <Bot size={20} color="#BE3E2D" />
+              </View>
+              <View className="flex-1">
+                <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
+                <Text className="block text-xs text-muted-foreground mt-1">
+                  关于小程序的功能和使用问题都可以问我
+                </Text>
+              </View>
+              <Text className="block text-base text-muted-foreground">›</Text>
+            </View>
           </Card>
 
           {/* 数据概览 */}
