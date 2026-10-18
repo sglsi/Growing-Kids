@@ -4,6 +4,7 @@ import 'dotenv/config';
 
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '@/app.module';
+import { AppController } from '@/app.controller';
 import * as express from 'express';
 import { HttpStatusInterceptor } from '@/interceptors/http-status.interceptor';
 
@@ -48,6 +49,13 @@ async function bootstrap() {
   app.useGlobalInterceptors(new HttpStatusInterceptor());
   // 1. 开启优雅关闭 Hooks (关键!)
   app.enableShutdownHooks();
+
+  // 2. 原生根路由：Nest 全局前缀 api 不含 /，直接打开托管域名会得到默认 404。
+  //    这里绕过 Nest 路由系统挂一个 /，复用 AppController.getRoot() 的服务名片。
+  const appController = app.get(AppController);
+  app.getHttpAdapter().get('/', (_req, res) => {
+    res.json(appController.getRoot());
+  });
 
   // 2. 解析端口
   const port = parsePort();
