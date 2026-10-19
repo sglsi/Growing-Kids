@@ -26,9 +26,27 @@
 > - 顶部工具栏的 `···`（更多）菜单里；
 > - 旧界面里它在 **左下角齿轮 ⚙ → Project Settings → Database**。
 
-### 3. 选「Session pooler」（**别选 Direct connection**）
+### 3. 点「Direct Connection string」页签 → 再选 Session pooler
 
-面板里通常有这几项，含义和选法：
+弹出面板的顶部有 **5 个页签**，别被名字骗了 —— 连接串入口叫 **Direct Connection string**：
+
+```
+Framework | Server | Direct Connection string | ORM | MCP
+```
+
+**Session pooler 不是页签，是点进「Direct Connection string」之后里面的一个"连接方式"选项。**
+
+操作顺序：
+
+1. 点 **`Direct Connection string`**（第 3 个页签，圆柱形数据库图标）；
+2. 进入后，面板上方会出现连接方式选择（下拉框 / 单选，标签是 *Connection method* 或 *Type* 之类）；
+3. 在下拉里选 **Session pooler**；
+4. 下方的 URI 会跟着变成 `postgres.<项目ref>@...pooler.supabase.com:5432`，复制它。
+
+> 如果下拉里只有 Direct / Transaction 两种，没有 Session —— 换成 **Transaction pooler（6543）** 也能用，
+> 我们的迁移脚本已经规避了 prepared statement 限制（见下表说明）。
+
+三种方式的对比（复制前先确认自己选对了）：
 
 | 选项 | 端口 | 用户名长相 | 要不要选 |
 |---|---|---|---|
