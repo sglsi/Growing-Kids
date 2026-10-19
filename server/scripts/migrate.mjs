@@ -72,9 +72,31 @@ function loadEnv() {
   }
 }
 
+/**
+ * 连接串清洗：修掉从面板/文档复制时常见的两种畸形写法。
+ * 实战案例（2026-10-19）：
+ *   postgresql://postgres.<ref>:[pwd]@//aws-0-ap-southeast-1.pooler.supabase.com/:5432/postgres
+ *   → host 前多了一对 //（UNC 风格残留），端口前多了一个 /，直接喂给 pg 会解析失败。
+ */
+function normalizeConn(raw) {
+  let s = String(raw || '').trim()
+  s = s.replace(/@\/\/+/g, '@')              // @//host → @host
+  s = s.replace(/\/(\:\d{2,5})(?=\/|$)/, '$1') // host/:5432 → host:5432
+  s = s.replace(/\s+/g, '')                  // 复制时夹带的空格/换行
+  return s
+}
+
+/** 找出未替换的密码占位符：[YOUR-PASSWORD]、[*]、YOUR-PASSWORD */
+function findPlaceholder(conn) {
+  const bracket = /\[[^\]]*\]/.exec(conn)
+  if (bracket) return bracket[0]
+  if (/YOUR[-_]?PASSWORD/i.test(conn)) return 'YOUR-PASSWORD'
+  return null
+}
+
 function resolveConn() {
   const direct = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL
-  if (direct) return { conn: direct, from: 'DATABASE_URL/SUPABASE_DB_URL' }
+  if (direct) return { conn: normalizeConn(direct), from: 'DATABASE_URL/SUPABASE_DB_URL' }
 
   const apiUrl = process.env.SUPABASE_URL || process.env.COZE_SUPABASE_URL
   const pwd = process.env.SUPABASE_DB_PASSWORD
@@ -139,8 +161,19 @@ async function main() {
     console.error('   详细图文步骤见 docs/获取DATABASE_URL-操作指引.md')
     process.exit(2)
   }
+  const placeholder = findPlaceholder(conn)
+  if (placeholder) {
+    console.error(`\n[migrate] ✗ 连接串里还有未替换的密码占位符：${placeholder}`)
+    console.error('   把 [YOUR-PASSWORD] 换成真实数据库密码后重试。')
+    console.error('   忘记密码：Supabase 项目页 Connect 面板 / Settings → Database → Reset password。')
+    process.exit(2)
+  }
+
   console.log('\n[migrate] 连接串来源：', from)
   console.log('[migrate] 目标：', redact(conn))
+  if (/@db\..*supabase\.co/.test(conn)) {
+    console.log('[migrate] ⚠️ 这是 Direct connection（IPv6）。国内网络大概率连接超时，建议换 Session pooler。')
+  }
 
   if (DRY) {
     console.log('\n[migrate] --dry 干跑模式，未连接数据库。将执行：')
