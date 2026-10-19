@@ -2,7 +2,7 @@
   "miniprogramRoot": "./dist",
   "projectname": "growing-kids",
   "description": "test",
-  "appid": "touristappid",
+  "appid": "wx48bf5ba9bae0bf39",
   "setting": {
     "urlCheck": false,
     "es6": false,

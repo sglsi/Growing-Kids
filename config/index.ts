@@ -23,7 +23,7 @@ const serverPort = resolvePort(process.env.SERVER_PORT, 3000);
 const generateTTProjectConfig = (outputRoot: string) => {
   const config = {
     miniprogramRoot: './',
-    projectname: 'coze-mini-program',
+    projectname: 'growing-kids',
     appid: process.env.TARO_APP_TT_APPID || '',
     setting: {
       urlCheck: false,
@@ -54,7 +54,15 @@ export default defineConfig<'vite'>(async (merge, _env) => {
   const isH5 = process.env.TARO_ENV === 'h5';
 
   const buildMiniCIPluginConfig = () => {
-    const hasWeappConfig = !!process.env.TARO_APP_WEAPP_APPID;
+    // 微信 appid：优先显式 TARO_APP_WEAPP_APPID，回退平台注入的 WX_APPID
+    const weappAppid = process.env.TARO_APP_WEAPP_APPID || process.env.WX_APPID;
+    // 微信 CI 上传必须同时具备有效的「代码上传密钥」（公众平台下载，非 AppSecret）。
+    // 密钥为空/0 字节时不启用 CI 插件，保持“仅编译”行为，避免构建因无效密钥失败。
+    const weappKeyPath = path.resolve(__dirname, '../key/private.appid.key');
+    const hasWeappConfig =
+      !!weappAppid &&
+      fs.existsSync(weappKeyPath) &&
+      fs.statSync(weappKeyPath).size > 0;
     const hasTTConfig = !!process.env.TARO_APP_TT_EMAIL;
     if (!hasWeappConfig && !hasTTConfig) {
       return [];
@@ -65,7 +73,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
     };
     if (hasWeappConfig) {
       miniCIConfig.weapp = {
-        appid: process.env.TARO_APP_WEAPP_APPID,
+        appid: weappAppid,
         privateKeyPath: 'key/private.appid.key',
       };
     }
@@ -82,7 +90,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
   };
 
   const baseConfig: UserConfigExport<'vite'> = {
-    projectName: 'coze-mini-program',
+    projectName: 'growing-kids',
     date: '2026-1-13',
     alias: {
       '@': path.resolve(__dirname, '..', 'src'),
@@ -98,11 +106,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
     outputRoot,
     plugins: ['@tarojs/plugin-generator', ...buildMiniCIPluginConfig()],
     defineConstants: {
-      PROJECT_DOMAIN: JSON.stringify(
-        process.env.PROJECT_DOMAIN ||
-          process.env.COZE_PROJECT_DOMAIN_DEFAULT ||
-          '',
-      ),
+      PROJECT_DOMAIN: JSON.stringify(process.env.PROJECT_DOMAIN || ''),
       TARO_ENV: JSON.stringify(process.env.TARO_ENV),
     },
     copy: {
@@ -112,7 +116,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
     ...(process.env.TARO_ENV === 'tt' && {
       tt: {
         appid: process.env.TARO_APP_TT_APPID,
-        projectName: 'coze-mini-program',
+        projectName: 'growing-kids',
       },
     }),
     jsMinimizer: 'esbuild',
@@ -226,7 +230,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
       },
     },
     rn: {
-      appName: 'coze-mini-program',
+      appName: 'growing-kids',
       postcss: {
         cssModules: {
           enable: false, // 默认为 false，如需使用 css modules 功能，则设为 true

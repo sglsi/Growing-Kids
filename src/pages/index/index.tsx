@@ -1,19 +1,30 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { Trash2, BookmarkPlus, CircleUser } from 'lucide-react-taro'
+import { Trash2, BookmarkPlus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
+import ImageEditor from '@/components/image-editor'
 import { ActionBtn, BottomActionBar, EmptyCard } from '@/components/filter-header'
+import SubjectBadge from '@/components/subject-badge'
+import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
-  type Overview, type TimelineItem,
+  fetchSubjects, updateTimeline, replaceTimelineImage,
+  type Overview, type TimelineItem, type Subject, type ImageAction,
 } from '@/services/api'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
-import { getSubjectColor } from '@/types'
+
+/** 「更多操作」里可对图片执行的 AI 动作 */
+const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
+  { action: 'crop', label: '裁剪', icon: Crop },
+  { action: 'auto', label: '自动调正', icon: Wand },
+  { action: 'enhance', label: '智能高清', icon: Sparkles },
+  { action: 'erase', label: '去手写', icon: Eraser },
+]
 
 export default function IndexPage() {
   const [overview, setOverview] = useState<Overview | null>(null)
@@ -24,19 +35,32 @@ export default function IndexPage() {
   const [busy, setBusy] = useState(false)
   // 登录态（顶部入口展示）
   const [auth, setAuth] = useState<AuthState | null>(getAuthState())
+  // 学科列表（用于「最近题目」里手动改分类）
+  const [subjects, setSubjects] = useState<Subject[]>([])
+  // 当前正在改分类的条目（弹层状态）
+  const [pickerItem, setPickerItem] = useState<TimelineItem | null>(null)
+  // 「更多操作」弹层（#3：对已加入最近题目的资料再裁剪 / 高清 / 去手写）
+  const [moreItem, setMoreItem] = useState<TimelineItem | null>(null)
+  // 图片编辑器状态（复用 ImageEditor）
+  const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
+  const [editorSrc, setEditorSrc] = useState('')
+  const [editorAction, setEditorAction] = useState<ImageAction | null>(null)
+  const [savingEdit, setSavingEdit] = useState(false)
   const sel = useSelection()
 
   const load = async () => {
     setLoading(true)
     setAuth(getAuthState())
     try {
-      const [ov, list] = await Promise.all([
+      const [ov, list, subs] = await Promise.all([
         fetchOverview(),
         fetchTimeline({ scope: 'recent', pageSize: 20 }),
+        fetchSubjects().catch(() => [] as Subject[]),
       ])
       setOverview(ov)
       setInbox(list.list)
       setInboxTotal(list.total)
+      setSubjects(subs)
     } catch (e) {
       console.error('加载概览失败', e)
     } finally {
@@ -80,6 +104,104 @@ export default function IndexPage() {
     }
     const ok = await promptLogin()
     if (ok) load()
+  }
+
+  // ---------- 手动改分类 ----------
+  const openSubjectPicker = (item: TimelineItem) => setPickerItem(item)
+  const closePicker = () => setPickerItem(null)
+  const applySubject = async (sub: Subject | null) => {
+    const item = pickerItem
+    if (!item) return
+    const next = sub
+      ? { subject_id: sub.id, subjects: { id: sub.id, name: sub.name, color: sub.color } }
+      : { subject_id: null as string | null, subjects: null as null }
+    // 乐观更新（失败会回滚）
+    const prev = inbox
+    setInbox((p) => p.map((it) => it.id === item.id ? { ...it, ...next } : it))
+    closePicker()
+    try {
+      await updateTimeline(item.id, { subject_id: sub ? sub.id : null })
+      Taro.showToast({ title: sub ? `已归为「${sub.name}」` : '已设为未分类', icon: 'none' })
+    } catch (e) {
+      // 失败回滚，并把服务端真实原因透出（修复「更新失败，请重试」无信息可查）
+      setInbox(prev)
+      const msg = e instanceof Error && e.message ? e.message : '更新失败，请重试'
+      console.error('改分类失败', e)
+      Taro.showToast({ title: msg, icon: 'none' })
+    }
+  }
+
+  // ---------- 「更多操作」（#3） ----------
+  const openMore = (item: TimelineItem) => setMoreItem(item)
+  const closeMore = () => setMoreItem(null)
+
+  const openEditor = (item: TimelineItem, action: ImageAction | 'crop') => {
+    const src = item.url || item.thumb_url || ''
+    if (!src) {
+      Taro.showToast({ title: '图片地址缺失，请下拉刷新后重试', icon: 'none' })
+      return
+    }
+    setEditorItem(item)
+    setEditorSrc(src)
+    setEditorAction(action === 'crop' ? null : action)
+    closeMore()
+  }
+
+  /** 编辑器返回：把编辑结果保存并替换原条目 */
+  const handleEditorConfirm = async (tempFilePath: string) => {
+    const item = editorItem
+    setEditorItem(null)
+    setEditorSrc('')
+    if (!item) return
+    setSavingEdit(true)
+    Taro.showLoading({ title: '保存中…', mask: true })
+    try {
+      await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
+      Taro.hideLoading()
+      Taro.showToast({ title: '已更新该资料', icon: 'success' })
+      load()
+    } catch (e) {
+      Taro.hideLoading()
+      console.error('保存编辑结果失败', e)
+      const msg = e instanceof Error && e.message ? e.message : '保存失败，请重试'
+      Taro.showToast({ title: msg, icon: 'none' })
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
+  const handleMoreSubject = () => {
+    const item = moreItem
+    closeMore()
+    if (item) openSubjectPicker(item)
+  }
+  const handleMoreReview = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    try {
+      await addToReviewBook([item.id])
+      Taro.showToast({ title: '已加入复习本', icon: 'success' })
+      load()
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    }
+  }
+  const handleMoreDelete = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    const ok = await confirmDelete(1, '条')
+    if (!ok) return
+    try {
+      await batchDeleteTimeline([item.id])
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      load()
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    }
   }
 
   const handleOpen = (item: TimelineItem) => {
@@ -150,23 +272,34 @@ export default function IndexPage() {
             </View>
           </View>
 
-          {/* 识别与导入主操作区 */}
+          {/* 识别与导入主操作区（主操作独立，3 个次操作合并为一行） */}
           <Card className="rounded-2xl border-border p-4 mb-4">
-            <View className="flex flex-row gap-3 mb-3">
-              <Button className="flex-1 h-12 rounded-xl" onClick={goRecognize}>
-                <Text className="block text-sm">拍照 / 相册识别</Text>
-              </Button>
-              <Button variant="outline" className="flex-1 h-12 rounded-xl" onClick={goSplit}>
-                <Text className="block text-sm">题目答案分传</Text>
-              </Button>
+            <View
+              className="flex flex-row items-center gap-3 rounded-xl bg-primary mb-3 px-2 py-2"
+              onClick={goRecognize}
+            >
+              <View className="flex flex-row items-center justify-center w-9 h-9 rounded-full bg-primary-foreground">
+                <Camera size={18} color="#BE3E2D" />
+              </View>
+              <View className="flex-1">
+                <Text className="block text-sm font-medium text-primary-foreground">拍照 / 相册识别</Text>
+                <Text className="block text-xs text-primary-foreground opacity-70">拍下一道错题，自动整理到收件箱</Text>
+              </View>
+              <Text className="block text-primary-foreground opacity-70 text-xl">›</Text>
             </View>
-            <View className="flex flex-row gap-3">
-              <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={goDocImport}>
-                <Text className="block text-sm">导入文档识别</Text>
-              </Button>
-              <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={goLibrary}>
-                <Text className="block text-sm">资料库</Text>
-              </Button>
+            <View className="flex flex-row gap-2">
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goSplit}>
+                <Images size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">题答分传</Text>
+              </View>
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goDocImport}>
+                <FileText size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">导入文档</Text>
+              </View>
+              <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goLibrary}>
+                <BookmarkPlus size={14} color="#5C5750" />
+                <Text className="block text-sm text-foreground">资料库</Text>
+              </View>
             </View>
           </Card>
 
@@ -188,24 +321,19 @@ export default function IndexPage() {
               {/* 学科入口 */}
               <View className="mb-2 flex flex-row items-center justify-between">
                 <Text className="block text-sm font-semibold text-foreground">学科分类</Text>
-                <Text className="block text-xs text-muted-foreground" onClick={() => goSubject()}>全部</Text>
+                <Text className="block text-xs text-muted-foreground" onClick={() => goSubject()}>全部 ›</Text>
               </View>
               <View className="flex flex-row flex-wrap gap-2 mb-5">
                 {overview?.subject_stats?.length ? (
-                  overview.subject_stats.map((s) => {
-                    const c = getSubjectColor(s.color)
-                    return (
-                      <View
-                        key={s.subject_id}
-                        className={`flex flex-row items-center gap-2 rounded-full border px-3 py-2 ${c.badge}`}
-                        onClick={() => goSubject(s.subject_id)}
-                      >
-                        <View className={`w-2 h-2 rounded-full ${c.dot}`} />
-                        <Text className="block text-xs">{s.name}</Text>
-                        <Text className="block text-xs opacity-70">{s.count}</Text>
-                      </View>
-                    )
-                  })
+                  overview.subject_stats.map((s) => (
+                    <SubjectBadge
+                      key={s.subject_id}
+                      name={s.name}
+                      color={s.color}
+                      trailing={<Text className="block text-xs opacity-70">{s.count}</Text>}
+                      onClick={() => goSubject(s.subject_id)}
+                    />
+                  ))
                 ) : (
                   <Text className="block text-xs text-muted-foreground">暂无分类数据</Text>
                 )}
@@ -213,22 +341,11 @@ export default function IndexPage() {
 
               {/* 最近题目（统一收件箱） */}
               <View className="mb-2 flex flex-row items-center justify-between">
-                <Text className="block text-sm font-semibold text-foreground">
-                  最近题目 <Text className="block text-xs text-muted-foreground">（共 {inboxTotal} 条）</Text>
-                </Text>
-                {!sel.selecting ? (
-                  <Text className="block text-xs text-primary" onClick={sel.enter}>批量选择</Text>
-                ) : (
-                  <View className="flex flex-row items-center gap-3">
-                    {sel.count > 0 && (
-                      <>
-                        <Text className="block text-xs text-foreground">已选 {sel.count}</Text>
-                        <Text className="block text-xs text-muted-foreground" onClick={sel.clear}>清空</Text>
-                      </>
-                    )}
-                    <Text className="block text-xs text-primary" onClick={sel.exit}>取消</Text>
-                  </View>
-                )}
+                <View className="flex flex-col">
+                  <Text className="block text-sm font-semibold text-foreground">最近题目</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">共 {inboxTotal} 条 · 点学科标签可改分类，点「…」可再编辑</Text>
+                </View>
+                <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
               </View>
 
               {inbox.length ? (
@@ -241,6 +358,8 @@ export default function IndexPage() {
                       checked={sel.selected.has(item.id)}
                       onOpen={handleOpen}
                       onLongPress={(it) => sel.longPress(it.id)}
+                      onChangeSubject={openSubjectPicker}
+                      onMore={openMore}
                     />
                   ))}
                 </View>
@@ -278,6 +397,91 @@ export default function IndexPage() {
             />
           </View>
         </BottomActionBar>
+      )}
+
+      {/* 改分类弹层 */}
+      {pickerItem && (
+        <View className="z-50" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)' }} onClick={closePicker}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '70vh' }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">选择分类</Text>
+            <View className="overflow-y-auto">
+              {subjects.map((s) => (
+                <View key={s.id} className="mb-2">
+                  <SubjectBadge name={s.name} color={s.color} showArrow onClick={() => applySubject(s)} />
+                </View>
+              ))}
+              <View className="flex flex-row items-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 mb-2" onClick={() => applySubject(null)}>
+                <Text className="block text-sm text-muted-foreground">未分类 / 清除</Text>
+              </View>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closePicker}>
+                <Text className="block text-sm">取消</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* 「更多操作」弹层（#3） */}
+      {moreItem && (
+        <View className="z-50" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)' }} onClick={closeMore}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0 }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">
+              {moreItem.kind === 'image' ? '编辑这张图片' : '更多操作'}
+            </Text>
+
+            {moreItem.kind === 'image' && (
+              <View className="flex flex-row flex-wrap gap-3 mb-4">
+                {IMAGE_ACTIONS.map(({ action, label, icon: Icon }) => (
+                  <View
+                    key={action}
+                    className="flex flex-col items-center justify-center rounded-xl border border-border"
+                    style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
+                    onClick={() => openEditor(moreItem, action)}
+                  >
+                    <Icon size={20} color="#BE3E2D" />
+                    <Text className="block text-xs text-foreground mt-1">{label}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
+              <Tag size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">修改分类</Text>
+            </View>
+            {!moreItem.in_review_book && (
+              <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreReview}>
+                <BookmarkPlus size={18} color="#BE3E2D" />
+                <Text className="block text-sm text-foreground">加入复习本</Text>
+              </View>
+            )}
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
+              <Trash2 size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">删除</Text>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closeMore}>
+                <Text className="block text-sm">取消</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* 图片编辑器（复用；不显示「保存图片」按钮，编辑结果直接替换原条目） */}
+      <ImageEditor
+        visible={!!editorItem}
+        src={editorSrc}
+        autoAction={editorAction}
+        enableSaveToInbox={false}
+        onCancel={() => { setEditorItem(null); setEditorAction(null); setEditorSrc('') }}
+        onConfirm={handleEditorConfirm}
+      />
+
+      {savingEdit && (
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
       )}
     </View>
   )

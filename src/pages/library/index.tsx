@@ -1,10 +1,12 @@
-import { View, Text, ScrollView, Input } from '@tarojs/components'
+import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { FileText, Trash2 } from 'lucide-react-taro'
+import { FileText, Trash2, Upload } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
+import { Input } from '@/components/ui/input'
+import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
@@ -93,7 +95,9 @@ export default function LibraryPage() {
       const f = res.tempFiles[0]
       Taro.showLoading({ title: '上传中…' })
       // 后端 /api/upload 检测为非图片时自动归档到 library，并回传 library_id
-      await uploadFile(f.path)
+      // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
+      //    表现为「提示已归档，但资料库里没有」。
+      await uploadFile(f.path, { purpose: 'save' })
       Taro.hideLoading()
       Taro.showToast({ title: '已归档到资料库', icon: 'success' })
       load()
@@ -117,15 +121,16 @@ export default function LibraryPage() {
         <View className="flex flex-row items-center justify-between mb-2">
           <Text className="block text-base font-semibold text-foreground">资料库</Text>
           <View className="flex flex-row items-center gap-3">
-            {!sel.selecting ? (
-              <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
-            ) : (
-              <>
-                {sel.count > 0 && <Text className="block text-sm text-foreground">已选 {sel.count}</Text>}
-                <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
-              </>
+            <SelectionBar selection={sel} enterLabel="批量选择" />
+            {!sel.selecting && (
+              <View
+                className="flex flex-row items-center gap-1 rounded-xl bg-primary px-3 h-8"
+                onClick={handleUpload}
+              >
+                <Upload size={14} color="#fff" />
+                <Text className="block text-sm text-primary-foreground">导入</Text>
+              </View>
             )}
-            <Text className="block text-sm text-primary" onClick={handleUpload}>导入</Text>
           </View>
         </View>
         <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9 mb-3">
@@ -165,9 +170,7 @@ export default function LibraryPage() {
                     onLongPress={() => sel.longPress(d.id)}
                   >
                     {sel.selecting && (
-                      <View className={`w-5 h-5 flex-shrink-0 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-                        {checked && <Text className="block text-xs text-primary-foreground">✓</Text>}
-                      </View>
+                      <CheckDot checked={checked} size={20} />
                     )}
                     <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
                       <FileText size={20} color="#BE3E2D" />

@@ -1,10 +1,26 @@
 import { View, Text, Image } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { Check, Image as ImageIcon } from 'lucide-react-taro'
+import { Image as ImageIcon, Ellipsis } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
-import type { TimelineItem } from '@/types'
+import type { TimelineItem, ErrorAnalysis } from '@/types'
+
+/**
+ * 错因类型 → 角标配色（与详情页红橙色系呼应，但按错因语义分色，便于列表一眼分拣）
+ * 粗心类用琥珀、概念混用紫、审题偏用橙、步骤错用蓝、未作答/未判分用灰、未知用玫红
+ */
+const ERROR_ANALYSIS_BADGE: Record<ErrorAnalysis['type'], string> = {
+  'no-answer': 'bg-gray-50 text-gray-600 border-gray-200',
+  unscored: 'bg-gray-50 text-gray-600 border-gray-200',
+  'careless-sign': 'bg-amber-50 text-amber-700 border-amber-200',
+  'careless-calc': 'bg-amber-50 text-amber-700 border-amber-200',
+  'concept-mix': 'bg-purple-50 text-purple-700 border-purple-200',
+  misread: 'bg-orange-50 text-orange-700 border-orange-200',
+  'method-step': 'bg-blue-50 text-blue-700 border-blue-200',
+  unknown: 'bg-rose-50 text-rose-700 border-rose-200',
+}
 
 interface Props {
   item: TimelineItem
@@ -14,6 +30,10 @@ interface Props {
   checked?: boolean
   onOpen?: (item: TimelineItem) => void
   onLongPress?: (item: TimelineItem) => void
+  /** 点击学科徽章时触发（用于「最近题目」里手动改分类）；不传则徽章不响应点击 */
+  onChangeSubject?: (item: TimelineItem) => void
+  /** 点击「更多」时触发（用于对已加入的资料再做裁剪 / 智能高清 / 去手写等）；不传则不显示「更多」 */
+  onMore?: (item: TimelineItem) => void
   /** 复习本里展示「加入时间」而非创建时间 */
   timeField?: 'created_at' | 'added_to_review_at'
 }
@@ -24,7 +44,7 @@ interface Props {
  */
 export default function ReviewItemCard({
   item, showSubject = true, selecting = false, checked = false,
-  onOpen, onLongPress, timeField = 'created_at',
+  onOpen, onLongPress, timeField = 'created_at', onChangeSubject, onMore,
 }: Props) {
   const color = getSubjectColor(item.subjects?.color)
   const subjectName = item.subjects?.name || '未分类'
@@ -43,6 +63,16 @@ export default function ReviewItemCard({
 
   const time = formatDate((timeField === 'added_to_review_at' ? item.added_to_review_at : item.created_at) || '')
 
+  // 「更多」按钮（非选择态且有回调时显示）
+  const moreBtn = onMore && !selecting ? (
+    <View
+      className="w-8 h-8 flex items-center justify-center"
+      onClick={(e) => { e.stopPropagation?.(); onMore(item) }}
+    >
+      <Ellipsis size={18} color="#9A948A" />
+    </View>
+  ) : null
+
   // ---------- 图片条目：缩略图卡片 ----------
   if (item.kind === 'image') {
     const thumb = item.thumb_url || item.url || ''
@@ -55,9 +85,7 @@ export default function ReviewItemCard({
         <View className="flex flex-row">
           {selecting && (
             <View className="pl-3 flex items-center">
-              <View className={`w-5 h-5 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-                {checked && <Check size={13} color="#fff" />}
-              </View>
+              <CheckDot checked={!!checked} size={20} />
             </View>
           )}
           <View className={`w-2 self-stretch ${color.bar}`} />
@@ -72,17 +100,28 @@ export default function ReviewItemCard({
               )}
             </View>
             <View className="flex-1 min-w-0">
-              <View className="flex flex-row items-center gap-2 mb-1">
-                {showSubject && (
-                  <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
-                    {subjectName}
-                  </Badge>
-                )}
-                {item.in_review_book && (
-                  <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
-                    复习本
-                  </Badge>
-                )}
+              <View className="flex flex-row items-center justify-between">
+                <View className="flex flex-row items-center gap-2 mb-1">
+                  {showSubject && (
+                    onChangeSubject ? (
+                      <View onClick={(e) => { e.stopPropagation?.(); onChangeSubject(item) }}>
+                        <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                          {subjectName} ›
+                        </Badge>
+                      </View>
+                    ) : (
+                      <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                        {subjectName}
+                      </Badge>
+                    )
+                  )}
+                  {item.in_review_book && (
+                    <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
+                      复习本
+                    </Badge>
+                  )}
+                </View>
+                {moreBtn}
               </View>
               <Text className="block text-sm text-foreground leading-relaxed">
                 {truncate(item.title || '图片资料', 24)}
@@ -97,6 +136,9 @@ export default function ReviewItemCard({
 
   // ---------- 题目条目：学科色条 + 题干 + 答案摘要 ----------
   const c = item.content || {}
+  // 错因角标：草稿/题目卡一眼看出错因分类（详情页也有完整分析）
+  const ea = c.error_analysis
+  const eaBadgeCls = ea?.type ? ERROR_ANALYSIS_BADGE[ea.type] ?? ERROR_ANALYSIS_BADGE.unknown : null
   return (
     <Card
       className={`rounded-2xl border-border overflow-hidden ${checked ? 'border-primary' : ''}`}
@@ -106,9 +148,7 @@ export default function ReviewItemCard({
       <View className="flex flex-row">
         {selecting && (
           <View className="pl-3 flex items-center">
-            <View className={`w-5 h-5 rounded-full border flex items-center justify-center ${checked ? 'bg-primary border-primary' : 'border-muted-foreground'}`}>
-              {checked && <Check size={13} color="#fff" />}
-            </View>
+            <CheckDot checked={!!checked} size={20} />
           </View>
         )}
         <View className={`w-2 self-stretch ${color.bar}`} />
@@ -116,9 +156,17 @@ export default function ReviewItemCard({
           <View className="flex flex-row items-center justify-between mb-2">
             <View className="flex flex-row items-center gap-2">
               {showSubject && (
-                <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
-                  {subjectName}
-                </Badge>
+                onChangeSubject ? (
+                  <View onClick={(e) => { e.stopPropagation?.(); onChangeSubject(item) }}>
+                    <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                      {subjectName} ›
+                    </Badge>
+                  </View>
+                ) : (
+                  <Badge variant="outline" className={`${color.badge} border rounded-full px-2 py-0 text-xs`}>
+                    {subjectName}
+                  </Badge>
+                )
               )}
               {status === 'pending' && (
                 <Badge className="bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0 text-xs">
@@ -135,8 +183,22 @@ export default function ReviewItemCard({
                   复习本
                 </Badge>
               )}
+              {eaBadgeCls && ea?.label && (
+                <Badge className={`${eaBadgeCls} border rounded-full px-2 py-0 text-xs`}>
+                  {ea.label}
+                </Badge>
+              )}
+              {/* P3：规范题号标签（节·小类 题号）——复习本/错题库列表唯一指认题目 */}
+              {c.question_label ? (
+                <Badge className="border rounded-full px-2 py-0 text-xs" style={{ backgroundColor: 'rgba(190,62,45,0.08)', color: '#BE3E2D', borderColor: 'rgba(190,62,45,0.25)' }}>
+                  {c.question_label}
+                </Badge>
+              ) : null}
             </View>
-            <Text className="block text-xs text-muted-foreground shrink-0">{time}</Text>
+            <View className="flex flex-row items-center gap-1 shrink-0">
+              <Text className="block text-xs text-muted-foreground">{time}</Text>
+              {moreBtn}
+            </View>
           </View>
 
           <Text className="block text-sm text-foreground leading-relaxed mb-2">

@@ -8,10 +8,33 @@ import { Switch } from '@/components/ui/switch'
 import {
   fetchTimelineDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
   addToReviewBook, removeFromReviewBook, deleteTimeline,
+  fetchSimilar, markReviewed,
   type Subject, type TimelineItem,
 } from '@/services/api'
-import { getSubjectColor, formatTime } from '@/types'
+import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
+
+/** P2-18 艾宾浩斯间隔（与后端 timeline/review.ts 保持一致） */
+const EBBINGHAUS_INTERVALS = [1, 2, 4, 7, 15, 30]
+/** 前端现算复习计划（纯本地，避免跨端引后端模块） */
+function computePlan(createdAt?: string, reviewCount = 0): ReviewPlan {
+  const base = createdAt ? new Date(createdAt) : new Date()
+  const total = EBBINGHAUS_INTERVALS.length
+  const count = Math.max(0, Math.min(total, Math.floor(reviewCount) || 0))
+  const schedule = EBBINGHAUS_INTERVALS.map((day, i) => {
+    const d = new Date(base)
+    d.setDate(d.getDate() + day)
+    return { stage: i + 1, day, date: d.toISOString(), done: i < count }
+  })
+  const next = schedule.find((s) => !s.done)
+  return {
+    review_count: count,
+    total_stages: total,
+    completed: count >= total,
+    next_review_at: next ? next.date : null,
+    schedule,
+  }
+}
 
 export default function DetailPage() {
   const router = useRouter()
@@ -26,6 +49,13 @@ export default function DetailPage() {
   const [saving, setSaving] = useState(false)
   const [searchHint, setSearchHint] = useState('')
   const [mastered, setMastered] = useState(false)
+  // P2-18 复习计划
+  const [plan, setPlan] = useState<ReviewPlan | null>(null)
+  const [reviewing, setReviewing] = useState(false)
+  // P2-17 相似题
+  const [similar, setSimilar] = useState<SimilarItem[]>([])
+  const [similarOpen, setSimilarOpen] = useState(false)
+  const [similarLoading, setSimilarLoading] = useState(false)
 
   const load = async () => {
     const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
@@ -36,6 +66,7 @@ export default function DetailPage() {
     setAContent(it.content?.answer || '')
     setSolution(it.content?.solution || '')
     setMastered(it.mastered)
+    setPlan(computePlan(it.created_at, it.content?.review_count))
   }
 
   useEffect(() => {
@@ -127,6 +158,41 @@ export default function DetailPage() {
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
+    }
+  }
+
+  // P2-18 标记本次复习完成：更新计数并刷新复习计划
+  const handleReview = async () => {
+    if (!item) return
+    setReviewing(true)
+    try {
+      const { review_count, plan: newPlan } = await markReviewed(item.id)
+      setPlan(newPlan)
+      setItem({ ...item, content: { ...item.content, review_count } })
+      Taro.showToast({ title: '已记录本次复习', icon: 'success' })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  // P2-17 展开相似题：按需拉取（基于用户自建错题历史）
+  const toggleSimilar = async () => {
+    const next = !similarOpen
+    setSimilarOpen(next)
+    if (next && !similar.length && item) {
+      setSimilarLoading(true)
+      try {
+        const list = await fetchSimilar(item.id, 5)
+        setSimilar(list)
+      } catch (e) {
+        console.error(e)
+        Taro.showToast({ title: '相似题加载失败', icon: 'none' })
+      } finally {
+        setSimilarLoading(false)
+      }
     }
   }
 
@@ -230,7 +296,14 @@ export default function DetailPage() {
           <Switch checked={mastered} onCheckedChange={(v) => setMastered(v)} />
         </View>
 
-        <Text className="block text-sm font-semibold text-foreground mb-2">题目</Text>
+        <View className="flex flex-row items-center justify-between mb-2">
+          <Text className="block text-sm font-semibold text-foreground">题目</Text>
+          {item?.content?.question_label ? (
+            <View style={{ backgroundColor: 'rgba(190,62,45,0.08)', borderRadius: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 2, paddingBottom: 2 }}>
+              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{item.content.question_label}</Text>
+            </View>
+          ) : null}
+        </View>
         <Card className="rounded-2xl border-border p-4 mb-4">
           <Textarea
             className="min-h-32 border-0 ring-0 focus-within:ring-0 rounded-xl"
@@ -241,7 +314,43 @@ export default function DetailPage() {
           />
         </Card>
 
-        {item?.image_urls?.length ? (
+        {item?.question_image_urls?.length ? (
+          <View className="mb-4">
+            <Text className="block text-xs text-muted-foreground mb-2">题面图</Text>
+            <View className="flex flex-row flex-wrap gap-2">
+              {item.question_image_urls.map((u) => (
+                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <Image
+                    src={u}
+                    mode="aspectFill"
+                    style={{ width: '100%', height: '100%' }}
+                    onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {item?.answer_image_urls?.length ? (
+          <View className="mb-4">
+            <Text className="block text-xs text-muted-foreground mb-2">答题卡图</Text>
+            <View className="flex flex-row flex-wrap gap-2">
+              {item.answer_image_urls.map((u) => (
+                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <Image
+                    src={u}
+                    mode="aspectFill"
+                    style={{ width: '100%', height: '100%' }}
+                    onClick={() => Taro.previewImage({ current: u, urls: item.answer_image_urls || [u] })}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {!item?.question_image_urls?.length && !item?.answer_image_urls?.length && item?.image_urls?.length ? (
           <View className="flex flex-row flex-wrap gap-2 mb-4">
             {item.image_urls.map((u) => (
               <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
@@ -255,6 +364,87 @@ export default function DetailPage() {
             ))}
           </View>
         ) : null}
+
+        {/* P2-16 错因分析 */}
+        {item?.content?.error_analysis?.label && (
+          <Card className="rounded-2xl border p-4 mb-4" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190,62,45,0.04)' }}>
+            <Text className="block text-sm font-semibold mb-1" style={{ color: '#BE3E2D' }}>错因分析</Text>
+            <Text className="block text-sm font-medium text-foreground mb-1">{item.content.error_analysis.label}</Text>
+            {item.content.error_analysis.reason && (
+              <Text className="block text-xs text-muted-foreground mb-1">{item.content.error_analysis.reason}</Text>
+            )}
+            {item.content.error_analysis.suggestion && (
+              <Text className="block text-xs text-muted-foreground">{item.content.error_analysis.suggestion}</Text>
+            )}
+          </Card>
+        )}
+
+        {/* P2-18 艾宾浩斯复习计划 */}
+        {item && plan && (
+          <Card className="rounded-2xl border-border p-4 mb-4">
+            <View className="flex flex-row items-center justify-between mb-2">
+              <Text className="block text-sm font-semibold text-foreground">复习计划（艾宾浩斯）</Text>
+              <Text className="block text-xs text-muted-foreground">已复习 {plan.review_count}/{plan.total_stages}</Text>
+            </View>
+            <View className="flex flex-row items-center gap-1 flex-wrap mb-3">
+              {plan.schedule.map((s) => (
+                <View key={s.stage} className="flex flex-col items-center px-1">
+                  <View
+                    className={`w-6 h-6 rounded-full flex items-center justify-center ${s.done ? 'border-0' : 'bg-muted border border-border'}`}
+                    style={s.done ? { backgroundColor: '#BE3E2D' } : undefined}
+                  >
+                    <Text className={`text-[10px] ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: '#fff' } : undefined}>
+                      {s.done ? '✓' : s.stage}
+                    </Text>
+                  </View>
+                  <Text className="block text-[10px] text-muted-foreground mt-1">第{s.day}天</Text>
+                </View>
+              ))}
+            </View>
+            <View className="flex flex-row items-center justify-between">
+              <Text className="block text-xs text-muted-foreground">
+                {plan.completed ? '已全部完成复习阶段 🎉' : `下次复习：${plan.next_review_at ? formatDate(plan.next_review_at) : '—'}`}
+              </Text>
+              {!plan.completed && (
+                <Button variant="outline" className="h-8 rounded-lg px-3" onClick={handleReview} disabled={reviewing}>
+                  <Text className="block text-xs">{reviewing ? '记录中…' : '今天复习了 ✓'}</Text>
+                </Button>
+              )}
+            </View>
+          </Card>
+        )}
+
+        {/* P2-17 相似 / 变式题（基于用户自建错题历史） */}
+        <View className="mb-4">
+          <Text className="block text-sm font-semibold text-foreground mb-2" onClick={toggleSimilar}>
+            相似 / 变式题 {similarOpen ? '▾' : '▸'}
+          </Text>
+          {similarOpen && (
+            similarLoading ? (
+              <Text className="block text-xs text-muted-foreground">加载中…</Text>
+            ) : similar.length ? (
+              <View className="flex flex-col gap-2">
+                {similar.map((s) => (
+                  <View key={s.id} className="rounded-xl border border-border p-3">
+                    <Text className="block text-xs text-foreground mb-1">{truncate(s.question || '（无题面文本）', 80)}</Text>
+                    <View className="flex flex-row items-center justify-between">
+                      <View className="flex flex-row gap-1 flex-wrap">
+                        {s.shared_tags.map((t) => (
+                          <Text key={t} className="block text-[10px]" style={{ color: '#BE3E2D', backgroundColor: 'rgba(190,62,45,0.1)' }}>
+                            {t}
+                          </Text>
+                        ))}
+                      </View>
+                      <Text className="block text-[10px] text-muted-foreground">相似度 {Math.round(s.score * 100)}%</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <Text className="block text-xs text-muted-foreground">暂无相似错题（多在「最近题目」里多攒几道同知识点题后会显现）</Text>
+            )
+          )}
+        </View>
 
         <View className="flex flex-row items-center justify-between mb-2">
           <Text className="block text-sm font-semibold" style={{ color: '#BE3E2D' }}>正确答案 / 解题过程</Text>

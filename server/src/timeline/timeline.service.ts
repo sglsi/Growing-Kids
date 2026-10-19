@@ -1,8 +1,12 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
+import { findSimilarQuestions } from '../ocr/ocr-similar'
+import { buildReviewPlan, nextReviewCount } from './review'
 import { StorageService } from '../storage/storage.service'
+import { BlobService } from '../storage/blob.service'
 import type {
-  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto,
+  TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto, TimelineItemWithUrl, QuestionContent,
 } from './timeline.types'
 
 const TABLE = 'timeline_items'
@@ -16,18 +20,29 @@ const MAX_PAGE_SIZE = 100
  */
 @Injectable()
 export class TimelineService {
-  constructor(private readonly storageService: StorageService) {}
+  constructor(
+    private readonly storageService: StorageService,
+    private readonly blobService: BlobService,
+  ) {}
 
   /** 给条目补签名 URL（图片 file_key / 题目内 images） */
   async withUrls(items: TimelineItem[]): Promise<TimelineItem[]> {
     return Promise.all(
       items.map(async (it) => {
-        const enriched: TimelineItem & { url?: string; thumb_url?: string; image_urls?: string[] } = { ...it }
+        const enriched: TimelineItemWithUrl = { ...it }
         if (it.file_key) enriched.url = await this.storageService.getPublicUrl(it.file_key)
         if (it.thumb_key) enriched.thumb_url = await this.storageService.getPublicUrl(it.thumb_key)
         const imgs = it.content?.images
         if (Array.isArray(imgs) && imgs.length) {
           enriched.image_urls = await Promise.all(imgs.map((k) => this.storageService.getPublicUrl(k)))
+        }
+        const qImgs = it.content?.question_images
+        if (Array.isArray(qImgs) && qImgs.length) {
+          enriched.question_image_urls = await Promise.all(qImgs.map((k) => this.storageService.getPublicUrl(k)))
+        }
+        const aImgs = it.content?.answer_images
+        if (Array.isArray(aImgs) && aImgs.length) {
+          enriched.answer_image_urls = await Promise.all(aImgs.map((k) => this.storageService.getPublicUrl(k)))
         }
         return enriched as TimelineItem
       }),
@@ -60,8 +75,21 @@ export class TimelineService {
     if (query.tag) q = q.contains('tags', [query.tag])
     if (query.keyword) {
       const kw = `%${query.keyword}%`
-      // 题目按题干/答案搜；图片按 title 搜（content->>question / title）
-      q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw}`)
+      // 题目按题干/答案/题号标签搜；图片按 title 搜（content->>question / content->>question_label / title）
+      q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw},content->>question_label.ilike.${kw}`)
+    }
+    if (query.since) {
+      if (scope === 'review') {
+        // review 模式按加入复习本的时间过滤。
+        // 兼容历史数据：早期加入复习本的记录 added_to_review_at 可能为 NULL，
+        // 直接 gte 会因 NULL 比较为假而被整条排除（表现为"筛选后列表变空"），
+        // 故对空值回退到 created_at 参与过滤。
+        q = q.or(
+          `added_to_review_at.gte.${query.since},and(added_to_review_at.is.null,created_at.gte.${query.since})`,
+        )
+      } else {
+        q = q.gte('created_at', query.since)
+      }
     }
 
     const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
@@ -106,6 +134,17 @@ export class TimelineService {
     }
 
     const client = getSupabaseClient()
+    const payload = this.buildPayload(userId, dto)
+
+    const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
+    if (error) throw new Error(error.message)
+    // 迁移双写：DB_PROVIDER=dual 时把同一行镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorInsert(TABLE, payload)
+    return data as unknown as TimelineItem
+  }
+
+  /** 组装单条插入 payload（create 与 createBatch 共用） */
+  private buildPayload(userId: string, dto: CreateTimelineDto): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
@@ -132,37 +171,112 @@ export class TimelineService {
         wrong_answer: c.wrong_answer || '',
         images: c.images || [],
         status: c.status || (c.answer ? 'answered' : 'pending'),
+        // 题面图 / 答题卡图区分存储（避免混在 images[] 里分不清哪张是答案）
+        question_images: c.question_images || [],
+        answer_images: c.answer_images || [],
+        level: typeof c.level === 'number' ? c.level : null,
+        parent_index: c.parent_index ?? null,
+        stem: c.stem || '',
+        // P2-16 / P2-18：错因分析结论与艾宾浩斯复习阶段计数（jsonb 免迁移，直接存）
+        error_analysis: c.error_analysis ?? null,
+        review_count: typeof c.review_count === 'number' ? c.review_count : 0,
+        // P3：规范题号标签（错题库唯一指认「节·小类 题号」）
+        question_label: c.question_label ?? null,
       }
     }
+    return payload
+  }
 
-    const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
+  /**
+   * 批量创建：一次提取多道题时替代「循环单条 create」，一次 insert 落库，减少往返。
+   * 每条复用 buildPayload；逐条轻量校验，避免脏数据进库。
+   */
+  async createBatch(userId: string, dtos: CreateTimelineDto[]): Promise<TimelineItem[]> {
+    if (!Array.isArray(dtos) || !dtos.length) return []
+    const client = getSupabaseClient()
+    const payloads = dtos.map((dto) => {
+      if (dto.kind !== 'image' && dto.kind !== 'question') {
+        throw new BadRequestException('kind 仅支持 image / question')
+      }
+      if (dto.kind === 'image' && !dto.file_key) {
+        throw new BadRequestException('图片条目缺少 file_key')
+      }
+      if (dto.kind === 'question' && !dto.content?.question) {
+        throw new BadRequestException('题目条目缺少 content.question')
+      }
+      return this.buildPayload(userId, dto)
+    })
+    const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
-    return data as unknown as TimelineItem
+    // 迁移双写：DB_PROVIDER=dual 时把这批行镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorInsert(TABLE, payloads)
+    return (data || []) as unknown as TimelineItem[]
   }
 
   // ---------- 更新 ----------
+  /**
+   * 更新条目。
+   *
+   * ⚠️ 根因修复（「更新失败，请重试」）：
+   * 之前写成 `.update(payload).select('*, subjects:subject_id(...)').maybeSingle()`。
+   * PostgREST 在 **UPDATE + 嵌入关联资源** 时，返回体经常会丢掉嵌入对象，
+   * 导致 `.maybeSingle()` 拿不到行（data=null）→ 这里误抛 NotFoundException('内容不存在')，
+   * 前端就显示「更新失败，请重试」；而由于写入其实已发生/或部分发生的语义不一致，
+   * 用户刷新后看到的又可能是旧值，体验为「改了没生效」。
+   *
+   * 修复策略：先把更新写下去（**不带** select，只看是否报错、是否命中行），
+   * 再用带嵌入的 findOne 单独查一遍返回完整记录。两次都是最朴素、最稳的调用。
+   */
   async update(userId: string, id: string, dto: UpdateTimelineDto): Promise<TimelineItem> {
     const client = getSupabaseClient()
+    // 内容局部更新合并（P3 链路复核发现的数据丢失）：content 为局部 patch 时
+    // 先读现价再合并——详情页等调用方只传题干/答案/解答/状态，全量替换会把
+    // question_images/question_label/level/stem/error_analysis/review_count 清空。
+    // 显式传值（含空串/null）照常覆盖；未传的字段保留原值。
+    let mergedContent: QuestionContent | undefined
+    if (dto.content !== undefined) {
+      const { data: cur } = await client
+        .from(TABLE)
+        .select('content')
+        .eq('user_id', userId)
+        .eq('id', id)
+        .maybeSingle()
+      const curContent = (cur as { content?: QuestionContent } | null)?.content ?? {}
+      mergedContent = { ...curContent, ...dto.content }
+    }
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (dto.title !== undefined) payload.title = dto.title
     if (dto.subject_id !== undefined) payload.subject_id = dto.subject_id
     if (dto.tags !== undefined) payload.tags = dto.tags
-    if (dto.content !== undefined) payload.content = dto.content
+    if (mergedContent !== undefined) payload.content = mergedContent
+    // 图片字段（kind=image 的「原位替换」）：
+    // ⚠️ 必须支持原位替换（前端编辑已入库图片时直接 PUT file_key/thumb_key）。
+    // 旧方案「新建条目+软删旧条目」会让新条目插到列表最前、旧条目软删失败时残留，
+    // 造成「编辑 A 后编辑 B，打开的却是 A 的图」的错位（列表顺序每次编辑都在变）。
+    if (dto.file_key !== undefined) payload.file_key = dto.file_key
+    if (dto.thumb_key !== undefined) payload.thumb_key = dto.thumb_key
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null
     }
 
-    const { data, error } = await client
+    // 1) 执行更新（只 select id，不带任何嵌入，避免关联解析失败导致 0 行）
+    const { data: updated, error } = await client
       .from(TABLE)
       .update(payload)
       .eq('user_id', userId)
       .eq('id', id)
-      .select(SELECT_COLS)
-      .maybeSingle()
+      .select('id')
     if (error) throw new Error(error.message)
-    if (!data) throw new NotFoundException('内容不存在')
-    return data as unknown as TimelineItem
+    // 更新命中 0 行 = 该 id 不属于当前用户 / 已软删 / 不存在
+    if (!updated || updated.length === 0) {
+      throw new NotFoundException('内容不存在或无权修改')
+    }
+    // 迁移双写：DB_PROVIDER=dual 时把同一行变更镜像到腾讯云 PG（best-effort，失败不影响主库）
+    await mirrorUpdate(TABLE, payload, { user_id: userId, id })
+
+    // 2) 单独查询返回完整记录（此时嵌入 subjects 走的是普通 SELECT，稳定返回）
+    return this.findOne(userId, id)
   }
 
   // ---------- 删除（软删） ----------
@@ -171,16 +285,49 @@ export class TimelineService {
     return { id }
   }
 
+  /**
+   * 批量软删。
+   *
+   * ⚠️ 存储优化要点（复习本与项目设计.md §11.3 策略 4/5）：
+   * 软删时**释放 blob 引用计数**。顺序很重要：
+   *   1) 先查出待删行的 file_hash（必须在置 deleted_at **之前**查，否则可能查不到）；
+   *   2) 再做软删；
+   *   3) 最后释放引用 —— 归零的 blob 才进待回收队列（由 maintenance 真删文件）。
+   * `deleted_at is null` 的过滤保证**同一条目重复删除只释放一次**，防止计数被多减。
+   */
   async removeMany(userId: string, ids: string[]): Promise<{ removed: number }> {
     if (!ids.length) return { removed: 0 }
     const client = getSupabaseClient()
+
+    // 1) 先取待删条目的内容 hash（此时还未置 deleted_at）
+    const { data: pending } = await client
+      .from(TABLE)
+      .select('id, file_hash')
+      .eq('user_id', userId)
+      .in('id', ids)
+      .is('deleted_at', null)
+
+    const hashes = Array.from(
+      new Set(((pending || []) as { file_hash: string | null }[]).map((r) => r.file_hash).filter(Boolean) as string[]),
+    )
+
+    // 2) 软删（带 deleted_at is null 过滤 ⇒ 幂等，重复删不会二次释放）
     const { data, error } = await client
       .from(TABLE)
       .update({ deleted_at: new Date().toISOString() })
       .eq('user_id', userId)
       .in('id', ids)
+      .is('deleted_at', null)
       .select('id')
     if (error) throw new Error(error.message)
+
+    // 3) 释放引用（失败不阻断删除；孤儿由 GC 核对兜底）
+    for (const h of hashes) {
+      await this.blobService.release(h).catch((e) =>
+        console.warn('[timeline] 释放 blob 引用失败', h, e),
+      )
+    }
+
     return { removed: (data || []).length }
   }
 
@@ -233,6 +380,25 @@ export class TimelineService {
       .select('id')
     if (error) throw new Error(error.message)
     return { updated: (data || []).length }
+  }
+
+  // ---------- P2-17 相似题推荐（基于用户自建错题历史） ----------
+  async findSimilar(userId: string, id: string, limit = 5) {
+    return findSimilarQuestions(userId, id, limit)
+  }
+
+  // ---------- P2-18 艾宾浩斯复习：标记完成一次复习 ----------
+  /**
+   * 把指定题的复习计数 +1（封顶 total 阶段数），返回更新后的计数与现算的复习计划。
+   * 复习计划由 created_at + review_count 现算（见 ./review.ts），不冗余存储。
+   */
+  async markReviewed(userId: string, id: string): Promise<{ review_count: number; plan: ReturnType<typeof buildReviewPlan> }> {
+    const item = await this.findOne(userId, id)
+    const cur = typeof item.content?.review_count === 'number' ? item.content.review_count : 0
+    const next = nextReviewCount(cur)
+    const merged = { ...(item.content || {}), review_count: next }
+    const updated = await this.update(userId, id, { content: merged })
+    return { review_count: next, plan: buildReviewPlan(updated.created_at, next) }
   }
 
   // ---------- 首页概览 ----------

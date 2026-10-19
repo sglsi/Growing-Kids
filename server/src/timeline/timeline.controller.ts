@@ -21,12 +21,14 @@ export class TimelineController {
     @Query('subject_id') subjectId?: string,
     @Query('tag') tag?: string,
     @Query('keyword') keyword?: string,
+    /** ISO 时间下界：过滤 created_at >= since（review 模式下按 added_to_review_at） */
+    @Query('since') since?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
   ) {
     const userId = requireUserId(req)
     const data = await this.timelineService.list(userId, {
-      scope, subject_id: subjectId, tag, keyword,
+      scope, subject_id: subjectId, tag, keyword, since,
       page: page ? Number(page) : 1,
       page_size: pageSize ? Number(pageSize) : 20,
     })
@@ -52,6 +54,17 @@ export class TimelineController {
     return { code: 200, msg: 'success', data: withUrl }
   }
 
+  /** 批量创建（一次提取多道题时替代前端循环单条，一次落库） */
+  @Post('batch')
+  @HttpCode(200)
+  async createBatch(@Req() req: RequestWithUser, @Body() body: { items?: CreateTimelineDto[] }) {
+    const userId = requireUserId(req)
+    if (!Array.isArray(body?.items) || !body.items.length) throw new BadRequestException('items 不能为空')
+    const items = await this.timelineService.createBatch(userId, body.items)
+    const withUrls = await this.timelineService.withUrls(items)
+    return { code: 200, msg: 'success', data: { list: withUrls } }
+  }
+
   @Post('review-book')
   @HttpCode(200)
   async addToReview(@Req() req: RequestWithUser, @Body() body: IdsBody) {
@@ -67,6 +80,25 @@ export class TimelineController {
     const userId = requireUserId(req)
     const ids = this.parseIds(body)
     const data = await this.timelineService.removeFromReviewBook(userId, ids)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** P2-17 相似题/变式题推荐：基于用户自建错题历史（文本+标签相似） */
+  @Post(':id/similar')
+  @HttpCode(200)
+  async similar(@Req() req: RequestWithUser, @Param('id') id: string, @Body() body: { limit?: number }) {
+    const userId = requireUserId(req)
+    const limit = Math.min(20, Math.max(1, Number(body?.limit) || 5))
+    const data = await this.timelineService.findSimilar(userId, id, limit)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** P2-18 艾宾浩斯复习：标记本次复习已完成，返回更新后的复习计划 */
+  @Post(':id/review')
+  @HttpCode(200)
+  async review(@Req() req: RequestWithUser, @Param('id') id: string) {
+    const userId = requireUserId(req)
+    const data = await this.timelineService.markReviewed(userId, id)
     return { code: 200, msg: 'success', data }
   }
 

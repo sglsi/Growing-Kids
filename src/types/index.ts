@@ -20,9 +20,63 @@ export interface QuestionContent {
   answer?: string
   solution?: string
   wrong_answer?: string
-  /** 题目关联的图片 key（展示时后端补 image_urls） */
-  images?: string[]
   status?: 'answered' | 'pending'
+  /** 以下字段与后端 timeline 存储对齐，消除前后端类型漂移（错题提取切块流程写入） */
+  question_images?: string[]
+  answer_images?: string[]
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题下标；顶层为 null */
+  parent_index?: number | null
+  /** 所属大题完整题干（子题携带，独立可读） */
+  stem?: string
+  /** P2-16 错因分析结论（本地规则引擎产出） */
+  error_analysis?: ErrorAnalysis
+  /** P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"），错题库唯一指认题目 */
+  question_label?: string
+  /** P2-18 艾宾浩斯复习阶段计数：已完成复习次数 */
+  review_count?: number
+}
+
+/** P2-16 错因分析结论 */
+export interface ErrorAnalysis {
+  type:
+    | 'no-answer'
+    | 'unscored'
+    | 'careless-sign'
+    | 'careless-calc'
+    | 'concept-mix'
+    | 'misread'
+    | 'method-step'
+    | 'unknown'
+  label: string
+  reason: string
+  suggestion: string
+  sbert?: number
+}
+
+/** P2-18 艾宾浩斯复习计划 */
+export interface ReviewStage {
+  stage: number
+  day: number
+  date: string
+  done: boolean
+}
+export interface ReviewPlan {
+  review_count: number
+  total_stages: number
+  completed: boolean
+  next_review_at: string | null
+  schedule: ReviewStage[]
+}
+
+/** P2-17 相似题推荐项 */
+export interface SimilarItem {
+  id: string
+  question: string
+  answer: string
+  score: number
+  shared_tags: string[]
 }
 
 export type TimelineKind = 'image' | 'question'
@@ -67,6 +121,10 @@ export interface TimelineItem {
   url?: string
   thumb_url?: string
   image_urls?: string[]
+  /** 题面图签名 URL（来自 content.question_images） */
+  question_image_urls?: string[]
+  /** 答题卡/答案图签名 URL（来自 content.answer_images） */
+  answer_image_urls?: string[]
 }
 
 // 资料库文档（外部 PDF / Word / TXT 等）

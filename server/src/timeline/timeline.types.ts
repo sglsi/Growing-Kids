@@ -2,6 +2,8 @@ export type TimelineKind = 'image' | 'question'
 
 export type TimelineScope = 'recent' | 'review'
 
+import type { ErrorAnalysis } from '../ocr/ocr.types'
+
 /** 题目的结构化内容（存于 timeline_items.content） */
 export interface QuestionContent {
   question?: string
@@ -10,6 +12,26 @@ export interface QuestionContent {
   wrong_answer?: string
   images?: string[]
   status?: 'answered' | 'pending'
+  /** 题面图 file_key（与答题卡图区分存储，避免混在 images[] 里分不清） */
+  question_images?: string[]
+  /** 答题卡 / 答案图 file_key */
+  answer_images?: string[]
+  /** 层级：1=大题/父题，2=小题/子题 */
+  level?: number
+  /** 所属父题在识别结果数组中的下标；顶层题为 null */
+  parent_index?: number | null
+  /** 所属大题完整题干（子题携带，可脱离父题独立读懂） */
+  stem?: string
+  /** P2-16 错因分析结论（本地规则引擎产出；SBERT 分可选） */
+  error_analysis?: ErrorAnalysis
+  /**
+   * P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"）。
+   * 两节各自重起题号时数字有歧义，标签才能唯一指认题目（#129 P1 产出，
+   * P3 起随保存落库，供错题库查看/检索/复习时识别「这是哪一节哪一道」）。
+   */
+  question_label?: string
+  /** P2-18 艾宾浩斯复习阶段计数：已完成的复习次数（计划由 created_at + 该值现算） */
+  review_count?: number
 }
 
 export interface TimelineItem {
@@ -47,6 +69,10 @@ export interface TimelineItemWithUrl extends TimelineItem {
   url?: string
   thumb_url?: string
   image_urls?: string[]
+  /** 题面图签名 URL（来自 content.question_images） */
+  question_image_urls?: string[]
+  /** 答题卡/答案图签名 URL（来自 content.answer_images） */
+  answer_image_urls?: string[]
 }
 
 export interface TimelineListQuery {
@@ -54,6 +80,8 @@ export interface TimelineListQuery {
   subject_id?: string
   tag?: string
   keyword?: string
+  /** ISO 时间，过滤 created_at >= since（review 模式下按 added_to_review_at） */
+  since?: string
   page?: number
   page_size?: number
 }
@@ -77,5 +105,6 @@ export interface CreateTimelineDto {
 }
 
 export type UpdateTimelineDto = Partial<
-  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered'> & { content: QuestionContent }
+  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered' | 'file_key' | 'thumb_key'> &
+  { content: QuestionContent }
 >

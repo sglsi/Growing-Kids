@@ -3,10 +3,15 @@ export default defineAppConfig({
     'pages/index/index',
     'pages/subject/index',
     'pages/document/index',
+    'pages/memory/index',
     'pages/recognize/index',
     'pages/detail/index',
     'pages/library/index',
-    'pages/profile/index'
+    'pages/profile/index',
+    'pages/chat/index',
+    'pages/chat/admin',
+    'pages/memory/edit',
+    'pages/memory/detail'
   ],
   window: {
     backgroundTextStyle: 'light',
@@ -37,6 +42,12 @@ export default defineAppConfig({
         text: '文档',
         iconPath: './assets/tabbar/file-text.png',
         selectedIconPath: './assets/tabbar/file-text-active.png'
+      },
+      {
+        pagePath: 'pages/memory/index',
+        text: '记忆',
+        iconPath: './assets/tabbar/book-heart.png',
+        selectedIconPath: './assets/tabbar/book-heart-active.png'
       }
     ]
   }

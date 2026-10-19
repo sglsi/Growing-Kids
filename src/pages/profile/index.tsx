@@ -1,15 +1,19 @@
-import { View, Text, Image, ScrollView, Input } from '@tarojs/components'
+import { View, Text, Image, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { CircleUser, LogIn, LogOut, Pencil } from 'lucide-react-taro'
+import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
+import { Input } from '@/components/ui/input'
 import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
   type AuthState,
 } from '@/services/auth'
-import { fetchOverview, type Overview } from '@/services/api'
+import {
+  fetchOverview, fetchStorageUsage, formatBytes,
+  type Overview, type StorageUsage,
+} from '@/services/api'
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -18,6 +22,7 @@ import { fetchOverview, type Overview } from '@/services/api'
 export default function ProfilePage() {
   const [state, setState] = useState<AuthState | null>(getAuthState())
   const [overview, setOverview] = useState<Overview | null>(null)
+  const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
   const [nickname, setNickname] = useState('')
@@ -30,6 +35,9 @@ export default function ProfilePage() {
     } catch {
       /* 概览失败不影响本页 */
     }
+    // 存储配额（策略 6）；拿不到就整块不展示，不影响本页其余功能
+    const u = await fetchStorageUsage()
+    setUsage(u)
     // 有本地身份时向服务端校验一次（失效则降级为未登录）
     if (getAuthState()) {
       try {
@@ -92,8 +100,10 @@ export default function ProfilePage() {
   const logged = isLoggedIn()
 
   return (
-    <View className="bg-background" style={{ height: '100vh' }}>
-      <ScrollView scrollY style={{ height: '100vh' }}>
+    <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
+      {/* 说明：本页无 fixed 头部，H5 下靠 app.css 的 .taro_scroll_view_core
+          paddingTop 补偿把内容顶到内置导航栏下方 */}
+      <ScrollView scrollY style={{ height: '100vh', paddingTop: 44 }}>
         <View className="px-4 pt-6 pb-16">
           {/* 头像 + 身份 */}
           <View className="flex flex-row items-center gap-4 mb-5">
@@ -173,12 +183,64 @@ export default function ProfilePage() {
             )}
           </Card>
 
+          {/* 智能客服 */}
+          <Card
+            className="rounded-2xl border-border p-4 mb-5"
+            onClick={() => Taro.navigateTo({ url: '/pages/chat/index' })}
+          >
+            <View className="flex flex-row items-center gap-3">
+              <View
+                className="rounded-xl flex items-center justify-center"
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(190,62,45,0.10)' }}
+              >
+                <Bot size={20} color="#BE3E2D" />
+              </View>
+              <View className="flex-1">
+                <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
+                <Text className="block text-xs text-muted-foreground mt-1">
+                  关于小程序的功能和使用问题都可以问我
+                </Text>
+              </View>
+              <Text className="block text-base text-muted-foreground">›</Text>
+            </View>
+          </Card>
+
           {/* 数据概览 */}
           <View className="flex flex-row gap-3 mb-5">
-            <MiniStat label="收件箱" value={overview?.total ?? 0} />
-            <MiniStat label="复习本" value={overview?.review_total ?? 0} />
-            <MiniStat label="本周新增" value={overview?.week_total ?? 0} />
+            <MiniStat icon={<Inbox size={14} color="#5C5750" />} label="收件箱" value={overview?.total ?? 0} />
+            <MiniStat icon={<BookOpen size={14} color="#5C5750" />} label="复习本" value={overview?.review_total ?? 0} />
+            <MiniStat icon={<Plus size={14} color="#5C5750" />} label="本周新增" value={overview?.week_total ?? 0} />
           </View>
+
+          {/* 存储配额（策略 6）：拿不到用量时整块不展示 */}
+          {usage && (
+            <Card className="rounded-2xl border-border p-4 mb-5">
+              <View className="flex flex-row items-center gap-2 mb-2">
+                <HardDrive size={16} color="#BE3E2D" />
+                <Text className="block text-sm font-semibold text-foreground">存储空间</Text>
+                <View className="flex-1" />
+                <Text className="block text-xs text-muted-foreground">
+                  {formatBytes(usage.used_bytes)} / {formatBytes(usage.quota_bytes)}
+                  {' · '}
+                  {usage.used_count}/{usage.quota_count} 张
+                </Text>
+              </View>
+              <View className="w-full rounded-full bg-muted overflow-hidden" style={{ height: '6px' }}>
+                <View
+                  style={{
+                    width: `${Math.max(2, Math.min(100, usage.pct))}%`,
+                    height: '6px',
+                    background: usage.pct >= 90 ? '#C25B4E' : usage.pct >= 80 ? '#E08A3C' : '#6B8E6B',
+                  }}
+                />
+              </View>
+              {usage.pct >= 80 && (
+                <Text className="block text-xs mt-2 text-muted-foreground">
+                  空间即将用满，可在「最近题目」删除不再需要的图片来释放空间。
+                </Text>
+              )}
+            </Card>
+          )}
 
           {/* 说明 */}
           {logged ? (
@@ -205,11 +267,14 @@ export default function ProfilePage() {
   )
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function MiniStat({ icon, label, value }: { icon?: React.ReactNode; label: string; value: number }) {
   return (
     <Card className="flex-1 rounded-2xl border-border p-3">
+      <View className="flex flex-row items-center gap-1 mb-1">
+        {icon}
+        <Text className="block text-xs text-muted-foreground">{label}</Text>
+      </View>
       <Text className="block text-xl font-bold text-foreground">{value}</Text>
-      <Text className="block text-xs mt-1 text-muted-foreground">{label}</Text>
     </Card>
   )
 }

@@ -7,6 +7,8 @@ import ReviewItemCard from '@/components/review-item-card'
 import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
+import SelectionBar from '@/components/selection-bar'
+import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
@@ -21,6 +23,8 @@ export default function SubjectPage() {
   const [activeSubject, setActiveSubject] = useState('')
   const [keyword, setKeyword] = useState('')
   const [activeTag, setActiveTag] = useState('')
+  const [range, setRange] = useState<RangeValue>('all')
+  const [latestTimestamp, setLatestTimestamp] = useState<string | undefined>(undefined)
   const [items, setItems] = useState<TimelineItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -32,8 +36,8 @@ export default function SubjectPage() {
   // 从当前页数据里汇总出现过的标签，供筛选
   const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
 
-  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; append?: boolean }) => {
-    const { subjectId, keyword: kw, tag, page: p, append } = opts
+  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; since?: string; append?: boolean }) => {
+    const { subjectId, keyword: kw, tag, page: p, since, append } = opts
     if (append) setLoadingMore(true)
     else setLoading(true)
     try {
@@ -42,12 +46,18 @@ export default function SubjectPage() {
         subjectId: subjectId || undefined,
         keyword: kw || undefined,
         tag: tag || undefined,
+        since,
         page: p,
         pageSize: PAGE_SIZE,
       })
       setItems((prev) => (append ? [...prev, ...res.list] : res.list))
       setTotal(res.total)
       setPage(res.page)
+      // 记录当前结果中最新一条的时间，作为"自动"模式的锚点
+      if (!append && res.list[0]) {
+        const ts = res.list[0].added_to_review_at || res.list[0].created_at
+        if (ts) setLatestTimestamp(ts)
+      }
     } catch (e) {
       console.error('加载复习本失败', e)
     } finally {
@@ -70,6 +80,8 @@ export default function SubjectPage() {
     setActiveSubject(preset)
     setKeyword('')
     setActiveTag('')
+    setRange('all')
+    setLatestTimestamp(undefined)
     sel.exit()
     await load({ subjectId: preset, keyword: '', tag: '', page: 1 })
   }
@@ -78,7 +90,9 @@ export default function SubjectPage() {
     init()
   })
 
-  const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string }>) => {
+  const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string; range: RangeValue }>) => {
+    const nextRange = patch.range !== undefined ? patch.range : range
+    const since = getSinceFromRange(nextRange, latestTimestamp)
     const next = {
       subjectId: patch.subjectId !== undefined ? patch.subjectId : activeSubject,
       keyword: patch.keyword !== undefined ? patch.keyword : keyword,
@@ -87,8 +101,13 @@ export default function SubjectPage() {
     if (patch.subjectId !== undefined) setActiveSubject(patch.subjectId)
     if (patch.keyword !== undefined) setKeyword(patch.keyword)
     if (patch.tag !== undefined) setActiveTag(patch.tag)
+    if (patch.range !== undefined) {
+      setRange(patch.range)
+      // 切到自动时清空锚点，由下次请求首条重新确定
+      if (patch.range !== 'auto') setLatestTimestamp(undefined)
+    }
     sel.exit()
-    load({ ...next, page: 1 })
+    load({ ...next, page: 1, since })
   }
 
   const handleOpen = (item: TimelineItem) => {
@@ -107,7 +126,8 @@ export default function SubjectPage() {
       await removeFromReviewBook(Array.from(sel.selected))
       Taro.showToast({ title: '已移出复习本', icon: 'success' })
       sel.exit()
-      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1 })
+      const since = getSinceFromRange(range, latestTimestamp)
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -125,7 +145,8 @@ export default function SubjectPage() {
       await batchDeleteTimeline(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
-      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1 })
+      const since = getSinceFromRange(range, latestTimestamp)
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -168,23 +189,12 @@ export default function SubjectPage() {
           onSearch={() => resetAndLoad({ keyword: keyword })}
           countText={`复习本 · 共 ${total} 条`}
           placeholder="搜索题干 / 答案关键词，回车确认"
-          right={
-            !sel.selecting ? (
-              <Text className="block text-sm text-primary" onClick={sel.enter}>批量选择</Text>
-            ) : (
-              <View className="flex flex-row items-center gap-3">
-                {sel.count > 0 && (
-                  <>
-                    <Text className="block text-sm text-foreground">已选 {sel.count}</Text>
-                    <Text className="block text-sm text-muted-foreground" onClick={sel.clear}>清空</Text>
-                  </>
-                )}
-                <Text className="block text-sm text-primary" onClick={sel.exit}>取消</Text>
-              </View>
-            )
-          }
+          right={<SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />}
         >
           <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
+          <View className="mt-2">
+            <RangePicker value={range} onChange={(v) => resetAndLoad({ range: v })} />
+          </View>
         </FilterHeader>
       </View>
 
@@ -193,7 +203,8 @@ export default function SubjectPage() {
         style={{ height: '100vh', paddingTop: 168 }}
         onScrollToLower={() => {
           if (canLoadMore && !loadingMore && !loading) {
-            load({ subjectId: activeSubject, keyword, tag: activeTag, page: page + 1, append: true })
+            const since = getSinceFromRange(range, latestTimestamp)
+            load({ subjectId: activeSubject, keyword, tag: activeTag, page: page + 1, since, append: true })
           }
         }}
       >
