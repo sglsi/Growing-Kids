@@ -4,7 +4,7 @@ import {
   type OnApplicationBootstrap,
   type OnApplicationShutdown,
 } from '@nestjs/common'
-import { LLMClient, FetchClient, Config, type ContentPart } from 'coze-coding-dev-sdk'
+import { LLMClient, FetchClient, Config, type ContentPart } from '../ai/llm-provider'
 import * as http from 'http'
 import * as https from 'https'
 import { execFileSync } from 'child_process'

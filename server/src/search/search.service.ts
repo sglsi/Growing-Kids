@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { LLMClient, SearchClient, type SearchResponse } from 'coze-coding-dev-sdk'
+import { LLMClient, SearchClient, type SearchResponse } from '../ai/llm-provider'
 
 const MODEL = 'doubao-seed-2-0-pro-260215'
 

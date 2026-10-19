@@ -1,4 +1,4 @@
-import { LLMClient, Config, HeaderUtils } from 'coze-coding-dev-sdk'
+import { LLMClient, Config, HeaderUtils } from '../ai/llm-provider'
 import sharp from 'sharp'
 import {
   maskFromRects,

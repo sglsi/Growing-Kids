@@ -3,7 +3,7 @@ import {
   ImageGenerationClient,
   Config,
   HeaderUtils,
-} from 'coze-coding-dev-sdk'
+} from '../ai/llm-provider'
 import * as http from 'http'
 import * as https from 'https'
 import sharp from 'sharp'

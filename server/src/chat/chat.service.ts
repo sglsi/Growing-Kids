@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { randomUUID } from 'crypto'
-import { LLMClient } from 'coze-coding-dev-sdk'
+import { LLMClient } from '../ai/llm-provider'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import type { ChatMessage, ChatSendResult, KnowledgeArticle } from './chat.types'
 

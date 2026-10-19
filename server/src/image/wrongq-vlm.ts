@@ -72,7 +72,7 @@ export interface VlmResult {
 export async function vlmQuestionBlocks(imageUrl: string, hintCount = 0): Promise<VlmResult> {
   if (!imageUrl) return { items: [], used: false, error: 'imageUrl 为空' }
   try {
-    const { LLMClient } = await import('coze-coding-dev-sdk')
+    const { LLMClient } = await import('../ai/llm-provider')
     const client = new LLMClient()
     const invokePromise = client.invoke(
       [
