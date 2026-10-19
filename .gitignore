@@ -50,6 +50,7 @@ pnpm-debug.log*
 .codegraph
 node-compile-cache/
 /logs
+/server/logs/
 .codegraph/
 .workbuddy/
 

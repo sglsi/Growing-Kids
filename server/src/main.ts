@@ -7,6 +7,7 @@ import { AppModule } from '@/app.module';
 import { AppController } from '@/app.controller';
 import * as express from 'express';
 import { HttpStatusInterceptor } from '@/interceptors/http-status.interceptor';
+import { AllExceptionsFilter } from '@/filters/all-exceptions.filter';
 
 function parsePort(): number {
   const args = process.argv.slice(2);
@@ -47,6 +48,9 @@ async function bootstrap() {
 
   // 全局拦截器：统一将 POST 请求的 201 状态码改为 200
   app.useGlobalInterceptors(new HttpStatusInterceptor());
+  // 全局异常过滤器：5xx/未知异常落盘 server/logs/error-YYYY-MM-DD.log
+  // （服务常在另一个终端手动起，默认堆栈只进那个终端的 stdout，跨会话排查看不到）
+  app.useGlobalFilters(new AllExceptionsFilter());
   // 1. 开启优雅关闭 Hooks (关键!)
   app.enableShutdownHooks();
 
