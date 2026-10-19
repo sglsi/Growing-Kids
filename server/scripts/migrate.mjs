@@ -22,6 +22,7 @@
  *   node server/scripts/migrate.mjs --dry      # 干跑：只打印将要执行哪些文件
  *   node server/scripts/migrate.mjs --force    # 忽略已执行记录，全部重跑（脚本均为幂等）
  *   node server/scripts/migrate.mjs --only 0007_chat_schema.sql
+ *   node server/scripts/migrate.mjs --ping     # 只验证连接串是否可用（推荐第一次先跑这个）
  *
  * 连接串（按优先级）：
  *   1) DATABASE_URL
@@ -45,6 +46,7 @@ const MIGRATIONS_DIR = path.resolve(PROJECT_ROOT, 'migrations')
 const argv = process.argv.slice(2)
 const DRY = argv.includes('--dry')
 const FORCE = argv.includes('--force')
+const PING = argv.includes('--ping')
 const onlyIdx = argv.indexOf('--only')
 const ONLY = onlyIdx >= 0 ? argv[onlyIdx + 1] : null
 
@@ -132,8 +134,9 @@ async function main() {
     console.error('   DATABASE_URL=postgresql://postgres:<密码>@<host>:5432/postgres')
     console.error('   SUPABASE_DB_URL=同上')
     console.error('   SUPABASE_DB_PASSWORD=<数据库密码>（配合已有的 SUPABASE_URL 自动拼接）')
-    console.error('\n获取方式：Supabase Dashboard → Project Settings → Database → Connection string → URI')
+    console.error('\n获取方式（Supabase 新版界面）：项目页顶部「Connect」按钮 → Session pooler → 复制 URI')
     console.error('⚠️ 注意：是「数据库连接串（含密码）」，不是 anon / service_role key。')
+    console.error('   详细图文步骤见 docs/获取DATABASE_URL-操作指引.md')
     process.exit(2)
   }
   console.log('\n[migrate] 连接串来源：', from)
@@ -155,11 +158,32 @@ async function main() {
     await client.connect()
   } catch (e) {
     console.error('\n[migrate] ✗ 连接数据库失败：', e.message)
-    console.error('排查：① 连接串是否复制完整 ② 密码是否正确 ③ 本机能否出网 5432（必要时改用 6543 pooler）')
+    console.error('\n排查（按概率排序）：')
+    console.error('  ① 用了 Direct connection（db.<ref>.supabase.co:5432）—— 它默认走 IPv6，')
+    console.error('     国内家庭/办公宽带基本连不上。请改用 Session pooler：')
+    console.error('     postgresql://postgres.<ref>:<密码>@aws-0-<region>.pooler.supabase.com:5432/postgres')
+    console.error('  ② 密码不对：Supabase 只在建库时显示一次，忘了去 Settings → Database 重置。')
+    console.error('     密码含 & # ? 空格 等字符需 URL 编码（脚本会编码，但粘贴进 .env 请保持原样）。')
+    console.error('  ③ 连接串没复制完整 / 少了 postgres 库名后缀。')
+    console.error('\n详见 docs/获取DATABASE_URL-操作指引.md')
     process.exit(3)
   }
 
   try {
+    // --ping：只验证连接串能否用，不执行任何迁移
+    if (PING) {
+      const { rows } = await client.query('select version()')
+      console.log('\n[migrate] ✓ 连接成功')
+      console.log('   Postgres:', String(rows[0]?.version || '').split(',')[0])
+      const { rows: ts } = await client.query(`
+        select table_name from information_schema.tables
+         where table_schema = 'public' and table_type = 'BASE TABLE'
+         order by table_name
+      `)
+      console.log(`   public 表 ${ts.length} 张：${ts.map((r) => r.table_name).join(', ')}`)
+      return
+    }
+
     await client.query(`
       create table if not exists schema_migrations (
         id          serial primary key,
@@ -192,11 +216,13 @@ async function main() {
       try {
         await client.query('begin')
         await client.query(sql)
+        // 不用 $1 占位符：Transaction pooler（6543）不支持 prepared statement。
+        // 值是文件名与 sha256（可控常量），单引号已转义，安全。
+        const esc = (s) => `'${String(s).replace(/'/g, "''")}'`
         await client.query(
           `insert into schema_migrations (filename, checksum)
-           values ($1, $2)
+           values (${esc(file)}, ${esc(sum)})
            on conflict (filename) do update set checksum = excluded.checksum, executed_at = now()`,
-          [file, sum],
         )
         await client.query('commit')
         console.log(`[migrate] ✓ ${file} 成功`)
