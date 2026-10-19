@@ -1,5 +1,6 @@
 export interface Question {
   id: string
+  user_id: string | null
   subject_id: string
   question_content: string
   question_image_keys: string[]

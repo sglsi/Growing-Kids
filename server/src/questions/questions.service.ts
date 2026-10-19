@@ -18,6 +18,12 @@ interface ListQuery {
   page_size?: number
 }
 
+/**
+ * ⚠️ service_role 绕过 RLS ⇒ 每个查询都必须 .eq('user_id', userId)
+ * 2026-10-19 补齐：此前本服务完全没有用户隔离（不写也不过滤 user_id），
+ * 与 timeline.service 的约定不一致，注册进 app.module 前必须先补上，
+ * 否则任意用户可读写他人题目。
+ */
 @Injectable()
 export class QuestionsService {
   private applyRange(q: any, startDate?: string, endDate?: string) {
@@ -30,7 +36,10 @@ export class QuestionsService {
     return query
   }
 
-  async list(query: ListQuery): Promise<{ list: QuestionWithSubject[]; total: number; page: number; page_size: number }> {
+  async list(
+    userId: string,
+    query: ListQuery,
+  ): Promise<{ list: QuestionWithSubject[]; total: number; page: number; page_size: number }> {
     const client = getSupabaseClient()
     const page = Math.max(1, query.page || 1)
     const pageSize = Math.min(100, query.page_size || 50)
@@ -40,6 +49,7 @@ export class QuestionsService {
     let supabaseQuery = client
       .from('questions')
       .select('*, subjects:subject_id(id, name, color)', { count: 'exact' })
+      .eq('user_id', userId)
 
     const subjectId = cleanStr(query.subject_id)
     const keyword = cleanStr(query.keyword)
@@ -60,24 +70,26 @@ export class QuestionsService {
     }
   }
 
-  async findOne(id: string): Promise<QuestionWithSubject> {
+  async findOne(userId: string, id: string): Promise<QuestionWithSubject> {
     const client = getSupabaseClient()
     const { data, error } = await client
       .from('questions')
       .select('*, subjects:subject_id(id, name, color)')
       .eq('id', id)
+      .eq('user_id', userId)
       .single()
 
     if (error || !data) throw new NotFoundException('题目不存在')
     return data as unknown as QuestionWithSubject
   }
 
-  async create(dto: CreateQuestionDto): Promise<Question> {
+  async create(userId: string, dto: CreateQuestionDto): Promise<Question> {
     if (!dto.subject_id) throw new BadRequestException('subject_id 不能为空')
     if (!dto.question_content) throw new BadRequestException('question_content 不能为空')
 
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = {
+      user_id: userId,
       subject_id: dto.subject_id,
       question_content: dto.question_content,
       answer_content: dto.answer_content || '',
@@ -101,7 +113,7 @@ export class QuestionsService {
     return data as unknown as Question
   }
 
-  async update(id: string, dto: UpdateQuestionDto): Promise<Question> {
+  async update(userId: string, id: string, dto: UpdateQuestionDto): Promise<Question> {
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     const fields: (keyof UpdateQuestionDto)[] = [
@@ -120,6 +132,7 @@ export class QuestionsService {
       .from('questions')
       .update(payload)
       .eq('id', id)
+      .eq('user_id', userId)
       .select()
       .single()
 
@@ -127,29 +140,38 @@ export class QuestionsService {
     return data as unknown as Question
   }
 
-  async remove(id: string): Promise<{ id: string }> {
+  async remove(userId: string, id: string): Promise<{ id: string }> {
     const client = getSupabaseClient()
-    const { error } = await client.from('questions').delete().eq('id', id)
+    // 带 .select() 才能拿到实际删除行数：越权删除时返回空，必须报 404 而不是假装成功
+    const { data, error } = await client
+      .from('questions')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', userId)
+      .select('id')
     if (error) throw new Error(error.message)
+    if (!data || data.length === 0) throw new NotFoundException('题目不存在')
     return { id }
   }
 
-  async overview() {
+  async overview(userId: string) {
     const client = getSupabaseClient()
     const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString()
 
     const [totalRes, weekRes, pendingRes, subjectRes, recentRes] = await Promise.all([
-      client.from('questions').select('id', { count: 'exact', head: true }),
-      client.from('questions').select('id', { count: 'exact', head: true }).gte('recognized_at', weekAgo),
-      client.from('questions').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+      client.from('questions').select('id', { count: 'exact', head: true }).eq('user_id', userId),
+      client.from('questions').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('recognized_at', weekAgo),
+      client.from('questions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'pending'),
       client
         .from('questions')
         .select('subject_id, subjects:subject_id(name, color)')
+        .eq('user_id', userId)
         .then(async (r) => {
           // 聚合各学科总数 + 本周数
           const { data: weekData } = await client
             .from('questions')
             .select('subject_id')
+            .eq('user_id', userId)
             .gte('recognized_at', weekAgo)
           const weekCountMap: Record<string, number> = {}
           ;(weekData || []).forEach((row: any) => {
@@ -175,6 +197,7 @@ export class QuestionsService {
       client
         .from('questions')
         .select('*, subjects:subject_id(id, name, color)')
+        .eq('user_id', userId)
         .order('recognized_at', { ascending: false })
         .limit(6),
     ])

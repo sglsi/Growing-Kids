@@ -24,6 +24,10 @@ import { MaintenanceModule } from './maintenance/maintenance.module'
 import { QuotaModule } from './quota/quota.module'
 import { MemoryModule } from './memory/memory.module'
 import { ChatModule } from './chat/chat.module'
+// v3 遗留模块：此前漏注册导致 /api/questions、/api/materials 全部 404
+// （2026-10-19 补注册，同时补齐 user_id 隔离）
+import { QuestionsModule } from './questions/questions.module'
+import { MaterialsModule } from './materials/materials.module'
 
 @Module({
   imports: [
@@ -45,6 +49,8 @@ import { ChatModule } from './chat/chat.module'
     QuotaModule, // 策略 6：配额
     MemoryModule, // 成长记忆
     ChatModule, // 智能客服
+    QuestionsModule, // 题目（v3 遗留，2026-10-19 补注册 + 补用户隔离）
+    MaterialsModule, // 素材（v3 遗留，同上）
   ],
   controllers: [AppController],
   providers: [AppService],

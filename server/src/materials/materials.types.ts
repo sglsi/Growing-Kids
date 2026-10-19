@@ -2,6 +2,7 @@ export type MaterialType = 'image' | 'document'
 
 export interface Material {
   id: string
+  user_id: string | null
   name: string
   type: MaterialType
   file_key: string
