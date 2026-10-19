@@ -86,12 +86,29 @@ function normalizeConn(raw) {
   return s
 }
 
-/** 找出未替换的密码占位符：[YOUR-PASSWORD]、[*]、YOUR-PASSWORD */
+/**
+ * 未替换的密码占位符。
+ * ⚠️ 只认「已知占位符」这几种写法，不能无脑匹配任何方括号 ——
+ *    实战（2026-10-19）：用户把密码连同外层方括号一起保留（[真密码]），
+ *    通配方括号检测会把真实密码误判成占位符，脚本直接退出、连不上库。
+ */
 function findPlaceholder(conn) {
-  const bracket = /\[[^\]]*\]/.exec(conn)
-  if (bracket) return bracket[0]
+  const known = /\[\s*(YOUR[-_ ]?PASSWORD|PASSWORD|PWD|DB[-_]?PASSWORD|\*+)\s*\]/i.exec(conn)
+  if (known) return known[0]
   if (/YOUR[-_]?PASSWORD/i.test(conn)) return 'YOUR-PASSWORD'
   return null
+}
+
+/** 连接串能否被解析；不能解析时给出针对性提示 */
+function validateConn(conn) {
+  try {
+    const u = new URL(conn)
+    if (!u.hostname) return '解析不出主机名'
+    if (!u.username) return '解析不出用户名'
+    return null
+  } catch (e) {
+    return `URL 解析失败：${e.message}（密码里若含 @ : / # ? 等字符，需先百分号编码）`
+  }
 }
 
 function resolveConn() {
@@ -166,6 +183,14 @@ async function main() {
     console.error(`\n[migrate] ✗ 连接串里还有未替换的密码占位符：${placeholder}`)
     console.error('   把 [YOUR-PASSWORD] 换成真实数据库密码后重试。')
     console.error('   忘记密码：Supabase 项目页 Connect 面板 / Settings → Database → Reset password。')
+    process.exit(2)
+  }
+
+  const bad = validateConn(conn)
+  if (bad) {
+    console.error(`\n[migrate] ✗ 连接串无法解析：${bad}`)
+    console.error('   目标（已脱敏）：', redact(conn))
+    console.error('   检查：① 密码外的方括号去掉了吗 ② 密码含 @ : / # ? 要先百分号编码（@ → %40）')
     process.exit(2)
   }
 
