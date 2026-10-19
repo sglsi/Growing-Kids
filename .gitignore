@@ -61,4 +61,9 @@ assets/
 .cache-paddle-xdg/
 .cache-pip/
 .venv-py/
->>>>>>> origin/main
+
+# local 存储驱动对象目录（本机开发，STORAGE_DRIVER=local）
+.local-storage/
+
+# WorkBuddy 应用身份文件（平台侧管理，不进版本库）
+*.genie
