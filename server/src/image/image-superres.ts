@@ -630,13 +630,15 @@ async function renderPreset(
   debug?: Record<string, unknown>,
 ): Promise<Buffer> {
   if (preset === 'original') return sharp(ctx.rawBuf).png().toBuffer()
-  // 黑白模式在「原分辨率」(scale=1) 直接二值化：二值图超分只是对 0/255 插值，徒增体积、拖慢速度，
-  // 且扫描王自身输出也低于原图分辨率。neutral=true 时 recombine 不读 cbUp/crUp，故无尺寸冲突。
-  const useBase = preset === 'bw' && ctx.scale > 1
-  const luma = useBase ? ctx.lumaBase : ctx.lumaUp
-  const w = useBase ? ctx.W : ctx.tW
-  const h = useBase ? ctx.H : ctx.tH
-  const metrics = useBase ? ctx.metrics0 : ctx.metricsUp
+  // 所有预设统一在「目标分辨率」上处理：lumaUp 已是（归一化 + 超分后）的亮度，
+  // metricsUp 是同步放大后的字符度量，文档增强/二值化按目标尺度执行。
+  // ⚠️ 2026-10-19 修复：此前 bw 在 scale>1 时回退到 lumaBase（原分辨率），
+  //   高清扩展对黑白件失效；现已移除该特例（scale=1 时两者等价，无行为变化）。
+  //   neutral=true 时 recombine 不读 cbUp/crUp，故 bw/grayscale 无尺寸冲突。
+  const luma = ctx.lumaUp
+  const w = ctx.tW
+  const h = ctx.tH
+  const metrics = ctx.metricsUp
   const r = await enhanceDocumentLuma(luma, w, h, {
     preset,
     strength,
@@ -663,8 +665,12 @@ export async function enhanceImage(buf: Buffer, opts: SROptions = {}): Promise<S
       debug: { preset, stage: 'original', note: '未做任何像素改动' },
     }
   }
-  // 黑白模式不超分：二值图超分无意义，强制原分辨率输出（更小体积、更快、效果一致）。
-  const effScale = preset === 'bw' ? 1 : opts.scale
+  // 黑白模式同样遵循显式倍率：超分在**灰度域**完成（classicalUpscale 已做），
+  // 二值化在目标分辨率上进行（renderPreset 用 lumaUp + metricsUp）——
+  // 即「先放大、后二值化」，边缘精度随倍率提升，而非对 0/255 插值（那才无意义）。
+  // ⚠️ 2026-10-19 修复：此前 preset==='bw' 时强制 effScale=1，导致单色源
+  //   （自动判定默认 bw）的「高清扩展」x2/x3/x4 全部静默失效（思傅实测）。
+  const effScale = opts.scale
   const ctx = await prepareEnhanceContext(buf, { ...opts, scale: effScale })
   const buffer = await renderPreset(ctx, preset, normalizeStrength(opts.strength), ctx.debug)
   return { buffer, width: ctx.tW, height: ctx.tH, mode: ctx.mode, preset, debug: ctx.debug }
@@ -691,8 +697,8 @@ export interface SRModesResult {
  * 设计要点（见《智能高清-方法论》§P1）：
  *  · 背景归一化与超分（ESPCN）只对归一化后的亮度做**一次**，五模式共享；
  *    各模式仅在「对比增强 / 锐化 / 二值化 / 提亮」这一步分叉，成本可控。
- *  · 默认 scale=1（轻量预览）；要最终画质可传 scale=2，彩色类模式做超分。
- *    黑白模式无论 scale 多少都固定原分辨率输出（二值图不超分，见 renderPreset）。
+ *  · 默认 scale=1（轻量预览）；要最终画质可传 scale=2，各类模式（含 bw）均按
+ *    「先超分后二值化/增强」输出目标分辨率（2026-10-19 起 bw 不再强制回原分辨率）。
  *  · 模式语义：
  *      original 原样直出 | enhance 彩色增强(默认) | bw 黑白硬二值 | brighten 增亮 | gray 去色增强(留灰阶)
  *  · 前端拿到后可并列渲染缩略图，让用户挑最满意的一张（提升满意度 / 粘性）。
