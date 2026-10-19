@@ -13,7 +13,11 @@ export namespace Network {
         if (url.startsWith('http://') || url.startsWith('https://')) {
             return url
         }
-        return `${PROJECT_DOMAIN}${url}`
+        // 兜底：编译期 PROJECT_DOMAIN 为空（未配置 .env.local / PROJECT_DOMAIN）时，
+        // H5 端保持相对路径走 devServer 代理；小程序端没有相对路径概念，
+        // 必须补全为绝对地址，否则微信直接报 `request:fail invalid url "/api/..."`。
+        const base = PROJECT_DOMAIN || (TARO_ENV === 'h5' ? '' : 'http://127.0.0.1:3001')
+        return `${base}${url}`
     }
 
     export const request: typeof Taro.request = option => {

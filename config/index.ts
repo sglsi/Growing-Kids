@@ -139,7 +139,13 @@ export default defineConfig<'vite'>(async (merge, _env) => {
     outputRoot,
     plugins: ['@tarojs/plugin-generator', ...buildMiniCIPluginConfig()],
     defineConstants: {
-      PROJECT_DOMAIN: JSON.stringify(process.env.PROJECT_DOMAIN || ''),
+      // 小程序端 baseURL 缺省值：未配置 PROJECT_DOMAIN 时默认打本机 3001 后端
+      // （微信开发者工具联调标准姿势：开发者工具 → 详情 → 本地设置 → 不校验域名）。
+      // ⚠️ H5 端必须保持空串——devServer 已把 /api 代理到 localhost:SERVER_PORT，
+      //    填了绝对地址反而绕过代理直连，开发环境下会 CORS/连不上。
+      PROJECT_DOMAIN: JSON.stringify(
+        process.env.PROJECT_DOMAIN || (process.env.TARO_ENV === 'h5' ? '' : 'http://127.0.0.1:3001'),
+      ),
       TARO_ENV: JSON.stringify(process.env.TARO_ENV),
     },
     copy: {
