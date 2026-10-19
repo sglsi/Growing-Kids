@@ -73,7 +73,10 @@ const HANDLE_HIT = 32
 // 四角手柄命中半径（px）。角点手柄直径 22，命中半径放大到 36，便于手指抓取。
 const CORNER_HIT = 36
 
-const DEFAULT_CROP: Rect = { x: 0.05, y: 0.08, w: 0.9, h: 0.84 }
+// 默认裁剪框 = 整张图（思傅 2026-10-19 要求）。
+// 历史值为内缩 5%/8% 的 {0.05,0.08,0.9,0.84}，导致「没碰裁剪框直接保存」
+// 也会被裁掉四周；现默认全图，即便误触裁剪确认也无损失。
+const DEFAULT_CROP: Rect = { x: 0, y: 0, w: 1, h: 1 }
 
 // 四角默认位置：内缩 8% 的四边形（贴合「试卷略小于取景框」的常见拍摄）。
 // 顺序固定 [左上, 右上, 右下, 左下]，与后端 orderCorners 语义一致（后端仍会自行排序）。
@@ -1173,15 +1176,12 @@ export default function ImageEditor({
     setBusy(true)
     Taro.showLoading({ title: '保存中…', mask: true })
     try {
-      // ★ 与 handleConfirm 共用同一套判断（此前 handleSave 缺此判断，导致「旋转/AI 后保存」
-      //   又按 crop 默认框裁了一刀 → 四周被裁。这正是「旋转预览正常、保存后才裁」的根因）：
-      //   仅当「处于**矩形**主动裁剪模式且尚未确认」时，才按当前框选裁剪；
-      //   ⚠️ cornerMode==='rect' 条件不可少：四角模式（quad）下 crop 仍是无关的内缩矩形，
-      //     若不加此条件，「四角拉框失败后点保存」会误按矩形内缩框再裁一刀（用户已实测踩坑）。
-      //   其余情况（旋转/AI 处理的结果、已确认裁剪、原图直存）currentSrc 已是最终成品，**直接使用**，
-      //   绝不再用 crop（尤其不要用被 reset 的 DEFAULT_CROP）二次裁剪。
-      const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed
-      const imgSrc = pendingCrop ? await exportEdited() : await toLocalIfRemote(currentSrc)
+      // ★ 保存链路永不按裁剪框二次裁剪（思傅 2026-10-19 修复）：
+      //   用户没有点过「确定裁剪」时，保存的必须是 currentSrc（原图/旋转/AI 成品），
+      //   绝不再用 crop 裁一刀——此前 framing 初始为 true 且 DEFAULT_CROP 内缩，
+      //   导致「没碰裁剪框直接保存」存的就是被裁掉四周的图（用户实测 bug）。
+      //   裁剪结果生效的唯一路径：点「确定裁剪」(handleConfirmCrop) → currentSrc 替换为成品。
+      const imgSrc = await toLocalIfRemote(currentSrc)
       if (!imgSrc) throw new Error('图片处理失败，请重试')
       const up = await uploadImage(imgSrc, { purpose: 'save' })
       const saved = !!(up && (up.timeline_id || up.key))
@@ -1201,12 +1201,15 @@ export default function ImageEditor({
     if (busy || aiBusy) return
     setBusy(true)
     try {
-      // 仅在「**矩形**主动裁剪且尚未提交」时按当前框选裁剪（quad 模式下 crop 无意义，见 handleSave 注释）；
-      // 其余情况（已提交裁剪 / AI 处理 / 旋转 / 原图直接确认）currentSrc 已是最终结果，
-      // 直接以「本地化后的 currentSrc」提交——既避免 AI/旋转后被默认裁剪框再裁一刀，
-      // 也避免 currentSrc 因下载失败残留远程 URL 时走错上传分支（导致静默不入库）。
-      const pendingCrop = cornerMode === 'rect' && showFrame && !confirmed
-      const out = pendingCrop ? await exportEdited() : await toLocalIfRemote(currentSrc)
+      // 统一规则（思傅 2026-10-19 定）：「未点确定裁剪 = 不裁剪」。
+      // 除 cropOnly（#150 页内裁剪入图：整页即为裁剪服务，矩形模式下底部主按钮
+      // 就是「确认裁剪并返回」的出口，保留按框导出）外，其余模式一律直接回传
+      // currentSrc——裁剪/四角的成品都在用户点过「确定裁剪」/「确认四角」后
+      // 已替换进 currentSrc，保存/返回链路不再按框二次裁剪（双保险：
+      // DEFAULT_CROP 已改为全图 + 此链路不再裁）。
+      const out = cropOnly && cornerMode === 'rect'
+        ? await exportEdited()
+        : await toLocalIfRemote(currentSrc)
       if (!out) throw new Error('图片处理失败，请重试')
       onConfirm(out)
     } catch (err: any) {
