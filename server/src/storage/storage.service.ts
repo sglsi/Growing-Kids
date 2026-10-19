@@ -1,40 +1,58 @@
 import { Injectable } from '@nestjs/common'
 import * as fs from 'fs'
 import * as path from 'path'
-import { S3Storage } from 'coze-coding-dev-sdk'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 /**
- * 存储驱动抽象：
- *  - `local`（默认，本机开发）：文件落项目根 .local-storage/，经 /api/storage/files/* 读回。
- *    扣子 S3 通道在环境外已死刑（COZE_WORKLOAD_IDENTITY_API_KEY 用户侧拿不到），
- *    本机开发/测试阶段用本地盘顶替，接口与扣子版完全一致，调用方零改动。
- *  - `coze`（扣子平台内）：原 S3Storage 实现，仅在显式提供扣子凭证时启用。
+ * 存储驱动抽象（已彻底去除扣子 / Coze S3 依赖）
+ * ------------------------------------------------------------------
+ *  - `local`（默认，本机开发）：文件落 `<项目根>/.local-storage/`，
+ *    经 `GET /api/storage/files/*` 读回。零外部依赖，断网也能跑。
+ *  - `supabase`（生产）：Supabase Storage（S3 兼容对象存储），
+ *    用 service_role key 服务端直传，公共桶返回公网 URL、私有桶返回签名 URL。
  *
- * 切换：env `STORAGE_DRIVER=local|coze`（未设时：有扣子 workload key → coze，否则 local）。
+ * 切换：env `STORAGE_DRIVER=local|supabase`
+ *      未显式设置时默认 `local`（本机开发最安全：断网可跑、不会因 bucket 未建而
+ *      突然把上传打挂）；上生产时显式设 `STORAGE_DRIVER=supabase`。
+ *
+ * 接口（uploadBuffer/uploadDerived/uploadTemp/getPublicUrl/deleteObject/listKeys）
+ * 与历史版本完全一致，10+ 处调用方零改动。
  */
-type StorageDriver = 'local' | 'coze'
+type StorageDriver = 'local' | 'supabase'
 
 @Injectable()
 export class StorageService {
   private readonly driver: StorageDriver
-  private readonly storage?: S3Storage
+  private readonly supabase?: SupabaseClient
+  private readonly bucket: string
   /** local 驱动：对象根目录（默认 <cwd>/.local-storage） */
-  private readonly localDir: string
+  private localDir: string
+  /** supabase 驱动：true=公共桶（公网直链），false=私有桶（签名 URL） */
+  private readonly publicBucket: boolean
 
   constructor() {
-    this.driver = ((process.env.STORAGE_DRIVER as StorageDriver) ||
-      (process.env.COZE_WORKLOAD_IDENTITY_API_KEY ? 'coze' : 'local')) as StorageDriver
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.COZE_SUPABASE_URL
+    const serviceKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.COZE_SUPABASE_SERVICE_ROLE_KEY
 
-    if (this.driver === 'coze') {
-      this.storage = new S3Storage({
-        endpointUrl: process.env.COZE_BUCKET_ENDPOINT_URL,
-        accessKey: '',
-        secretKey: '',
-        bucketName: process.env.COZE_BUCKET_NAME,
-        region: 'cn-beijing',
+    this.driver = ((process.env.STORAGE_DRIVER as StorageDriver) || 'local') as StorageDriver
+
+    this.bucket = process.env.SUPABASE_STORAGE_BUCKET || 'media'
+    this.publicBucket = (process.env.SUPABASE_STORAGE_PUBLIC || 'true') !== 'false'
+    this.localDir = ''
+
+    if (this.driver === 'supabase') {
+      if (!supabaseUrl || !serviceKey) {
+        throw new Error(
+          '[storage] STORAGE_DRIVER=supabase 但缺少 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY',
+        )
+      }
+      this.supabase = createClient(supabaseUrl, serviceKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
       })
-      console.log('[storage] 驱动：coze S3（扣子平台内运行）')
-      this.localDir = ''
+      console.log(
+        `[storage] 驱动：supabase（bucket=${this.bucket}，${this.publicBucket ? '公共桶' : '私有桶签名'}）`,
+      )
       return
     }
 
@@ -43,7 +61,7 @@ export class StorageService {
     console.log(`[storage] 驱动：local（根目录 ${this.localDir}，读取路由 /api/storage/files/*）`)
   }
 
-  /** 本地驱动：把对象 key 安全解析为磁盘绝对路径（防 ../ 逃逸） */
+  /** local 驱动：把对象 key 安全解析为磁盘绝对路径（防 ../ 逃逸） */
   private resolveLocal(key: string): string {
     const norm = path.normalize(key).replace(/^(\.\.[/\\])+/, '')
     const abs = path.resolve(this.localDir, norm)
@@ -58,18 +76,23 @@ export class StorageService {
     if (!buffer || buffer.length === 0) {
       throw new Error(`[storage] 拒绝上传空文件：${fileName}`)
     }
+
     if (this.driver === 'local') {
       const abs = this.resolveLocal(fileName)
       fs.mkdirSync(path.dirname(abs), { recursive: true })
       fs.writeFileSync(abs, buffer)
       return fileName
     }
-    const key = await this.storage!.uploadFile({
-      fileContent: buffer,
-      fileName,
-      contentType,
+
+    const { error } = await this.supabase!.storage.from(this.bucket).upload(fileName, buffer, {
+      contentType: contentType || 'application/octet-stream',
+      upsert: true,
+      cacheControl: '31536000',
     })
-    return key
+    if (error) {
+      throw new Error(`[storage] 上传失败 ${fileName}：${error.message}`)
+    }
+    return fileName
   }
 
   /**
@@ -117,21 +140,25 @@ export class StorageService {
     return `http://127.0.0.1:${port}`
   }
 
-  /** 对象可访问 URL。local 驱动：后端静态路由；coze 驱动：SDK 预签名 URL。 */
+  /** 对象可访问 URL。local：后端静态路由；supabase：公共桶公网直链 / 私有桶签名 URL。 */
   async getPublicUrl(key: string): Promise<string> {
     if (this.driver === 'local') {
       return `${this.publicBaseUrl()}/api/storage/files/${key}`
     }
-    return this.storage!.generatePresignedUrl({ key, expireTime: 86400 })
+    if (this.publicBucket) {
+      return this.supabase!.storage.from(this.bucket).getPublicUrl(key).data.publicUrl
+    }
+    const { data, error } = await this.supabase!.storage
+      .from(this.bucket)
+      .createSignedUrl(key, 86400)
+    if (error || !data?.signedUrl) {
+      throw new Error(`[storage] 生成签名 URL 失败 ${key}：${error?.message || 'unknown'}`)
+    }
+    return data.signedUrl
   }
 
   /**
    * 删除对象（用于匿名清理 / 软删回收 / GC）；失败不抛，返回是否成功。
-   *
-   * ⚠️ 修过一个真实 bug：SDK 的签名是 `deleteFile(options: { fileKey })`**（对象参数）**，
-   * 而此前传的是裸字符串 key ⇒ 内部 `options.fileKey` 为 undefined ⇒ 删除**静默失败**
-   * （异常被这里 catch 吞掉，只返回 false）。这意味着 GC / 清理任务「看起来在跑」，
-   * 实际上文件一个都没删掉。现按类型定义传对象，并保留字符串形式兜底以兼容旧版 SDK。
    */
   async deleteObject(key: string): Promise<boolean> {
     if (!key) return false
@@ -148,31 +175,14 @@ export class StorageService {
         return false
       }
     }
-    const anyStorage = this.storage as unknown as {
-      deleteFile?: (a: unknown) => Promise<unknown>
-      deleteObject?: (a: unknown) => Promise<unknown>
-    }
     try {
-      if (typeof anyStorage.deleteFile === 'function') {
-        await anyStorage.deleteFile({ fileKey: key })
-        return true
+      const { error } = await this.supabase!.storage.from(this.bucket).remove([key])
+      if (error) {
+        console.error('[storage] 删除对象失败', key, error.message)
+        return false
       }
-      if (typeof anyStorage.deleteObject === 'function') {
-        await anyStorage.deleteObject({ fileKey: key })
-        return true
-      }
-      console.warn('[storage] SDK 未暴露删除方法，跳过 key:', key)
-      return false
+      return true
     } catch (e) {
-      // 兜底：个别 SDK 版本可能是 (key: string) 的老签名
-      try {
-        if (typeof anyStorage.deleteFile === 'function') {
-          await anyStorage.deleteFile(key)
-          return true
-        }
-      } catch {
-        /* 两种签名都不行，才判定失败 */
-      }
       console.error('[storage] 删除对象失败', key, e)
       return false
     }
@@ -180,7 +190,7 @@ export class StorageService {
 
   /**
    * 按前缀列举对象 key（供分层统计、临时对象清理使用）。
-   * local 驱动：递归遍历磁盘；SDK：分页 listFiles。
+   * local：递归遍历磁盘；supabase：按目录分页 list（Storage API 不支持跨级前缀，需逐层下钻）。
    */
   async listKeys(prefix: string, maxKeys = 1000): Promise<string[]> {
     if (this.driver === 'local') {
@@ -208,21 +218,29 @@ export class StorageService {
       walk(root)
       return out
     }
-    const anyStorage = this.storage as unknown as {
-      listFiles?: (o: { prefix?: string; maxKeys?: number; continuationToken?: string })
-        => Promise<{ keys?: string[]; isTruncated?: boolean; nextContinuationToken?: string }>
-    }
-    if (typeof anyStorage.listFiles !== 'function') return []
+
     const out: string[] = []
-    let token: string | undefined
-    try {
-      // 最多翻 20 页，避免异常情况下无限循环
-      for (let page = 0; page < 20; page++) {
-        const res = await anyStorage.listFiles({ prefix, maxKeys, ...(token ? { continuationToken: token } : {}) })
-        out.push(...(res?.keys || []))
-        if (!res?.isTruncated || !res.nextContinuationToken) break
-        token = res.nextContinuationToken
+    // prefix 形如 "blobs/" 或 "tmp/"；逐层下钻目录，收集文件 key
+    const walk = async (dir: string): Promise<void> => {
+      if (out.length >= maxKeys) return
+      const { data, error } = await this.supabase!.storage
+        .from(this.bucket)
+        .list(dir, { limit: 1000, offset: 0, sortBy: { column: 'name', order: 'asc' } })
+      if (error || !data) return
+      for (const item of data) {
+        if (out.length >= maxKeys) return
+        // Supabase Storage 用 id=null 表示目录（无 metadata 时为文件）
+        const isDir = !item.metadata || item.metadata === null
+        const child = dir ? `${dir}/${item.name}` : item.name
+        if (isDir) {
+          await walk(child)
+        } else {
+          if (!prefix || child.startsWith(prefix)) out.push(child)
+        }
       }
+    }
+    try {
+      await walk('')
     } catch (e) {
       console.error('[storage] 列举对象失败', prefix, e)
     }

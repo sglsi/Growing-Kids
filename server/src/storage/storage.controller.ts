@@ -25,7 +25,7 @@ const MIME: Record<string, string> = {
  *   用途一：在云控制台配生命周期规则**前后各调一次**，核对省了多少，而不是只看账单猜；
  *   用途二：容量告警数据源（total.bytes 超过阈值即告警，设计文档 §11.5 第 6 条）。
  *
- * GET /api/storage/files/* —— local 驱动对象读取（本机开发用；coze 驱动走预签名 URL，不经此路由）
+ * GET /api/storage/files/* —— local 驱动对象读取（本机开发用；supabase 驱动直连对象存储，不经此路由）
  */
 @Controller('storage')
 export class StorageController {

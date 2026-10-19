@@ -123,9 +123,11 @@ export class ChatService {
   ): Promise<KnowledgeArticle> {
     if (!id) throw new BadRequestException('id 必填')
     const client = getSupabaseClient()
+    // ⚠️ updated_at 必须显式写：knowledge_articles 只有 default now()（仅覆盖 insert），
+    //    update 时不会自动刷新。库级触发器见 migrations/0008_updated_at_trigger.sql（双保险）。
     const { data, error } = await client
       .from(KNOWLEDGE_TABLE)
-      .update(patch)
+      .update({ ...patch, updated_at: new Date().toISOString() })
       .eq('id', id)
       .select(KNOWLEDGE_SELECT)
       .maybeSingle()
