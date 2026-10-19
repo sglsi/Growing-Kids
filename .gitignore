@@ -44,8 +44,6 @@ pnpm-debug.log*
 # Preview files
 .preview
 
-.cozeproj/reduction
-
 # CodeGraph index
 .codegraph
 node-compile-cache/
