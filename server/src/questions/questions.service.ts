@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { cleanStr, cleanDate } from '../shared/query-param'
 import type {
   Question,
   QuestionWithSubject,
@@ -21,8 +22,11 @@ interface ListQuery {
 export class QuestionsService {
   private applyRange(q: any, startDate?: string, endDate?: string) {
     let query = q
-    if (startDate) query = query.gte('recognized_at', startDate)
-    if (endDate) query = query.lte('recognized_at', endDate)
+    // 脏参数防御：非日期字符串喂给 recognized_at 会让 Postgres 解析失败直接 500
+    const start = cleanDate(startDate)
+    const end = cleanDate(endDate)
+    if (start) query = query.gte('recognized_at', start)
+    if (end) query = query.lte('recognized_at', end)
     return query
   }
 
@@ -37,8 +41,10 @@ export class QuestionsService {
       .from('questions')
       .select('*, subjects:subject_id(id, name, color)', { count: 'exact' })
 
-    if (query.subject_id) supabaseQuery = supabaseQuery.eq('subject_id', query.subject_id)
-    if (query.keyword) supabaseQuery = supabaseQuery.or(`question_content.ilike.%${query.keyword}%,answer_content.ilike.%${query.keyword}%`)
+    const subjectId = cleanStr(query.subject_id)
+    const keyword = cleanStr(query.keyword)
+    if (subjectId) supabaseQuery = supabaseQuery.eq('subject_id', subjectId)
+    if (keyword) supabaseQuery = supabaseQuery.or(`question_content.ilike.%${keyword}%,answer_content.ilike.%${keyword}%`)
     if (query.mastered !== undefined) supabaseQuery = supabaseQuery.eq('mastered', query.mastered)
     supabaseQuery = this.applyRange(supabaseQuery, query.start_date, query.end_date)
     supabaseQuery = supabaseQuery.order('recognized_at', { ascending: false }).range(from, to)

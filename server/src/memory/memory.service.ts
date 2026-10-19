@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
+import { cleanStr, cleanDate } from '../shared/query-param'
 import type {
   Memory, MemoryMedia, MemoryListQuery,
   CreateMemoryDto, UpdateMemoryDto, CreateMemoryMediaDto,
@@ -40,16 +41,23 @@ export class MemoryService {
       .eq('user_id', userId)
       .is('deleted_at', null)
 
-    if (query.category && VALID_CATEGORIES.includes(query.category as MemoryCategory)) {
-      q = q.eq('category', query.category)
+    const category = cleanStr(query.category)
+    const subjectId = cleanStr(query.subject_id)
+    const tag = cleanStr(query.tag)
+    const keyword = cleanStr(query.keyword)
+    // since 必须是合法日期：否则 Postgres 解析 timestamptz 失败直接 500
+    const since = cleanDate(query.since)
+
+    if (category && VALID_CATEGORIES.includes(category as MemoryCategory)) {
+      q = q.eq('category', category)
     }
-    if (query.subject_id) q = q.eq('subject_id', query.subject_id)
-    if (query.tag) q = q.contains('tags', [query.tag])
-    if (query.keyword) {
-      const kw = `%${query.keyword}%`
+    if (subjectId) q = q.eq('subject_id', subjectId)
+    if (tag) q = q.contains('tags', [tag])
+    if (keyword) {
+      const kw = `%${keyword}%`
       q = q.or(`title.ilike.${kw},content.ilike.${kw}`)
     }
-    if (query.since) q = q.gte('occurred_at', query.since)
+    if (since) q = q.gte('occurred_at', since)
 
     const { data, error, count } = await q
       .order('occurred_at', { ascending: false })

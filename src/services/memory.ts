@@ -98,45 +98,53 @@ export interface CreateMemoryMediaPayload {
 
 /** 列表 */
 export function fetchMemories(q: MemoryListQuery = {}) {
+  // ⚠️ 必须过滤空值：直接把 undefined 塞进 data 会拼出 ?category=undefined&... 这类脏参数，
+  //    后端拿到字符串 "undefined" 会当成真值去过滤 ⇒ 不报错但永远查不到数据（比 404 更隐蔽）。
+  const raw: Record<string, unknown> = {
+    category: q.category,
+    subject_id: q.subjectId,
+    tag: q.tag,
+    keyword: q.keyword,
+    since: q.since,
+    page: q.page ?? 1,
+    page_size: q.pageSize ?? 20,
+  }
+  const data: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === undefined || v === null || v === '') continue
+    data[k] = v
+  }
   return Network.request<MemoryListResp>({
-    url: '/memories',
+    url: '/api/memories',
     method: 'GET',
-    data: {
-      category: q.category,
-      subject_id: q.subjectId,
-      tag: q.tag,
-      keyword: q.keyword,
-      since: q.since,
-      page: q.page ?? 1,
-      page_size: q.pageSize ?? 20,
-    },
+    data,
   })
 }
 
 /** 详情 */
 export function fetchMemoryDetail(id: string) {
-  return Network.request<MemoryDetailResp>({ url: `/memories/${id}`, method: 'GET' })
+  return Network.request<MemoryDetailResp>({ url: `/api/memories/${id}`, method: 'GET' })
 }
 
 /** 创建 */
 export function createMemory(payload: CreateMemoryPayload) {
-  return Network.request<Memory>({ url: '/memories', method: 'POST', data: payload })
+  return Network.request<Memory>({ url: '/api/memories', method: 'POST', data: payload })
 }
 
 /** 修改 */
 export function updateMemory(id: string, payload: UpdateMemoryPayload) {
-  return Network.request<Memory>({ url: `/memories/${id}`, method: 'PATCH', data: payload })
+  return Network.request<Memory>({ url: `/api/memories/${id}`, method: 'PATCH', data: payload })
 }
 
 /** 删除（软删） */
 export function deleteMemory(id: string) {
-  return Network.request<{ id: string }>({ url: `/memories/${id}`, method: 'DELETE' })
+  return Network.request<{ id: string }>({ url: `/api/memories/${id}`, method: 'DELETE' })
 }
 
 /** 批量删除 */
 export function batchDeleteMemories(ids: string[]) {
   return Network.request<{ count: number }>({
-    url: '/memories/batch-delete',
+    url: '/api/memories/batch-delete',
     method: 'POST',
     data: { ids },
   })
@@ -145,7 +153,7 @@ export function batchDeleteMemories(ids: string[]) {
 /** 追加媒体 */
 export function addMemoryMedia(memoryId: string, payload: CreateMemoryMediaPayload) {
   return Network.request<MemoryMedia>({
-    url: `/memories/${memoryId}/media`,
+    url: `/api/memories/${memoryId}/media`,
     method: 'POST',
     data: payload,
   })
@@ -154,7 +162,7 @@ export function addMemoryMedia(memoryId: string, payload: CreateMemoryMediaPaylo
 /** 删除媒体 */
 export function deleteMemoryMedia(memoryId: string, mediaId: string) {
   return Network.request<{ id: string }>({
-    url: `/memories/${memoryId}/media/${mediaId}`,
+    url: `/api/memories/${memoryId}/media/${mediaId}`,
     method: 'DELETE',
   })
 }

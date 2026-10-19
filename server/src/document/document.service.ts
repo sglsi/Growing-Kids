@@ -4,6 +4,7 @@ import {
   AlignmentType, Footer, PageNumber, BorderStyle,
 } from 'docx'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { cleanStr, cleanDate } from '../shared/query-param'
 
 interface ExportParams {
   subject_id?: string
@@ -41,9 +42,14 @@ export class DocumentService {
       .eq('kind', 'question')
       .is('deleted_at', null)
 
-    if (params.subject_id) q = q.eq('subject_id', params.subject_id)
-    if (params.start_date) q = q.gte('created_at', params.start_date)
-    if (params.end_date) q = q.lte('created_at', params.end_date)
+    // 脏参数防御：'undefined'/'null' 这类字符串当真值过滤会静默查不到数据，
+    // 喂给日期列更会让 Postgres 解析失败直接 500
+    const subjectId = cleanStr(params.subject_id)
+    const startDate = cleanDate(params.start_date)
+    const endDate = cleanDate(params.end_date)
+    if (subjectId) q = q.eq('subject_id', subjectId)
+    if (startDate) q = q.gte('created_at', startDate)
+    if (endDate) q = q.lte('created_at', endDate)
     if (!params.include_mastered) q = q.eq('mastered', false)
     q = q.order('created_at', { ascending: true })
 
