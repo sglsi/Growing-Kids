@@ -46,8 +46,15 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 # 模型缓存持久化：HOME(/root) 在沙箱重置后不丢内容但有清理风险，指到项目卷保证命中
-os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
-os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
+# 平台自适应：Linux 沙箱走 /workspace/projects（扣子卷）；Windows 本机走项目根目录，
+# 避免 C:\Users\<name>\.paddlex 随用户目录被清理，也保证模型权重跨重启命中。
+if sys.platform == "win32":
+    _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", os.path.join(_REPO_ROOT, ".cache-paddlex"))
+    os.environ.setdefault("XDG_CACHE_HOME", os.path.join(_REPO_ROOT, ".cache-paddle-xdg"))
+else:
+    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
+    os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel

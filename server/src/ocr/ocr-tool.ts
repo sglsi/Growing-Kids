@@ -44,15 +44,17 @@ function resolveEngine(engine: ToolEngine = 'legacy'): { dir: string; script: st
   return { dir: candidates[0] ?? '', script: '' }
 }
 
-/** 探测某 python 是否能 import 指定模块（结果缓存，避免每次 OCR 都 fork 子进程）。 */
+/** 探测某 python 是否能 import 指定模块（结果缓存，避免每次 OCR 都 fork 子进程）。
+ *  timeoutMs：paddle 首次 import 在 Windows/冷盘上可达 15~30s，paddle 系探测必须放宽，
+ *  否则探测超时被误判为「venv 不可用」而回退到无包的裸 python（工具式调用随即 ModuleNotFound）。 */
 const importProbeCache = new Map<string, boolean>()
-function pythonCanImport(py: string, mod: string): boolean {
+function pythonCanImport(py: string, mod: string, timeoutMs = 8000): boolean {
   const key = `${py}::${mod}`
   const hit = importProbeCache.get(key)
   if (hit !== undefined) return hit
   let ok = false
   try {
-    execFileSync(py, ['-c', `import ${mod}`], { timeout: 8000, stdio: 'ignore' })
+    execFileSync(py, ['-c', `import ${mod}`], { timeout: timeoutMs, stdio: 'ignore' })
     ok = true
   } catch {
     ok = false
@@ -62,16 +64,21 @@ function pythonCanImport(py: string, mod: string): boolean {
 }
 
 /** 从候选里挑第一个能 import 全部 requiredModules 的 python；都不行返回 null。 */
-function pickUsablePython(candidates: string[], requiredModules: string[]): string | null {
+function pickUsablePython(
+  candidates: string[],
+  requiredModules: string[],
+  timeoutMs?: number,
+): string | null {
   for (const py of candidates) {
     if (!py) continue
-    if (requiredModules.every((m) => pythonCanImport(py, m))) return py
+    if (requiredModules.every((m) => pythonCanImport(py, m, timeoutMs))) return py
   }
   return null
 }
 
 /**
  * 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
+ * Windows 本机：项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 / ppsv3.client 对齐）。
  * 可用 PPSV3_PYTHON 环境变量覆盖。
  * 探测 paddle + paddlex 是否可用，缺包则回退，避免用「存在但损坏」的 venv。
  */
@@ -79,20 +86,35 @@ export function resolvePython(engine: ToolEngine): string {
   if (engine === 'ppsv3') {
     const fromEnv = process.env.PPSV3_PYTHON
     if (fromEnv && pythonCanImport(fromEnv, 'paddle')) return fromEnv
-    const ppsv3Candidates = ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']
-    return pickUsablePython(ppsv3Candidates, ['paddle', 'paddlex']) ?? 'python3'
+    const repoRoot = path.resolve(__dirname, '../../..')
+    const ppsv3Candidates =
+      process.platform === 'win32'
+        ? [
+            path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
+            path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
+          ]
+        : ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']
+    // paddle 系 import 慢（首次 15~30s）：探测超时放宽到 60s，结果有缓存只慢一次
+    return (
+      pickUsablePython(ppsv3Candidates, ['paddle', 'paddlex'], 60_000) ??
+      (process.platform === 'win32' ? 'python' : 'python3')
+    )
   }
   // legacy 引擎：RapidOCR 依赖 rapidocr_onnxruntime。部分 /opt venv **未安装该包**，
   // 直接返回会让 main.py 启动即捕获 ImportError → 静默输出空结果（raw_text:""），
   // recognizePageFast 收到空 data 不抛错 → 快速模式「伪成功实为空白」。
   // 故按「持久化 venv → 旧 venv → 系统 python3(三者齐全)」探测，取第一个真能 import 的。
+  const repoRoot = path.resolve(__dirname, '../../..')
+  const winVenv = [
+    path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
+    path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
+  ]
   const legacyCandidates = [
     process.env.OCR_PYTHON,
-    '/workspace/projects/.venv-py/bin/python',
-    '/opt/pocr3-venv/bin/python',
-    'python3',
+    ...(process.platform === 'win32' ? winVenv : ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']),
+    process.platform === 'win32' ? 'python' : 'python3',
   ].filter(Boolean) as string[]
-  return pickUsablePython(legacyCandidates, ['rapidocr_onnxruntime']) ?? 'python3'
+  return pickUsablePython(legacyCandidates, ['rapidocr_onnxruntime']) ?? (process.platform === 'win32' ? 'python' : 'python3')
 }
 
 export type ToolOcrOp = 'recognize' | 'orient' | 'ppsv3' | 'rectify'

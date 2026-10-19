@@ -25,8 +25,25 @@ import { Injectable } from '@nestjs/common'
 
 export type OcrEnvStatus = 'unknown' | 'ok' | 'missing' | 'recovering' | 'failed'
 
-const VENV_DIR = '/workspace/projects/.venv-py'
-const VENV_PY = `${VENV_DIR}/bin/python`
+/**
+ * OCR venv 位置（平台自适应）：
+ *  - Linux 沙箱：/workspace/projects/.venv-py（扣子项目卷，重置不丢）
+ *  - Windows 本机：项目根 .venv-py（install-ocr-env.ps1 默认落点）
+ *  环境变量 OCR_VENV_DIR 可显式覆盖。
+ */
+function defaultVenvDir(): string {
+  if (process.env.OCR_VENV_DIR) return process.env.OCR_VENV_DIR
+  if (process.platform === 'win32') {
+    // dist/ocr -> ../../.. = 仓库根
+    return path.resolve(__dirname, '../../..', '.venv-py')
+  }
+  return '/workspace/projects/.venv-py'
+}
+const VENV_DIR = defaultVenvDir()
+const VENV_PY =
+  process.platform === 'win32'
+    ? path.join(VENV_DIR, 'Scripts', 'python.exe')
+    : path.join(VENV_DIR, 'bin', 'python')
 /** 轻量自检要求存在的包目录（与 install 脚本安装清单一一对应） */
 const REQUIRED_PKG_DIRS = [
   'cv2',
@@ -71,6 +88,11 @@ export class EnvRecoveryService {
 
   private sitePackagesDir(): string | null {
     try {
+      // Windows venv 布局：.venv-py/Lib/site-packages（无 lib/pythonX 层级）
+      if (process.platform === 'win32') {
+        const p = path.join(VENV_DIR, 'Lib', 'site-packages')
+        return fs.existsSync(p) ? p : null
+      }
       const lib = path.join(VENV_DIR, 'lib')
       for (const e of fs.readdirSync(lib)) {
         if (!e.startsWith('python3')) continue
@@ -162,25 +184,33 @@ export class EnvRecoveryService {
     return result
   }
 
-  /** 执行 docs/install-ocr-env.sh（幂等），完成后再做 import 实测确认。 */
+  /** 执行 install-ocr-env.sh（Linux）或 install-ocr-env.ps1（Windows）（幂等），完成后再做 import 实测确认。 */
   private async doRecover(): Promise<boolean> {
     const script = this.resolveInstallScript()
     this.lastRecoverAt = Date.now()
     if (!script) {
       this.status = 'failed'
-      this.lastError = '恢复脚本 docs/install-ocr-env.sh 未找到'
+      this.lastError = '恢复脚本 install-ocr-env.sh/.ps1 未找到'
       console.warn(`[ocr-env] ${this.lastError}`)
       return false
     }
+    const isWin = process.platform === 'win32'
+    const cmd = isWin ? `powershell -ExecutionPolicy Bypass -File "${script}"` : `bash ${script}`
     console.warn(
-      `[ocr-env] 检测到 OCR venv 缺失/损坏（${VENV_PY}），开始自动恢复：bash ${script}（约 3~6 分钟，含 paddlepaddle 下载）`,
+      `[ocr-env] 检测到 OCR venv 缺失/损坏（${VENV_PY}），开始自动恢复：${cmd}（约 3~6 分钟，含 paddlepaddle 下载）`,
     )
     const exitCode = await new Promise<number>((resolve) => {
-      const child = spawn('bash', [script], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
-        cwd: path.dirname(script),
-      })
+      const child = isWin
+        ? spawn(process.env.ComSpec ?? 'powershell', ['-ExecutionPolicy', 'Bypass', '-File', script], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: process.env,
+            cwd: path.dirname(script),
+          })
+        : spawn('bash', [script], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: process.env,
+            cwd: path.dirname(script),
+          })
       const onLine = (buf: Buffer) => {
         for (const line of buf.toString().split('\n')) {
           const t = line.trim()
@@ -227,10 +257,12 @@ export class EnvRecoveryService {
   }
 
   private resolveInstallScript(): string | null {
+    const isWin = process.platform === 'win32'
+    const name = isWin ? 'install-ocr-env.ps1' : 'install-ocr-env.sh'
     const candidates = [
-      path.resolve(__dirname, '../../../docs/install-ocr-env.sh'),
-      path.resolve(process.cwd(), 'docs/install-ocr-env.sh'),
-      path.resolve(process.cwd(), '../docs/install-ocr-env.sh'),
+      path.resolve(__dirname, '../../../docs', name),
+      path.resolve(process.cwd(), 'docs', name),
+      path.resolve(process.cwd(), '../docs', name),
     ]
     for (const p of candidates) {
       try {

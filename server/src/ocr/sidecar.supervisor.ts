@@ -80,14 +80,17 @@ function parseBaseUrl(raw: string): { host: string; port: number } {
 
 /**
  * python 可执行判定：
- *  - 绝对/相对路径（含分隔符，如 PPSV3_PYTHON 默认的 /opt/pocr3-venv/bin/python）：
- *    直接查文件存在 + 可执行位。venv 未随部署落地时这里必须判失败——否则 auto 模式
- *    会显示"守护已启用"，随后 spawn ENOENT 把每次 OCR 拖进 30s 启动超时再静默失败。
- *  - 裸命令（python3）：走 PATH 查找。
+ *  - 绝对/相对路径（如 PPSV3_PYTHON 默认的 /opt/pocr3-venv/bin/python 或
+ *    Windows 的 D:\...\Scripts\python.exe）：直接查文件存在 + 可执行位。
+ *    venv 未随部署落地时这里必须判失败——否则 auto 模式会显示"守护已启用"，
+ *    随后 spawn ENOENT 把每次 OCR 拖进 30s 启动超时再静默失败。
+ *    （注意：不能用 includes('/') 判路径——Windows 绝对路径 D:\... 不含 /，
+ *     会被误判成裸命令走 command -v，在 cmd.exe 下必然失败。）
+ *  - 裸命令（python3/python）：走 PATH 查找。
  */
 function pythonUsable(python: string): boolean {
   try {
-    if (python.includes('/')) {
+    if (path.isAbsolute(python)) {
       const st = fs.statSync(python)
       if (!st.isFile()) return false
       fs.accessSync(python, fs.constants.X_OK)
@@ -100,9 +103,20 @@ function pythonUsable(python: string): boolean {
   }
 }
 
-/** legacy（2.x 融合）侧车 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 系统 python3。 */
+/** legacy（2.x 融合）侧车 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 系统 python3。
+ *  平台自适应：Windows 本机开发走项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 对齐）。 */
 function defaultLegacyPython(): string {
   try {
+    if (process.platform === 'win32') {
+      const repoRoot = path.resolve(__dirname, '../../..')
+      for (const p of [
+        path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
+        path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
+      ]) {
+        if (fs.existsSync(p)) return p
+      }
+      return 'python'
+    }
     const venvPython = '/workspace/projects/.venv-py/bin/python'
     if (fs.existsSync(venvPython)) return venvPython
   } catch { /* ignore */ }

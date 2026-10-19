@@ -68,18 +68,28 @@ export interface Ppsv3ClientOptions {
 }
 
 /** 3.x 引擎 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
+ *  平台自适应：Windows 本机开发走项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 对齐）；
+ *  Linux 沙箱保留 /workspace/projects 与 /opt 两个历史路径。
  *  常量保留函数形式：Supervisor 构造在模块加载期执行，需即时探测文件系统。 */
 function defaultPpsv3Python(): string {
-  const candidates = [
+  const repoRoot = path.resolve(__dirname, '../../..')
+  const candidates: (string | undefined)[] = [
+    process.env.PPSV3_PYTHON,
     '/workspace/projects/.venv-py/bin/python',
-    '/opt/pocr3-venv/bin/python'
+    '/opt/pocr3-venv/bin/python',
   ]
-  for (const p of candidates) {
+  if (process.platform === 'win32') {
+    candidates.push(
+      path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
+      path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
+    )
+  }
+  for (const p of candidates.filter(Boolean) as string[]) {
     try {
       if (fs.existsSync(p)) return p
     } catch { /* ignore */ }
   }
-  return 'python3'
+  return process.platform === 'win32' ? 'python' : 'python3'
 }
 const DEFAULT_PPSV3_PYTHON = defaultPpsv3Python()
 
