@@ -162,11 +162,12 @@ export default function ImageEditor({
   const [imgH, setImgH] = useState(0)
   const [busy, setBusy] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
-  // confirmed=true：已点「确定裁剪」，展示干净成品，不再显示裁剪框
-  const [confirmed, setConfirmed] = useState(false)
-  // framing=true：主动裁剪模式，显示裁剪框/遮罩/手柄。仅在此模式下出现「裁剪中」视觉态，
-  // 满足「该状态只能是点击裁剪后才会出现」。AI/旋转后回到 false（干净预览）。
-  const [framing, setFraming] = useState(true)
+  // framing=true：主动裁剪模式，显示裁剪框/遮罩/手柄。
+  // ⭐ 思傅 2026-10-19 定：裁剪功能**默认关闭**（打开编辑器不显示裁剪框），
+  //    用户点底部「裁剪」按钮才启用（按钮随之变为「确定裁剪」），调好框后点
+  //    「确定裁剪」完成裁剪。cropOnly 模式（#150 页内裁剪入图）整页即为裁剪
+  //    服务，保持初始启用，行为无回归。
+  const [framing, setFraming] = useState(!cropOnly)
   const [previewError, setPreviewError] = useState(false)
   // 智能高清：点开即出「黑白」预览（默认），面板内可切换其他模式实时预览；
   // 倍率/处理模式仅「高清扩展」分组下使用。
@@ -315,8 +316,7 @@ export default function ImageEditor({
     setActiveCorner(null)
     setBusy(false)
     setAiBusy(false)
-    setConfirmed(false)
-    setFraming(true)
+    setFraming(!!cropOnly)
     setPreviewError(false)
     canvasNodeRef.current = null
     void openImage(src)
@@ -433,7 +433,6 @@ export default function ImageEditor({
     if (aiBusy) return
     // 智能高清面板打开期间，点图片不进入裁剪模式（避免裁剪框遮罩盖住模式预览）
     if (srPanelOpen) return
-    setConfirmed(false)
     setFraming(true)
   }
 
@@ -464,7 +463,6 @@ export default function ImageEditor({
       return
     }
     setEraseMode(true)
-    setConfirmed(true)
     setFraming(false)
     setCompareMode(false)
     Taro.showToast({ title: '在图上划框圈住漏擦的手写，完成后点「应用去手写」', icon: 'none', duration: 2600 })
@@ -554,7 +552,6 @@ export default function ImageEditor({
     } catch {
       /* 拿不到尺寸也先换图，不影响撤销本身 */
     }
-    setConfirmed(true)
     setFraming(false)
     Taro.showToast({ title: '已撤销上一步去手写', icon: 'success' })
   }
@@ -583,10 +580,8 @@ export default function ImageEditor({
       resetBox(info.width, info.height)
       setCrop(DEFAULT_CROP)
       setQuad(DEFAULT_QUAD)
-      // 旋转结果已是「成品」：confirmed=true + framing=false 表示干净预览态。
-      // ⚠️ 若置 confirmed=false，则「保存」会误判为「未确认的主动裁剪」而按 crop 再裁一刀
-      //   （且 crop 刚被 reset 成 DEFAULT_CROP，内缩 5%~8%）→ 四周被裁。详见 工程教训录 L7-补充。
-      setConfirmed(true)
+      // 旋转结果即是「成品」：framing=false 干净预览态（不再显示裁剪框）。
+      // 保存/返回链路只认 currentSrc，绝不会按 crop 再裁一刀（2026-10-19 修复，见 handleSave）。
       setFraming(false)
     } catch (err) {
       console.error('旋转失败', err)
@@ -598,8 +593,7 @@ export default function ImageEditor({
 
   const handleReset = () => {
     setRotation(0)
-    setConfirmed(false)
-    setFraming(true)
+    setFraming(!!cropOnly)
     setCrop(DEFAULT_CROP)
     setQuad(DEFAULT_QUAD)
     setCornerMode('rect')
@@ -876,8 +870,7 @@ export default function ImageEditor({
       setCrop({ x: 0, y: 0, w: 1, h: 1 })
       setQuad(DEFAULT_QUAD)
       setCornerMode('rect')
-      setConfirmed(true) // 进入「已裁剪」干净态
-      setFraming(false)  // 不再显示裁剪框
+      setFraming(false)  // 不再显示裁剪框（干净预览）
       Taro.showToast({ title: '已裁剪，点「使用此图」返回', icon: 'none' })
     } catch (err) {
       console.error('裁剪失败', err)
@@ -921,8 +914,7 @@ export default function ImageEditor({
 
   /**
    * AI 处理：调后端图生图。
-   * 关键修复（Issue 3）：成功/失败都把 confirmed 复位为 false，并把 framing 置为 false，
-   * 让图片回到「干净预览」，不再停在「已裁剪/裁剪中」视觉态。
+   * 成功/失败都把 framing 置为 false，让图片回到「干净预览」，不再停在「裁剪中」视觉态。
    */
   /**
    * 【服务端限流配合】智能高清被限流时的降级处理（依据 Phase 2 压测结论）。
@@ -1037,7 +1029,6 @@ export default function ImageEditor({
         if (res.confirm) {
           setCornerMode('quad')
           setFraming(true)
-          setConfirmed(false)
           Taro.showToast({ title: '拖动四个圆点框住试卷四角，拉完点「确认四角」', icon: 'none', duration: 2500 })
         } else {
           // 用户放弃：把后端返回的原图（内容保真）落到当前预览
@@ -1048,7 +1039,6 @@ export default function ImageEditor({
             setRotation(0)
             setCrop(DEFAULT_CROP)
             resetBox(info.width, info.height)
-            setConfirmed(false)
             setFraming(false)
           }
         }
@@ -1072,11 +1062,9 @@ export default function ImageEditor({
       setQuad(DEFAULT_QUAD)
       setCornerMode('rect')
       resetBox(info.width, info.height)
-      // AI 结果是「成品」：confirmed=true + framing=false 表示干净预览态。
-      // ⚠️ 必须 confirmed=true：否则「保存」会误判为「未确认的主动裁剪」，
-      //   用刚 reset 的 DEFAULT_CROP 再裁一刀 → 四周被裁（与旋转同一坑，见 L7-补充）。
-      setConfirmed(true)
-      setFraming(false)   // 干净预览（不再显示裁剪框）
+      // AI 结果是「成品」：framing=false 干净预览态（不再显示裁剪框）。
+      // 保存/返回链路只认 currentSrc，不会按 crop 再裁一刀（2026-10-19 修复，见 handleSave）。
+      setFraming(false)
 
       // ⭐ 去手写步骤入栈：栈顶 = 该次擦除「之前」的图 → 对比左侧 / 撤销目标。
       //   只在成功后入栈，失败的一步步档不入历史（与服务器异常恢复语义一致）。
@@ -1349,7 +1337,6 @@ export default function ImageEditor({
     const next: CornerMode = cornerMode === 'quad' ? 'rect' : 'quad'
     setCornerMode(next)
     setFraming(true)
-    setConfirmed(false)
     if (next === 'quad') setQuad(DEFAULT_QUAD)
     else setCrop(DEFAULT_CROP)
     Taro.showToast({
@@ -1378,11 +1365,19 @@ export default function ImageEditor({
   const runEnhance = (closePanel = true) => {
     if (closePanel) setSrPanelOpen(false)
     if (activeMode === 'hd') {
-      // 高清扩展：走超分倍率（x2/x3/x4）+ 推理模式（后端）
+      // 高清扩展：走超分倍率（x2/x3/x4）+ 推理模式（后端）。
+      // ⚠️ multi_modes 必须缺省/false：true 会让服务端返回五模式「预览」
+      //   （内部固定 scale=1），真正的超分永远不跑——思傅 2026-10-19 实测
+      //   「高清扩展不可用」的根因之一（另一根因是服务端对 bw 强制 scale=1）。
+      // enhance_preset 带上当前选中的基础模式：高清扩展 = 该模式的放大版；
+      //   选中「原图」则不传，由服务端按单色源自动判定（黑白件→bw，否则→enhance）。
+      const hdPreset = (['enhance', 'bw', 'brighten', 'gray'] as const).includes(activePreset as any)
+        ? (activePreset as 'enhance' | 'bw' | 'brighten' | 'gray')
+        : undefined
       void handleAi('enhance', '智能高清', {
         sr_scale: srScale,
         sr_mode: srMode,
-        multi_modes: true,
+        enhance_preset: hdPreset,
         enhance_strength: enhanceStrength,
       })
     } else {
@@ -1630,7 +1625,8 @@ export default function ImageEditor({
             <RotateCw size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
           </View>
-          {/* 矩形模式=确定裁剪；四角模式=确认四角（拉完四角后的唯一确认入口） */}
+          {/* 矩形模式：未启用裁剪时显示「裁剪」（点击启用），启用后变为「确定裁剪」（点击应用）。
+              四角模式=确认四角（拉完四角后的唯一确认入口） */}
           {cornerMode === 'quad' ? (
             <View className="flex flex-col items-center" onClick={confirmQuad}>
               <View className="w-11 h-11 rounded-full bg-primary flex items-center justify-center mb-1">
@@ -1639,15 +1635,15 @@ export default function ImageEditor({
               <Text className="block text-white text-opacity-80 text-xs">确认四角</Text>
             </View>
           ) : (
-            <View className="flex flex-col items-center" onClick={handleConfirmCrop}>
+            <View className="flex flex-col items-center" onClick={framing ? handleConfirmCrop : enterFraming}>
               <View
                 className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                  confirmed ? 'bg-primary' : 'bg-white bg-opacity-15'
+                  framing ? 'bg-primary' : 'bg-white bg-opacity-15'
                 }`}
               >
                 <Crop size={20} color="#ffffff" />
               </View>
-              <Text className="block text-white text-opacity-80 text-xs">确定裁剪</Text>
+              <Text className="block text-white text-opacity-80 text-xs">{framing ? '确定裁剪' : '裁剪'}</Text>
             </View>
           )}
           {/* 四角透视拉框：与「确定裁剪」互斥切换，专用于把斜拍试卷拉平 */}
@@ -2124,7 +2120,8 @@ function clamp255(v: number): number {
  *  - gray：灰度（保留层次）
  *  - brighten：增亮 + 轻度提对比（偏暗/阴影图）
  *  - enhance：增强并锐化（提对比 + 3x3 非锐化，让印刷体更清晰）
- *  - bw：白底黑字二值化（Otsu 阈值 + 自动反相纠正，确保背景白、文字黑）
+ *  - bw：白底黑字二值化（Sauvola 局部自适应阈值 + 中值去斑 + 自动反相纠正，
+ *    确保背景白、文字黑、干净清晰；对阴影/噪点照片鲁棒，实测见 binarizeWhiteBgBlackInk 注释）
  */
 function applyPresetPixels(
   d: Uint8ClampedArray,
@@ -2174,82 +2171,95 @@ function applyPresetPixels(
 }
 
 /**
- * 白底黑字二值化：
- *  1) 灰度；2) 3x3 盒式模糊轻度降噪；3) Otsu 全局阈值；
- *  4) 暗笔画留黑、亮背景留白；5) 若黑像素过半（黑底白字/曝光异常），
- *     自动反相，确保最终「背景白、文字黑、干净清晰」。
+ * 白底黑字二值化（Sauvola 局部自适应阈值 + 3x3 中值去斑 + 自动反相兜底）。
+ *
+ * ── 为什么必须用局部自适应（思傅 2026-10-19 实测换来的） ─────────────────
+ * 旧实现是「3x3 模糊 + 全局 Otsu」：在**光照不均**（阴影渐变）或**高噪点**
+ * （屏拍/翻拍/压缩 artifacts）照片上，全局阈值无法适应画面各区域亮度差异，
+ * 整张图会变成花斑噪点——用户截图实证：数学试卷拍屏后点「黑白」直接成花屏。
+ *
+ * Sauvola 是文档二值化的业界标准：逐像素按「局部均值 μ 与局部标准差 σ」
+ * 计算阈值 T = μ·(1 + k·(σ/R − 1))，阴影区/噪点区都能正确分离墨迹与背景。
+ * 积分图（summed-area table）把窗口统计从 O(n·win²) 降到 O(n)，手机端可跑。
+ * 参数经真实故障图 A/B 实测定型：k=0.2、窗口 = max(15, 短边/15) 取奇、
+ * R=128、3x3 中值去孤立斑（保标点：中值阈 5/9 邻域）。
  */
 function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number) {
   const gray = new Float64Array(n)
   for (let i = 0; i < n; i++) {
     gray[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
   }
-  const blurred = boxBlur(gray, w, h, 1)
-  const thr = otsu(blurred, n)
-  let black = 0
-  for (let i = 0; i < n; i++) if (blurred[i] < thr) black++
-  const invert = black / n > 0.55
+  // 窗口随图尺寸自适应：小图保底 15px，大图 ≈ 短边/15（覆盖多个字符），强制奇数
+  let win = Math.max(15, Math.round(Math.min(w, h) / 15))
+  if (win % 2 === 0) win += 1
+  const r = (win - 1) / 2
+  const area = win * win
+  // 积分图（边缘复制 padding）：S[i+1][j+1] = pad[i][j] + S[i][j+1] + S[i+1][j] − S[i][j]
+  const pw = w + 2 * r
+  const ph = h + 2 * r
+  const SW = pw + 1
+  const intSum = new Float64Array(SW * (ph + 1))
+  const intSq = new Float64Array(SW * (ph + 1))
+  for (let i = 0; i < ph; i++) {
+    const rowBase = (i + 1) * SW
+    const prevBase = i * SW
+    // 边缘复制：padding 区取最近的边缘像素值
+    const gy = i < r ? 0 : i >= ph - r ? h - 1 : i - r
+    for (let j = 0; j < pw; j++) {
+      const gx = j < r ? 0 : j >= pw - r ? w - 1 : j - r
+      const v = gray[gy * w + gx]
+      const idx = rowBase + j + 1
+      intSum[idx] = v + intSum[prevBase + j + 1] + intSum[rowBase + j] - intSum[prevBase + j]
+      const v2 = v * v
+      intSq[idx] = v2 + intSq[prevBase + j + 1] + intSq[rowBase + j] - intSq[prevBase + j]
+    }
+  }
+  const K = 0.2
+  const R = 128
+  const bin = new Uint8Array(n)
+  let ink = 0
+  for (let y = 0; y < h; y++) {
+    const y1 = y
+    const y2 = y + 2 * r + 1
+    for (let x = 0; x < w; x++) {
+      const x1 = x
+      const x2 = x + 2 * r + 1
+      const s = intSum[y2 * SW + x2] - intSum[y1 * SW + x2] - intSum[y2 * SW + x1] + intSum[y1 * SW + x1]
+      const sq = intSq[y2 * SW + x2] - intSq[y1 * SW + x2] - intSq[y2 * SW + x1] + intSq[y1 * SW + x1]
+      const mean = s / area
+      const variance = sq / area - mean * mean
+      const std = variance > 0 ? Math.sqrt(variance) : 0
+      const T = mean * (1 + K * (std / R - 1))
+      const isInk = gray[y * w + x] < T
+      if (isInk) ink++
+      bin[y * w + x] = isInk ? 0 : 255
+    }
+  }
+  // 3x3 中值去斑：孤立噪点（<5/9 邻域为墨）被抹掉，成片笔画完整保留（标点不误伤）
+  const out = new Uint8Array(n)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let black = 0
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy
+        if (ny < 0 || ny >= h) continue
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx
+          if (nx < 0 || nx >= w) continue
+          if (bin[ny * w + nx] === 0) black++
+        }
+      }
+      out[y * w + x] = black >= 5 ? 0 : 255
+    }
+  }
+  // 自动反相兜底：暗背景/曝光异常照片（墨迹过半 → 实际是黑底白字）
+  const invert = ink / n > 0.55
   for (let i = 0; i < n; i++) {
-    let v = blurred[i] < thr ? 0 : 255
+    let v = out[i]
     if (invert) v = 255 - v
     d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v
     d[4 * i + 3] = 255
   }
-}
-
-/** 3x3 盒式模糊（轻度降噪，保边） */
-function boxBlur(src: Float64Array, w: number, h: number, r: number): Float64Array {
-  const out = new Float64Array(src.length)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0
-      let cnt = 0
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = y + dy
-        if (ny < 0 || ny >= h) continue
-        for (let dx = -r; dx <= r; dx++) {
-          const nx = x + dx
-          if (nx < 0 || nx >= w) continue
-          sum += src[ny * w + nx]
-          cnt++
-        }
-      }
-      out[y * w + x] = sum / cnt
-    }
-  }
-  return out
-}
-
-/** Otsu 全局阈值：在双峰直方图下最大化类间方差，自动求最佳分割点 */
-function otsu(gray: Float64Array, n: number): number {
-  const hist = new Array(256).fill(0)
-  for (let i = 0; i < n; i++) {
-    let v = gray[i] | 0
-    if (v < 0) v = 0
-    else if (v > 255) v = 255
-    hist[v]++
-  }
-  let sum = 0
-  for (let t = 0; t < 256; t++) sum += t * hist[t]
-  let sumB = 0
-  let wB = 0
-  let maxVar = 0
-  let thr = 127
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t]
-    if (wB === 0) continue
-    const wF = n - wB
-    if (wF === 0) break
-    sumB += t * hist[t]
-    const mB = sumB / wB
-    const mF = (sum - sumB) / wF
-    const varBetween = wB * wF * (mB - mF) * (mB - mF)
-    if (varBetween > maxVar) {
-      maxVar = varBetween
-      thr = t
-    }
-  }
-  return thr
 }
 
 /** 3x3 非锐化（拉普拉斯边缘增强），amount 控制强度，不过冲 */

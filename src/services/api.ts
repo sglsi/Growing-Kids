@@ -1111,7 +1111,9 @@ export async function processImage(action: ImageAction, filePathOrUrl: string, o
         header: authHeaders(),
       }),
     ),
-    opts.timeout || 90000,
+    // 180s：高清扩展（SR + OCR 一致性校验）实测 54s（x2/classical），
+    // x3/x4 与神经网络模式更久，90s 默认值会在真机上被掐断（思傅 2026-10-19 实测）。
+    opts.timeout || 180000,
     '图片处理超时（90s），可能是原图过大或网络较慢。建议先用「编辑裁剪」缩小图片后重试。',
   )
 }
