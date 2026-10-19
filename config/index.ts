@@ -53,6 +53,39 @@ export default defineConfig<'vite'>(async (merge, _env) => {
   const outputRoot = process.env.OUTPUT_ROOT?.trim() || defaultOutputRoot;
   const isH5 = process.env.TARO_ENV === 'h5';
 
+  /**
+   * 小程序端 `global` 垫片。
+   *
+   * 背景：`@tarojs/runtime` 在初始化时会用 Node 的 `global` 对象来拼装 window：
+   *   Object.getOwnPropertyNames(global || {})
+   * 真实微信运行时里 `global` 存在；但浏览器沙箱（WorkBuddy 的 H5 预览模拟器等）里
+   * `global` 未定义，`global || {}` 只能防 null/undefined、防不住 ReferenceError，
+   * 于是 `taro.js` 模块初始化直接抛 `ReferenceError: global is not defined`。
+   * 该模块一旦失败，其 exports 会被置空，后续 chunk（vendors/common/pages）再
+   * `require('./taro.js')` 只能拿到空壳，最终报出
+   * `Cannot read properties of undefined (reading 'createContext')` 这类连环错误。
+   *
+   * 这里在 app.js 产物最前面注入垫片，保证 taro.js 加载前 `global` 已就绪。
+   * 微信/飞书真机与开发者工具中 `global` 已存在，此代码为空操作，不影响原行为。
+   */
+  const miniGlobalPolyfillPlugin = {
+    name: 'mini-global-polyfill',
+    renderChunk(code: string, chunk: any) {
+      const isAppEntry =
+        chunk.isEntry &&
+        (/(^|\/)app\.js$/.test(chunk.fileName || '') ||
+          /(^|\/)app\.tsx?$/.test(chunk.facadeModuleId || ''));
+      if (!isAppEntry) return null;
+      const polyfill = "if(typeof global==='undefined'){globalThis.global=globalThis}\n";
+      // 保持 "use strict" 指令位于文件首行，避免垫片把它挤成普通字符串而丢失严格模式
+      const strictPrefix = '"use strict";';
+      const patched = code.startsWith(strictPrefix)
+        ? strictPrefix + polyfill + code.slice(strictPrefix.length)
+        : polyfill + code;
+      return { code: patched, map: null };
+    },
+  };
+
   const buildMiniCIPluginConfig = () => {
     // 微信 appid：优先显式 TARO_APP_WEAPP_APPID，回退平台注入的 WX_APPID
     const weappAppid = process.env.TARO_APP_WEAPP_APPID || process.env.WX_APPID;
@@ -155,6 +188,7 @@ export default defineConfig<'vite'>(async (merge, _env) => {
         ...(isH5
           ? []
           : [
+              miniGlobalPolyfillPlugin,
               UnifiedViteWeappTailwindcssPlugin({
                 rem2rpx: true,
                 cssEntries: [path.resolve(__dirname, '../src/app.css')],
