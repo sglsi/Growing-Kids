@@ -59,6 +59,10 @@ async function bootstrap() {
 
   // 2. 解析端口
   const port = parsePort();
+  // 将实际监听端口注入 env：StorageService(local 驱动) 的 getPublicUrl 需要用它拼
+  // 对象公网地址（模块构造早于 listen，无法直接拿到 port）。`-p 3001` 启动时
+  // process.env.PORT 未设，不注入的话会回落默认 3000，生成打不开的 URL。
+  process.env.SERVER_PORT = String(port);
   try {
     // 显式绑定 0.0.0.0：容器/托管平台要求监听全部网卡，不能只绑 localhost
     await app.listen(port, '0.0.0.0');
