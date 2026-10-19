@@ -431,6 +431,8 @@ export default function ImageEditor({
   // 点击预览区：重新进入裁剪模式（从「已裁剪/AI 后」的干净态切回可框选）
   const enterFraming = () => {
     if (aiBusy) return
+    // 智能高清面板打开期间，点图片不进入裁剪模式（避免裁剪框遮罩盖住模式预览）
+    if (srPanelOpen) return
     setConfirmed(false)
     setFraming(true)
   }
@@ -1241,6 +1243,10 @@ export default function ImageEditor({
       setActiveMode('bw') // 默认选中「黑白」，点开即给出黑白预览
       setActivePreset('bw')
       setSrPanelOpen(true)
+      // ⭐ 隐藏裁剪框/遮罩：模式预览需要一张干净的图（思傅 2026-10-19 反馈：
+      //    裁剪框的四块遮罩盖在预览图上，效果同样看不清）。取消/确定后面板关闭，
+      //    用户点图片可随时重新进入裁剪（enterFraming）。
+      setFraming(false)
       // ⭐ 前端实时预览：基础模式（含默认黑白）本地即时出图，点击即显，
       //    不再走后端（对标扫描王/夸克的即时滤镜，规避秒级网络往返）。
       void pickEnhanceModeLocal('bw')
@@ -1282,7 +1288,8 @@ export default function ImageEditor({
     }
     // 本地即时渲染（白底黑字二值化 / 灰度 / 增亮 / 增强锐化）
     setAiBusy(true)
-    Taro.showLoading({ title: '预览中…', mask: true })
+    // mask:false——加载圈不再遮挡图片区域，用户能看到主图切换的整个过程
+    Taro.showLoading({ title: '预览中…', mask: false })
     try {
       const base = enhanceBase || currentSrc
       const out = await renderLocalPreset(base, preset)
@@ -1383,6 +1390,14 @@ export default function ImageEditor({
       // 此处仅作兜底：若尚未生成预览则补一次本地渲染（正常不应走到）。
       void pickEnhanceModeLocal(activeMode)
     }
+  }
+
+  // 面板「取消」：回退主图到打开面板时的底稿（enhanceBase），再关闭。
+  // （此前取消只关面板、不回图——用户看到的是最后一个预览效果，"取消"名不副实。）
+  const cancelEnhancePanel = () => {
+    if (busy || aiBusy) return
+    if (enhanceBase) setCurrentSrc(enhanceBase)
+    setSrPanelOpen(false)
   }
 
   // 面板「确定」：确认当前选中模式。
@@ -1774,14 +1789,17 @@ export default function ImageEditor({
         </Button>
       </View>
 
-      {/* 智能高清选择面板：基础画面模式（直接点选） + 高清扩展（x2/x3/x4 超分） */}
+      {/* 智能高清选择面板：底部抽屉（不遮挡图片、无蒙板）——基础画面模式（直接点选） + 高清扩展（x2/x3/x4 超分）
+          ⭐ 思傅 2026-10-19 反馈修复：此前是「全屏半透明蒙板 + 底部弹窗」结构——
+             ① 蒙板 rgba(0,0,0,0.55) 盖住图片，模式预览效果看不清；
+             ② 点图片区域会点到蒙板上的 onClick → 直接关闭面板，模式选择被误退出。
+          现改为纯底部抽屉：图片全程完整可见（点模式即换预览），
+          退出只认「取消 / 确定」两个按钮，点图片不再有任何副作用。 */}
       {srPanelOpen && (
-        <View className="absolute inset-0 z-[210]" onClick={() => setSrPanelOpen(false)}>
-          <View className="absolute inset-0" style={{ backgroundColor: 'rgba(0,0,0,0.55)' }} />
+        <View className="absolute left-0 right-0 z-[210]" style={{ bottom: 0 }}>
           <View
-            className="absolute left-4 right-4 rounded-2xl p-4"
-            style={{ bottom: 24, backgroundColor: '#1c1c1e' }}
-            onClick={(e: any) => e?.stopPropagation?.()}
+            className="rounded-t-2xl p-4"
+            style={{ backgroundColor: '#1c1c1e', boxShadow: '0 -4px 24px rgba(0,0,0,0.5)' }}
           >
             <Text className="block text-white text-base font-medium mb-3">智能高清</Text>
 
@@ -1893,7 +1911,7 @@ export default function ImageEditor({
               <Button
                 className="flex-1 h-10 rounded-xl"
                 style={{ backgroundColor: 'rgba(255,255,255,0.12)' }}
-                onClick={() => setSrPanelOpen(false)}
+                onClick={cancelEnhancePanel}
               >
                 <Text className="block text-sm text-white">取消</Text>
               </Button>
