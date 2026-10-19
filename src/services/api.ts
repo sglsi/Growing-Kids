@@ -869,6 +869,10 @@ export async function ocrPage(imageUrl: string, mode: 'fast' | 'precise' = 'prec
       method: 'POST',
       data: { image_url: imageUrl, mode },
       header: authHeaders(),
+      // precise 全链路（摆正 dewarp ~17s + PP-StructureV3 ~50s）实测可超 60s，
+      // 微信 request 默认 timeout 正好 60s——大图/慢机必然被前端掐断。
+      // 180s 在微信允许上限（300s）内。
+      timeout: 180000,
     }),
   )
   return {
