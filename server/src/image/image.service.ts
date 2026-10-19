@@ -917,13 +917,50 @@ export class ImageService {
   ): Promise<OcrPageResult> {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
 
-    // 与 extract-wrong 同基准：摆正后的 flatBuf 既是 OCR 输入，也是前端展示/裁剪的图
-    // （blocks/OCR box 坐标都在它的像素空间；前端若显示原图会整体错位）。
-    const ctx = await buildLayoutContext(srcBuffer)
-    const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
-    const pageUrl = await this.storageService.getPublicUrl(pageIng.key)
+    // 下载 → 版面 → 暂存 三段各自兜底：这些环节历史上都是裸抛，
+    // 一旦失败（URL 失效/侧车超时/sharp 处理异常）直接变 500
+    // "Internal server error"，用户与排查者都无从下手。
+    // 典型场景：上传拿到的是 temp 对象（24h 回收），隔天再点识别即 404 → 500。
+    // 现在统一转成 400 + 可读文案，前端 toast 能直接显示原因。
+    const brief = (e: unknown): string => {
+      const m = (e as Error)?.message ?? String(e)
+      return m.length > 120 ? m.slice(0, 120) + '…' : m
+    }
+
+    let srcBuffer: Buffer
+    try {
+      srcBuffer = await this.download(dto.image_url, fwd)
+    } catch (e) {
+      const reason = brief(e)
+      console.error(`[ocr-page] 页面图下载失败 url=${dto.image_url}:`, reason)
+      throw new BadRequestException(
+        /404|410|status 4/.test(reason)
+          ? `页面图已失效（${reason}）。临时图片有保管期限，请重新选择图片后再试`
+          : `页面图下载失败（${reason}），请检查网络后重试`,
+      )
+    }
+
+    let ctx: LayoutContext
+    try {
+      // 与 extract-wrong 同基准：摆正后的 flatBuf 既是 OCR 输入，也是前端展示/裁剪的图
+      // （blocks/OCR box 坐标都在它的像素空间；前端若显示原图会整体错位）。
+      ctx = await buildLayoutContext(srcBuffer)
+    } catch (e) {
+      const reason = brief(e)
+      console.error('[ocr-page] 版面分析失败:', reason)
+      throw new BadRequestException(`版面分析失败（${reason}），请重新选择图片或稍后重试`)
+    }
+
+    let pageUrl: string
+    try {
+      const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
+      pageUrl = await this.storageService.getPublicUrl(pageIng.key)
+    } catch (e) {
+      const reason = brief(e)
+      console.error('[ocr-page] 摆正图暂存失败:', reason)
+      throw new BadRequestException(`页面图暂存失败（${reason}），请稍后重试`)
+    }
 
     const mode = dto.mode === 'fast' ? 'fast' : 'precise'
     let pageRegions: LocalOcrTextRegion[] = []
@@ -942,10 +979,20 @@ export class ImageService {
     }
 
     // 分栏排序：优先用 OCR 文本区域聚类出的阅读栏（比图像投影更可靠），再交给 toReadingOrderSegments
-    const columns = deriveColumnsFromRegions(pageRegions)
+    // 排序是 OCR 成功后的收尾，同样兜底：它抛错会把一次成功的识别整个变成 500。
+    let pageText: PageTextSegment[]
+    try {
+      const columns = deriveColumnsFromRegions(pageRegions)
+      pageText = toReadingOrderSegments(pageRegions, columns)
+    } catch (e) {
+      const reason = brief(e)
+      console.error('[ocr-page] 识别结果整理失败:', reason)
+      throw new BadRequestException(`识别结果整理失败（${reason}），请重试或改用手动输入`)
+    }
+
     return {
       page: { w: ctx.w, h: ctx.h },
-      page_text: toReadingOrderSegments(pageRegions, columns),
+      page_text: pageText,
       image_url: pageUrl,
       // 朝向未经 OCR 消歧（侧车缺席）：前端可提示"本页可能侧躺，识别结果供参考"
       orient_suspect: ctx.orientSuspect === true,
