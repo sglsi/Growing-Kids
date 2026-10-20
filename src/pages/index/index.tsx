@@ -17,6 +17,7 @@ import {
   type Overview, type TimelineItem, type Subject, type ImageAction,
 } from '@/services/api'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
+import { BUILD_META } from '@/build-meta'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -271,6 +272,11 @@ export default function IndexPage() {
               </Text>
             </View>
           </View>
+
+          {/* 构建版本角标：真机一眼确认是否最新包（防「改了没生效」之争） */}
+          <Text className="block text-[10px] text-muted-foreground opacity-50 mb-2" onClick={() => Taro.showModal({ title: '当前包版本', content: `构建时间：${BUILD_META.time}\ngit：${BUILD_META.commit}\n域名：${(globalThis as any).PROJECT_DOMAIN || '(默认 127.0.0.1:3001)'}`, showCancel: false, confirmText: '知道了' })}>
+            包版本 {BUILD_META.label}
+          </Text>
 
           {/* 识别与导入主操作区（主操作独立，3 个次操作合并为一行） */}
           <Card className="rounded-2xl border-border p-4 mb-4">

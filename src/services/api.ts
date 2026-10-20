@@ -493,6 +493,8 @@ export async function fetchImageCapabilities(): Promise<{
   supported: boolean
   version?: number
   pipeline_mode?: string
+  /** true = 请求根本没发出去/超时（通道问题，与服务版本无关） */
+  networkError?: boolean
 }> {
   try {
     const data = await unwrap<{ version: number; pipeline_mode: string }>(
@@ -500,9 +502,17 @@ export async function fetchImageCapabilities(): Promise<{
     )
     return { supported: true, version: data?.version, pipeline_mode: data?.pipeline_mode }
   } catch (e) {
-    // 404/不存在路由 = 旧版后端；其余错误也按不支持处理（拿不到能力 = 无法保证可用）
-    console.warn('[capabilities] 线上后端能力自检失败（疑似旧版）:', e)
-    return { supported: false }
+    // 区分两类失败（修复「未包含所需的处理模块」误报）：
+    //  - 服务端有响应但路由不存在（ApiError 带 HTTP 状态码，如 404）= 旧版后端 → supported:false
+    //  - 请求未发出/超时（Taro request:fail，无状态码）= 通道问题 → networkError:true
+    //    此前一律按「服务版本过旧」提示，把真机调试断链/局域网不通误报成后端缺模块。
+    const status = e instanceof ApiError ? e.status : 0
+    const isNetworkFail = !status || /request:fail|time ?out|超时|aborted/i.test((e as Error)?.message || '')
+    console.warn(
+      `[capabilities] 能力自检失败（${isNetworkFail ? '网络/通道错误' : `服务端响应 ${status}`}）:`,
+      e,
+    )
+    return { supported: false, networkError: isNetworkFail }
   }
 }
 

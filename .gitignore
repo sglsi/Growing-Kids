@@ -79,3 +79,6 @@ __pycache__/
 
 # 微信开发者工具本机设置（打开项目时自动生成）
 project.private.config.json
+
+# 构建版本角标数据（scripts/gen-build-meta.mjs 每次构建重新生成）
+src/build-meta.ts
