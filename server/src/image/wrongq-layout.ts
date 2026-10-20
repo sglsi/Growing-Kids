@@ -457,7 +457,9 @@ export function colRowsIn(ink: Uint8Array, w: number, h: number, x0: number, x1:
 
 /** 构建版面上下文（全流程第①步 + 结构层） */
 export async function buildLayoutContext(buf: Buffer): Promise<LayoutContext> {
-  const st = await straightenImage(buf, { auto: true, curved: false })
+  // ⭐ keepFullCanvas=true：OCR/版面分析要保留**整页**（含四周留白与边角文字），只做几何摆正、
+  //    绝不按内容包络裁边——否则自动四角命中时会把页面空白整段裁掉、边角文字被切（问题④-A）。
+  const st = await straightenImage(buf, { auto: true, curved: false, keepFullCanvas: true })
   const flatBuf = st.buffer ?? buf
   const { data, info } = await sharp(flatBuf).removeAlpha().toColourspace('srgb').raw().toBuffer({ resolveWithObject: true })
   const w = info.width, h = info.height, ch = info.channels

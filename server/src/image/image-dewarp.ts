@@ -206,6 +206,13 @@ export interface StraightenOptions {
    */
   curved?: boolean
   /**
+   * 透视压平时是否「只拉直、不裁边」（默认 false）。
+   * true = 保留原图全部像素（含页面四周留白），仅做几何摆正，绝不按内容包络裁掉边角文字；
+   * false（默认）= 以内容包络四角定输出尺寸，会裁掉页面空白、可能切到边角文字。
+   * OCR/版面分析等需要整页内容的场景应传 true（见 buildLayoutContext）。
+   */
+  keepFullCanvas?: boolean
+  /**
    * 是否在「四角检测未命中」后继续尝试**文本行倾斜估计**（默认 true）。
    *
    * ⭐ 这是让「自动调正」在真实场景真正可用的关键：四角检测要求画面里有纸张外框，
@@ -340,7 +347,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
     // 手动四角：用户拉的四边形可能退化（共线/面积≈0/自交）→ 单应矩阵奇异。
     // 此处捕获并**回落自动检测**，绝不把几何异常抛给上层（否则前端一次误拖就 500）。
     try {
-      const r = await dewarpBuffer(workBuf, opts.manualCorners)
+      const r = await dewarpBuffer(workBuf, opts.manualCorners, { keepFullCanvas: opts.keepFullCanvas })
       return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'manual', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
     } catch (e) {
       console.warn('[image-dewarp] 手动四角无效，回落自动检测：', (e as Error).message)
@@ -350,7 +357,7 @@ export async function straightenImage(buf: Buffer, opts: StraightenOptions): Pro
     const corners = await detectDocumentCorners(workBuf)
     if (corners) {
       try {
-        const r = await dewarpBuffer(workBuf, corners)
+        const r = await dewarpBuffer(workBuf, corners, { keepFullCanvas: opts.keepFullCanvas })
         return { buffer: r.buffer, width: r.width, height: r.height, orderedCorners: r.orderedCorners, needManual: false, method: 'auto', orientAngle: orientResult.angle, orientMethod: orientResult.method, orientAxis: orientResult.axis, orientSuspect: orientResult.suspect }
       } catch (e) {
         console.warn('[image-dewarp] 自动检测四角无效：', (e as Error).message)
