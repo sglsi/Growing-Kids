@@ -107,12 +107,14 @@ function pythonUsable(python: string): boolean {
 }
 
 /** legacy（2.x 融合）侧车 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 系统 python3。
- *  平台自适应：Windows 本机开发走项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 对齐）。 */
+ *  平台自适应：Windows 本机开发走项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 对齐）。
+ *  OCR_VENV_DIR 可覆盖 venv 位置（venv 搬出仓库根防 DevTools EMFILE）。 */
 function defaultLegacyPython(): string {
   try {
     if (process.platform === 'win32') {
       const repoRoot = path.resolve(__dirname, '../../..')
       for (const p of [
+        ...(process.env.OCR_VENV_DIR ? [path.join(process.env.OCR_VENV_DIR, 'Scripts', 'python.exe')] : []),
         path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
         path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
       ]) {

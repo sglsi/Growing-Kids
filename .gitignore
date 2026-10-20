@@ -76,3 +76,6 @@ server/docs/
 
 # Python 字节码缓存（py_compile 校验时产生）
 __pycache__/
+
+# 微信开发者工具本机设置（打开项目时自动生成）
+project.private.config.json

@@ -70,6 +70,7 @@ export interface Ppsv3ClientOptions {
 /** 3.x 引擎 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
  *  平台自适应：Windows 本机开发走项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 对齐）；
  *  Linux 沙箱保留 /workspace/projects 与 /opt 两个历史路径。
+ *  OCR_VENV_DIR 可覆盖 venv 位置（venv 搬出仓库根防 DevTools EMFILE，见 env-recovery.service.ts）。
  *  常量保留函数形式：Supervisor 构造在模块加载期执行，需即时探测文件系统。 */
 function defaultPpsv3Python(): string {
   const repoRoot = path.resolve(__dirname, '../../..')
@@ -80,6 +81,7 @@ function defaultPpsv3Python(): string {
   ]
   if (process.platform === 'win32') {
     candidates.push(
+      ...(process.env.OCR_VENV_DIR ? [path.join(process.env.OCR_VENV_DIR, 'Scripts', 'python.exe')] : []),
       path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
       path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
     )

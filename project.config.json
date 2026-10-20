@@ -1,5 +1,5 @@
 {
-  "miniprogramRoot": "./dist",
+  "miniprogramRoot": "dist/",
   "projectname": "growing-kids",
   "description": "test",
   "appid": "wx48bf5ba9bae0bf39",
@@ -11,8 +11,29 @@
     "postcss": false,
     "minified": false,
     "packNpmManually": true,
-    "packNpmRelationList": []
+    "packNpmRelationList": [],
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    },
+    "condition": false
   },
   "compileType": "miniprogram",
-  "packOptions": { "ignore": [{ "type": "folder", "value": "./assets" }] }
+  "packOptions": {
+    "ignore": [
+      {
+        "value": "./assets",
+        "type": "folder"
+      }
+    ],
+    "include": []
+  },
+  "libVersion": "3.17.4",
+  "srcMiniprogramRoot": "dist/",
+  "condition": {},
+  "editorSetting": {
+    "tabIndent": "insertSpaces",
+    "tabSize": 2
+  }
 }

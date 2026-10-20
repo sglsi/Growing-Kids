@@ -82,7 +82,8 @@ function pickUsablePython(
 /**
  * 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
  * Windows 本机：项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 / ppsv3.client 对齐）。
- * 可用 PPSV3_PYTHON 环境变量覆盖。
+ * 可用 PPSV3_PYTHON / OCR_VENV_DIR 环境变量覆盖（venv 搬出仓库根后必须设 OCR_VENV_DIR，
+ * 否则微信开发者工具监听 3.3 万个文件的 .venv-py 会耗尽文件句柄 EMFILE）。
  * 探测 paddle + paddlex 是否可用，缺包则回退，避免用「存在但损坏」的 venv。
  */
 export function resolvePython(engine: ToolEngine): string {
@@ -93,6 +94,7 @@ export function resolvePython(engine: ToolEngine): string {
     const ppsv3Candidates =
       process.platform === 'win32'
         ? [
+            ...(process.env.OCR_VENV_DIR ? [path.join(process.env.OCR_VENV_DIR, 'Scripts', 'python.exe')] : []),
             path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
             path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
           ]
@@ -109,6 +111,7 @@ export function resolvePython(engine: ToolEngine): string {
   // 故按「持久化 venv → 旧 venv → 系统 python3(三者齐全)」探测，取第一个真能 import 的。
   const repoRoot = path.resolve(__dirname, '../../..')
   const winVenv = [
+    ...(process.env.OCR_VENV_DIR ? [path.join(process.env.OCR_VENV_DIR, 'Scripts', 'python.exe')] : []),
     path.join(repoRoot, '.venv-py', 'Scripts', 'python.exe'),
     path.join(repoRoot, 'ocr-engine', '.venv', 'Scripts', 'python.exe'),
   ]
