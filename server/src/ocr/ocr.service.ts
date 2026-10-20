@@ -22,6 +22,7 @@ import {
   Ppsv3Client,
   getPpsv3Client,
   getPpsv3Supervisor,
+  type Ppsv3Block,
   type Ppsv3Result,
   type Ppsv3TextRegion,
 } from './ppsv3.client'
@@ -77,6 +78,20 @@ export function ppsv3ToLocal(r: Ppsv3Result): LocalOcrResult {
     engine_used: ['ppsv3'],
     low_confidence: regions.length === 0 || conf < lowConfThreshold,
   }
+}
+
+/**
+ * 全页 OCR 的产物（供分段消费）。
+ *
+ * ⭐ blocks 是分段质量的命门：PP-StructureV3 的版面块**自带阅读序与段落合并**，
+ *    分段时直接用它；RapidOCR 没有版面概念（blocks 恒空），分段退回行级算法。
+ *    （此前页面文本栏一律用行级 regions → 一行一段，故「分段不合理」。）
+ */
+export interface PageOcrResult {
+  regions: LocalOcrTextRegion[]
+  layout: LocalOcrLayoutBlock[]
+  /** 引擎版面块（阅读序）；无版面能力的引擎为空数组 */
+  blocks: Ppsv3Block[]
 }
 
 const EXAM_TASK =
@@ -986,6 +1001,27 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
   }
 
   /**
+   * 版面块（PP-StructureV3 parsing_res_list）的 bbox 回算到输入图坐标系。
+   * 与 scaleRegions 同口径：缩图识别后必须还原，否则分段坐标与展示图错位。
+   */
+  private scaleBlocks(blocks: Ppsv3Block[], sx: number, sy: number): Ppsv3Block[] {
+    return (blocks || [])
+      .map((b) => {
+        const bb = Array.isArray(b.bbox) ? b.bbox : []
+        if (bb.length < 4) return b
+        return {
+          ...b,
+          bbox: [
+            Math.round(bb[0] * sx),
+            Math.round(bb[1] * sy),
+            Math.round(bb[2] * sx),
+            Math.round(bb[3] * sy),
+          ] as [number, number, number, number],
+        }
+      })
+  }
+
+  /**
    * 「快速」模式全页 OCR（#150 人工辅助）：2.x 融合侧车 RapidOCR 通道
    * （main.py --once --op recognize --mode rapid，工具式独立子进程）。
    *
@@ -996,9 +1032,7 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
    *    2026-10 用户实测「未识别到文字」却无任何线索，根因即这些失败被静默吞成空文本栏；
    *  - 正常执行但图中无文字 → 空（不抛），用户重试或换图即可。
    */
-  async recognizePageFast(
-    buf: Buffer,
-  ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+  async recognizePageFast(buf: Buffer): Promise<PageOcrResult> {
     // 沙箱重置自愈：venv 缺失时自动重装并等待（上限 45s）；未完成则显式报错而非静默空结果
     if (!(await this.envRecovery.ensureReady())) {
       throw new Error(
@@ -1022,8 +1056,10 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
       )
     }
     // 2.x main.py --once 输出：{ raw_text, text_regions: [{text, box:[x0,y0,x1,y1], score}] }
+    // ⚠️ RapidOCR 是纯行级引擎，没有版面/段落概念——blocks 恒空，分段走行级算法
+    //    （见 ocr-segment.ts segmentsFromTextRegions）。
     const local = r.data as unknown as LocalOcrResult
-    return this.scaleRegions(local, sx, sy)
+    return { ...this.scaleRegions(local, sx, sy), blocks: [] }
   }
 
   /**
@@ -1042,9 +1078,7 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
    *    真正的「图中无文字」是 200 + blocks:[]（r 为真、regions 为空），返回空文本栏不抛。
    * 抛出的错误由 image.service.ocrPage 转成模式化 BadRequest，前端明确提示。
    */
-  async recognizePageForPanel(
-    buf: Buffer,
-  ): Promise<{ regions: LocalOcrTextRegion[]; layout: LocalOcrLayoutBlock[] }> {
+  async recognizePageForPanel(buf: Buffer): Promise<PageOcrResult> {
     // 沙箱重置自愈：venv 缺失时自动重装并等待（上限 45s），再拉起侧车
     if (!(await this.envRecovery.ensureReady())) {
       throw new Error(
@@ -1071,7 +1105,11 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
         `OCR 侧车本次解析失败${detail ? `：${detail}` : ''}（侧车健康检查通过，可能是推理崩溃/超时，请查看侧车日志 /tmp/ocr-sidecar-*.log）`,
       )
     }
-    return this.scaleRegions(ppsv3ToLocal(r), sx, sy)
+    // ⭐ 版面块一路带到分段层：PP-StructureV3 的 parsing_res_list 已完成
+    //   「版面区域 + 区内行合并成段 + 阅读序排序」，直接用它即是最成熟的分段
+    //   （此前只把它塞进 layout、再用行级 regions 出文本栏，故一行一段）。
+    const { regions, layout } = this.scaleRegions(ppsv3ToLocal(r), sx, sy)
+    return { regions, layout, blocks: this.scaleBlocks(r.blocks ?? [], sx, sy) }
   }
 
   /**

@@ -57,13 +57,25 @@ export interface ExtractWrongResult {
   debug?: Record<string, unknown>
 }
 
-/** P3：全页 OCR 文本片段（阅读序平铺的一个 region） */
+/**
+ * 全页 OCR 文本片段（一个**段落**，不是一行）。
+ *
+ * 分段由 server/src/ocr/ocr-segment.ts 产出：
+ *  - 精准（PP-StructureV3）：直接取引擎版面块（已含阅读序 + 区内行合并成段）；
+ *  - 快速（RapidOCR，无版面能力）：行级 → 递归 XY-Cut 定序 + 间隙/缩进/题号断段。
+ */
 export interface PageTextSegment {
   text: string
   /** 页图像素框（与 blocks[].box 同口径） */
   box: PageBox
   /** 所属栏索引（0 起；单栏页恒 0） */
   col: number
+  /** 段落语义类型（标题/正文/表格/公式） */
+  kind?: 'text' | 'title' | 'table' | 'formula' | 'other'
+  /** 本段由几行合并而来（1 = 单行） */
+  lines?: number
+  /** 分段来源：layout=引擎版面块｜xycut=行级 XY-Cut 聚类 */
+  source?: 'layout' | 'xycut'
 }
 
 /**
@@ -80,6 +92,14 @@ export interface OcrPageDto {
    *  - fast    = 快速（RapidOCR 轻量通道，1~3s/页，引擎未部署时明确报错）
    */
   mode?: 'precise' | 'fast'
+  /**
+   * 是否先做几何摆正（dewarp/纠偏），默认 true。
+   *
+   * ⭐ 新流程「先裁剪题目 → 再对裁剪图 OCR」必须传 false：
+   *    裁剪图本身已是「摆正后页面图」上切下来的正矩形，再跑一次摆正
+   *    不但无收益，还可能把小图二次透视/塌缩（历史上 37×39 裂图即由此而来）。
+   */
+  rectify?: boolean
 }
 
 export interface OcrPageResult {

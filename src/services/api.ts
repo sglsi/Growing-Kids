@@ -766,12 +766,21 @@ export interface WrongBlockSummary {
   question_label?: string
 }
 
-/** P3：全页 OCR 文本片段（阅读序：分栏 → 行序），供选择粘贴面板补全题干/答案 */
+/**
+ * OCR 文本片段（一个**段落**，不是一行）。
+ * 分段在后端完成：精准走 PP-StructureV3 版面块，快速走行级递归 XY-Cut（见 ocr-segment.ts）。
+ */
 export interface PageTextSegment {
   text: string
   box: { x0: number; y0: number; x1: number; y1: number }
   /** 所属栏索引（0 起；单栏页恒 0） */
   col: number
+  /** 段落语义类型 */
+  kind?: 'text' | 'title' | 'table' | 'formula' | 'other'
+  /** 本段由几行合并而来（1 = 单行） */
+  lines?: number
+  /** 分段来源：layout=引擎版面块｜xycut=行级 XY-Cut */
+  source?: 'layout' | 'xycut'
 }
 
 /** P2：用户改框后的重切重识（与 extract-wrong 同链路，保存以用户框为准） */
@@ -874,7 +883,18 @@ export async function exportRecognizedDocx(items: RecognizeResult[], title?: str
  * 返回摆正后的页面图 URL：前端展示与「页内裁剪」都用它（与 OCR 同一坐标系）。
  * @param mode fast=快速（RapidOCR 1~3s/页）| precise=精准（PaddleOCR 全链路 15~20s/页，默认）
  */
-export async function ocrPage(imageUrl: string, mode: 'fast' | 'precise' = 'precise') {
+export async function ocrPage(
+  imageUrl: string,
+  mode: 'fast' | 'precise' = 'precise',
+  opts?: {
+    /**
+     * 是否先几何摆正，默认 true（整页拍照图需要）。
+     * ⭐「先裁剪 → 再对裁剪图 OCR」必须传 false：裁剪图已是正矩形，
+     *    再摆正只会二次透视把小图拉塌（历史故障：识别后图被换成 37×39 裂图）。
+     */
+    rectify?: boolean
+  },
+) {
   const data = await unwrapResponse<{
     page: { w: number; h: number }
     page_text: PageTextSegment[]
@@ -884,7 +904,7 @@ export async function ocrPage(imageUrl: string, mode: 'fast' | 'precise' = 'prec
     Network.request({
       url: '/api/image/ocr-page',
       method: 'POST',
-      data: { image_url: imageUrl, mode },
+      data: { image_url: imageUrl, mode, rectify: opts?.rectify !== false },
       header: authHeaders(),
       // precise 全链路（摆正 dewarp ~17s + PP-StructureV3 ~50s）实测可超 60s，
       // 微信 request 默认 timeout 正好 60s——大图/慢机必然被前端掐断。

@@ -57,6 +57,11 @@
 
 Node 端 `LocalOcrClient`（`ocr-engine.client.ts`）：内置 `fetch` 调用，**任何失败返回 `null` 不抛错**，交由 `OcrService` 降级到 VLM。
 
+> ⭐ 文本**分段**（阅读序 + 行→段落合并）不在此处，另见 **[OCR-文本分段设计.md](./OCR-文本分段设计.md)**：
+> 精准通道直接取 PP-StructureV3 的 `parsing_res_list` 版面块（引擎自带阅读序与段落），
+> 快速通道（RapidOCR 无版面能力）走递归 XY-Cut + 行聚类。上面 `text_regions` 是**行级**原料，
+> 不是用户看到的段落。
+
 ## 5. 关键配置（环境变量，全 `process.env` 直读）
 
 | 变量 | 默认 | 说明 |

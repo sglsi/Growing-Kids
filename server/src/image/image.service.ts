@@ -42,6 +42,8 @@ import { splitBlocksByNumber, type RowSplitContext } from './wrongq-pureblock'
 import { estimateSharpness, sharpnessHint } from './image-sharpness'
 import type { WrongqBlock } from './wrongq.types'
 import { structureLocalItems } from '../ocr/ocr-struct'
+import { buildSegments } from '../ocr/ocr-segment'
+import type { Ppsv3Block } from '../ocr/ppsv3.client'
 import { parseQuestionNumber, inferHierarchy, linkHierarchy } from '../ocr/ocr-hierarchy'
 import { attachKeywordTags, dedupItems } from '../ocr/ocr-dedup'
 import { attachErrorAnalysis } from '../ocr/ocr-error'
@@ -70,77 +72,6 @@ function boxFeedback(sys: PageBox, user: PageBox): BoxFeedback {
     area_delta_pct: Math.round(((area(user) - area(sys)) / area(sys)) * 1000) / 10,
     offset: { dx: Math.round(cx(user) - cx(sys)), dy: Math.round(cy(user) - cy(sys)) },
   }
-}
-
-/**
- * P3：全页 OCR regions 按阅读序平铺（设计 §4.8 文本面板数据源）。
- *
- * 分栏优先（region 中心 x 落入哪栏，越界取最近栏），栏内按 y 再按 x——
- * 与「先读完左栏再读右栏」的人工阅读顺序一致；cols 为空按单栏处理。
- * 与 wrongq-pureblock 的 regionBox/colOf 同口径（box 为 [x0,y0,x1,y1] 元组，
- * 容忍旋转/逆序输入）。
- */
-export function toReadingOrderSegments(
-  regions: LocalOcrTextRegion[],
-  cols: Array<[number, number]>,
-): PageTextSegment[] {
-  const boxOf = (r: LocalOcrTextRegion): PageBox => {
-    const [a, b, c, d] = r.box || [0, 0, 0, 0]
-    return { x0: Math.min(a, c), y0: Math.min(b, d), x1: Math.max(a, c), y1: Math.max(b, d) }
-  }
-  const colOf = (cx: number): number => {
-    if (!cols.length) return 0
-    for (let i = 0; i < cols.length; i++) if (cx >= cols[i][0] && cx < cols[i][1]) return i
-    let best = 0
-    let bestD = Infinity
-    for (let i = 0; i < cols.length; i++) {
-      const d = Math.min(Math.abs(cx - cols[i][0]), Math.abs(cx - cols[i][1]))
-      if (d < bestD) { bestD = d; best = i }
-    }
-    return best
-  }
-  return regions
-    .filter((r) => (r.text || '').trim().length > 0)
-    .map((r) => {
-      const box = boxOf(r)
-      return { text: r.text.trim(), box, col: colOf((box.x0 + box.x1) / 2) }
-    })
-    .sort((a, b) => a.col - b.col || a.box.y0 - b.box.y0 || a.box.x0 - b.box.x0)
-}
-
-/**
- * 从 OCR 文本区域按 x 投影间隙聚合成阅读栏（左→右）。
- *
- * 「分栏自动切分」的排序依据：版面分析（ctx.cols，图像投影）在分栏页常漏检成单栏，
- * 导致 toReadingOrderSegments 回退「按 y 再按 x」，两栏行数不等时交错成"左1右1左2右2…"。
- * 改用实际文本位置的 x 区间聚类出栏边界，让文本严格按「先左栏后右栏」排序。
- * 单列（或聚类不足两栏）返回空数组，toReadingOrderSegments 按单栏处理（零回归）。
- * 两引擎（快速 RapidOCR / 精准 PP-StructureV3）的 regions 都经此归一，通用。
- */
-function deriveColumnsFromRegions(regions: LocalOcrTextRegion[]): Array<[number, number]> {
-  const boxes = (regions || [])
-    .map((r) => r.box)
-    .filter((b): b is OcrBox => Array.isArray(b) && b.length >= 4)
-  if (boxes.length < 2) return []
-  const ivs = boxes
-    .map((b) => [Math.min(b[0], b[2]), Math.max(b[0], b[2])] as [number, number])
-    .sort((a, b) => a[0] - b[0])
-  const maxX = ivs[ivs.length - 1][1]
-  const gap = Math.max(20, maxX * 0.04)
-  const spans: Array<[number, number]> = []
-  let cs = ivs[0][0]
-  let ce = ivs[0][1]
-  for (let i = 1; i < ivs.length; i++) {
-    const [x0, x1] = ivs[i]
-    if (x0 <= ce + gap) ce = Math.max(ce, x1)
-    else {
-      spans.push([cs, ce])
-      cs = x0
-      ce = x1
-    }
-  }
-  spans.push([cs, ce])
-  return spans.length > 1 ? spans : []
 }
 
 /**
@@ -950,8 +881,15 @@ export class ImageService {
       items: finalItems,
       unmatched_questions: unmatched,
       answer_image_keys: answerKeys,
-      // P3：全页 OCR 文本（阅读序）——与 items 同源 regions，供选择粘贴面板补全题干/答案
-      page_text: toReadingOrderSegments(pageRegions, ctx.cols),
+      // P3：全页 OCR 文本（分段）——与 items 同源 regions，供选择粘贴面板补全题干/答案
+      page_text: buildSegments({ regions: pageRegions }).map((s) => ({
+        text: s.text,
+        box: { x0: s.box.x0, y0: s.box.y0, x1: s.box.x1, y1: s.box.y1 },
+        col: s.col,
+        kind: s.kind,
+        lines: s.lines,
+        source: s.source,
+      })),
       quality: {
         sharpness: quality.score,
         sharp: quality.sharp,
@@ -1021,35 +959,66 @@ export class ImageService {
       )
     }
 
-    let ctx: LayoutContext
-    try {
-      // 与 extract-wrong 同基准：摆正后的 flatBuf 既是 OCR 输入，也是前端展示/裁剪的图
-      // （blocks/OCR box 坐标都在它的像素空间；前端若显示原图会整体错位）。
-      ctx = await buildLayoutContext(srcBuffer)
-    } catch (e) {
-      const reason = brief(e)
-      console.error('[ocr-page] 版面分析失败:', reason)
-      throw new BadRequestException(`版面分析失败（${reason}），请重新选择图片或稍后重试`)
+    // ⭐ 摆正开关（dto.rectify，默认 true）：
+    //   整页拍照图 → 需要几何摆正（歪斜/透视），摆正图同时作为前端展示与裁剪的基准
+    //   （OCR box 坐标都在它的像素空间）；
+    //   「已裁好的小题图」→ 本身就是在摆正图上切出的正矩形，再摆一次不但无收益，
+    //   还会二次透视把小图拉塌（历史故障：37×39 裂图）。故支持 rectify=false 跳过。
+    const rectify = dto.rectify !== false
+    let flatBuf = srcBuffer
+    let pageW = 0
+    let pageH = 0
+    let orientSuspect = false
+    if (rectify) {
+      let ctx: LayoutContext
+      try {
+        ctx = await buildLayoutContext(srcBuffer)
+      } catch (e) {
+        const reason = brief(e)
+        console.error('[ocr-page] 版面分析失败:', reason)
+        throw new BadRequestException(`版面分析失败（${reason}），请重新选择图片或稍后重试`)
+      }
+      flatBuf = ctx.flatBuf
+      pageW = ctx.w
+      pageH = ctx.h
+      orientSuspect = ctx.orientSuspect === true
+    } else {
+      try {
+        // 不做几何摆正，仅统一通道/去掉 alpha（PNG 带透明会让 OCR 侧车出怪结果）
+        flatBuf = await sharp(srcBuffer).removeAlpha().toColourspace('srgb').png().toBuffer()
+        const meta = await sharp(flatBuf).metadata()
+        pageW = meta.width ?? 0
+        pageH = meta.height ?? 0
+      } catch (e) {
+        const reason = brief(e)
+        console.error('[ocr-page] 页面图预处理失败:', reason)
+        throw new BadRequestException(`页面图预处理失败（${reason}），请重新选择图片`)
+      }
     }
 
-    let pageUrl: string
-    try {
-      const pageIng = await this.ingestService.ingest(ctx.flatBuf, 'image/png')
-      pageUrl = await this.storageService.getPublicUrl(pageIng.key)
-    } catch (e) {
-      const reason = brief(e)
-      console.error('[ocr-page] 摆正图暂存失败:', reason)
-      throw new BadRequestException(`页面图暂存失败（${reason}），请稍后重试`)
+    // 未摆正时不重新暂存：原 URL 即可用，省一次对象存储写入（裁图 OCR 走此路）
+    let pageUrl = dto.image_url
+    if (rectify) {
+      try {
+        const pageIng = await this.ingestService.ingest(flatBuf, 'image/png')
+        pageUrl = await this.storageService.getPublicUrl(pageIng.key)
+      } catch (e) {
+        const reason = brief(e)
+        console.error('[ocr-page] 摆正图暂存失败:', reason)
+        throw new BadRequestException(`页面图暂存失败（${reason}），请稍后重试`)
+      }
     }
 
     const mode = dto.mode === 'fast' ? 'fast' : 'precise'
     let pageRegions: LocalOcrTextRegion[] = []
+    let pageBlocks: Ppsv3Block[] = []
     try {
       const page =
         mode === 'fast'
-          ? await this.ocrService.recognizePageFast(ctx.flatBuf)
-          : await this.ocrService.recognizePageForPanel(ctx.flatBuf)
+          ? await this.ocrService.recognizePageFast(flatBuf)
+          : await this.ocrService.recognizePageForPanel(flatBuf)
       pageRegions = page.regions
+      pageBlocks = page.blocks
     } catch (e) {
       // 透传真实错误（含 stderr 摘录/侧车不可达原因），不再换成泛化文案——
       // 否则前端只能看到「识别失败，请重试」，用户与排查者都无从下手。
@@ -1058,12 +1027,20 @@ export class ImageService {
       throw new BadRequestException(`${mode === 'fast' ? '快速' : '精准'}识别失败：${reason}`)
     }
 
-    // 分栏排序：优先用 OCR 文本区域聚类出的阅读栏（比图像投影更可靠），再交给 toReadingOrderSegments
-    // 排序是 OCR 成功后的收尾，同样兜底：它抛错会把一次成功的识别整个变成 500。
+    // ⭐ 分段（不再是「一行一段」）：
+    //   精准路径直接取 PP-StructureV3 的版面块（引擎已完成阅读序 + 区内行合并成段）；
+    //   快速路径（RapidOCR 无版面能力）走行级递归 XY-Cut + 间隙/缩进/题号断段。
+    //   排序是 OCR 成功后的收尾，同样兜底：它抛错会把一次成功的识别整个变成 500。
     let pageText: PageTextSegment[]
     try {
-      const columns = deriveColumnsFromRegions(pageRegions)
-      pageText = toReadingOrderSegments(pageRegions, columns)
+      pageText = buildSegments({ regions: pageRegions, blocks: pageBlocks }).map((s) => ({
+        text: s.text,
+        box: { x0: s.box.x0, y0: s.box.y0, x1: s.box.x1, y1: s.box.y1 },
+        col: s.col,
+        kind: s.kind,
+        lines: s.lines,
+        source: s.source,
+      }))
     } catch (e) {
       const reason = brief(e)
       console.error('[ocr-page] 识别结果整理失败:', reason)
@@ -1071,11 +1048,11 @@ export class ImageService {
     }
 
     return {
-      page: { w: ctx.w, h: ctx.h },
+      page: { w: pageW, h: pageH },
       page_text: pageText,
       image_url: pageUrl,
       // 朝向未经 OCR 消歧（侧车缺席）：前端可提示"本页可能侧躺，识别结果供参考"
-      orient_suspect: ctx.orientSuspect === true,
+      orient_suspect: orientSuspect,
     }
   }
 
