@@ -137,7 +137,7 @@ export async function dewarpBuffer(
   if (!cornersRaw || cornersRaw.length !== 4) throw new Error('dewarp 需要 4 个角点')
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const ordered = orderCorners(cornersRaw)
-  let dst: Corner[]
+  let homo: number[]
   let W: number
   let H: number
   if (opts.keepFullCanvas) {
@@ -154,22 +154,53 @@ export async function dewarpBuffer(
     const pts = [apply(0, 0), apply(info.width, 0), apply(info.width, info.height), apply(0, info.height)]
     const xs = pts.map((p) => p[0])
     const ys = pts.map((p) => p[1])
+    const minX = Math.min(...xs)
+    const minY = Math.min(...ys)
+    const spanX = Math.max(...xs) - minX
+    const spanY = Math.max(...ys) - minY
+    // ⭐ 单位空间 → 像素空间：单位网格（= 检测到的文档四角）对应的像素尺寸与默认路径
+    // 同口径（targetSize 取四角边长像素值）。
+    // ⚠️ 事故档案（2026-10-20 思傅真机）：此处曾把「像素 margin」直接加在单位坐标上，
+    // 而单位空间的全图包围盒跨度只有 ~1~3 → 输出画布恒塌缩成
+    // ~1+2×(2%×max边长) ≈ 37px（640×902 原图实测输出 37×39 的糊图）。
+    // OCR 后前端把页面图换成该裂图，用户感知「识别后图被裁剪成小局部/被换图」。
+    const [docW, docH] = targetSize(ordered)
     const margin = Math.max(2, Math.round(Math.max(info.width, info.height) * 0.02))
-    const minX = Math.min(...xs) - margin
-    const minY = Math.min(...ys) - margin
-    W = Math.max(1, Math.round(Math.max(...xs) + margin - minX))
-    H = Math.max(1, Math.round(Math.max(...ys) + margin - minY))
-    // 输出画布坐标系下：src 各角应落到的位置 = 映射点 − 包围盒偏移
-    dst = pts.map((p) => [p[0] - minX, p[1] - minY] as Corner)
+    W = Math.max(1, Math.round(spanX * docW) + margin * 2)
+    H = Math.max(1, Math.round(spanY * docH) + margin * 2)
+    // homo（输出像素 → 源图像素）：输出画布四角 ↔ 单位空间包围盒四角 ↔ 源图（F 的逆）。
+    // ⚠️ 事故档案（同次排查）：此前把「图像四角的显示位置」与「文档四角」直接配给
+    // solveHomography——两组点语义不同，homo 把整幅输出映射到文档四角周边的源区域，
+    // 且单位空间跨度仅 ~1 使输出塌缩成 ~37px 糊图；用户实测「识别后页面文字消失、
+    // 图被换成空白纸」。正确做法：输出四角 ↔ 包围盒四角经 F⁻¹ 回投到源图，
+    // 保证全图像素按同一透视映入画布（文档四角区被摆正，四周内容原样保留）。
+    const outCorners: Corner[] = [
+      [margin, margin],
+      [W - margin, margin],
+      [W - margin, H - margin],
+      [margin, H - margin],
+    ]
+    const unitBox: Corner[] = [
+      [minX, minY],
+      [minX + spanX, minY],
+      [minX + spanX, minY + spanY],
+      [minX, minY + spanY],
+    ]
+    const invF = solveHomography(unitDst, ordered) // 单位网格 → src(角)
+    const applyInv = (x: number, y: number): Corner => {
+      const d = invF[6] * x + invF[7] * y + 1
+      return [(invF[0] * x + invF[1] * y + invF[2]) / d, (invF[3] * x + invF[4] * y + invF[5]) / d]
+    }
+    homo = solveHomography(outCorners, unitBox.map(([x, y]) => applyInv(x, y)))
   } else {
     const sz = targetSize(ordered)
     W = sz[0]
     H = sz[1]
-    dst = [[0, 0], [W, 0], [W, H], [0, H]]
+    const dst: Corner[] = [[0, 0], [W, 0], [W, H], [0, H]]
+    homo = solveHomography(dst, ordered)
   }
-  // 反向采样：对输出像素 (X,Y) 求它在源图中的位置 → 需要 **dst→src** 的单应。
-  // 传 solveHomography(dst, ordered) 而非 (ordered, dst)，见 warpRaw 顶部事故档案。
-  const homo = solveHomography(dst, ordered)
+  // 反向采样：对输出像素 (X,Y) 求它在源图中的位置 → homo 已由上方分支按各自坐标系
+  // 正确装配（输出像素 → 源图像素），见 warpRaw 顶部事故档案。
   const out = warpRaw(data, info.width, info.height, info.channels, homo, W, H)
   const buffer = await sharp(out, { raw: { width: W, height: H, channels: info.channels } })
     .png()
