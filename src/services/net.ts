@@ -6,6 +6,7 @@ import Taro from '@tarojs/taro'
 import { Network } from '@/network'
 
 export const USER_ID_KEY = 'gk_user_id'
+export const DEVICE_ID_KEY = 'gk_device_id'
 
 export function getUserId(): string {
   try {
@@ -24,10 +25,32 @@ export function setUserId(id?: string) {
   }
 }
 
+/**
+ * 设备标识：一次生成、永存 storage。「同一设备 = 同一身份」的锚点
+ * （思傅 2026-10-20 拍板方案 A）：匿名 user TTL 过期/本地 gk_user_id 丢失后，
+ * 后端凭 X-Device-Id 找回同一匿名身份，旧数据不再「看不见」。
+ */
+export function getDeviceId(): string {
+  try {
+    let id = Taro.getStorageSync(DEVICE_ID_KEY)
+    if (!id) {
+      id = 'dev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
+      Taro.setStorageSync(DEVICE_ID_KEY, id)
+    }
+    return id as string
+  } catch {
+    return ''
+  }
+}
+
 /** 构造带身份头的请求头 */
 export function buildHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const uid = getUserId()
-  return uid ? { ...extra, 'X-User-Id': uid } : { ...extra }
+  const did = getDeviceId()
+  const headers: Record<string, string> = { ...extra }
+  if (uid) headers['X-User-Id'] = uid
+  if (did) headers['X-Device-Id'] = did
+  return headers
 }
 
 /** 从响应中捕获匿名身份回传头 */

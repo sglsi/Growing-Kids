@@ -4,9 +4,10 @@
 // 依据：数据库重新设计-v4.md §B1/B6 + 用户确认（匿名可读写、1 天清理）
 //
 // 机制：
-//  - 优先读请求头 X-User-Id（已注册/已登录用户）
+//  - 优先读请求头 X-User-Id（已注册/已登录用户；匿名 id 过期则视为失效）
 //  - 其次读 X-Open-Id，映射到 users.open_id
-//  - 都没有 → 创建一个匿名 user（is_anonymous=true, expire_at=now()+1天）
+//  - 其次读 X-Device-Id，按设备找/建匿名 user 并续期（「同一设备同一身份」）
+//  - 都没有 → 创建一个匿名 user（is_anonymous=true, expire_at=now()+30天）
 //  - 匿名 user 的 id 通过响应头 X-User-Id 回传，前端后续请求带上即可续用同一身份
 //  - 例外：/auth/login 等免上下文路由不自动建匿名用户（避免每次登录都产生垃圾账号）
 //
@@ -20,6 +21,7 @@ import type { User } from '../users/users.types'
 
 const HEADER_USER_ID = 'x-user-id'
 const HEADER_OPEN_ID = 'x-open-id'
+const HEADER_DEVICE_ID = 'x-device-id'
 
 /** 无需用户上下文的路由前缀（不自动创建匿名用户） */
 const SKIP_ANONYMOUS_PREFIXES = ['/api/auth/', '/api/health']
@@ -37,13 +39,20 @@ export class UserContextMiddleware implements NestMiddleware {
     try {
       const headerUserId = this.asString(req.headers[HEADER_USER_ID])
       const headerOpenId = this.asString(req.headers[HEADER_OPEN_ID])
+      const headerDeviceId = this.asString(req.headers[HEADER_DEVICE_ID])
 
       let user: User | null = null
       if (headerUserId) {
-        user = await this.usersService.findById(headerUserId)
+        const found = await this.usersService.findById(headerUserId)
+        // 匿名 id 过期（ maintenance 还没清）视为失效：继续按设备/匿名重建，
+        // 否则前端带失效 id 会被静默当合法身份，数据全进新号、旧号成孤儿。
+        if (found && !this.isExpiredAnonymous(found)) user = found
       }
       if (!user && headerOpenId) {
         user = await this.usersService.findOrCreateByOpenId(headerOpenId)
+      }
+      if (!user && headerDeviceId) {
+        user = await this.usersService.findOrCreateByDeviceId(headerDeviceId)
       }
       if (!user && !this.shouldSkipAnonymous(req.originalUrl || req.url)) {
         user = await this.usersService.createAnonymous()
@@ -61,6 +70,11 @@ export class UserContextMiddleware implements NestMiddleware {
       console.error('[user-context] 解析用户失败', e)
     }
     next()
+  }
+
+  /** 匿名且已过期 → 视为失效身份 */
+  private isExpiredAnonymous(u: User): boolean {
+    return !!u.is_anonymous && !!u.expire_at && new Date(u.expire_at).getTime() < Date.now()
   }
 
   private shouldSkipAnonymous(url: string): boolean {

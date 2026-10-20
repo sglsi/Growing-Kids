@@ -3,7 +3,7 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { ANONYMOUS_TTL_MS, type User } from './users.types'
 
 const TABLE = 'users'
-const SELECT_COLS = 'id, open_id, nickname, avatar_url, is_anonymous, expire_at, created_at'
+const SELECT_COLS = 'id, open_id, device_id, nickname, avatar_url, is_anonymous, expire_at, created_at'
 
 @Injectable()
 export class UsersService {
@@ -39,7 +39,49 @@ export class UsersService {
     return data as unknown as User
   }
 
-  /** 创建一个匿名用户（1 天后过期，由 maintenance 清理） */
+  /**
+   * 用 device_id 找匿名用户；不存在则创建，找到则滑动续期。
+   * 「同一设备 = 同一身份」的核心（0011 migration + 思傅 2026-10-20 拍板方案 A）：
+   * 前端一次生成 deviceId 永存 storage，此后请求都带 X-Device-Id，
+   * 即使本地 gk_user_id 丢失/后端匿名 id 失效，也能找回同一身份，数据不漂移。
+   */
+  async findOrCreateByDeviceId(deviceId: string): Promise<User> {
+    const client = getSupabaseClient()
+    const { data: existing, error: findErr } = await client
+      .from(TABLE)
+      .select(SELECT_COLS)
+      .eq('device_id', deviceId)
+      .maybeSingle()
+    if (findErr) throw new Error(findErr.message)
+    if (existing) {
+      const u = existing as unknown as User
+      // 匿名身份滑动续期：仍在用就顺延 30 天，避免「放着几天没用数据就被清」
+      if (u.is_anonymous) {
+        const expireAt = new Date(Date.now() + ANONYMOUS_TTL_MS).toISOString()
+        if (!u.expire_at || new Date(u.expire_at) < new Date(expireAt)) {
+          const { data: renewed, error: upErr } = await client
+            .from(TABLE)
+            .update({ expire_at: expireAt })
+            .eq('id', u.id)
+            .select(SELECT_COLS)
+            .maybeSingle()
+          if (!upErr && renewed) return renewed as unknown as User
+        }
+      }
+      return u
+    }
+
+    const expireAt = new Date(Date.now() + ANONYMOUS_TTL_MS).toISOString()
+    const { data, error } = await client
+      .from(TABLE)
+      .insert({ is_anonymous: true, expire_at: expireAt, device_id: deviceId })
+      .select(SELECT_COLS)
+      .single()
+    if (error) throw new Error(error.message)
+    return data as unknown as User
+  }
+
+  /** 创建一个匿名用户（30 天后过期，由 maintenance 清理） */
   async createAnonymous(): Promise<User> {
     const client = getSupabaseClient()
     const expireAt = new Date(Date.now() + ANONYMOUS_TTL_MS).toISOString()
