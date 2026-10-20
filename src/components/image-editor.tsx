@@ -363,6 +363,18 @@ export default function ImageEditor({
       }
       return
     }
+    // ⭐ 智能高清（enhance）不直接跑后端超分。
+    //    外部入口（首页「最近题目 · …」、拍照识别页的「智能高清」按钮）此前传
+    //    autoAction='enhance' → 这里直接 handleAi('enhance') → 后端默认 x2 高清放大，
+    //    用户拿到的永远是「放大版原图」，而编辑器内点同一个按钮却是「先选模式
+    //    （原图/增强并锐化/增亮/灰度/黑白/高清扩展）」。同一功能两条路径行为不一致
+    //    （思傅 2026-10-20 反馈：「智能高清」调的是「高清放大」）。
+    //    现在统一走 dispatchAi('enhance')：与编辑器内点按完全一致，先弹模式面板，
+    //    由用户决定模式；「高清放大（超分）」仅作为面板里的「高清扩展」一项存在。
+    if (autoAction === 'enhance') {
+      void dispatchAi('enhance', '智能高清')
+      return
+    }
     const cfg = AI_ACTIONS.find((a) => a.action === autoAction)
     if (cfg) void handleAi(cfg.action, cfg.label)
     // eslint-disable-next-line react-hooks/exhaustive-deps
