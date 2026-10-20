@@ -819,10 +819,19 @@ export default function ImageEditor({
     // 绘制「成品内容」铺满缓冲
     if (fullFrame && norm !== 0) {
       // 整图旋转烘焙：以缓冲中心为轴旋转，整张铺满（不缩放、不裁边）
+      // ★ 修复（2026-10-20，思傅实测「旋转后图片被裁剪」）：
+      //   5 参 drawImage(img, x, y, w, h) 的 w/h 是**目标像素尺寸**（源恒为整图），
+      //   原图 > MAX_CANVAS_SIDE 时 outW/outH 已按 fit 缩小，若仍按原图尺寸 sw/sh
+      //   绘制，大图四边会被缓冲裁掉。修法：旋转坐标系内先 scale(fit) 再以原图
+      //   像素 1:1 绘制——scale 后外接恰为 sh*fit × sw*fit，与 swap 后的
+      //   outW × outH 严格一致（90/270° 互换，180° 不变），零裁剪。
+      //   fit 现场按 sw/sh 实算，与主路径 fitWhole / 防御路径 f2 同公式，三者一致。
+      const fit = Math.min(1, MAX_CANVAS_SIDE / Math.max(sw, sh, 1))
       ctx.save()
       ctx.translate(outW / 2, outH / 2)
       ctx.rotate((norm * Math.PI) / 180)
-      ctx.drawImage(img, -sw / 2, -sh / 2, sw, sh)
+      ctx.scale(fit, fit)
+      ctx.drawImage(img, -sw / 2, -sh / 2)
       ctx.restore()
     } else if (norm === 0 && !fullFrame) {
       // 纯裁剪：九参 drawImage 把选区精确画满缓冲（Canvas 规范保证的源矩形→目标矩形映射）
