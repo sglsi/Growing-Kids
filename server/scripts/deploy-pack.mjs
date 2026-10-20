@@ -28,6 +28,13 @@ const STAGING = path.join(PROJECT_ROOT, '.deploy-staging')
 /** 部署时不应出现在 server/ 里的本机专属项 */
 const ITEMS = ['.env.secrets', '.env.migrate', '.local-storage', 'logs']
 
+/** 部署时必须随 server/ 一起上传、但位于仓库根的目录。
+ *  部署包 = server/ 整个目录打 tar，仓库根的 ocr-engine/ 不会自动进包，
+ *  导致容器内 /ocr-engine/main3.py 缺失、OCR 全挂（问题③）。
+ *  deploy-pack 在 pack 时把仓库根 ocr-engine/ 复制进 server/ocr-engine/ 一起上传，
+ *  restore 时删除（不提交进 git，已加入 .gitignore）。 */
+const COPY_IN = ['ocr-engine']
+
 function move(src, dst) {
   try {
     fs.renameSync(src, dst)
@@ -35,6 +42,35 @@ function move(src, dst) {
     if (e.code !== 'EXDEV') throw e
     fs.cpSync(src, dst, { recursive: true })
     fs.rmSync(src, { recursive: true, force: true })
+  }
+}
+
+/** 复制仓库根 COPY_IN 项 → server/<同名>/，供部署包上传 */
+function copyIn() {
+  for (const name of COPY_IN) {
+    const src = path.join(PROJECT_ROOT, name)
+    const dst = path.join(SERVER_ROOT, name)
+    if (!fs.existsSync(src)) {
+      console.warn(`[deploy-pack] ⚠ 仓库根 ${name}/ 不存在，跳过复制（OCR 引擎将缺失！）`)
+      continue
+    }
+    if (fs.existsSync(dst)) {
+      // 已存在：先清掉再复制，保证最新
+      fs.rmSync(dst, { recursive: true, force: true })
+    }
+    fs.cpSync(src, dst, { recursive: true })
+    console.log(`[deploy-pack] 复制 ${name}/ → server/${name}/（随部署包上传）`)
+  }
+}
+
+/** 删除 pack 阶段复制进 server/ 的 COPY_IN 项（restore 时调用） */
+function cleanupCopyIn() {
+  for (const name of COPY_IN) {
+    const dst = path.join(SERVER_ROOT, name)
+    if (fs.existsSync(dst)) {
+      fs.rmSync(dst, { recursive: true, force: true })
+      console.log(`[deploy-pack] 清理 server/${name}/（部署产物，不入库）`)
+    }
   }
 }
 
@@ -65,6 +101,8 @@ function pack() {
     }
     console.log(`[deploy-pack] ✓ pack 完成（挪出 ${moved.length} 项），可以执行部署；部署完成后务必 restore`)
   }
+  // 复制 OCR 引擎等仓库根依赖进包（问题③修复）
+  copyIn()
 }
 
 function restore() {
@@ -84,6 +122,8 @@ function restore() {
     restored.push(item)
     console.log(`[deploy-pack] 挪回 ${item}/ ← .deploy-staging/${item}`)
   }
+  // 清理 pack 阶段复制进 server/ 的依赖（不入库）
+  cleanupCopyIn()
   // 暂存区空了就清理掉，避免下次误判
   try {
     if (fs.existsSync(STAGING) && fs.readdirSync(STAGING).length === 0) fs.rmdirSync(STAGING)

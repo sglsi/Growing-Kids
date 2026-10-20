@@ -34,6 +34,9 @@ function resolveEngine(engine: ToolEngine = 'legacy'): { dir: string; script: st
     process.env.OCR_ENGINE_DIR,
     process.env.PPSV3_ENGINE_DIR,
     path.resolve(__dirname, '../../../ocr-engine'),
+    // ⭐ 部署包内嵌：deploy-pack.mjs 会把仓库根 ocr-engine/ 复制进 server/ocr-engine/ 一起上传，
+    //    避免「只传 server/ 导致 /ocr-engine 脚本缺失、OCR 全挂」（问题③）。
+    path.resolve(__dirname, '../../ocr-engine'),
     path.resolve(process.cwd(), 'ocr-engine'),
     path.resolve(process.cwd(), '../ocr-engine'),
   ].filter(Boolean) as string[]
