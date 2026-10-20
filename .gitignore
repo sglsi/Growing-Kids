@@ -82,3 +82,6 @@ project.private.config.json
 
 # 构建版本角标数据（scripts/gen-build-meta.mjs 每次构建重新生成）
 src/build-meta.ts
+
+# 临时编译产物（分段验证脚本用）
+.tmp/

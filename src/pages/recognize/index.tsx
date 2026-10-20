@@ -37,23 +37,38 @@ interface Draft extends RecognizeResult {
 
 // ---------- #150 人工辅助错题整理（替代 split 自动识别的主流程） ----------
 
-/** 粘贴栏的一道题：文本（长按粘贴 OCR 拷贝 / 手动输入）+ 手动裁剪的图片组 */
+/**
+ * 题目卡片的一道题：文本 + 裁剪图 + **该题自己的 OCR 段落**。
+ *
+ * ⭐ 思傅 2026-10-20 定的流程：**先裁剪题目，再对裁剪出的内容做 OCR**。
+ *   文本与图片同挂在「这一道题」上——文字不再是整页流水账里摘出来的孤儿，
+ *   选文字即选本题，从根上消灭「图文分家」。
+ */
 interface BoardEntry {
   id: number
   text: string
   images: { url: string; key: string }[]
+  /** 本题（首图）OCR 出的段落 */
+  segments: PageTextSegment[]
+  /** idle=未识别 | busy=识别中 | done=已识别 | error=识别失败 */
+  ocr: 'idle' | 'busy' | 'done' | 'error'
+  /** 识别失败原因 */
+  err?: string
+  /** 上次使用的识别模式（失败重试沿用） */
+  lastMode?: 'fast' | 'precise'
 }
 
-/** 一个来源页：上传的页面图 + 全页 OCR 结果（url 为摆正后图片，展示/裁剪基准） */
+/** 一个来源页：上传的页面图（整页识别后 url 换成摆正图，作为展示/裁剪基准） */
 interface BoardPage {
   id: number
   url: string
   w: number
   h: number
+  /** 整页识别（次要入口）产出的段落 */
   segments: PageTextSegment[]
-  /** idle=未识别（等用户手动触发）| busy=识别中 | done=已识别 | error=识别失败 */
+  /** idle=未识别 | busy=识别中 | done=已识别 | error=识别失败 */
   ocr: 'idle' | 'busy' | 'done' | 'error'
-  /** 识别失败原因（面板内提示，区别于"未识别到文字"） */
+  /** 识别失败原因 */
   err?: string
   /** 上次使用的识别模式（失败重试沿用） */
   lastMode?: 'fast' | 'precise'
@@ -114,7 +129,7 @@ export default function RecognizePage() {
   // 进入错题提取模式时给一条空题目，降低「从哪开始」的迷茫（用户删光后不补）
   useEffect(() => {
     if (mode === 'split' && board.length === 0) {
-      setBoard([{ id: ++boardIdRef.current, text: '', images: [] }])
+      setBoard([{ id: ++boardIdRef.current, text: '', images: [], segments: [], ocr: 'idle' }])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
@@ -528,7 +543,7 @@ export default function RecognizePage() {
       Taro.showToast({ title: `最多 ${MAX_BOARD_ENTRIES} 题`, icon: 'none' })
       return
     }
-    setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: '', images: [] }])
+    setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: '', images: [], segments: [], ocr: 'idle' }])
   }
 
   const removeEntry = (idx: number) => {
@@ -575,11 +590,59 @@ export default function RecognizePage() {
           )
           Taro.showToast({ title: `已存入第 ${idx + 1} 题`, icon: 'success' })
         } else {
-          setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: t, images: [] }])
+          setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: t, images: [], segments: [], ocr: 'idle' }])
           Taro.showToast({ title: `已存入新题（第 ${board.length + 1} 题）`, icon: 'success' })
         }
       },
     })
+  }
+
+  /**
+   * ⭐ 新流程核心：对「已裁剪好的题目图」单独 OCR（快速 1~3s / 精准 15~20s）。
+   *
+   * 为什么先裁剪再识别（思傅 2026-10-20 定）：
+   *  - 整页 OCR 得到的是流水账，用户要在几十段里凭记忆找「哪几段是这一题」；
+   *  - 先裁出题目区域再识别，返回的段落天然属于本题，勾选即可，不必再认亲；
+   *  - 小图识别本身也更准（版面简单、字更大）。
+   *
+   * rectify=false：裁剪图已在摆正页图上切出，再摆正只会二次透视（37×39 裂图教训）。
+   */
+  const runEntryOcr = async (entryIdx: number, ocrMode: 'fast' | 'precise', imageUrl?: string) => {
+    const e = board[entryIdx]
+    // imageUrl：裁剪刚完成时用它（此时 board 状态还没更新出这张图）
+    const src = imageUrl || e?.images[0]?.url
+    if (!e || !src) return
+    setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
+    try {
+      const r = await ocrPage(src, ocrMode, { rectify: false })
+      setBoard((prev) =>
+        prev.map((x, i) =>
+          i === entryIdx
+            ? { ...x, segments: r.page_text, ocr: 'done', err: undefined, lastMode: ocrMode }
+            : x,
+        ),
+      )
+      if (!r.page_text.length) {
+        Taro.showToast({ title: '本图未识别到文字，可手动输入', icon: 'none' })
+      } else {
+        Taro.showToast({ title: `识别到 ${r.page_text.length} 段`, icon: 'success' })
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '识别失败，请重试'
+      console.error('题目图 OCR 失败', err)
+      setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'error', err: msg, lastMode: ocrMode } : x)))
+      Taro.showToast({ title: msg.slice(0, 30), icon: 'none', duration: 2500 })
+    }
+  }
+
+  /** 把本题勾选的段落追加进本题题干（一步到位，不再靠剪贴板中转） */
+  const appendSegmentsToEntry = (entryIdx: number, text: string) => {
+    const t = text.trim()
+    if (!t) return
+    setBoard((prev) =>
+      prev.map((e, i) => (i === entryIdx ? { ...e, text: e.text.trim() ? `${e.text.trim()}\n${t}` : t } : e)),
+    )
+    Taro.showToast({ title: `已加入第 ${entryIdx + 1} 题`, icon: 'success' })
   }
 
   const removeEntryImage = (idx: number, imgIdx: number) => {
@@ -617,7 +680,10 @@ export default function RecognizePage() {
       setBoard((prev) =>
         prev.map((e, i) => (i === entryIdx ? { ...e, images: [...e.images, { url: up.url, key: up.key }] } : e)),
       )
-      Taro.showToast({ title: '已裁剪入题', icon: 'success' })
+      Taro.showToast({ title: '已裁剪入题，正在识别文字', icon: 'success' })
+      // ⭐ 裁完即识别（快速 1~3s）：用户拉框的手还没离开，本题文字已经摊在卡片里了。
+      //    失败不阻断（卡片显示「识别失败，重试」），图已经进本题了。
+      await runEntryOcr(entryIdx, 'fast', up.url)
     } catch (e) {
       console.error('裁剪图上传失败', e)
       Taro.showToast({ title: '裁剪图上传失败，请重试', icon: 'none' })
@@ -968,92 +1034,30 @@ export default function RecognizePage() {
           </Card>
         ) : mode === 'split' ? (
           <>
-            {/* #150 人工辅助流程：选图 → 右侧 OCR 文本栏 → 底部粘贴栏（文字 + 裁剪图）→ 导出 Word */}
+            {/* ⭐ 新流程（思傅 2026-10-20 定）：选图 → 在题目卡片「＋裁剪题目」框出本题 → 对该裁剪图 OCR → 勾选段落入题干。
+                整页识别降级为次要入口（不裁剪、直接看全页文字时用）。 */}
             <Card className="rounded-2xl border-border p-4 mb-4">
-              <Text className="block text-xs text-muted-foreground mb-3">
-                选择作业图片后，点下方「快速/精准」手动识别整页文字：在右侧文本栏复制需要的内容，粘到下方题目的文本框；也可直接在图片上框选裁剪错题区域入题
-              </Text>
+              <View className="flex flex-row items-center justify-between mb-3">
+                <Text className="block text-sm font-semibold text-foreground">来源页</Text>
+                <Text className="block text-[10px] text-muted-foreground">先选图，再到下方题目里「＋裁剪题目」</Text>
+              </View>
               {!curPage ? (
                 <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={() => void addBoardPages()}>
                   <View className="flex flex-col items-center">
                     <Text className="block text-sm text-muted-foreground">点击拍照 / 选择作业图片</Text>
-                    <Text className="block text-[10px] text-muted-foreground mt-1">支持一次多选，选好后手动触发识别</Text>
+                    <Text className="block text-[10px] text-muted-foreground mt-1">支持一次多选，再从图里逐题裁剪</Text>
                   </View>
                 </View>
               ) : (
                 <>
-                  {/* 图片（左） + OCR 文本栏（右） */}
-                  <View className="flex flex-row gap-2 mb-3" style={{ height: 360 }}>
-                    <View className="rounded-xl overflow-hidden bg-muted" style={{ flex: '1 1 0' }}>
-                      <TaroImage
-                        src={curPage.url}
-                        mode="aspectFit"
-                        style={{ width: '100%', height: '100%' }}
-                        onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
-                      />
-                    </View>
-                    <View className="rounded-xl overflow-hidden" style={{ flex: '1 1 0', border: '1px solid #ece8e0' }}>
-                      <WrongqOcrPanel
-                        segments={curPage.segments}
-                        pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
-                        busy={curPage.ocr === 'busy'}
-                        error={curPage.err}
-                        onPasteToEntry={handlePasteToEntry}
-                      />
-                    </View>
-                  </View>
-
-                  {/* OCR 触发（#150 双模式）：默认不自动识别，用户按需选快速/精准 */}
-                  <View className="flex flex-row items-center gap-2 mb-3">
-                    <View
-                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
-                      style={{
-                        backgroundColor: '#FFF7F0',
-                        border: '1px solid rgba(190,62,45,0.3)',
-                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
-                      }}
-                      onClick={() => {
-                        if (boardBusy || curPage.ocr === 'busy') return
-                        void runPageOcr(curPage, 'fast')
-                      }}
-                    >
-                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
-                        {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '快速识别中…' : '快速识别'}
-                      </Text>
-                    </View>
-                    <View
-                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
-                      style={{
-                        backgroundColor: '#BE3E2D',
-                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
-                      }}
-                      onClick={() => {
-                        if (boardBusy || curPage.ocr === 'busy') return
-                        void runPageOcr(curPage, 'precise')
-                      }}
-                    >
-                      <Text className="block text-xs font-medium text-white">
-                        {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '精准识别中…' : '精准识别'}
-                      </Text>
-                    </View>
-                  </View>
-
-                  {/* OCR 诊断入口：识别异常时一键自查端口·侧车·引擎是否就绪（显眼样式，避免找不到） */}
-                  <View
-                    className="flex-row items-center justify-center mt-1 py-2 px-3 rounded-lg"
-                    style={{
-                      backgroundColor: 'rgba(190,62,45,0.08)',
-                      borderWidth: 1,
-                      borderColor: 'rgba(190,62,45,0.35)',
-                    }}
-                    onClick={() => { if (!diagLoading) void handleDiagnose() }}
-                  >
-                    <Text
-                      className="block text-xs"
-                      style={{ color: diagLoading ? '#B08D84' : '#BE3E2D', fontWeight: '500' }}
-                    >
-                      {diagLoading ? '诊断中…（约 30 秒）' : 'OCR 识别异常？点此「一键诊断」'}
-                    </Text>
+                  {/* 来源图：点击看大图。裁剪入口统一放在下方题目卡片（避免"图上能裁、卡片也能裁"的歧义） */}
+                  <View className="rounded-xl overflow-hidden bg-muted mb-2" style={{ height: 260 }}>
+                    <TaroImage
+                      src={curPage.url}
+                      mode="aspectFit"
+                      style={{ width: '100%', height: '100%' }}
+                      onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
+                    />
                   </View>
 
                   {/* 多图切换条 */}
@@ -1103,15 +1107,89 @@ export default function RecognizePage() {
                       <Text className="block text-[10px] text-primary" onClick={() => void addBoardPages()}>添加图片</Text>
                     </View>
                   </View>
+
+                  {/* 整页识别（次要入口）：不裁剪、直接看全页文字时用。
+                      主流程是「裁剪题目 → 识别本题」，见下方题目卡片。 */}
+                  <View className="flex flex-row items-center gap-2 mt-2">
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#FFF7F0',
+                        border: '1px solid rgba(190,62,45,0.3)',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'fast')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                        {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '整页快速识别中…' : '整页快速识别'}
+                      </Text>
+                    </View>
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#BE3E2D',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'precise')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium text-white">
+                        {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '整页精准识别中…' : '整页精准识别'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text className="block text-[10px] text-muted-foreground mt-1">
+                    整页识别会把本页换成摆正后的图（裁剪更准）；只要单题文字，用下方题目的「＋裁剪题目」即可
+                  </Text>
+
+                  {/* OCR 诊断入口：识别异常时一键自查端口·侧车·引擎是否就绪（显眼样式，避免找不到） */}
+                  <View
+                    className="flex-row items-center justify-center mt-2 py-2 px-3 rounded-lg"
+                    style={{
+                      backgroundColor: 'rgba(190,62,45,0.08)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(190,62,45,0.35)',
+                    }}
+                    onClick={() => { if (!diagLoading) void handleDiagnose() }}
+                  >
+                    <Text
+                      className="block text-xs"
+                      style={{ color: diagLoading ? '#B08D84' : '#BE3E2D', fontWeight: '500' }}
+                    >
+                      {diagLoading ? '诊断中…（约 30 秒）' : 'OCR 识别异常？点此「一键诊断」'}
+                    </Text>
+                  </View>
+
+                  {/* 整页识别出的段落（有则显示）：勾选后可「存入题目」 */}
+                  {curPage.segments.length ? (
+                    <View
+                      className="rounded-xl overflow-hidden mt-2"
+                      style={{ height: 220, border: '1px solid #ece8e0' }}
+                    >
+                      <WrongqOcrPanel
+                        segments={curPage.segments}
+                        title="整页文字"
+                        pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
+                        busy={curPage.ocr === 'busy'}
+                        error={curPage.err}
+                        onPasteToEntry={handlePasteToEntry}
+                      />
+                    </View>
+                  ) : null}
                 </>
               )}
             </Card>
 
-            {/* 底部粘贴栏：结构化题目列表（文字长按粘贴 + 手动裁剪图） */}
+            {/* 题目清单：每题 = 裁剪图 + 本题 OCR 段落 + 题干（① 裁剪 ② 识别 ③ 勾选入题干） */}
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
-                <Text className="block text-sm font-semibold text-foreground">粘贴栏（{board.length} 题）</Text>
-                <Text className="block text-[10px] text-muted-foreground">文字长按粘贴 · 图片裁剪入题</Text>
+                <Text className="block text-sm font-semibold text-foreground">题目（{board.length} 题）</Text>
+                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题 ③ 勾选入题干</Text>
               </View>
               {board.map((e, idx) => (
                 <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
@@ -1120,6 +1198,8 @@ export default function RecognizePage() {
                       <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
                       {cropEditor?.entryIdx === idx ? (
                         <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>裁剪中…</Text>
+                      ) : e.ocr === 'busy' ? (
+                        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>识别中…</Text>
                       ) : null}
                     </View>
                     <View className="flex flex-row items-center gap-3">
@@ -1128,19 +1208,11 @@ export default function RecognizePage() {
                       <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={() => removeEntry(idx)}>删除</Text>
                     </View>
                   </View>
-                  <View className="bg-muted rounded-xl p-2 mb-2">
-                    <Textarea
-                      className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
-                      value={e.text}
-                      placeholder="长按粘贴从右侧 OCR 文本栏复制的文字，也可手动输入"
-                      maxlength={2000}
-                      onInput={(ev) => setEntryText(idx, ev.detail.value)}
-                    />
-                  </View>
-                  {/* 裁剪图组 + 裁剪入图按钮 */}
-                  <View className="flex flex-row items-center flex-wrap gap-2">
+
+                  {/* ① 裁剪图组 + 裁剪入口 */}
+                  <View className="flex flex-row items-center flex-wrap gap-2 mb-2">
                     {e.images.map((img, j) => (
-                      <View key={j} style={{ width: 64, height: 64, borderRadius: 8, overflow: 'hidden', position: 'relative', border: '1px solid #ece8e0' }}>
+                      <View key={j} style={{ width: 64, height: 64, borderRadius: 8, overflow: 'hidden', position: 'relative', border: `1px solid ${j === 0 ? '#BE3E2D' : '#ece8e0'}` }}>
                         <TaroImage
                           src={img.url}
                           mode="aspectFill"
@@ -1164,8 +1236,73 @@ export default function RecognizePage() {
                       style={{ width: 64, height: 64, borderRadius: 8, border: '1px dashed #C9C2B8' }}
                     >
                       <Text style={{ fontSize: 14, color: '#BE3E2D', lineHeight: '16px' }}>＋</Text>
-                      <Text className="block text-[9px]" style={{ color: '#BE3E2D' }}>裁剪入图</Text>
+                      <Text className="block text-[9px]" style={{ color: '#BE3E2D' }}>裁剪题目</Text>
                     </View>
+                  </View>
+
+                  {/* ② 对裁剪出的题目图做 OCR（有图才出现；裁完会自动跑一次快速识别） */}
+                  {e.images.length ? (
+                    <View className="flex flex-row items-center gap-2 mb-2">
+                      <View
+                        className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                        style={{
+                          backgroundColor: '#FFF7F0',
+                          border: '1px solid rgba(190,62,45,0.3)',
+                          opacity: e.ocr === 'busy' ? 0.5 : 1,
+                        }}
+                        onClick={() => {
+                          if (e.ocr === 'busy') return
+                          void runEntryOcr(idx, 'fast')
+                        }}
+                      >
+                        <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                          {e.ocr === 'busy' && e.lastMode === 'fast' ? '识别中…' : '识别本题（快速）'}
+                        </Text>
+                      </View>
+                      <View
+                        className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                        style={{ backgroundColor: '#BE3E2D', opacity: e.ocr === 'busy' ? 0.5 : 1 }}
+                        onClick={() => {
+                          if (e.ocr === 'busy') return
+                          void runEntryOcr(idx, 'precise')
+                        }}
+                      >
+                        <Text className="block text-xs font-medium text-white">
+                          {e.ocr === 'busy' && e.lastMode !== 'fast' ? '识别中…' : '识别本题（精准）'}
+                        </Text>
+                      </View>
+                    </View>
+                  ) : (
+                    <Text className="block text-[10px] text-muted-foreground mb-2">
+                      点上方「＋裁剪题目」，从来源页框出这道题的区域（裁完自动识别文字）
+                    </Text>
+                  )}
+
+                  {/* ③ 本题 OCR 段落：勾选 → 直接进本题题干（不再经剪贴板中转） */}
+                  {e.segments.length ? (
+                    <View
+                      className="rounded-xl overflow-hidden mb-2"
+                      style={{ height: 200, border: '1px solid #ece8e0' }}
+                    >
+                      <WrongqOcrPanel
+                        segments={e.segments}
+                        title="本题文字"
+                        busy={e.ocr === 'busy'}
+                        error={e.ocr === 'error' ? e.err : undefined}
+                        saveLabel="加入题干"
+                        onPasteToEntry={(t) => appendSegmentsToEntry(idx, t)}
+                      />
+                    </View>
+                  ) : null}
+
+                  <View className="bg-muted rounded-xl p-2">
+                    <Textarea
+                      className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                      value={e.text}
+                      placeholder="点上方段落的「加入题干」自动填入，也可手动输入 / 长按粘贴"
+                      maxlength={2000}
+                      onInput={(ev) => setEntryText(idx, ev.detail.value)}
+                    />
                   </View>
                 </View>
               ))}

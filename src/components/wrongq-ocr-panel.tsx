@@ -19,18 +19,36 @@ interface Props {
   segments: PageTextSegment[]
   /** 页码提示（多图切换时标识当前页），如「第 1/3 页」 */
   pageLabel?: string
+  /** 面板标题（默认「OCR 文本」；题目卡片内用「本题文字」） */
+  title?: string
   /** 上传/OCR/导出进行中：禁操作 */
   busy?: boolean
   /** 识别失败原因（服务不可用等）；有值时空态显示错误而非引导文案 */
   error?: string
   /**
-   * 「存入题目」直通：勾选片段后一键写入指定题（父组件弹出题目选择器）。
+   * 勾选后一键写入的操作名（默认「存入题目」）。
+   * ⭐ 题目卡片内传「加入题干」：段落已经属于这一题（先裁剪再识别的结果），
+   *    直接落进本题题干，不再弹题目选择器——少一步、不会选错题。
+   */
+  saveLabel?: string
+  /**
+   * 「存入题目/加入题干」直通：勾选片段后一键写入。
    * 与「复制」并存——复制仍保留给想手动调整的用户。
    */
   onPasteToEntry?: (text: string) => void
 }
 
-export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPasteToEntry }: Props) {
+export default function WrongqOcrPanel({
+  segments,
+  pageLabel,
+  title,
+  busy,
+  error,
+  saveLabel,
+  onPasteToEntry,
+}: Props) {
+  const headTitle = title || 'OCR 文本'
+  const saveText = saveLabel || '存入题目'
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expanded, setExpanded] = useState(true)
   const n = selected.size
@@ -68,7 +86,7 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
       {/* 头部：标题 + 页码 + 段数 + 展开/收起 */}
       <View className="flex flex-row items-center justify-between px-2 py-2" style={{ borderBottomWidth: 0.5, borderBottomColor: '#f0ece4', borderBottomStyle: 'solid' }}>
         <View className="flex flex-row items-center gap-1" style={{ flex: 1, minWidth: 0 }}>
-          <Text className="block text-xs font-semibold text-foreground">OCR 文本</Text>
+          <Text className="block text-xs font-semibold text-foreground">{headTitle}</Text>
           {pageLabel ? <Text className="block text-[10px] text-muted-foreground">{pageLabel}</Text> : null}
           <Text className="block text-[10px] text-muted-foreground">{segments.length} 段</Text>
         </View>
@@ -84,7 +102,9 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
       {expanded ? (
         <>
           <Text className="block text-[10px] text-muted-foreground px-2 py-1">
-            点「复制」后，到下方题目文本框长按粘贴
+            {saveLabel
+              ? `勾选需要的段落，点「${saveText}」直接填入`
+              : '点「复制」后，到下方题目文本框长按粘贴'}
           </Text>
 
           {/* 片段列表（阅读序，内部滚动） */}
@@ -129,7 +149,12 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
                     {/* 文本（View 承载点击：见文件顶部说明） */}
                     <View
                       className="block text-[11px] text-foreground"
-                      style={{ flex: 1, lineHeight: '16px' }}
+                      style={{
+                        flex: 1,
+                        lineHeight: '16px',
+                        // 标题型段落加粗：分段层已按版面 label 标出语义类型（见 ocr-segment.ts）
+                        fontWeight: seg.kind === 'title' ? '600' : '400',
+                      }}
                       onClick={() => toggle(i)}
                     >
                       {seg.text}
@@ -171,7 +196,7 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
                   if (text) onPasteToEntry(text)
                 }}
               >
-                存入题目（{n}）
+                {saveText}（{n}）
               </View>
             ) : null}
             {n > 0 ? (
