@@ -3,7 +3,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
-import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2, Check } from 'lucide-react-taro'
+import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
@@ -306,10 +306,13 @@ export default function ImageEditor({
     }
   }
 
-  // 打开/换图：复位所有状态并加载
+  // 打开/换图：复位所有状态并加载。
+  // ⭐ 关键：组件从不卸载（if (!visible) return null），故跨会话的全部「会话态」都必须在此清空，
+  //    否则下一张图会残留上一张图的滤镜预览/增强底稿/去手写步骤等（问题①：选择效果栏残留旧图、智能高清主图被旧底稿替换）。
   useEffect(() => {
     if (!visible || !src) return
     setCurrentSrc(src)
+    // 基础编辑态
     setRotation(0)
     setCrop(DEFAULT_CROP)
     setQuad(DEFAULT_QUAD)
@@ -319,7 +322,28 @@ export default function ImageEditor({
     setAiBusy(false)
     setFraming(!!cropOnly)
     setPreviewError(false)
+    setNaturalW(0)
+    setNaturalH(0)
     canvasNodeRef.current = null
+    // 智能高清 / 滤镜预览缓存（问题①核心残留项）
+    setModeThumbs({})
+    setActivePreset('enhance')
+    setEnhanceStrength('medium')
+    setEnhanceBase('')
+    setActiveMode('bw')
+    setSrPanelOpen(false)
+    setSrScale(2)
+    setSrMode('classical')
+    // 去手写步骤栈 / 框选
+    setEraseMode(false)
+    setEraseRects([])
+    setEraseDrag(null)
+    setEraseStack([])
+    // 对比态
+    setCompareMode(false)
+    setCompareRatio(0.5)
+    // 红/蓝笔卷模式随图重置
+    setColorPenMode(false)
     void openImage(src)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, src])
@@ -1626,16 +1650,9 @@ export default function ImageEditor({
             <RotateCw size={24} color="#ffffff" />
             <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
           </View>
-          {/* 矩形模式：未启用裁剪时显示「裁剪」（点击启用），启用后变为「确定裁剪」（点击应用）。
-              四角模式=确认四角（拉完四角后的唯一确认入口） */}
-          {cornerMode === 'quad' ? (
-            <View className="flex flex-col items-center" onClick={confirmQuad}>
-              <View className="w-11 h-11 rounded-full bg-primary flex items-center justify-center mb-1">
-                <Check size={20} color="#ffffff" />
-              </View>
-              <Text className="block text-white text-opacity-80 text-xs">确认四角</Text>
-            </View>
-          ) : (
+          {/* 矩形裁剪：仅矩形模式出现（四角模式专做透视压平，隐藏矩形裁剪）。
+              未启用时显示「裁剪」（点击进入裁剪框），启用后变为「确定裁剪」（点击应用）。 */}
+          {cornerMode !== 'quad' && (
             <View className="flex flex-col items-center" onClick={framing ? handleConfirmCrop : enterFraming}>
               <View
                 className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
@@ -1647,8 +1664,13 @@ export default function ImageEditor({
               <Text className="block text-white text-opacity-80 text-xs">{framing ? '确定裁剪' : '裁剪'}</Text>
             </View>
           )}
-          {/* 四角透视拉框：与「确定裁剪」互斥切换，专用于把斜拍试卷拉平 */}
-          <View className="flex flex-col items-center" onClick={toggleCornerMode}>
+          {/* 合并键：同一按键的两种状态——
+              矩形模式=「四角拉框」(点击进入四角透视，可拉试卷四角)；
+              四角模式=「确认四角」(拉完四角后提交透视压平，确认后自动回到矩形态)。 */}
+          <View
+            className="flex flex-col items-center"
+            onClick={cornerMode === 'quad' ? confirmQuad : toggleCornerMode}
+          >
             <View
               className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
                 cornerMode === 'quad' ? 'bg-primary' : 'bg-white bg-opacity-15'
@@ -1656,7 +1678,9 @@ export default function ImageEditor({
             >
               <Maximize2 size={20} color="#ffffff" />
             </View>
-            <Text className="block text-white text-opacity-80 text-xs">四角拉框</Text>
+            <Text className="block text-white text-opacity-80 text-xs">
+              {cornerMode === 'quad' ? '确认四角' : '四角拉框'}
+            </Text>
           </View>
           {enableSaveToInbox && (
             <View className="flex flex-col items-center" onClick={handleSave}>
