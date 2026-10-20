@@ -29,6 +29,8 @@ const SKIP_ANONYMOUS_PREFIXES = ['/api/auth/', '/api/health']
 export interface RequestWithUser extends Request {
   userId?: string
   isAnonymous?: boolean
+  /** 请求头 X-Device-Id 原样透传（登录时用于绑定正式账号 + 迁移设备名下匿名号） */
+  deviceId?: string
 }
 
 @Injectable()
@@ -61,8 +63,11 @@ export class UserContextMiddleware implements NestMiddleware {
       if (user) {
         req.userId = user.id
         req.isAnonymous = user.is_anonymous
+        req.deviceId = headerDeviceId
         // 回传身份，匿名用户下次请求带上即可续用
         res.setHeader(HEADER_USER_ID, user.id)
+      } else {
+        req.deviceId = headerDeviceId
       }
     } catch (e) {
       // 用户上下文失败不应直接 500，交给下游（下游会用 userId 校验并报错）

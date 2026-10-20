@@ -81,11 +81,15 @@ export class QrLoginService implements OnModuleDestroy {
    * @param token       票据
    * @param code        wx.login() 临时凭证
    * @param anonymousId H5 端当前匿名身份（可选）——授权成功即把它的数据迁到正式账号
+   * @param deviceId    手机端设备标识（X-Device-Id，可选）——① 授权手机的
+   *                    微信账号绑定该设备（丢 gk_user_id 也能找回）；② 该设备
+   *                    名下历史遗留匿名号一并迁移
    */
   async authorize(
     token: string,
     code: string,
     anonymousId?: string,
+    deviceId?: string,
   ): Promise<{ user: User; migrated: { subjects: number; timeline_items: number; library_docs: number; documents: number } }> {
     const t = this.tickets.get(token)
     if (!t || t.status === 'expired') {
@@ -101,10 +105,11 @@ export class QrLoginService implements OnModuleDestroy {
       throw new BadRequestException(`微信登录失败：${session.errmsg || '未返回 openid'}`)
     }
 
-    const user = await this.usersService.findOrCreateByOpenId(session.openid)
+    const user = await this.usersService.findOrCreateByOpenId(session.openid, deviceId)
 
-    // 匿名数据迁移：把 H5 端（电脑浏览器）匿名身份的数据改挂到正式账号
-    const migrated = await this.migrateAnonymous(user.id, anonymousId)
+    // 匿名数据迁移：把 H5 端（电脑浏览器）匿名身份 + 授权手机设备名下
+    // 历史遗留匿名号的数据，一并改挂到正式账号
+    const migrated = await this.migrateAnonymous(user.id, anonymousId, deviceId)
 
     t.status = 'authorized'
     t.userId = user.id
@@ -116,28 +121,42 @@ export class QrLoginService implements OnModuleDestroy {
   private async migrateAnonymous(
     targetUserId: string,
     anonymousId?: string,
+    deviceId?: string,
   ): Promise<{ subjects: number; timeline_items: number; library_docs: number; documents: number }> {
     const empty = { subjects: 0, timeline_items: 0, library_docs: 0, documents: 0 }
-    if (!anonymousId || anonymousId === targetUserId) return empty
 
-    const anon = await this.usersService.findById(anonymousId)
-    if (!anon || !anon.is_anonymous) return empty
+    const anonIds = new Set<string>()
+    if (anonymousId) anonIds.add(anonymousId)
+    if (deviceId) {
+      try {
+        const devAnons = await this.usersService.listAnonymousByDeviceId(deviceId)
+        for (const u of devAnons) anonIds.add(u.id)
+      } catch (e) {
+        this.logger.warn(`[qr-login] 查设备匿名号失败（不影响主迁移）: ${(e as Error).message}`)
+      }
+    }
+    anonIds.delete(targetUserId)
+    if (!anonIds.size) return empty
 
     const client = getSupabaseClient()
     const migrated = { ...empty }
-    for (const table of ['subjects', 'timeline_items', 'library_docs', 'documents'] as const) {
-      const { data, error } = await client
-        .from(table)
-        .update({ user_id: targetUserId })
-        .eq('user_id', anonymousId)
-        .select('id')
-      if (error) {
-        this.logger.error(`[qr-login] 迁移 ${table} 失败`, error.message)
-        continue
+    for (const anonId of anonIds) {
+      const anon = await this.usersService.findById(anonId)
+      if (!anon || !anon.is_anonymous) continue
+      for (const table of ['subjects', 'timeline_items', 'library_docs', 'documents'] as const) {
+        const { data, error } = await client
+          .from(table)
+          .update({ user_id: targetUserId })
+          .eq('user_id', anonId)
+          .select('id')
+        if (error) {
+          this.logger.error(`[qr-login] 迁移 ${table}（${anonId}）失败`, error.message)
+          continue
+        }
+        migrated[table] += (data || []).length
       }
-      migrated[table] = (data || []).length
     }
-    await this.usersService.removeByIds([anonymousId])
+    await this.usersService.removeByIds([...anonIds])
     return migrated
   }
 

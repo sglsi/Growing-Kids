@@ -15,14 +15,18 @@ export class AuthController {
    * 微信登录
    * 前端：wx.login() 拿 code → POST 到这里（附带 anonymous_id 以便迁移匿名数据）
    * 返回：{ user, migrated }，前端把 user.id 存为 X-User-Id 用于后续请求
+   *
+   * deviceId 取中间件透传的 X-Device-Id：① 正式账号绑定设备（本地身份丢失
+   * 也能找回）；② 设备名下历史遗留匿名号一并迁移（思傅 2026-10-20 反馈
+   * 「分类没迁全」的根因——丢过 gk_user_id 的匿名号没被覆盖到）。
    */
   @Post('login')
   @HttpCode(200)
-  async login(@Body() dto: LoginDto) {
+  async login(@Body() dto: LoginDto, @Req() req: RequestWithUser) {
     const data = await this.authService.login(dto.code, dto.anonymous_id, {
       nickname: dto.nickname,
       avatar_url: dto.avatar_url,
-    })
+    }, req.deviceId)
     return { code: 200, msg: 'success', data }
   }
 
@@ -76,8 +80,8 @@ export class AuthController {
   /** 手机端授权（扫码落地页：wx.login 拿 code 后调用） */
   @Post('qr-login/authorize')
   @HttpCode(200)
-  async authorizeQrTicket(@Body() dto: QrAuthorizeDto) {
-    const data = await this.qrLoginService.authorize(dto.token, dto.code, dto.anonymous_id)
+  async authorizeQrTicket(@Body() dto: QrAuthorizeDto, @Req() req: RequestWithUser) {
+    const data = await this.qrLoginService.authorize(dto.token, dto.code, dto.anonymous_id, req.deviceId)
     return { code: 200, msg: 'success', data }
   }
 }

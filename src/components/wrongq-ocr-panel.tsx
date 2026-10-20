@@ -72,9 +72,13 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
           {pageLabel ? <Text className="block text-[10px] text-muted-foreground">{pageLabel}</Text> : null}
           <Text className="block text-[10px] text-muted-foreground">{segments.length} 段</Text>
         </View>
-        <Text className="block text-[10px] text-muted-foreground shrink-0" onClick={() => setExpanded((v) => !v)}>
+        {/* ⚠️ 交互元素一律用 View 不用 Text：Taro 4.1.9 的 removeEventListener
+            在 Text 解绑最后一个事件时会读 componentsAlias['pure-text']._num
+            （映射表缺该键）直接崩（#16641，app.tsx 已挂兜底补丁）。
+            View 的 pure-view/static-view 别名编译期就存在，安全。 */}
+        <View className="block text-[10px] text-muted-foreground shrink-0" onClick={() => setExpanded((v) => !v)}>
           {expanded ? '收起' : '展开'}
-        </Text>
+        </View>
       </View>
 
       {expanded ? (
@@ -122,39 +126,39 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
                     >
                       {on ? <Text style={{ fontSize: 9, lineHeight: '12px', color: '#fff' }}>✓</Text> : null}
                     </View>
-                    {/* 文本 */}
-                    <Text
+                    {/* 文本（View 承载点击：见文件顶部说明） */}
+                    <View
                       className="block text-[11px] text-foreground"
                       style={{ flex: 1, lineHeight: '16px' }}
                       onClick={() => toggle(i)}
                     >
                       {seg.text}
-                    </Text>
+                    </View>
                     {/* 单段复制 */}
-                    <Text
+                    <View
                       className="block text-[10px] shrink-0"
                       style={{ color: '#BE3E2D', marginTop: 2 }}
                       onClick={() => copyOne(seg.text)}
                     >
                       复制
-                    </Text>
+                    </View>
                   </View>
                 )
               })
             )}
           </ScrollView>
 
-          {/* 操作条：全选 / 清空 / 存入题目 / 复制所选 */}
+          {/* 操作条：全选 / 清空 / 存入题目 / 复制所选（交互元素均为 View，见顶部说明） */}
           <View className="flex flex-row items-center gap-2 px-2 py-2" style={{ borderTopWidth: 0.5, borderTopColor: '#f0ece4', borderTopStyle: 'solid' }}>
-            <Text className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set(segments.map((_, i) => i)))}>
+            <View className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set(segments.map((_, i) => i)))}>
               全选
-            </Text>
-            <Text className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set())}>
+            </View>
+            <View className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set())}>
               清空
-            </Text>
+            </View>
             <View style={{ flex: 1 }} />
             {n > 0 && onPasteToEntry ? (
-              <Text
+              <View
                 className="block text-[10px] mr-2"
                 style={{ color: '#BE3E2D', fontWeight: '500' }}
                 onClick={() => {
@@ -168,14 +172,14 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPas
                 }}
               >
                 存入题目（{n}）
-              </Text>
+              </View>
             ) : null}
             {n > 0 ? (
-              <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={copySelected}>
+              <View className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={copySelected}>
                 复制所选（{n}）
-              </Text>
+              </View>
             ) : (
-              <Text className="block text-[10px] text-muted-foreground">已选 0 段</Text>
+              <View className="block text-[10px] text-muted-foreground">已选 0 段</View>
             )}
           </View>
         </>

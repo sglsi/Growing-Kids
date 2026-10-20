@@ -19,8 +19,14 @@ export class UsersService {
     return (data as unknown as User) || null
   }
 
-  /** 用 openid 找用户；不存在则创建（已注册用户） */
-  async findOrCreateByOpenId(openId: string): Promise<User> {
+  /**
+   * 用 openid 找用户；不存在则创建（已注册用户）。
+   * deviceId 传入时：新账号直接绑定该设备；老账号若未绑设备则补绑
+   * （0011 唯一索引保证一个设备只绑一个正式号）——「设备找回微信账号」
+   * 的关键：本地 gk_user_id 丢失后，凭 X-Device-Id 也能回到同一账号，
+   * 不再掉回匿名身份造成数据分家。
+   */
+  async findOrCreateByOpenId(openId: string, deviceId?: string): Promise<User> {
     const client = getSupabaseClient()
     const { data: existing, error: findErr } = await client
       .from(TABLE)
@@ -28,11 +34,24 @@ export class UsersService {
       .eq('open_id', openId)
       .maybeSingle()
     if (findErr) throw new Error(findErr.message)
-    if (existing) return existing as unknown as User
+    if (existing) {
+      const u = existing as unknown as User
+      if (deviceId && !u.device_id) {
+        const { data: bound, error: bindErr } = await client
+          .from(TABLE)
+          .update({ device_id: deviceId })
+          .eq('id', u.id)
+          .is('device_id', null)
+          .select(SELECT_COLS)
+          .maybeSingle()
+        if (!bindErr && bound) return bound as unknown as User
+      }
+      return u
+    }
 
     const { data, error } = await client
       .from(TABLE)
-      .insert({ open_id: openId, is_anonymous: false })
+      .insert({ open_id: openId, is_anonymous: false, device_id: deviceId ?? null })
       .select(SELECT_COLS)
       .single()
     if (error) throw new Error(error.message)
@@ -92,6 +111,24 @@ export class UsersService {
       .single()
     if (error) throw new Error(error.message)
     return data as unknown as User
+  }
+
+  /**
+   * 列出某设备名下的所有匿名用户。
+   * 登录迁移用：设备历史上丢过 gk_user_id（真机重连/重编译）会留下多个
+   * 匿名号，只迁当前一个会漏数据——这里一次性找出全部，保证旧数据都
+   * 并到正式账号。
+   */
+  async listAnonymousByDeviceId(deviceId: string): Promise<User[]> {
+    if (!deviceId) return []
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .select(SELECT_COLS)
+      .eq('device_id', deviceId)
+      .eq('is_anonymous', true)
+    if (error) throw new Error(error.message)
+    return (data || []) as unknown as User[]
   }
 
   /** 列出所有已过期的匿名用户（供清理任务用） */

@@ -19,11 +19,15 @@ export class AuthService {
    * @param code          wx.login() 拿到的临时凭证（5 分钟有效，一次性）
    * @param anonymousId   当前设备上的匿名 user_id（可选）；有则把它的数据改挂到正式账号
    * @param profile       昵称 / 头像（可选，来自 wx.getUserProfile 或用户手动填）
+   * @param deviceId      当前设备标识（X-Device-Id，可选）——① 正式账号绑定设备，
+   *                      本地 gk_user_id 丢失后凭设备找回微信账号；② 该设备历史上
+   *                      的其它匿名号也一并迁移（丢过身份会留下多个匿名号）
    */
   async login(
     code: string,
     anonymousId?: string,
     profile?: { nickname?: string; avatar_url?: string },
+    deviceId?: string,
   ): Promise<LoginResult> {
     if (!code) throw new BadRequestException('code 不能为空')
 
@@ -37,8 +41,8 @@ export class AuthService {
       throw new BadRequestException(`微信登录失败：${session.errmsg || '未返回 openid'}`)
     }
 
-    // 1) 找/建正式用户
-    const user = await this.usersService.findOrCreateByOpenId(session.openid)
+    // 1) 找/建正式用户（带设备绑定：设备以后能直接找回该微信账号）
+    const user = await this.usersService.findOrCreateByOpenId(session.openid, deviceId)
 
     // 2) 补资料（首次有值才写）
     let finalUser = user
@@ -46,8 +50,8 @@ export class AuthService {
       finalUser = await this.updateProfile(user.id, profile)
     }
 
-    // 3) 匿名数据迁移
-    const migrated = await this.migrateAnonymousData(user.id, anonymousId)
+    // 3) 匿名数据迁移（当前号 + 该设备历史遗留的全部匿名号）
+    const migrated = await this.migrateAnonymousData(user.id, anonymousId, deviceId)
 
     this.logger.log(
       `[auth] 登录成功 userId=${user.id} 迁移=${JSON.stringify(migrated)}`,
@@ -62,30 +66,48 @@ export class AuthService {
    * 把匿名用户的数据整体迁移到正式账号。
    * 策略：直接 update user_id（保留原 id，数据不丢、外键不破）。
    *       迁移后删除匿名用户记录（其数据已全部改挂）。
+   *
+   * 迁移范围：① 前端显式传来的 anonymous_id；② 该 device_id 名下所有
+   * 匿名号（真机重连/重编译丢过 gk_user_id 时会留下多个，只迁一个会漏）。
    */
   private async migrateAnonymousData(
     targetUserId: string,
     anonymousId?: string,
+    deviceId?: string,
   ): Promise<LoginResult['migrated']> {
     const empty = { subjects: 0, timeline_items: 0, library_docs: 0, documents: 0 }
-    if (!anonymousId || anonymousId === targetUserId) return empty
 
-    const client = getSupabaseClient()
-    const anon = await this.usersService.findById(anonymousId)
-    if (!anon || !anon.is_anonymous) return empty
+    const anonIds = new Set<string>()
+    if (anonymousId) anonIds.add(anonymousId)
+    if (deviceId) {
+      try {
+        const devAnons = await this.usersService.listAnonymousByDeviceId(deviceId)
+        for (const u of devAnons) anonIds.add(u.id)
+      } catch (e) {
+        this.logger.warn(`[auth] 查设备匿名号失败（不影响主迁移）: ${(e as Error).message}`)
+      }
+    }
+    anonIds.delete(targetUserId)
+    if (!anonIds.size) return empty
 
     const migrated = { ...empty }
-    for (const table of TABLES_WITH_USER) {
-      const { data, error } = await client
-        .from(table)
-        .update({ user_id: targetUserId })
-        .eq('user_id', anonymousId)
-        .select('id')
-      if (error) {
-        this.logger.error(`[auth] 迁移 ${table} 失败`, error.message)
-        continue
+    const client = getSupabaseClient()
+    for (const anonId of anonIds) {
+      const anon = await this.usersService.findById(anonId)
+      if (!anon || !anon.is_anonymous) continue
+
+      for (const table of TABLES_WITH_USER) {
+        const { data, error } = await client
+          .from(table)
+          .update({ user_id: targetUserId })
+          .eq('user_id', anonId)
+          .select('id')
+        if (error) {
+          this.logger.error(`[auth] 迁移 ${table}（${anonId}）失败`, error.message)
+          continue
+        }
+        migrated[table] += (data || []).length
       }
-      migrated[table] = (data || []).length
     }
 
     // 学科可能撞唯一约束（user_id, name）；撞了就删掉匿名那份重复的
@@ -94,7 +116,7 @@ export class AuthService {
     }
 
     // 匿名账号本身已空壳，删除（其 expire_at 也无意义了）
-    await this.usersService.removeByIds([anonymousId])
+    await this.usersService.removeByIds([...anonIds])
 
     return migrated
   }
