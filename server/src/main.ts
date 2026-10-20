@@ -1,6 +1,43 @@
 // 必须先于其他模块加载：.env 需要在任何读取 process.env 的代码之前进入环境
 // （扣子平台由运行时注入 env；自托管/本地运行时必须靠 dotenv 显式加载）
-import 'dotenv/config';
+//
+// ⚠️ 不能只用 `import 'dotenv/config'`：那只会按 **process.cwd()** 找 .env。
+// 部署到托管环境（WorkBuddy 等）时 cwd 未必是 server 目录，会静默读不到配置 →
+// STORAGE_DRIVER 回退 local、图片 URL 变成 127.0.0.1，处理链路随后 404。
+// 故这里按「本文件所在目录」显式定位一次再兜底 cwd。
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+import * as fs from 'fs';
+
+{
+  const candidates = [
+    path.resolve(__dirname, '..', '.env'), // dist/main.js → server/.env
+    path.resolve(__dirname, '..', '..', '.env'), // 再上一层（部署包结构差异）
+    path.resolve(process.cwd(), '.env'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      dotenv.config({ path: p });
+      break;
+    }
+  }
+  // 全部不存在时仍走一次默认行为，保持与本地开发一致
+  dotenv.config();
+  // 敏感密钥：decrypt-env.mjs（容器 startCmd 里先跑）把 .env.secrets.enc
+  // 还原为 .env.secrets；本地开发则直接就是明文 .env.secrets。
+  // dotenv 默认不覆盖已存在的 process.env，故 .env 的非敏感项优先、
+  // 敏感项由 .env.secrets 补入，两者键集不重，无冲突。
+  for (const p of [
+    path.resolve(__dirname, '..', '.env.secrets'), // dist/main.js → server/.env.secrets
+    path.resolve(__dirname, '..', '..', '.env.secrets'),
+    path.resolve(process.cwd(), '.env.secrets'),
+  ]) {
+    if (fs.existsSync(p)) {
+      dotenv.config({ path: p });
+      break;
+    }
+  }
+}
 
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '@/app.module';

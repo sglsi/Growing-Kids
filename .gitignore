@@ -64,5 +64,8 @@ assets/
 # local 存储驱动对象目录（本机开发，STORAGE_DRIVER=local）
 .local-storage/
 
+# 部署打包时临时挪出的本地专属文件（.env.secrets/.env.migrate/.local-storage/logs）
+.deploy-staging/
+
 # WorkBuddy 应用身份文件（平台侧管理，不进版本库）
 *.genie

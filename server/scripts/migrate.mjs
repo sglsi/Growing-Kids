@@ -28,7 +28,7 @@
  *   1) DATABASE_URL
  *   2) SUPABASE_DB_URL
  *   3) SUPABASE_URL / COZE_SUPABASE_URL + SUPABASE_DB_PASSWORD（自动拼直连串）
- *   全部从 server/.env 读取（也可直接用环境变量）。
+ *   全部从 server/.env / server/.env.migrate 读取（也可直接用环境变量）。
  *   Supabase 获取：Dashboard → Project Settings → Database → Connection string → URI
  *   ⚠️ 必须用 URI（含密码），不是 anon/service_role key。
  */
@@ -50,9 +50,13 @@ const PING = argv.includes('--ping')
 const onlyIdx = argv.indexOf('--only')
 const ONLY = onlyIdx >= 0 ? argv[onlyIdx + 1] : null
 
-/** 极简 .env 加载：不覆盖已有环境变量 */
+/** 极简 .env 加载：不覆盖已有环境变量（.env.migrate 放 DATABASE_URL，本地专用） */
 function loadEnv() {
-  for (const file of [path.join(SERVER_ROOT, '.env'), path.join(PROJECT_ROOT, '.env')]) {
+  for (const file of [
+    path.join(SERVER_ROOT, '.env'),
+    path.join(SERVER_ROOT, '.env.migrate'),
+    path.join(PROJECT_ROOT, '.env'),
+  ]) {
     if (!fs.existsSync(file)) continue
     for (const rawLine of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
       const line = rawLine.trim()
