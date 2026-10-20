@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2, Check } from 'lucide-react-taro'
+import { isRemoteImageUrl } from '@/utils/url'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
@@ -279,7 +280,7 @@ export default function ImageEditor({
 
   /** 远程图先下载到本地，确保后续裁剪/AI 全程基于本地文件（与识别页一致、稳定） */
   const toLocalIfRemote = async (u: string): Promise<string> => {
-    if (!/^https?:\/\//.test(u)) return u
+    if (!isRemoteImageUrl(u)) return u
     try {
       const dl: any = await downloadWithTimeout(u, 30000)
       return dl?.tempFilePath || u
@@ -881,7 +882,7 @@ export default function ImageEditor({
   }
 
   const compressImage = async (filePath: string): Promise<string> => {
-    if (/^https?:\/\//.test(filePath)) return filePath
+    if (isRemoteImageUrl(filePath)) return filePath
     try {
       const info = await Taro.getImageInfo({ src: filePath })
       const longSide = Math.max(info.width, info.height)
@@ -1001,7 +1002,7 @@ export default function ImageEditor({
       lastGoodSrc = sourceForProcess
 
       let sourceUrl = sourceForProcess
-      if (!/^https?:\/\//.test(sourceForProcess)) {
+      if (!isRemoteImageUrl(sourceForProcess)) {
         const up = await uploadImage(sourceForProcess, { purpose: 'temp' })
         sourceUrl = up.url
       }

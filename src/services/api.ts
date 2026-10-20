@@ -12,6 +12,7 @@
 
 import Taro from '@tarojs/taro'
 import { Network } from '@/network'
+import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders, captureUserId } from '@/services/net'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
@@ -114,7 +115,7 @@ const UPLOAD_COMPRESS_QUALITY = 80
 
 /** 把本地图片压到长边 ≤1600 / q80；非图片、已足够小、或压缩失败时原样返回 */
 async function compressForUpload(filePath: string): Promise<string> {
-  if (!filePath || /^https?:\/\//.test(filePath)) return filePath
+  if (!filePath || isRemoteImageUrl(filePath)) return filePath
   // 只压图片扩展名，避免把 PDF/docx 交给 getImageInfo 报错
   if (!/\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(filePath)) return filePath
   try {
@@ -152,6 +153,9 @@ export async function uploadFile(
     name: 'file',
     header: authHeaders(),
     formData,
+    // 微信 uploadFile 默认超时 60s：线上后端冷启动 ~17s + 跨境（新加坡）延迟，
+    // 手机慢网上传几 MB 的卷子照片必然被前端掐断（表现为「图片上传失败」）。
+    timeout: 180000,
   })
   captureUserId(res)
   console.log('[Upload Response]', res.statusCode, res.data)
@@ -183,7 +187,10 @@ export async function uploadImage(
   filePathOrUrl: string,
   opts: UploadOpts = {},
 ): Promise<{ key: string; url: string; timeline_id?: string }> {
-  const isRemote = /^https?:\/\//.test(filePathOrUrl)
+  // ⚠️ 必须用 isRemoteImageUrl：开发者工具的 tempFilePath 是 `http://tmp/…`，
+  // 若当成远程 URL 复用 → 根本不上传 → 后端拿到 `http://tmp/…` →
+  // `getaddrinfo ENOTFOUND tmp`（全页 OCR / 智能高清全线失败的元凶）。
+  const isRemote = isRemoteImageUrl(filePathOrUrl)
   if (!isRemote) return uploadFile(filePathOrUrl, opts)
 
   // 远程图：只有在需要落库（save）时才下载再上传；否则直接复用 URL
@@ -1006,7 +1013,7 @@ export interface ImageProcessResult {
 }
 
 async function ensureImageUrl(filePathOrUrl: string): Promise<string> {
-  if (/^https?:\/\//.test(filePathOrUrl)) return filePathOrUrl
+  if (isRemoteImageUrl(filePathOrUrl)) return filePathOrUrl
   // AI 处理前的中间上传：用 purpose=temp，不要落库（避免自动进「最近题目」）
   const { url } = await uploadFile(filePathOrUrl, { purpose: 'temp' })
   return url
