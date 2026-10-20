@@ -9,7 +9,9 @@
     "enhance": false,
     "compileHotReLoad": false,
     "postcss": false,
-    "minified": false
+    "minified": false,
+    "packNpmManually": true,
+    "packNpmRelationList": []
   },
   "compileType": "miniprogram",
   "packOptions": { "ignore": [{ "type": "folder", "value": "./assets" }] }

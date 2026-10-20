@@ -94,7 +94,8 @@
     "tt-ide-cli": "^0.1.31",
     "typescript": "^5.4.5",
     "vite": "^4.2.0",
-    "weapp-tailwindcss": "^4.10.3"
+    "weapp-tailwindcss": "^4.10.3",
+    "@babel/plugin-proposal-decorators": "^7.28.0"
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
