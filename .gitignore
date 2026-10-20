@@ -67,8 +67,9 @@ assets/
 # 部署打包时临时挪出的本地专属文件（.env.secrets/.env.migrate/.local-storage/logs）
 .deploy-staging/
 
-# 部署打包时复制进 server/ 的仓库根依赖（ocr-engine/），随包上传、不入库
+# 部署打包时复制进 server/ 的仓库根依赖（ocr-engine/、docs/），随包上传、不入库
 server/ocr-engine/
+server/docs/
 
 # WorkBuddy 应用身份文件（平台侧管理，不进版本库）
 *.genie

@@ -29,11 +29,13 @@ const STAGING = path.join(PROJECT_ROOT, '.deploy-staging')
 const ITEMS = ['.env.secrets', '.env.migrate', '.local-storage', 'logs']
 
 /** 部署时必须随 server/ 一起上传、但位于仓库根的目录。
- *  部署包 = server/ 整个目录打 tar，仓库根的 ocr-engine/ 不会自动进包，
- *  导致容器内 /ocr-engine/main3.py 缺失、OCR 全挂（问题③）。
- *  deploy-pack 在 pack 时把仓库根 ocr-engine/ 复制进 server/ocr-engine/ 一起上传，
- *  restore 时删除（不提交进 git，已加入 .gitignore）。 */
-const COPY_IN = ['ocr-engine']
+ *  部署包 = server/ 整个目录打 tar，仓库根的项不会自动进包。
+ *  - ocr-engine/：OCR 引擎脚本（main.py/main3.py），缺失则容器内 OCR 全挂（问题③）。
+ *  - docs/：含 install-ocr-env.sh 恢复脚本，EnvRecoveryService 自动恢复 venv 时依赖它；
+ *    缺失会导致「恢复脚本未找到」，精准引擎所需 Python venv 永远建不起来。
+ *  deploy-pack 在 pack 时把这些项复制进 server/ 一起上传，restore 时删除
+ *  （不提交进 git，已加入 .gitignore）。 */
+const COPY_IN = ['ocr-engine', 'docs']
 
 function move(src, dst) {
   try {
