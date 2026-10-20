@@ -23,9 +23,14 @@ interface Props {
   busy?: boolean
   /** 识别失败原因（服务不可用等）；有值时空态显示错误而非引导文案 */
   error?: string
+  /**
+   * 「存入题目」直通：勾选片段后一键写入指定题（父组件弹出题目选择器）。
+   * 与「复制」并存——复制仍保留给想手动调整的用户。
+   */
+  onPasteToEntry?: (text: string) => void
 }
 
-export default function WrongqOcrPanel({ segments, pageLabel, busy, error }: Props) {
+export default function WrongqOcrPanel({ segments, pageLabel, busy, error, onPasteToEntry }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expanded, setExpanded] = useState(true)
   const n = selected.size
@@ -139,7 +144,7 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error }: Pro
             )}
           </ScrollView>
 
-          {/* 操作条：全选 / 清空 / 复制所选 */}
+          {/* 操作条：全选 / 清空 / 存入题目 / 复制所选 */}
           <View className="flex flex-row items-center gap-2 px-2 py-2" style={{ borderTopWidth: 0.5, borderTopColor: '#f0ece4', borderTopStyle: 'solid' }}>
             <Text className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set(segments.map((_, i) => i)))}>
               全选
@@ -148,6 +153,23 @@ export default function WrongqOcrPanel({ segments, pageLabel, busy, error }: Pro
               清空
             </Text>
             <View style={{ flex: 1 }} />
+            {n > 0 && onPasteToEntry ? (
+              <Text
+                className="block text-[10px] mr-2"
+                style={{ color: '#BE3E2D', fontWeight: '500' }}
+                onClick={() => {
+                  const text = segments
+                    .map((s, i) => ({ s, i }))
+                    .filter(({ i }) => selected.has(i))
+                    .map(({ s }) => s.text.trim())
+                    .filter(Boolean)
+                    .join('\n')
+                  if (text) onPasteToEntry(text)
+                }}
+              >
+                存入题目（{n}）
+              </Text>
+            ) : null}
             {n > 0 ? (
               <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={copySelected}>
                 复制所选（{n}）

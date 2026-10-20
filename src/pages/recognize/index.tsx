@@ -19,6 +19,7 @@ import {
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
+import { nudgeLoginIfAnonymous } from '@/services/auth'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -550,6 +551,37 @@ export default function RecognizePage() {
     setBoard((prev) => prev.map((e, i) => (i === idx ? { ...e, text } : e)))
   }
 
+  /**
+   * OCR 面板「存入题目」直通：弹题目选择器，把所选文本追加进指定题的题干。
+   * 思傅 2026-10-20 决策：文字与裁剪图必须绑定同一题——复制粘贴靠用户心记
+   * 「哪段文字属于哪题」极易错配，保存后同题图文"分家"成两道题；此按钮把
+   * 「选文字 → 定题目」变成一步显式操作。
+   */
+  const handlePasteToEntry = (text: string) => {
+    const t = text.trim()
+    if (!t) return
+    const items = board.map((e, i) => {
+      const prev = e.text.trim()
+      return prev ? `第 ${i + 1} 题：${prev.slice(0, 12)}${prev.length > 12 ? '…' : ''}` : `第 ${i + 1} 题（空）`
+    })
+    if (board.length < MAX_BOARD_ENTRIES) items.push('＋ 存入新题目')
+    Taro.showActionSheet({
+      itemList: items,
+      success: (res) => {
+        const idx = res.tapIndex
+        if (idx < board.length) {
+          setBoard((prev) =>
+            prev.map((e, i) => (i === idx ? { ...e, text: e.text.trim() ? `${e.text.trim()}\n${t}` : t } : e)),
+          )
+          Taro.showToast({ title: `已存入第 ${idx + 1} 题`, icon: 'success' })
+        } else {
+          setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: t, images: [] }])
+          Taro.showToast({ title: `已存入新题（第 ${board.length + 1} 题）`, icon: 'success' })
+        }
+      },
+    })
+  }
+
   const removeEntryImage = (idx: number, imgIdx: number) => {
     setBoard((prev) =>
       prev.map((e, i) => (i === idx ? { ...e, images: e.images.filter((_, j) => j !== imgIdx) } : e)),
@@ -652,6 +684,7 @@ export default function RecognizePage() {
       }))
       await createTimelineBatch(payloads)
       Taro.showToast({ title: `已存入错题库 ${payloads.length} 题`, icon: 'success' })
+      nudgeLoginIfAnonymous()
     } catch (e) {
       console.error('存入错题库失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '保存失败，请重试', icon: 'none' })
@@ -820,6 +853,7 @@ export default function RecognizePage() {
       }))
       await createTimelineBatch(payloads)
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
+      nudgeLoginIfAnonymous()
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('保存失败', e)
@@ -861,6 +895,7 @@ export default function RecognizePage() {
       // 后端 /api/upload 已为图片自动建立 timeline(kind=image) 条目，直接用其 id 补学科
       await saveQuestionAsImage(sid, up.key, up.url, up.timeline_id)
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
+      nudgeLoginIfAnonymous()
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
       console.error('图片直存失败', e)
@@ -963,6 +998,7 @@ export default function RecognizePage() {
                         pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
                         busy={curPage.ocr === 'busy'}
                         error={curPage.err}
+                        onPasteToEntry={handlePasteToEntry}
                       />
                     </View>
                   </View>
@@ -1078,9 +1114,14 @@ export default function RecognizePage() {
                 <Text className="block text-[10px] text-muted-foreground">文字长按粘贴 · 图片裁剪入题</Text>
               </View>
               {board.map((e, idx) => (
-                <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: '1px solid #ece8e0' }}>
+                <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
                   <View className="flex flex-row items-center justify-between mb-2">
-                    <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
+                    <View className="flex flex-row items-center gap-2">
+                      <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
+                      {cropEditor?.entryIdx === idx ? (
+                        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>裁剪中…</Text>
+                      ) : null}
+                    </View>
                     <View className="flex flex-row items-center gap-3">
                       <Text className="block text-[10px] text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
                       <Text className="block text-[10px] text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
@@ -1370,6 +1411,7 @@ export default function RecognizePage() {
           cropOnly
           src={cropEditor.src}
           confirmText="裁剪入题"
+          cropTargetLabel={`图片将存入：第 ${cropEditor.entryIdx + 1} 题`}
           enableSaveToInbox={false}
           onCancel={() => setCropEditor(null)}
           onConfirm={(p) => void handleCropConfirm(p)}

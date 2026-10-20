@@ -154,8 +154,8 @@ export async function updateProfile(payload: UpdateProfilePayload): Promise<Auth
 
 /**
  * 退出登录
- * 后端无状态，前端清掉本地正式身份即可；下次请求会自动获得新的匿名身份
- * （匿名数据 1 天后由后端清理，不残留）
+ * 后端无状态，前端清掉本地正式身份即可；下次请求会按设备找回/新建匿名身份
+ * （匿名数据 30 天后由后端清理，不残留）
  */
 export async function logout(): Promise<void> {
   try {
@@ -169,6 +169,19 @@ export async function logout(): Promise<void> {
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * 匿名可用 + 引导登录（思傅 2026-10-20 拍板策略）：
+ * 保存类操作成功后调用——未登录则延迟弹一次轻提示（让位给成功 toast），
+ * 不打断主流程；已登录则静默。匿名身份按设备保留 30 天（users TTL），
+ * 登录后匿名数据自动迁移到微信账号。
+ */
+export function nudgeLoginIfAnonymous(): void {
+  if (isLoggedIn()) return
+  setTimeout(() => {
+    Taro.showToast({ title: '登录微信，多端同步不丢失', icon: 'none' })
+  }, 1600)
 }
 
 /** 弹出登录（首页顶部 / 我的页共用）；返回是否登录成功 */

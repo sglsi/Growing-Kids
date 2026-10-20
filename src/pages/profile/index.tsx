@@ -131,7 +131,7 @@ export default function ProfilePage() {
                 )}
               </View>
               <Text className="block text-xs text-muted-foreground mt-1">
-                {logged ? '已登录（数据云端同步）' : '匿名使用中（数据保留 1 天）'}
+                {logged ? '已登录（数据云端同步）' : '匿名使用中（本机数据保留 30 天）'}
               </Text>
             </View>
           </View>
@@ -173,7 +173,7 @@ export default function ProfilePage() {
               <>
                 <Text className="block text-sm font-semibold text-foreground mb-2">登录以同步数据</Text>
                 <Text className="block text-xs text-muted-foreground mb-4">
-                  当前为匿名状态，数据仅保留 1 天。登录后现有内容会自动迁移到你的微信账号，长期保存、多端同步。
+                  当前为匿名状态，本机数据保留 30 天。登录后现有内容会自动迁移到你的微信账号，长期保存、多端同步。
                 </Text>
                 <Button className="w-full h-11 rounded-xl" disabled={busy} onClick={handleLogin}>
                   <LogIn size={16} color="#fff" />
@@ -256,7 +256,7 @@ export default function ProfilePage() {
           ) : (
             <EmptyCard
               title="你想长期保存这些题目吗？"
-              hint="登录后匿名数据自动迁移，1 天后也不会被清理"
+              hint="登录后匿名数据自动迁移，30 天内也不会被清理"
               actionLabel="立即登录"
               onAction={handleLogin}
             />

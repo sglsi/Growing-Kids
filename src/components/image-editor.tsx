@@ -27,6 +27,11 @@ interface ImageEditorProps {
   cropOnly?: boolean
   /** cropOnly 模式下底部主按钮文案，默认「使用此图（返回）」 */
   confirmText?: string
+  /**
+   * #150 裁剪入题：在底部主按钮上方常驻显示「图片将存入：第 N 题」。
+   * 解决 OCR 文字粘到题 A、裁剪图却进题 B——同题图文"分家"存成两道题的问题。
+   */
+  cropTargetLabel?: string
 }
 
 interface Rect {
@@ -152,7 +157,7 @@ const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
 
 export default function ImageEditor({
   visible, src, onCancel, onConfirm, autoAction = null, enableSaveToInbox = true,
-  cropOnly = false, confirmText,
+  cropOnly = false, confirmText, cropTargetLabel,
 }: ImageEditorProps) {
   const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
@@ -1816,6 +1821,24 @@ export default function ImageEditor({
             </Button>
           </View>
         )}
+
+        {cropTargetLabel ? (
+          <View
+            className="flex flex-row items-center justify-center mb-2"
+            style={{
+              backgroundColor: 'rgba(190,62,45,0.18)',
+              borderRadius: 999,
+              paddingTop: 6,
+              paddingBottom: 6,
+              borderWidth: 1,
+              borderColor: 'rgba(190,62,45,0.45)',
+            }}
+          >
+            <Text className="block text-xs" style={{ color: '#FFD9CF' }}>
+              🎯 {cropTargetLabel}
+            </Text>
+          </View>
+        ) : null}
 
         <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
           <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '使用此图（返回）')}</Text>
