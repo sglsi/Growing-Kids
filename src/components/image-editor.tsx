@@ -1184,7 +1184,8 @@ export default function ImageEditor({
     try {
       const cap = await fetchImageCapabilities()
       if (cap.networkError) {
-        capHint = `\n\n⚠️ 连不上后端服务器（请求未发出或超时）——这不是「服务版本」问题。\n请检查：① 真机调试二维码是否已重新生成并扫码（旧码连的是旧会话）；② 手机与电脑是否在同一局域网；③ 电脑本地后端是否在运行（127.0.0.1:3001）。`
+        const backendAddr = (typeof PROJECT_DOMAIN !== 'undefined' && PROJECT_DOMAIN) || 'http://127.0.0.1:3001'
+        capHint = `\n\n⚠️ 连不上后端服务器（请求未发出或超时）——这不是「服务版本」问题。\n当前后端地址：${backendAddr}\n请检查：① 真机调试二维码是否已重新生成并扫码（旧码连的是旧会话）；② 手机与电脑是否在同一局域网；③ 电脑本地后端是否在运行。`
       } else if (!cap.supported) {
         capHint = `\n\n检测到服务未包含「${label}」所需的处理模块（服务版本过旧）。请联系开发者更新后端。`
       }
