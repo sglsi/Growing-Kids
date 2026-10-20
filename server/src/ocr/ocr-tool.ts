@@ -182,7 +182,16 @@ export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOc
       done({ ok: false, data: null, ms: Date.now() - t0, reason: 'timeout', stderr: errTail() })
     }, timeoutMs)
 
-    const child = spawn(python, [script, '--once', '--op', opts.op, '--mode', mode, '--layout', opts.layout ?? 'auto'], {
+    // ⚠️ 两个引擎的 CLI 契约**不同**，必须分开拼参：
+    //   2.x legacy（main.py）：--once --op recognize|orient --mode --layout auto|off
+    //   3.x ppsv3（main3.py）：--once --op ppsv3|rectify|orient|vl --mode（**没有 --layout**）
+    // 之前统一按 2.x 拼：① 传了 --layout → 3.x argparse 报
+    //   `unrecognized arguments: --layout auto` → exit 2 → 朝向检测（orient）全程失败；
+    // ② 上面算好的 op 映射（recognize→ppsv3）没用上，仍传 `recognize`
+    //   → 3.x 的 choices 不含它 → 一样 exit 2。
+    const args = [script, '--once', '--op', op, '--mode', mode]
+    if (engine === 'legacy') args.push('--layout', opts.layout ?? 'auto')
+    const child = spawn(python, args, {
       cwd: dir || undefined,
       env: { ...process.env, OCR_ENGINE_MODE: mode },
       stdio: ['pipe', 'pipe', 'pipe'],

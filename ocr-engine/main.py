@@ -30,6 +30,7 @@ import base64
 import io
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import threading
@@ -130,10 +131,51 @@ def _load_image(req: RecognizeRequest):
 
 
 # ---------- 引擎：RapidOCR ----------
+def _rapid_kwargs() -> dict:
+    """构造 RapidOCR 的参数。
+
+    ⚠️ rapidocr_onnxruntime 1.2.3 的 `UpdateParameters.update_det_params` 有 bug：
+    ```python
+    det_dict = {k.split('det_')[1]: v for k, v in det_dict.items()}
+    if not det_dict['model_path']:      # ← 只传 det_limit_side_len 时这里必 KeyError
+        det_dict['model_path'] = ...
+    ```
+    只要传入任意 `det_*` 参数，它都会去读 `det_dict['model_path']`，而调用方通常
+    不会传 `det_model_path` → `KeyError: 'model_path'` → 引擎**永远加载不起来**。
+    实测后果：`[persistent-ocr] 常驻进程退出：exit code 1`，「快速识别」全线不可用，
+    而 Node 侧只看到子进程退出码，看不到真实原因。
+
+    规避：连 `det_model_path` / `cls_model_path` / `rec_model_path` 一起传
+    （取值与包内 config.yaml 的默认模型一致），让那行判断拿到真值。
+    解析失败时返回空 dict，退回「不带参数构造」（用包内默认配置，功能不受影响）。
+    """
+    try:
+        import yaml
+        import rapidocr_onnxruntime as R
+
+        root = Path(R.__file__).parent
+        cfg = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+        return {
+            "det_model_path": str(root / cfg["Det"]["model_path"]),
+            "cls_model_path": str(root / cfg["Cls"]["model_path"]),
+            "rec_model_path": str(root / cfg["Rec"]["model_path"]),
+            "det_limit_side_len": OCR_DET_LIMIT,
+        }
+    except Exception as e:
+        print(f"[ocr] RapidOCR 参数解析失败，退回默认配置: {e}", file=sys.stderr, flush=True)
+        return {}
+
+
 def _get_rapid() -> Any:
     if "rapid" not in _ENGINES:
         from rapidocr_onnxruntime import RapidOCR
-        _ENGINES["rapid"] = RapidOCR(det_limit_side_len=OCR_DET_LIMIT)
+
+        try:
+            _ENGINES["rapid"] = RapidOCR(**_rapid_kwargs())
+        except Exception as e:
+            # 最后兜底：完全不带参数构造，宁可用默认限长也不能让引擎起不来
+            print(f"[ocr] RapidOCR 带参构造失败，退回默认构造: {e}", file=sys.stderr, flush=True)
+            _ENGINES["rapid"] = RapidOCR()
     return _ENGINES["rapid"]
 
 

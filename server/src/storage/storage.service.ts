@@ -158,6 +158,25 @@ export class StorageService {
   }
 
   /**
+   * 按对象 key **直接读磁盘**（仅 local 驱动有意义），supabase 驱动或文件不存在时返回 null。
+   *
+   * 存在意义：local 驱动下 `getPublicUrl()` 只能给出 `http://127.0.0.1:<port>/api/storage/files/…`
+   * 这种回环地址。在托管环境里，容器拿这个 URL 去 HTTP 下载**自己的**文件常常打不通
+   * （端口/网关不一致 → 404），于是整条图像处理链路报「下载处理图失败(status 404)」。
+   * 处理链路拿到自家 key 时直接读盘，绕开这一圈 HTTP，既修故障也省一次网络往返。
+   */
+  async readLocalObject(key: string): Promise<Buffer | null> {
+    if (this.driver !== 'local') return null
+    try {
+      const abs = this.resolveLocal(key)
+      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return null
+      return await fs.promises.readFile(abs)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 删除对象（用于匿名清理 / 软删回收 / GC）；失败不抛，返回是否成功。
    */
   async deleteObject(key: string): Promise<boolean> {

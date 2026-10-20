@@ -397,6 +397,26 @@ export class ImageService {
 
   private download(url: string, forwardHeaders?: Record<string, string>): Promise<Buffer> {
     return new Promise((resolve, reject) => {
+      // 地址形态预检：历史上有调用方把对象 key（`tmp/…`）或开发者工具临时路径
+      // （`http://tmp/wx…`）当图片 URL 传进来，此时会被当成主机名去 DNS 解析，
+      // 报 `getaddrinfo ENOTFOUND tmp` 这种完全看不出根因的错误。
+      // 这里先拦一道，给出能直接定位的文案。
+      const host = (() => {
+        try {
+          return new URL(url).hostname
+        } catch {
+          return ''
+        }
+      })()
+      if (!host || (host !== 'localhost' && !host.includes('.'))) {
+        reject(
+          new Error(
+            `图片地址不是可访问的网络地址（${String(url).slice(0, 80)}）。` +
+              `请确认图片已成功上传，不要把对象 key 或本地临时路径当 URL 使用`,
+          ),
+        )
+        return
+      }
       const mod = url.startsWith('https:') ? https : http
       const reqHeaders =
         forwardHeaders && ImageService.allowForwardHeaders(url) ? { ...forwardHeaders } : {}
@@ -422,6 +442,66 @@ export class ImageService {
   }
 
   /**
+   * 从 `http(s)://127.0.0.1:<port>/api/storage/files/<key>` 解析出 `<key>`。
+   * 非「本机 local storage 读取路由」一律返回 null，交给正常 HTTP 下载。
+   */
+  private static localFileKey(url: string): string | null {
+    try {
+      const u = new URL(url)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+      const host = u.hostname.toLowerCase()
+      if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return null
+      const m = u.pathname.match(/^\/api\/storage\/files\/(.+)$/)
+      return m ? decodeURIComponent(m[1]) : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 识别调用方误传的**裸对象 key**（如 `tmp/d4/abc.webp`、`blobs/xx/…/original.webp`）。
+   *
+   * 背景（思傅 2026-10-19 实测）：前端曾把微信开发者工具的临时文件路径
+   * `http://tmp/wx1a2b3c.png` 当成「远程图片 URL」直接复用、根本没上传。
+   * 后端拿到后 `http.get()` 把 `tmp` 当主机名解析 → `getaddrinfo ENOTFOUND tmp`，
+   * 前端只显示「全页 OCR 失败」，看不出是地址根本没上传。
+   * 这里把裸 key 兜底成「按 key 取对象」，并给出**可读**的错误文案。
+   */
+  private static asStorageKey(maybeKey: string): string | null {
+    const s = (maybeKey || '').trim()
+    if (!s || /^https?:\/\//i.test(s)) return null
+    if (!/^(tmp|blobs)\/[^\s]+\.[a-z0-9]+$/i.test(s)) return null
+    return s
+  }
+
+  /**
+   * 取图入口：**优先识别自家 local storage 的回环 URL 直接读盘**，其余走 HTTP。
+   *
+   * 背景（思傅 2026-10-19 实测）：线上容器未配 Supabase 时退回 local 驱动，
+   * 对外给出的 image_url 是 `http://127.0.0.1:<port>/api/storage/files/…`，
+   * 后续处理再拿这个 URL 去 HTTP 下载 → 404 → 前端弹「智能高清失败」。
+   * 直读绕开该问题，且不改变 supabase 驱动下的任何行为。
+   */
+  private async fetchImage(
+    url: string,
+    forwardHeaders?: Record<string, string>,
+  ): Promise<Buffer> {
+    const key = ImageService.localFileKey(url)
+    if (key) {
+      const buf = await this.storageService.readLocalObject(key)
+      if (buf) return buf
+    }
+    // 兜底：裸对象 key —— 直接按 key 取，别再拿去当主机名解析
+    const bare = ImageService.asStorageKey(url)
+    if (bare) {
+      const buf = await this.storageService.readLocalObject(bare)
+      if (buf) return buf
+      return this.download(await this.storageService.getPublicUrl(bare), forwardHeaders)
+    }
+    return this.download(url, forwardHeaders)
+  }
+
+  /**
    * 【阶段二】去手写 V2：mask + 局部修复 + blend
    *
    * 与 `process()`（图生图重绘）的本质区别：
@@ -443,7 +523,7 @@ export class ImageService {
 
     // 原图
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
     const srcMeta = await readMeta(srcBuffer)
 
     // ① 分割：拿到手写 mask（VLM 优先，失败降级色域阈值；manual_regions 无条件并入）
@@ -598,7 +678,7 @@ export class ImageService {
   ): Promise<{ blocks: WrongqBlock[]; debug: Record<string, unknown> }> {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
 
     // 版面上下文单独构建一次：产裁图时要复用同一份（避免重复 straighten）
     const ctx = await buildLayoutContext(srcBuffer)
@@ -679,7 +759,7 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
     const answerKeys = Array.isArray(dto.answer_image_keys) ? dto.answer_image_keys.filter(Boolean) : []
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
 
     // P1-8 清晰度门禁：入口只算一次（拉普拉斯方差），低于阈值只是提示、不拦截（见 image-sharpness.ts）
     const quality = await estimateSharpness(srcBuffer)
@@ -768,7 +848,7 @@ export class ImageService {
         let answerIngested = 0
         answerLoop: for (const ak of answerKeys) {
           const aUrl = await this.storageService.getPublicUrl(ak)
-          const aBuf = await this.download(aUrl, fwd)
+          const aBuf = await this.fetchImage(aUrl, fwd)
           const aCtx = await buildLayoutContext(aBuf)
           const aRegions = await this.ocrService.recognizePageRegions(aCtx.flatBuf)
           if (!aRegions.length) continue
@@ -930,7 +1010,7 @@ export class ImageService {
 
     let srcBuffer: Buffer
     try {
-      srcBuffer = await this.download(dto.image_url, fwd)
+      srcBuffer = await this.fetchImage(dto.image_url, fwd)
     } catch (e) {
       const reason = brief(e)
       console.error(`[ocr-page] 页面图下载失败 url=${dto.image_url}:`, reason)
@@ -1133,7 +1213,7 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
     if (!dto.box) throw new BadRequestException('box 不能为空')
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
     const ctx = await buildLayoutContext(srcBuffer)
 
     // 夹紧到页面范围并保证至少 1px（防越界/退化框把 sharp extract 打翻）
@@ -1189,7 +1269,7 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
 
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
     const srcMeta = await readMeta(srcBuffer)
 
     // 手动四角：前端以**归一化 [0,1]** 坐标提交（相对于原图）。
@@ -1330,7 +1410,7 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
 
     const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
-    const srcBuffer = await this.download(dto.image_url, fwd)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
     const srcMeta = await readMeta(srcBuffer)
 
     const mode: 'classical' | 'espcn' =
@@ -1559,7 +1639,7 @@ export class ImageService {
     if (!dto.image_url) throw new BadRequestException('image_url 不能为空')
 
     // —— 下载原图，拿到真实尺寸与色调基准 ——
-    const srcBuffer = await this.download(dto.image_url)
+    const srcBuffer = await this.fetchImage(dto.image_url)
     const srcMeta = await readMeta(srcBuffer)
     const srcTone = await measureTone(srcBuffer)
 
@@ -1598,7 +1678,7 @@ export class ImageService {
     const resultUrl = helper.imageUrls[0]
     let rawBuffer: Buffer
     if (resultUrl) {
-      rawBuffer = await this.download(resultUrl, headers)
+      rawBuffer = await this.fetchImage(resultUrl, headers)
     } else {
       const b64 = response.data?.find((d) => d.b64_json)?.b64_json
       if (!b64) throw new BadRequestException('处理服务未返回图片')
