@@ -8,16 +8,21 @@
 #       该目录随项目卷存续；Node 端（ppsv3.client / ocr-tool / sidecar.supervisor）
 #       已实现优先探测 .venv-py/bin/python。
 # 用法：bash docs/install-ocr-env.sh   （首次约 3~6 分钟，含 600MB paddlepaddle 下载）
-set -euo pipefail
+set -eu
+# pipefail 仅 bash 支持；dash/sh 下跳过（不影响 pip 直接调用的失败检测）
+if [ -n "${BASH_VERSION:-}" ]; then set -o pipefail; fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="$ROOT/.venv-py"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 允许调用方（EnvRecoveryService）显式指定 venv 落点，确保与 Node 端预期路径一致
+# （部署场景下 server/ 被独立打包，脚本若按 docs/ 父目录推导会建错位置）
+VENV_DIR="${OCR_VENV_DIR:-$ROOT/.venv-py}"
+VENV="$VENV_DIR"
 PY="$VENV/bin/python"
 PIP="$VENV/bin/python -m pip"
 
 # pip 下载缓存持久化到项目卷：沙箱重置冲掉 venv 包内容后，重装直接从本地 wheel
 # 安装（零下载，约 1 分钟），无需重新拉取 600MB 的 paddlepaddle 等
-export PIP_CACHE_DIR="$ROOT/.cache-pip"
+export PIP_CACHE_DIR="$(dirname "$VENV_DIR")/.cache-pip"
 mkdir -p "$PIP_CACHE_DIR"
 
 if [ ! -x "$PY" ]; then
