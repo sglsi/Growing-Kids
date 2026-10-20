@@ -11,7 +11,9 @@ export default defineAppConfig({
     'pages/chat/index',
     'pages/chat/admin',
     'pages/memory/edit',
-    'pages/memory/detail'
+    'pages/memory/detail',
+    // H5 扫码登录·手机端落地页（电脑浏览器无 wx.login；手机微信扫码后打开本页授权）
+    'pages/scan-login/index'
   ],
   window: {
     backgroundTextStyle: 'light',

@@ -2,9 +2,9 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
+import { code2Session } from './wechat-session'
 import type { LoginResult, WechatSession } from './auth.types'
 
-const WX_CODE2SESSION = 'https://api.weixin.qq.com/sns/jscode2session'
 const TABLES_WITH_USER = ['subjects', 'timeline_items', 'library_docs', 'documents'] as const
 
 @Injectable()
@@ -27,7 +27,12 @@ export class AuthService {
   ): Promise<LoginResult> {
     if (!code) throw new BadRequestException('code 不能为空')
 
-    const session = await this.code2Session(code)
+    let session: WechatSession
+    try {
+      session = await code2Session(code)
+    } catch (e) {
+      throw new BadRequestException(e instanceof Error ? e.message : '微信登录失败')
+    }
     if (!session.openid) {
       throw new BadRequestException(`微信登录失败：${session.errmsg || '未返回 openid'}`)
     }
@@ -51,34 +56,7 @@ export class AuthService {
     return { user: finalUser, migrated }
   }
 
-  /** 调微信 code2session（服务端调用，AppSecret 不上前端） */
-  private async code2Session(code: string): Promise<WechatSession> {
-    const appid = process.env.WX_APPID
-    const secret = process.env.WX_SECRET
-    if (!appid || !secret) {
-      throw new BadRequestException('服务端未配置 WX_APPID / WX_SECRET，无法完成微信登录')
-    }
-
-    const url =
-      `${WX_CODE2SESSION}?appid=${encodeURIComponent(appid)}` +
-      `&secret=${encodeURIComponent(secret)}` +
-      `&js_code=${encodeURIComponent(code)}` +
-      `&grant_type=authorization_code`
-
-    let json: WechatSession
-    try {
-      const res = await fetch(url)
-      json = (await res.json()) as WechatSession
-    } catch (e) {
-      this.logger.error('[auth] code2session 请求失败', e as Error)
-      throw new BadRequestException('微信服务暂时不可用，请稍后重试')
-    }
-
-    if (json.errcode) {
-      this.logger.warn(`[auth] code2session 返回错误 ${json.errcode}: ${json.errmsg}`)
-    }
-    return json
-  }
+  /** 调微信 code2session 已提取至 wechat-session.ts（扫码登录共用同一 openid 口径） */
 
   /**
    * 把匿名用户的数据整体迁移到正式账号。

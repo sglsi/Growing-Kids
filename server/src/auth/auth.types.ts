@@ -19,6 +19,16 @@ export interface LoginDto {
   avatar_url?: string
 }
 
+/** H5 扫码登录·手机端授权（扫码落地页调用） */
+export interface QrAuthorizeDto {
+  /** 二维码票据 token */
+  token: string
+  /** 手机端 wx.login() 拿到的临时凭证 */
+  code: string
+  /** H5 端当前匿名 user_id（可选）；授权成功即把它的数据迁到正式账号 */
+  anonymous_id?: string
+}
+
 export interface UpdateProfileDto {
   nickname?: string
   avatar_url?: string

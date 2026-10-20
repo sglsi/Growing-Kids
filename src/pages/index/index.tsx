@@ -17,6 +17,7 @@ import {
   type Overview, type TimelineItem, type Subject, type ImageAction,
 } from '@/services/api'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
+import QrLoginModal from '@/components/qr-login-modal'
 import { BUILD_META } from '@/build-meta'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
@@ -36,6 +37,8 @@ export default function IndexPage() {
   const [busy, setBusy] = useState(false)
   // 登录态（顶部入口展示）
   const [auth, setAuth] = useState<AuthState | null>(getAuthState())
+  // H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案）
+  const [qrVisible, setQrVisible] = useState(false)
   // 学科列表（用于「最近题目」里手动改分类）
   const [subjects, setSubjects] = useState<Subject[]>([])
   // 当前正在改分类的条目（弹层状态）
@@ -101,6 +104,11 @@ export default function IndexPage() {
   const handleAuthTap = async () => {
     if (isLoggedIn()) {
       goProfile()
+      return
+    }
+    // H5（电脑浏览器）：没有 wx.login，改走扫码登录弹层
+    if (Taro.getEnv() === Taro.ENV_TYPE.WEB) {
+      setQrVisible(true)
       return
     }
     const ok = await promptLogin()
@@ -250,6 +258,15 @@ export default function IndexPage() {
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
+      <QrLoginModal
+        visible={qrVisible}
+        onClose={() => setQrVisible(false)}
+        onSuccess={() => {
+          setQrVisible(false)
+          setAuth(getAuthState())
+          load()
+        }}
+      />
       <ScrollView scrollY style={{ height: '100vh' }}>
         <View className="px-4 pt-4 pb-32">
           {/* 顶部标题 + 登录入口 */}

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
 import { Input } from '@/components/ui/input'
+import QrLoginModal from '@/components/qr-login-modal'
 import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
   type AuthState,
@@ -26,6 +27,8 @@ export default function ProfilePage() {
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
   const [nickname, setNickname] = useState('')
+  /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
+  const [qrVisible, setQrVisible] = useState(false)
 
   const load = async () => {
     setState(getAuthState())
@@ -54,6 +57,11 @@ export default function ProfilePage() {
   })
 
   const handleLogin = async () => {
+    // H5（电脑浏览器）：没有 wx.login，改走扫码登录弹层
+    if (Taro.getEnv() === Taro.ENV_TYPE.WEB) {
+      setQrVisible(true)
+      return
+    }
     setBusy(true)
     const ok = await promptLogin()
     setBusy(false)
@@ -101,6 +109,14 @@ export default function ProfilePage() {
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
+      <QrLoginModal
+        visible={qrVisible}
+        onClose={() => setQrVisible(false)}
+        onSuccess={() => {
+          setQrVisible(false)
+          load()
+        }}
+      />
       {/* 说明：本页无 fixed 头部，H5 下靠 app.css 的 .taro_scroll_view_core
           paddingTop 补偿把内容顶到内置导航栏下方 */}
       <ScrollView scrollY style={{ height: '100vh', paddingTop: 44 }}>

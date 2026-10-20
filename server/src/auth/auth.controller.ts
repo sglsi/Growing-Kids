@@ -1,11 +1,15 @@
-import { Body, Controller, Get, HttpCode, Patch, Post, Req } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, Patch, Post, Query, Req } from '@nestjs/common'
 import { AuthService } from './auth.service'
+import { QrLoginService } from './qr-login.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
-import type { LoginDto, UpdateProfileDto } from './auth.types'
+import type { LoginDto, QrAuthorizeDto, UpdateProfileDto } from './auth.types'
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly qrLoginService: QrLoginService,
+  ) {}
 
   /**
    * 微信登录
@@ -45,6 +49,35 @@ export class AuthController {
   @HttpCode(200)
   async logout() {
     const data = await this.authService.logout()
+    return { code: 200, msg: 'success', data }
+  }
+
+  // ------------------------------------------------------------
+  // H5 扫码登录（思傅 2026-10-20 拍板）：电脑浏览器无 wx.login，
+  // H5 出二维码 → 手机微信扫码授权 → 两端同一 openid 账号。
+  // ------------------------------------------------------------
+
+  /** 创建扫码票据（H5 未登录时调用，返回 token 拼落地 URL 画二维码） */
+  @Post('qr-login/ticket')
+  @HttpCode(200)
+  async createQrTicket() {
+    const data = this.qrLoginService.createTicket()
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** 查询票据状态（H5 轮询，约 1.5s 一次）；authorized 时附带 user 供落本地身份 */
+  @Get('qr-login/status')
+  @HttpCode(200)
+  async qrTicketStatus(@Query('token') token: string) {
+    const data = await this.qrLoginService.getStatus(token || '')
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** 手机端授权（扫码落地页：wx.login 拿 code 后调用） */
+  @Post('qr-login/authorize')
+  @HttpCode(200)
+  async authorizeQrTicket(@Body() dto: QrAuthorizeDto) {
+    const data = await this.qrLoginService.authorize(dto.token, dto.code, dto.anonymous_id)
     return { code: 200, msg: 'success', data }
   }
 }

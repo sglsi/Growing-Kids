@@ -68,6 +68,15 @@ export function toAuthState(user: AuthUser): AuthState {
   }
 }
 
+/**
+ * 扫码登录落身份：把后端返回的 user 写入本地（与 login() 内同一套动作）。
+ * H5 扫码登录（qr-login-modal）授权成功后调用。
+ */
+export function applyLoginUser(user: AuthUser): void {
+  setUserId(user.id)
+  saveAuthState(toAuthState(user))
+}
+
 // ------------------------------------------------------------
 // wx.login 封装（Promise 化）
 // ------------------------------------------------------------
