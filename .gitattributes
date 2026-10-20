@@ -1,0 +1,4 @@
+# 强制脚本类文件以 LF 落地，避免 Windows core.autocrlf 把 .sh 转 CRLF，
+# 否则容器内 dash/sh 解析 install-ocr-env.sh 会失败（精准 OCR venv 自愈挂掉）。
+*.sh text eol=lf
+*.py text eol=lf
