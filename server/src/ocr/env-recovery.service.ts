@@ -70,6 +70,8 @@ export class EnvRecoveryService {
   private lastRecoverAt: number | null = null
   private lastRecoverExit: number | string | null = null
   private lastError: string | null = null
+  /** 恢复脚本最近一次完整输出（含 pip 报错），供 /api/image/ocr-diagnose 透出排障 */
+  private lastRecoverLog: string | null = null
 
   /** 毫秒级轻量自检：venv 解释器 + site-packages 关键包目录存在（骨架丢失场景即判缺失） */
   private lightCheck(): boolean {
@@ -188,6 +190,7 @@ export class EnvRecoveryService {
   private async doRecover(): Promise<boolean> {
     const script = this.resolveInstallScript()
     this.lastRecoverAt = Date.now()
+    this.lastRecoverLog = ''
     if (!script) {
       this.status = 'failed'
       this.lastError = '恢复脚本 install-ocr-env.sh/.ps1 未找到'
@@ -200,21 +203,25 @@ export class EnvRecoveryService {
       `[ocr-env] 检测到 OCR venv 缺失/损坏（${VENV_PY}），开始自动恢复：${cmd}（约 3~6 分钟，含 paddlepaddle 下载）`,
     )
     const exitCode = await new Promise<number>((resolve) => {
+      const childEnv = { ...process.env, OCR_VENV_DIR: VENV_DIR }
       const child = isWin
         ? spawn(process.env.ComSpec ?? 'powershell', ['-ExecutionPolicy', 'Bypass', '-File', script], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: process.env,
+            env: childEnv,
             cwd: path.dirname(script),
           })
         : spawn('bash', [script], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: process.env,
+            env: childEnv,
             cwd: path.dirname(script),
           })
       const onLine = (buf: Buffer) => {
         for (const line of buf.toString().split('\n')) {
           const t = line.trim()
-          if (t) console.log(`[ocr-env][install] ${t}`)
+          if (!t) continue
+          console.log(`[ocr-env][install] ${t}`)
+          this.lastRecoverLog = (this.lastRecoverLog ? this.lastRecoverLog + '\n' : '') + t
+          if (this.lastRecoverLog.length > 4000) this.lastRecoverLog = this.lastRecoverLog.slice(-4000)
         }
       }
       child.stdout?.on('data', onLine)
@@ -295,6 +302,7 @@ export class EnvRecoveryService {
       lastRecoverAt: this.lastRecoverAt,
       lastRecoverExit: this.lastRecoverExit,
       lastError: this.lastError,
+      lastRecoverLog: this.lastRecoverLog,
       recovering: !!this.recovering,
     }
   }
