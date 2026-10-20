@@ -131,7 +131,20 @@ function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
   const { host, port } = parseBaseUrl(process.env.OCR_ENGINE_URL || 'http://127.0.0.1:9300')
   const { dir, script } = resolveScript()
   const engineEnv: Record<string, string> = {}
-  for (const k of ['OCR_ENGINE_MODE', 'OCR_DEVICE', 'OCR_LOW_CONF_THRESHOLD', 'OCR_DRY_RUN']) {
+  // 透传 OCR 引擎调优项（main3.py 侧车读取）。PPSV3_* 必须在此列出——
+  // 否则 .env 里配了模型档位/开关也传不进侧车进程（问题③排查时才发现这个断点）。
+  for (const k of [
+    'OCR_ENGINE_MODE',
+    'OCR_DEVICE',
+    'OCR_LOW_CONF_THRESHOLD',
+    'OCR_DRY_RUN',
+    'PPSV3_DEVICE',
+    'PPSV3_DET_MODEL',
+    'PPSV3_REC_MODEL',
+    'PPSV3_LAYOUT_MODEL',
+    'PPSV3_UNWARP',
+    'PPSV3_ORIENT_CLS',
+  ]) {
     if (process.env[k] !== undefined) engineEnv[k] = process.env[k] as string
   }
   const supervise = ((process.env.OCR_SUPERVISE || 'auto') as '1' | '0' | 'auto')

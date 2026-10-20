@@ -70,8 +70,14 @@ PPSV3_LAYOUT_MODEL = os.getenv("PPSV3_LAYOUT_MODEL", "PP-DocLayout_plus-L")
 # 识别引擎版本（#142 实测决策，2026-10-15）：
 #   默认空 = PP-OCRv5_server（现生产）；PP-OCRv6_medium 实测编号召回持平（93/96 vs 93/96），
 #   平均置信度 +0.03~0.07、单页快 17%——收益真实但非召回级，故默认不变、env 灰度开启。
-PPSV3_DET_MODEL = os.getenv("PPSV3_DET_MODEL", "") or None   # 如 PP-OCRv6_medium_det
-PPSV3_REC_MODEL = os.getenv("PPSV3_REC_MODEL", "") or None   # 如 PP-OCRv6_medium_rec
+# ⚠️ 问题③复测（2026-10-20）实锤：CPU 上 server 档单页纯推理 118s（blocks=29），
+#   叠加 _INFER_LOCK 串行排队，后续请求 elapsed 冲到 600-800s，前端 180s 预算必爆
+#   （侧车日志 [ppsv3] 完成 ...ms 实证）。
+#   故：device=cpu 且未显式指定模型时，det/rec 默认降档 mobile（CPU 单页约 15-30s，
+#   印刷体精度对错题裁剪识别够用）；GPU 或显式 env 指定时保持原档位不变。
+_CPU_MOBILE_DEFAULT = PPSV3_DEVICE == "cpu"
+PPSV3_DET_MODEL = os.getenv("PPSV3_DET_MODEL", "") or ("PP-OCRv5_mobile_det" if _CPU_MOBILE_DEFAULT else None)
+PPSV3_REC_MODEL = os.getenv("PPSV3_REC_MODEL", "") or ("PP-OCRv5_mobile_rec" if _CPU_MOBILE_DEFAULT else None)
 DRY_RUN = os.getenv("OCR_DRY_RUN", "0") == "1"
 
 app = FastAPI(title="OCR Engine Sidecar 3.x (PP-StructureV3)", version="3.0.0")
@@ -441,12 +447,14 @@ def _run_ppsv3(req: Ppsv3Request) -> Dict[str, Any]:
     if pipeline is None:
         raise HTTPException(status_code=503, detail="DRY_RUN 模式无模型")
     path = _load_image_path(req)
-    t0 = time.time()
+    queued_at = time.time()
     with _INFER_LOCK:
+        t0 = time.time()  # elapsed 只计纯推理，不含 _INFER_LOCK 排队等待
         res = next(iter(pipeline.predict(path)))
     out = _extract_result(res, req.return_image)
     out["elapsed_ms"] = round((time.time() - t0) * 1000)
-    print(f"[ppsv3] 完成 blocks={out['block_count']} angle={out['angle']} {out['elapsed_ms']}ms", flush=True)
+    out["queue_ms"] = round((t0 - queued_at) * 1000)
+    print(f"[ppsv3] 完成 blocks={out['block_count']} angle={out['angle']} {out['elapsed_ms']}ms（排队 {out['queue_ms']}ms）", flush=True)
     return out
 
 
