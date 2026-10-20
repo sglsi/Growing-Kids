@@ -273,10 +273,29 @@ export default function IndexPage() {
             </View>
           </View>
 
-          {/* 构建版本角标：真机一眼确认是否最新包（防「改了没生效」之争） */}
-          <Text className="block text-[10px] text-muted-foreground opacity-50 mb-2" onClick={() => Taro.showModal({ title: '当前包版本', content: `构建时间：${BUILD_META.time}\ngit：${BUILD_META.commit}\n域名：${(globalThis as any).PROJECT_DOMAIN || '(默认 127.0.0.1:3001)'}`, showCancel: false, confirmText: '知道了' })}>
-            包版本 {BUILD_META.label}
-          </Text>
+          {/* 构建版本角标：真机一眼确认是否最新包（防「改了没生效」之争）。
+              样式需在真机上醒目可辨——曾用 10px/50% 透明度被用户当作「不存在」。 */}
+          <View
+            className="flex flex-row items-center mb-2"
+            onClick={() => Taro.showModal({ title: '当前包版本', content: `构建时间：${BUILD_META.time}\ngit：${BUILD_META.commit}\n域名：${(globalThis as any).PROJECT_DOMAIN || '(默认 127.0.0.1:3001)'}`, showCancel: false, confirmText: '知道了' })}
+          >
+            <View
+              style={{
+                backgroundColor: 'rgba(190,62,45,0.08)',
+                borderRadius: 999,
+                paddingLeft: 10,
+                paddingRight: 10,
+                paddingTop: 3,
+                paddingBottom: 3,
+                borderWidth: 1,
+                borderColor: 'rgba(190,62,45,0.3)',
+              }}
+            >
+              <Text className="block text-[11px]" style={{ color: '#BE3E2D' }}>
+                📦 包版本 {BUILD_META.label} · 点我查看后端域名
+              </Text>
+            </View>
+          </View>
 
           {/* 识别与导入主操作区（主操作独立，3 个次操作合并为一行） */}
           <Card className="rounded-2xl border-border p-4 mb-4">
