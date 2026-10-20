@@ -578,7 +578,10 @@ export default function RecognizePage() {
     if (entryIdx == null || !path) return
     setBoardBusy(true)
     try {
-      const up = await uploadImage(path)
+      // ⭐ purpose='save'：裁剪出来的错题图要随题目正式入错题库，必须走「正式归档」上传，
+      //    不能用默认的 temp —— temp 上传 24h 后会被 GC 回收，导致「只有文字入库、图片裂掉/没入库」
+      //    （与 handleSaveImageDirect 同源修复：图片直存也用 purpose='save'）。
+      const up = await uploadImage(path, { purpose: 'save' })
       setBoard((prev) =>
         prev.map((e, i) => (i === entryIdx ? { ...e, images: [...e.images, { url: up.url, key: up.key }] } : e)),
       )
