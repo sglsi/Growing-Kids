@@ -73,3 +73,6 @@ server/docs/
 
 # WorkBuddy 应用身份文件（平台侧管理，不进版本库）
 *.genie
+
+# Python 字节码缓存（py_compile 校验时产生）
+__pycache__/
