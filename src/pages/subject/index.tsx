@@ -1,6 +1,6 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { FileSearch, Trash2, FolderMinus } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
@@ -33,6 +33,10 @@ export default function SubjectPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState(false)
   const sel = useSelection()
+  // 列表滚动位置（思傅 2026-10-21：进详情退出后回到上次位置，不回顶部；与首页同一规则）
+  const [scrollTop, setScrollTop] = useState(0)
+  const scrollRef = useRef(0)
+  const restoredRef = useRef(false)
 
   // 从当前页数据里汇总出现过的标签，供筛选
   const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
@@ -108,6 +112,12 @@ export default function SubjectPage() {
   }
 
   useDidShow(() => {
+    // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），只恢复一次
+    if (!restoredRef.current && scrollRef.current > 0) {
+      const pos = scrollRef.current
+      restoredRef.current = true
+      setTimeout(() => setScrollTop(pos), 30)
+    }
     init()
   })
 
@@ -134,9 +144,12 @@ export default function SubjectPage() {
   const handleOpen = (item: TimelineItem) => {
     if (sel.selecting) { sel.toggle(item.id); return }
     if (item.kind === 'image') {
+      // 思傅 2026-10-21 规则：点图片 = 打开该图片（这里预览大图），点其他区域才进详情
       Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })
       return
     }
+    // 从详情返回后回到此处：位置由 onScroll 记在 scrollRef，这里只标记下一轮 show 需恢复
+    restoredRef.current = false
     Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
   }
 
@@ -221,6 +234,8 @@ export default function SubjectPage() {
 
       <ScrollView
         scrollY
+        scrollTop={scrollTop}
+        onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
         style={{ height: '100vh', paddingTop: 168 }}
         onScrollToLower={() => {
           if (canLoadMore && !loadingMore && !loading) {
