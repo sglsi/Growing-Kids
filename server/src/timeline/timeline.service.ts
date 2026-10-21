@@ -1,10 +1,11 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
 import { findSimilarQuestions } from '../ocr/ocr-similar'
 import { buildReviewPlan, nextReviewCount } from './review'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
+import { IngestService } from '../storage/ingest.service'
 import {
   memGet, memSet, invalidateUserTimeline, stableQuery,
   TL_LIST_PREFIX, TL_ITEM_PREFIX, TL_OV_KEY,
@@ -54,10 +55,48 @@ export interface OverviewResult {
  */
 @Injectable()
 export class TimelineService {
+  private readonly logger = new Logger(TimelineService.name)
+
   constructor(
     private readonly storageService: StorageService,
     private readonly blobService: BlobService,
+    private readonly ingestService: IngestService,
   ) {}
+
+  /**
+   * 把「临时对象」固化为常驻资产（思傅 2026-10-22 真机反馈的根因之一）。
+   *
+   * 背景：`tmp/<hash前2>/<hash>.ext` 是**中间态**对象 —— ref_count=0，24h 后会被
+   * maintenance 的孤儿 GC **真删**。若某条 timeline 的 file_key 落在 tmp/ 上，
+   * 用户会在一天后发现「图片凭空消失」。老版本前端换图时用 purpose='temp' 上传，
+   * 正是这样把 tmp key 写进了 file_key（线上已实测到 2 条）。
+   *
+   * 兜底策略（**放在服务端，不依赖前端版本**）：写路径上只要看到 tmp/ 前缀，
+   * 就重新 ingest 成 `blobs/<hash前2>/<hash>/display.webp` 常驻资产，
+   * 并顺带拿到配套缩略图，一次解决「临时对象被回收」+「缩略图过期」两个隐患。
+   *
+   * @returns 固化后的 { file_key, thumb_key }；非 tmp/ 或固化失败时返回 null（调用方沿用原值，不阻断业务）
+   */
+  private async promoteTempFileKey(
+    key?: string | null,
+  ): Promise<{ file_key: string; thumb_key: string } | null> {
+    if (!key || !key.startsWith('tmp/')) return null
+    try {
+      const buf = await this.storageService.readObject(key)
+      if (!buf || !buf.length) return null
+      const ext = (key.split('.').pop() || '').toLowerCase()
+      const mime = ext === 'png' ? 'image/png'
+        : (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg'
+          : 'image/webp'
+      const res = await this.ingestService.ingest(buf, mime)
+      if (!res?.key) return null
+      this.logger.log(`[timeline] 临时对象已固化：${key} → ${res.key}`)
+      return { file_key: res.key, thumb_key: res.thumbKey || res.key }
+    } catch (e) {
+      this.logger.warn(`[timeline] 临时对象固化失败，沿用原 key: ${key} ${e}`)
+      return null
+    }
+  }
 
   /** 给条目补签名 URL（图片 file_key / 题目内 images） */
   async withUrls(items: TimelineItem[]): Promise<TimelineItem[]> {
@@ -205,7 +244,7 @@ export class TimelineService {
     }
 
     const client = getSupabaseClient()
-    const payload = this.buildPayload(userId, dto)
+    const payload = await this.buildPayload(userId, dto)
 
     const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
     if (error) throw new Error(error.message)
@@ -216,8 +255,8 @@ export class TimelineService {
     return data as unknown as TimelineItem
   }
 
-  /** 组装单条插入 payload（create 与 createBatch 共用） */
-  private buildPayload(userId: string, dto: CreateTimelineDto): Record<string, unknown> {
+  /** 组装单条插入 payload（create 与 createBatch 共用）；async：含 tmp/ 临时对象固化 */
+  private async buildPayload(userId: string, dto: CreateTimelineDto): Promise<Record<string, unknown>> {
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
@@ -232,8 +271,15 @@ export class TimelineService {
       tags: dto.tags ?? [],
     }
     if (dto.kind === 'image') {
-      payload.file_key = dto.file_key
-      payload.thumb_key = dto.thumb_key ?? null
+      // tmp/ 临时对象兜底固化（详见 promoteTempFileKey 注释）
+      const promoted = await this.promoteTempFileKey(dto.file_key)
+      const fileKey = promoted?.file_key || dto.file_key
+      payload.file_key = fileKey
+      // 缩略图必须与主图**同源**（内容哈希一致），否则宁可留空 —— 读路径会回退用主图，
+      // 绝不让列表渲染出指向旧内容的过期缩略图。
+      payload.thumb_key = (dto.thumb_key && isThumbConsistent(fileKey, dto.thumb_key))
+        ? dto.thumb_key
+        : (promoted?.thumb_key || null)
       payload.mime_type = dto.mime_type ?? ''
       payload.width = dto.width ?? null
       payload.height = dto.height ?? null
@@ -272,7 +318,8 @@ export class TimelineService {
   async createBatch(userId: string, dtos: CreateTimelineDto[]): Promise<TimelineItem[]> {
     if (!Array.isArray(dtos) || !dtos.length) return []
     const client = getSupabaseClient()
-    const payloads = dtos.map((dto) => {
+    const payloads: Record<string, unknown>[] = []
+    for (const dto of dtos) {
       if (dto.kind !== 'image' && dto.kind !== 'question') {
         throw new BadRequestException('kind 仅支持 image / question')
       }
@@ -290,8 +337,8 @@ export class TimelineService {
           || !!((c2.images || []).length)
         if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
-      return this.buildPayload(userId, dto)
-    })
+      payloads.push(await this.buildPayload(userId, dto))
+    }
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
     // 迁移双写：DB_PROVIDER=dual 时把这批行镜像到腾讯云 PG（best-effort，失败不影响主库）
@@ -348,12 +395,20 @@ export class TimelineService {
     //    防御：换 file_key 而未显式给 thumb_key 时，默认让缩略图跟随主图，
     //    保证任何调用方都不会留下过期缩略图。
     if (dto.file_key !== undefined) {
-      payload.file_key = dto.file_key
-      // 只要没拿到「有效的新缩略图」（undefined / null / 空串）就跟随主图，
-      // 绝不允许保留指向旧内容的过期缩略图。
-      if (!dto.thumb_key) payload.thumb_key = dto.file_key
+      // tmp/ 临时对象兜底固化（详见 promoteTempFileKey 注释）：老前端换图用 purpose='temp'
+      // 上传，会把 24h 后即被回收的 key 写进 file_key，这里在服务端一律转成常驻资产。
+      const promoted = await this.promoteTempFileKey(dto.file_key)
+      const fileKey = promoted?.file_key || dto.file_key
+      payload.file_key = fileKey
+      // 缩略图优先级：与主图同源的显式值 > 固化产出的配套缩略图 > 跟随主图。
+      // ⚠️ 与主图内容哈希不一致的 thumb_key 一律丢弃 —— 那必然是过期的旧缩略图。
+      payload.thumb_key = (dto.thumb_key && isThumbConsistent(fileKey, dto.thumb_key))
+        ? dto.thumb_key
+        : (promoted?.thumb_key || fileKey)
+    } else if (dto.thumb_key) {
+      // 只换缩略图、不动主图（少见但合法）：显式值说了算
+      payload.thumb_key = dto.thumb_key
     }
-    if (dto.thumb_key) payload.thumb_key = dto.thumb_key
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null
