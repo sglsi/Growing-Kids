@@ -126,6 +126,8 @@ export default function RecognizePage() {
   const [cropEditor, setCropEditor] = useState<{ src: string; entryIdx: number } | null>(null)
   // 题目卡里点开已裁剪的图 → 编辑器（思傅 2026-10-21：支持裁剪/旋转/灰度/高清等）
   const [editImg, setEditImg] = useState<{ entryIdx: number; imgIdx: number; url: string } | null>(null)
+  // 来源页点开大图 → 编辑器（思傅 2026-10-21：来源页同样「点图片 = 打开并编辑」，与「＋裁剪题目」分开）
+  const [pageEditImg, setPageEditImg] = useState<{ pageIdx: number; url: string } | null>(null)
   const boardIdRef = useRef(0)
 
   // #150 诊断：OCR 自检弹层（定位「未检测到文本」根因）
@@ -767,6 +769,43 @@ export default function RecognizePage() {
     }
   }
 
+  /**
+   * 来源页「点开图片 → 编辑」完成（思傅 2026-10-21）：编辑器结果以 attach 上传（持久化、不建条目）
+   * → 原位替换该来源页的图，后续「＋裁剪题目」以新图为基准。
+   * ⚠️ 换图后本页旧 OCR 段落作废（文字不再是这张图的）→ 清空等用户重新识别。
+   */
+  const handlePageImgEdited = async (tempPath: string) => {
+    const t = pageEditImg
+    setPageEditImg(null)
+    if (!t || !tempPath) return
+    setBoardBusy(true)
+    try {
+      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      let w = 0
+      let h = 0
+      try {
+        const info = await Taro.getImageInfo({ src: tempPath })
+        w = info.width
+        h = info.height
+      } catch {
+        /* 拿不到尺寸就沿用旧值，不影响主流程 */
+      }
+      setBoardPages((prev) =>
+        prev.map((p, i) =>
+          i === t.pageIdx
+            ? { ...p, url: up.url, w: w || p.w, h: h || p.h, segments: [], ocr: 'idle', err: undefined }
+            : p,
+        ),
+      )
+      Taro.showToast({ title: '来源页已更新', icon: 'success' })
+    } catch (e) {
+      console.error('来源页替换失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '替换失败，请重试', icon: 'none' })
+    } finally {
+      setBoardBusy(false)
+    }
+  }
+
   /** 打开页内裁剪编辑器：从当前页图片裁出错题区域，结果进入指定题目 */
   const startCrop = (entryIdx: number) => {
     const page = boardPages[activePage]
@@ -1203,14 +1242,25 @@ export default function RecognizePage() {
                 </View>
               ) : (
                 <>
-                  {/* 来源图：点击看大图。裁剪入口统一放在下方题目卡片（避免"图上能裁、卡片也能裁"的歧义） */}
-                  <View className="rounded-xl overflow-hidden bg-muted mb-2" style={{ height: 260 }}>
+                  {/* 来源图：点击 = 打开这张图并可编辑（思傅 2026-10-21 定）。
+                      看大图（多页连续预览）保留为下方独立入口；「＋裁剪题目」仍在下方题目卡片。 */}
+                  <View className="rounded-xl overflow-hidden bg-muted mb-2" style={{ height: 260, position: 'relative' }}>
                     <TaroImage
                       src={curPage.url}
                       mode="aspectFit"
                       style={{ width: '100%', height: '100%' }}
-                      onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
+                      onClick={() => setPageEditImg({ pageIdx: activePage, url: curPage.url })}
                     />
+                    <View
+                      onClick={() => setPageEditImg({ pageIdx: activePage, url: curPage.url })}
+                      style={{
+                        position: 'absolute', right: 8, bottom: 8,
+                        paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4, borderRadius: 999,
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                      }}
+                    >
+                      <Text style={{ color: '#fff', fontSize: 10 }}>编辑</Text>
+                    </View>
                   </View>
 
                   {/* 多图切换条 */}
@@ -1250,8 +1300,14 @@ export default function RecognizePage() {
                     </View>
                   </ScrollView>
                   <View className="flex flex-row items-center justify-between mt-2">
-                    <Text className="block text-[10px] text-muted-foreground">点图片看大图 · 共 {boardPages.length} 页</Text>
+                    <Text className="block text-[10px] text-muted-foreground">点图片可编辑 · 共 {boardPages.length} 页</Text>
                     <View className="flex flex-row items-center gap-3">
+                      <Text
+                        className="block text-[10px] text-primary"
+                        onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
+                      >
+                        看大图
+                      </Text>
                       {curPage.ocr === 'error' ? (
                         <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
@@ -1287,7 +1343,7 @@ export default function RecognizePage() {
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
                 <Text className="block text-sm font-semibold text-foreground">题目（{board.length} 题）</Text>
-                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图片可编辑</Text>
+                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图=打开编辑</Text>
               </View>
               {board.map((e, idx) => (
                 <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
@@ -1736,6 +1792,18 @@ export default function RecognizePage() {
           enableSaveToInbox={false}
           onCancel={() => setEditImg(null)}
           onConfirm={(p) => void handleEntryImgEdited(p)}
+        />
+      ) : null}
+
+      {/* 来源页点开图片 → 全功能编辑器（思傅 2026-10-21）：裁剪/旋转/灰度/高清，
+          结果原位替换该来源页（handlePageImgEdited），不新建条目。 */}
+      {pageEditImg ? (
+        <ImageEditor
+          visible
+          src={pageEditImg.url}
+          enableSaveToInbox={false}
+          onCancel={() => setPageEditImg(null)}
+          onConfirm={(p) => void handlePageImgEdited(p)}
         />
       ) : null}
 
