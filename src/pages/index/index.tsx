@@ -64,6 +64,8 @@ export default function IndexPage() {
   const [scrollTop, setScrollTop] = useState(0)
   const scrollRef = useRef(0)
   const restoredRef = useRef(false)
+  /** 待恢复的滚动位（等 load 完成、列表渲染后再 setScrollTop，避免 skeleton 高度不足滚不到位） */
+  const pendingRestoreRef = useRef(0)
   const [savingEdit, setSavingEdit] = useState(false)
   const sel = useSelection()
 
@@ -109,6 +111,18 @@ export default function IndexPage() {
       }
     } finally {
       setLoading(false)
+      // 列表已渲染出来（loading 结束）→ 此刻再恢复滚动位，否则 skeleton 阶段滚不到位
+      const pending = pendingRestoreRef.current
+      if (pending > 0) {
+        pendingRestoreRef.current = 0
+        // 双帧后设：等 React 把列表节点真正渲染进 ScrollView，高度足够才滚得动。
+        // 先设 pending-1 再设 pending：确保 scrollTop 值发生变化，Taro 受控组件才真正触发滚动
+        // （值若与上次相同，部分平台不会下发 scrollTo → 表现为「回到顶部」）。
+        setTimeout(() => {
+          setScrollTop(Math.max(0, pending - 1))
+          setTimeout(() => setScrollTop(pending), 40)
+        }, 60)
+      }
     }
   }
 
@@ -122,11 +136,11 @@ export default function IndexPage() {
     sel.exit()
     // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），不回顶部。
     // 只恢复一次，避免每次 show 都被强行拉回旧位置。
+    // ⚠️ 不能在这里立刻 setScrollTop：此刻列表多为 skeleton（高度不足），
+    //    滚不到位。改为记入 pendingRestoreRef，等 load() 完成、列表渲染出来后再恢复。
     if (!restoredRef.current && scrollRef.current > 0) {
-      const pos = scrollRef.current
+      pendingRestoreRef.current = scrollRef.current
       restoredRef.current = true
-      // 下一帧再设：确保列表已渲染出内容，否则高度不足滚不到位
-      setTimeout(() => setScrollTop(pos), 30)
     }
     load()
   })

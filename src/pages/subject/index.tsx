@@ -37,6 +37,8 @@ export default function SubjectPage() {
   const [scrollTop, setScrollTop] = useState(0)
   const scrollRef = useRef(0)
   const restoredRef = useRef(false)
+  /** 待恢复的滚动位（等 load 完成、列表渲染后再 setScrollTop，避免 skeleton 高度不足滚不到位） */
+  const pendingRestoreRef = useRef(0)
 
   // 从当前页数据里汇总出现过的标签，供筛选
   const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
@@ -85,6 +87,15 @@ export default function SubjectPage() {
     } finally {
       setLoading(false)
       setLoadingMore(false)
+      // 列表已渲染出来（loading 结束）→ 恢复滚动位（双帧 + 先设偏移值强制 Taro 触发滚动）
+      const pending = pendingRestoreRef.current
+      if (pending > 0) {
+        pendingRestoreRef.current = 0
+        setTimeout(() => {
+          setScrollTop(Math.max(0, pending - 1))
+          setTimeout(() => setScrollTop(pending), 40)
+        }, 60)
+      }
     }
   }
 
@@ -114,9 +125,8 @@ export default function SubjectPage() {
   useDidShow(() => {
     // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），只恢复一次
     if (!restoredRef.current && scrollRef.current > 0) {
-      const pos = scrollRef.current
+      pendingRestoreRef.current = scrollRef.current
       restoredRef.current = true
-      setTimeout(() => setScrollTop(pos), 30)
     }
     init()
   })
