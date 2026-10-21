@@ -18,10 +18,23 @@ import { Injectable, NestMiddleware } from '@nestjs/common'
 import type { Request, Response, NextFunction } from 'express'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
+import { memGet, memSet } from './mem-cache'
 
 const HEADER_USER_ID = 'x-user-id'
 const HEADER_OPEN_ID = 'x-open-id'
 const HEADER_DEVICE_ID = 'x-device-id'
+
+/**
+ * 用户对象内存缓存 TTL（思傅 2026-10-21 性能优化）。
+ *
+ * 根因：本中间件对**每个请求**都做一次 users 表查询（Supabase 新加坡 RTT ~1.5s），
+ * 这是「每次点开题目都要等」的后端侧主因——timeline 缓存省掉的是第二次查询，
+ * 这第一次（用户校验）一直在付。
+ * 下游只消费 id / is_anonymous / expire_at，一分钟内稳定，缓存无一致性风险；
+ * 登录是新 user id（新 key），改资料不动这三个字段。只缓存非 null（避免把
+ * 「刚登录建号前后的瞬间查空」缓存成 60s 幽灵）。
+ */
+const USER_CACHE_TTL = 60_000
 
 /** 无需用户上下文的路由前缀（不自动创建匿名用户） */
 const SKIP_ANONYMOUS_PREFIXES = ['/api/auth/', '/api/health']
@@ -45,7 +58,12 @@ export class UserContextMiddleware implements NestMiddleware {
 
       let user: User | null = null
       if (headerUserId) {
-        const found = await this.usersService.findById(headerUserId)
+        const cacheKey = `user:${headerUserId}`
+        let found = memGet<User>(cacheKey)
+        if (!found) {
+          found = await this.usersService.findById(headerUserId)
+          if (found) memSet(cacheKey, found, USER_CACHE_TTL)
+        }
         // 匿名 id 过期（ maintenance 还没清）视为失效：继续按设备/匿名重建，
         // 否则前端带失效 id 会被静默当合法身份，数据全进新号、旧号成孤儿。
         if (found && !this.isExpiredAnonymous(found)) user = found
