@@ -14,6 +14,26 @@ import type {
 } from './timeline.types'
 
 const TABLE = 'timeline_items'
+
+/**
+ * 从对象 key 取出内容哈希段：`blobs/ab/<hash>/display.webp` → `<hash>`。
+ * 非 blobs/ 内容寻址路径（如历史 `tmp/...`）返回 ''。
+ */
+function hashOfKey(key?: string | null): string {
+  if (!key) return ''
+  const m = /^blobs\/[0-9a-f]{2}\/([^/]+)\//i.exec(key)
+  return m ? m[1] : ''
+}
+
+/**
+ * 缩略图是否与主图同源（同一份内容的 thumb 变体）。
+ * 主图 key 与缩略图 key 的哈希段必须一致；任一方取不到哈希时不作判断（视为不一致，回退主图）。
+ */
+function isThumbConsistent(fileKey?: string | null, thumbKey?: string | null): boolean {
+  const fh = hashOfKey(fileKey)
+  if (!fh) return false
+  return hashOfKey(thumbKey) === fh
+}
 const SELECT_COLS = '*, subjects:subject_id(id, name, color)'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
@@ -45,7 +65,17 @@ export class TimelineService {
       items.map(async (it) => {
         const enriched: TimelineItemWithUrl = { ...it }
         if (it.file_key) enriched.url = await this.storageService.getPublicUrl(it.file_key)
-        if (it.thumb_key) enriched.thumb_url = await this.storageService.getPublicUrl(it.thumb_key)
+        // ⭐ 缩略图一致性自愈（思傅 2026-10-22 反馈「列表是老图、详情是新图」）：
+        //    对象 key 形如 `blobs/<hash前2位>/<内容哈希>/<variant>.ext`，
+        //    主图(display) 与缩略图(thumb) **内嵌同一内容哈希**。历史 bug 换主图时
+        //    没同步换 thumb_key ⇒ 两者哈希段不同 ⇒ 缩略图仍指向旧图。
+        //    这里按哈希段比对，不一致就丢掉过期缩略图、回退用主图 —— 纯读路径自愈，
+        //    不改数据、无需迁移，对所有历史损坏记录**立即生效**。
+        if (it.thumb_key && isThumbConsistent(it.file_key, it.thumb_key)) {
+          enriched.thumb_url = await this.storageService.getPublicUrl(it.thumb_key)
+        } else if (it.file_key) {
+          enriched.thumb_url = enriched.url
+        }
         const imgs = it.content?.images
         if (Array.isArray(imgs) && imgs.length) {
           enriched.image_urls = await Promise.all(imgs.map((k) => this.storageService.getPublicUrl(k)))
@@ -319,9 +349,11 @@ export class TimelineService {
     //    保证任何调用方都不会留下过期缩略图。
     if (dto.file_key !== undefined) {
       payload.file_key = dto.file_key
-      if (dto.thumb_key === undefined) payload.thumb_key = dto.file_key
+      // 只要没拿到「有效的新缩略图」（undefined / null / 空串）就跟随主图，
+      // 绝不允许保留指向旧内容的过期缩略图。
+      if (!dto.thumb_key) payload.thumb_key = dto.file_key
     }
-    if (dto.thumb_key !== undefined) payload.thumb_key = dto.thumb_key
+    if (dto.thumb_key) payload.thumb_key = dto.thumb_key
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null
