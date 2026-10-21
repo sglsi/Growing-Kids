@@ -359,6 +359,20 @@ export default function DetailPage() {
             </Button>
           </View>
         </View>
+
+        {/* ⭐ 思傅 2026-10-21 修：kind=image 分支此前早 return，没挂载 ImageEditor，
+            「编辑」点了没反应。此处补挂载，点编辑/保存即替换该条目的 file_key。 */}
+        <ImageEditor
+          visible={!!editorImg}
+          src={editorImg}
+          enableSaveToInbox={false}
+          confirmText="保存并替换原图"
+          onCancel={() => setEditorImg('')}
+          onConfirm={(p) => void handleEditorConfirm(p)}
+        />
+        {editorBusy ? (
+          <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
+        ) : null}
       </ScrollView>
     )
   }
@@ -647,11 +661,12 @@ export default function DetailPage() {
         </View>
       ) : null}
 
-      {/* 题面图编辑器：裁剪/旋转/黑白灰度/智能高清/去手写；结果原位替换该图，不新建条目 */}
+      {/* 题面图编辑器：裁剪/旋转/黑白灰度/智能高清/去手写；点「保存并替换原图」才原位替换该图，不新建条目 */}
       <ImageEditor
         visible={!!editorImg}
         src={editorImg}
         enableSaveToInbox={false}
+        confirmText="保存并替换原图"
         onCancel={() => setEditorImg('')}
         onConfirm={(p) => void handleEditorConfirm(p)}
       />

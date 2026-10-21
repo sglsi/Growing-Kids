@@ -643,12 +643,13 @@ export default function IndexPage() {
         </View>
       )}
 
-      {/* 图片编辑器（复用；不显示「保存图片」按钮，编辑结果直接替换原条目） */}
+      {/* 图片编辑器（复用；不显示「保存图片」按钮，点「保存并替换原图」才把结果替换原条目） */}
       <ImageEditor
         visible={!!editorItem}
         src={editorSrc}
         autoAction={editorAction}
         enableSaveToInbox={false}
+        confirmText="保存并替换原图"
         onCancel={() => { setEditorItem(null); setEditorAction(null); setEditorSrc('') }}
         onConfirm={handleEditorConfirm}
       />

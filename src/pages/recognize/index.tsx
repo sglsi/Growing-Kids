@@ -1784,24 +1784,26 @@ export default function RecognizePage() {
       ) : null}
 
       {/* 题目卡点开已裁剪的图 → 全功能编辑器（思傅 2026-10-21：裁剪/旋转/灰度/高清）。
-          结果原位替换该题这张图（handleEntryImgEdited），不新建条目。 */}
+          点「保存并替换原图」原位替换该题这张图（handleEntryImgEdited），不新建条目。 */}
       {editImg ? (
         <ImageEditor
           visible
           src={editImg.url}
           enableSaveToInbox={false}
+          confirmText="保存并替换原图"
           onCancel={() => setEditImg(null)}
           onConfirm={(p) => void handleEntryImgEdited(p)}
         />
       ) : null}
 
       {/* 来源页点开图片 → 全功能编辑器（思傅 2026-10-21）：裁剪/旋转/灰度/高清，
-          结果原位替换该来源页（handlePageImgEdited），不新建条目。 */}
+          点「保存并替换原图」原位替换该来源页（handlePageImgEdited），不新建条目。 */}
       {pageEditImg ? (
         <ImageEditor
           visible
           src={pageEditImg.url}
           enableSaveToInbox={false}
+          confirmText="保存并替换原图"
           onCancel={() => setPageEditImg(null)}
           onConfirm={(p) => void handlePageImgEdited(p)}
         />
