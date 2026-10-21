@@ -6,7 +6,7 @@ import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import {
-  fetchTimelineDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
+  fetchTimelineDetail, fetchSubjects, updateQuestion, updateTimeline, searchSolution, exportDocument,
   addToReviewBook, removeFromReviewBook, deleteTimeline,
   fetchSimilar, markReviewed, uploadImage, ocrPage,
   type Subject, type TimelineItem,
@@ -156,23 +156,31 @@ export default function DetailPage() {
   /** 「编辑」：打开 ImageEditor——裁剪 / 旋转 / 黑白灰度 / 智能高清 / 去手写全在里面 */
   const handleEditImage = (url: string) => setEditorImg(url)
 
-  /** 编辑完成：结果以 attach 上传（持久化、不建条目）→ 原位替换该题面图的 file_key */
+  /**
+   * 编辑完成：结果以 attach 上传（持久化、不建条目）→ 原位替换。
+   *  - kind=image 条目：替换条目自身的 file_key（PUT /timeline/:id）
+   *  - 题目条目：替换 content.question_images[index]（题面图）
+   */
   const handleEditorConfirm = async (tempPath: string) => {
     if (!item || !editorImg) { setEditorImg(''); return }
-    const urls = item.question_image_urls || []
-    const keys = item.content?.question_images || []
-    const idx = urls.indexOf(editorImg)
-    if (idx < 0 || idx >= keys.length) { setEditorImg(''); return }
     setEditorBusy(true)
     try {
       const up = await uploadImage(tempPath, { purpose: 'attach' })
-      const nextKeys = keys.map((k, i) => (i === idx ? up.key : k))
-      await updateQuestion(item.id, { question_images: nextKeys })
+      if (item.kind === 'image') {
+        await updateTimeline(item.id, { file_key: up.key })
+      } else {
+        const urls = item.question_image_urls || []
+        const keys = item.content?.question_images || []
+        const idx = urls.indexOf(editorImg)
+        if (idx < 0 || idx >= keys.length) throw new Error('未找到要替换的题面图')
+        const nextKeys = keys.map((k, i) => (i === idx ? up.key : k))
+        await updateQuestion(item.id, { question_images: nextKeys })
+      }
       setEditorImg('')
       Taro.showToast({ title: '图片已更新', icon: 'success' })
       await load()
     } catch (e) {
-      console.error('题面图替换失败', e)
+      console.error('图片替换失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '替换失败，请重试', icon: 'none' })
     } finally {
       setEditorBusy(false)
@@ -302,6 +310,19 @@ export default function DetailPage() {
               onClick={() => Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })}
             />
           </Card>
+
+          {/* 图片条目详情也要能编辑（思傅 2026-10-21 规则：点开图片可编辑）：
+              编辑结果 attach 上传 → 原位替换该条目的 file_key（与首页一致，不新建条目）。 */}
+          <View className="flex flex-row items-center justify-between mb-4">
+            <Text className="block text-xs text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清</Text>
+            <View
+              className="px-3 rounded-lg"
+              style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
+              onClick={() => handleEditImage(item.url || item.thumb_url || '')}
+            >
+              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
+            </View>
+          </View>
 
           <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
             <View className="flex-1">
