@@ -2582,12 +2582,23 @@ function applyPresetPixels(
   }
 
   if (preset === 'brighten') {
-    // 暗部 Gamma 提亮（比线性 a/b 更稳：只抬暗部、不喷高光）+ 背景白化 + 轻对比
+    // 思傅 2026-10-22 反馈「增亮把文字处理得比较淡、看不清」。
+    //
+    // 根因：Gamma 提亮是**全画面**抬升，文字（暗）也被一起抬亮（实测 40 → 61）；
+    // 而旧文档曲线 thetaLow=46 又把 61 判进「中间调」继续抬到 66
+    // ⇒ 文字比原图还淡（背景 240→255，对比反而从 200 掉到 188）。
+    //
+    // 修法：增亮只管**背景**，文字必须更深。
+    //  ① 提亮幅度收敛（阴影已由前置光照归一化处理，不必再猛提）：gamma 1→0.70
+    //  ② 文档曲线把「墨」的判定阈值抬到 90 并加强压暗（gammaDark 0.55）
+    //     ⇒ 文字落在墨区被压暗（实测 40 → ~22），比原图更深更清晰；
+    //        背景 ≥214 一律拉到纯白 255。
+    // 净效果：画面更亮更干净，且文字对比从 200 提升到 ~233。
     const g = readGray(d, n)
-    const gamma = 1 - slider * 0.45 // s=0 → 1（不动）；s=1 → 0.55（明显提亮）
+    const gamma = 1 - slider * 0.30 // s=0 → 1（不动）；s=1 → 0.70（明显提亮）
     for (let i = 0; i < n; i++) g[i] = 255 * Math.pow(g[i] / 255, gamma)
-    applyDocumentCurve(g, n, 216, 46, 0.85, 40)
-    const contrast = 1.0 + slider * 0.18
+    applyDocumentCurve(g, n, 214, 90, 0.55, 30)
+    const contrast = 1.0 + slider * 0.15
     for (let i = 0; i < n; i++) g[i] = (g[i] - 128) * contrast + 128
     writeGrayToRgba(d, g, n)
     return
@@ -2658,8 +2669,13 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
   }
   // ② 百分位对比拉伸：淡印/低动态范围原图先拉开，Sauvola 才判得出细笔画
   stretchPercentileGray(gray, n)
-  // 窗口随图尺寸自适应：小图保底 15px，大图 ≈ 短边/15（覆盖多个字符），强制奇数
-  let win = Math.max(15, Math.round(Math.min(w, h) / 15))
+  // 窗口随图尺寸自适应（思傅 2026-10-22 调：旧公式 短边/15 对手机大图给出 80+，
+  // 窗口过大 → 局部统计被大片背景主导 → 细笔画判不出 → **文字发糊**）。
+  // 研究口径：300DPI 扫描 15~25；>31 会糊。这里 短边/45 并夹在 [15,31]，
+  // 对 1600×1200 得 27（约 0.7 个汉字高，足够稳定又不糊），强制奇数。
+  let win = Math.round(Math.min(w, h) / 45)
+  if (win < 15) win = 15
+  if (win > 31) win = 31
   if (win % 2 === 0) win += 1
   const r = (win - 1) / 2
   const area = win * win
@@ -2682,8 +2698,11 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
       intSq[idx] = v2 + intSq[prevBase + j + 1] + intSq[rowBase + j] - intSq[prevBase + j]
     }
   }
-  // ⭐ 固定稳健基线 k=0.2（不再随滑块扫），只做局部自适应
-  const K = 0.2
+  // ⭐ 固定稳健基线 k（不再随滑块扫），只做局部自适应。
+  // 思傅 2026-10-22 调：0.2 → 0.30。Sauvola T = μ(1 + k(σ/R − 1))，σ/R−1 为负，
+  // k 越大阈值越低 ⇒ 判墨越少 ⇒ 笔画更细更利落。研究口径：0.2=干净现代文档（保守）、
+  // 0.3=典型文档、0.32 为文档扫描实测最优。已做光照归一化 + 保细线去斑，可放心用 0.30。
+  const K = 0.3
   const R = 128
   // 滑块 → 阈值偏置（小幅，两端不崩）：s=0.5 → 0；s<0.5 → 阈值略降(墨少=字细)
   // s>0.5 → 阈值略升(墨多=字粗)。偏置幅度控制在 ±14 亮度，保证可读。
@@ -2707,7 +2726,16 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
       bin[y * w + x] = isInk ? 0 : 255
     }
   }
-  // 3x3 中值去斑：孤立噪点抹掉，成片笔画保留（标点不误伤）
+  // 保细线的条件形态学（对标「3x3 开运算去噪点 + 闭运算补断裂」）。
+  //
+  // ⚠️ 旧版写的是「3x3 邻域黑数 >= 5 才判黑」——那是**中值滤波**，而中值滤波会
+  //    把 1px 细笔画整条抹掉（一条竖线在 3x3 里只有上/中/下 3 个黑，< 5 ⇒ 判白）。
+  //    这正是思傅 2026-10-22 反馈「黑白后文字发糊」的主因。
+  //
+  // 新规则（只对明显不该存在的像素动手，其余原样保留）：
+  //   中心黑 & 邻域黑数 ≤ 2 ⇒ 孤立噪点，抹白（开运算）
+  //   中心白 & 邻域黑数 ≥ 7 ⇒ 笔画内的空洞/断口，补黑（闭运算）
+  //   其余保持原样 ⇒ 1px 细笔画（邻域 3 个黑 > 2）完整保留
   const med = new Uint8Array(n)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -2721,7 +2749,14 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
           if (bin[ny * w + nx] === 0) black++
         }
       }
-      med[y * w + x] = black >= 5 ? 0 : 255
+      const i = y * w + x
+      if (bin[i] === 0) {
+        // 本身是墨：邻域墨太少 ⇒ 孤立噪点
+        med[i] = black <= 2 ? 255 : 0
+      } else {
+        // 本身是白：邻域墨极多 ⇒ 笔画中间被判白的空洞/断口，补回来
+        med[i] = black >= 7 ? 0 : 255
+      }
     }
   }
   // ⭐ 滑块控制墨迹粗细：s>0.5 轻微膨胀（保断笔、字稍粗），s<0.5 轻微侵蚀（防糊、字稍细）
