@@ -602,13 +602,25 @@ export default function RecognizePage() {
     setBoard((prev) => prev.map((e, i) => (i === idx ? { ...e, text } : e)))
   }
 
+  /** 把文本追加进指定题题干（「存入题目」与「加入题干」共用） */
+  const appendTextToEntry = (idx: number, t: string) => {
+    setBoard((prev) =>
+      prev.map((e, i) => (i === idx ? { ...e, text: e.text.trim() ? `${e.text.trim()}\n${t}` : t } : e)),
+    )
+    Taro.showToast({ title: `已存入第 ${idx + 1} 题`, icon: 'success' })
+  }
+
   /**
    * OCR 面板「存入题目」直通：弹题目选择器，把所选文本追加进指定题的题干。
    * 思傅 2026-10-20 决策：文字与裁剪图必须绑定同一题——复制粘贴靠用户心记
    * 「哪段文字属于哪题」极易错配，保存后同题图文"分家"成两道题；此按钮把
    * 「选文字 → 定题目」变成一步显式操作。
-   * ⚠️ 防分家（2026-10-21 加固）：选项带「·有图」标记——文字要存回已有裁剪图的
-   *    那道题；主流程（本题 OCR →「加入题干」）本就不经过此选择器，不会分家。
+   * ⚠️ 防分家三重加固（思傅 2026-10-21 复测仍分家后）：
+   *    ① 选项带「·有图」标记——文字要存回已有裁剪图的那道题；
+   *    ② 选「＋存入新题目」时若存在「有图无文字」的题，弹确认引导并入
+   *       （这正是 10-21 复测的分家路径：整页选文字 → 新建文字题 →
+   *        裁剪图在另一题 → 存成两道）；
+   *    ③ 主流程（本题 OCR →「加入题干」）不经过此选择器，结构上不会分家。
    */
   const handlePasteToEntry = (text: string) => {
     const t = text.trim()
@@ -620,19 +632,36 @@ export default function RecognizePage() {
         ? `第 ${i + 1} 题${img}：${prev.slice(0, 12)}${prev.length > 12 ? '…' : ''}`
         : `第 ${i + 1} 题${img}（空）`
     })
-    if (board.length < MAX_BOARD_ENTRIES) items.push('＋ 存入新题目')
+    const canAdd = board.length < MAX_BOARD_ENTRIES
+    if (canAdd) items.push('＋ 存入新题目')
+    const createNewEntry = () => {
+      setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: t, images: [], segments: [], ocr: 'idle' }])
+      Taro.showToast({ title: `已存入新题（第 ${board.length + 1} 题）`, icon: 'success' })
+    }
     Taro.showActionSheet({
       itemList: items,
       success: (res) => {
         const idx = res.tapIndex
         if (idx < board.length) {
-          setBoard((prev) =>
-            prev.map((e, i) => (i === idx ? { ...e, text: e.text.trim() ? `${e.text.trim()}\n${t}` : t } : e)),
-          )
-          Taro.showToast({ title: `已存入第 ${idx + 1} 题`, icon: 'success' })
+          appendTextToEntry(idx, t)
+          return
+        }
+        if (!canAdd) return
+        // ② 分家守护：新建纯文字题前，若已有「有图无文字」的题，极可能是同题文字存丢了
+        const imgOnly = board.findIndex((e) => e.images.length && !e.text.trim())
+        if (imgOnly >= 0) {
+          Taro.showModal({
+            title: '可能存错题了',
+            content: `第 ${imgOnly + 1} 题有裁剪图但还没有文字。要把这段文字并入第 ${imgOnly + 1} 题吗？选「仍然新建」会多出一道只有文字的题。`,
+            confirmText: `并入第 ${imgOnly + 1} 题`,
+            cancelText: '仍然新建',
+            success: (m) => {
+              if (m.confirm) appendTextToEntry(imgOnly, t)
+              else createNewEntry()
+            },
+          })
         } else {
-          setBoard((prev) => [...prev, { id: ++boardIdRef.current, text: t, images: [], segments: [], ocr: 'idle' }])
-          Taro.showToast({ title: `已存入新题（第 ${board.length + 1} 题）`, icon: 'success' })
+          createNewEntry()
         }
       },
     })
@@ -761,6 +790,9 @@ export default function RecognizePage() {
   /**
    * 粘贴栏存入错题库（#150）：条目 → kind=question timeline 批量落库。
    * 文字进 content.question，手动裁剪图进 content.question_images（file_key）。
+   * ⚠️ 分家守护（思傅 2026-10-21 复测：同题图文仍被存成两道）：
+   *    「恰好 1 个只有图 + 1 个只有文字」是经典分家签名（文字存进了另一题/新题）。
+   *    落库前弹一次确认给合并机会；合法场景（本来就是两道题）点「仍然存两道」不拦截。
    */
   const handleBoardSave = async () => {
     const items = boardValidItems()
@@ -774,9 +806,35 @@ export default function RecognizePage() {
       Taro.showToast({ title: '请先选择学科', icon: 'none' })
       return
     }
+    // ── 分家守护：1 图 + 1 文字 → 确认是否合并 ──
+    let list = items
+    const imgOnlyIdx = board.findIndex((e) => e.images.length && !e.text.trim())
+    const textOnlyIdx = board.findIndex((e) => !e.images.length && e.text.trim())
+    if (imgOnlyIdx >= 0 && textOnlyIdx >= 0) {
+      const merge = await new Promise<boolean>((resolve) => {
+        Taro.showModal({
+          title: '确认题目数量',
+          content: `第 ${imgOnlyIdx + 1} 题只有裁剪图、第 ${textOnlyIdx + 1} 题只有文字——这样会存成两道题。如果是同一题，建议合并为一道。`,
+          confirmText: '合并为一道',
+          cancelText: '仍然存两道',
+          success: (m) => resolve(m.confirm),
+          fail: () => resolve(false),
+        })
+      })
+      if (merge) {
+        const t = board[textOnlyIdx].text.trim()
+        list = board
+          .map((e, i) => {
+            if (i === textOnlyIdx) return null
+            if (i === imgOnlyIdx) return { ...e, text: e.text.trim() ? `${e.text.trim()}\n${t}` : t }
+            return e
+          })
+          .filter((e): e is BoardEntry => e !== null && (!!e.text.trim() || e.images.length > 0))
+      }
+    }
     setSaving(true)
     try {
-      const payloads: CreateTimelinePayload[] = items.map((e) => ({
+      const payloads: CreateTimelinePayload[] = list.map((e) => ({
         kind: 'question' as const,
         subject_id: sid,
         source: '人工整理',
@@ -1149,45 +1207,6 @@ export default function RecognizePage() {
                     </View>
                   </View>
 
-                  {/* 整页识别（次要入口）：不裁剪、直接看全页文字时用。
-                      主流程是「裁剪题目 → 识别本题」，见下方题目卡片。 */}
-                  <View className="flex flex-row items-center gap-2 mt-2">
-                    <View
-                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
-                      style={{
-                        backgroundColor: '#FFF7F0',
-                        border: '1px solid rgba(190,62,45,0.3)',
-                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
-                      }}
-                      onClick={() => {
-                        if (boardBusy || curPage.ocr === 'busy') return
-                        void runPageOcr(curPage, 'fast')
-                      }}
-                    >
-                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
-                        {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '整页快速识别中…' : '整页快速识别'}
-                      </Text>
-                    </View>
-                    <View
-                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
-                      style={{
-                        backgroundColor: '#BE3E2D',
-                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
-                      }}
-                      onClick={() => {
-                        if (boardBusy || curPage.ocr === 'busy') return
-                        void runPageOcr(curPage, 'precise')
-                      }}
-                    >
-                      <Text className="block text-xs font-medium text-white">
-                        {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '整页精准识别中…' : '整页精准识别'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text className="block text-[10px] text-muted-foreground mt-1">
-                    整页识别会把本页换成摆正后的图（裁剪更准）；只要单题文字，用下方题目的「＋裁剪题目」即可
-                  </Text>
-
                   {/* OCR 诊断入口：识别异常时一键自查端口·侧车·引擎是否就绪（显眼样式，避免找不到） */}
                   <View
                     className="flex-row items-center justify-center mt-2 py-2 px-3 rounded-lg"
@@ -1206,22 +1225,6 @@ export default function RecognizePage() {
                     </Text>
                   </View>
 
-                  {/* 整页识别出的段落（有则显示）：勾选后可「存入题目」 */}
-                  {curPage.segments.length ? (
-                    <View
-                      className="rounded-xl overflow-hidden mt-2"
-                      style={{ height: 220, border: '1px solid #ece8e0' }}
-                    >
-                      <WrongqOcrPanel
-                        segments={curPage.segments}
-                        title="整页文字"
-                        pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
-                        busy={curPage.ocr === 'busy'}
-                        error={curPage.err}
-                        onPasteToEntry={handlePasteToEntry}
-                      />
-                    </View>
-                  ) : null}
                 </>
               )}
             </Card>
@@ -1350,6 +1353,62 @@ export default function RecognizePage() {
               <View onClick={addEntry} className="w-full h-10 rounded-xl flex items-center justify-center" style={{ border: '1px dashed #C9C2B8' }}>
                 <Text className="block text-xs text-primary">＋ 添加题目</Text>
               </View>
+
+              {/* ⭐ 整页识别 = 次要入口（思傅 2026-10-21 要求移到「＋添加题目」下方）：
+                  主流程是上方的「裁剪题目 → 识别本题 → 加入题干」——文字天然属于本题，不会图文分家；
+                  只有不想裁剪、直接看全页文字时才用这里，存文字时务必选「·有图」的同一道题。 */}
+              {curPage ? (
+                <View className="w-full mt-3 pt-3" style={{ borderTopWidth: 0.5, borderTopColor: '#f0ece4', borderTopStyle: 'solid' }}>
+                  <View className="flex flex-row items-center gap-2">
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#FFF7F0',
+                        border: '1px solid rgba(190,62,45,0.3)',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'fast')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                        {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '整页快速识别中…' : '整页快速识别'}
+                      </Text>
+                    </View>
+                    <View
+                      className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
+                      style={{
+                        backgroundColor: '#BE3E2D',
+                        opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
+                      }}
+                      onClick={() => {
+                        if (boardBusy || curPage.ocr === 'busy') return
+                        void runPageOcr(curPage, 'precise')
+                      }}
+                    >
+                      <Text className="block text-xs font-medium text-white">
+                        {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '整页精准识别中…' : '整页精准识别'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text className="block text-[10px] text-muted-foreground mt-1">
+                    次要入口：整页识别会把本页换成摆正后的图；文字请存入「·有图」的同一道题，避免图文分家
+                  </Text>
+                  {curPage.segments.length ? (
+                    <View className="rounded-xl overflow-hidden mt-2" style={{ height: 220, border: '1px solid #ece8e0' }}>
+                      <WrongqOcrPanel
+                        segments={curPage.segments}
+                        title="整页文字"
+                        pageLabel={`第 ${activePage + 1}/${boardPages.length} 页`}
+                        busy={curPage.ocr === 'busy'}
+                        error={curPage.err}
+                        onPasteToEntry={handlePasteToEntry}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
             </Card>
           </>
         ) : (
