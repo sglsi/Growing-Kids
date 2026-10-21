@@ -124,6 +124,8 @@ export default function RecognizePage() {
   const [boardBusy, setBoardBusy] = useState(false)
   /** 页内裁剪编辑器：{ src, entryIdx }——裁出的图进入指定题目 */
   const [cropEditor, setCropEditor] = useState<{ src: string; entryIdx: number } | null>(null)
+  // 题目卡里点开已裁剪的图 → 编辑器（思傅 2026-10-21：支持裁剪/旋转/灰度/高清等）
+  const [editImg, setEditImg] = useState<{ entryIdx: number; imgIdx: number; url: string } | null>(null)
   const boardIdRef = useRef(0)
 
   // #150 诊断：OCR 自检弹层（定位「未检测到文本」根因）
@@ -731,6 +733,40 @@ export default function RecognizePage() {
     )
   }
 
+  /**
+   * 题目图「编辑」完成（思傅 2026-10-21：点开已裁剪的图支持裁剪/旋转/灰度/高清）：
+   * 编辑器结果以 attach 上传（持久化、不建条目）→ 原位替换该题这张图。
+   * ⚠️ 换图后旧 OCR 段落作废（图都换了，文字不再是这张图的）→ 清空等用户重新识别。
+   */
+  const handleEntryImgEdited = async (tempPath: string) => {
+    const t = editImg
+    setEditImg(null)
+    if (!t || !tempPath) return
+    setBoardBusy(true)
+    try {
+      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      setBoard((prev) =>
+        prev.map((e, i) =>
+          i === t.entryIdx
+            ? {
+                ...e,
+                images: e.images.map((im, j) => (j === t.imgIdx ? { url: up.url, key: up.key } : im)),
+                segments: [],
+                ocr: 'idle',
+                err: undefined,
+              }
+            : e,
+        ),
+      )
+      Taro.showToast({ title: '图片已替换，可重新「识别本题」', icon: 'success' })
+    } catch (e) {
+      console.error('题目图替换失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '替换失败，请重试', icon: 'none' })
+    } finally {
+      setBoardBusy(false)
+    }
+  }
+
   /** 打开页内裁剪编辑器：从当前页图片裁出错题区域，结果进入指定题目 */
   const startCrop = (entryIdx: number) => {
     const page = boardPages[activePage]
@@ -778,8 +814,7 @@ export default function RecognizePage() {
     }
   }
 
-  /** 粘贴栏导出 Word：空条目（无文字且无图）跳过 */
-  const handleBoardExport = async () => {
+  /** 粘贴栏导出 Word：空条目（无文字且无图）跳过 */  const handleBoardExport = async () => {
     const items: BoardExportItem[] = board
       .map((e) => ({ question_content: e.text.trim(), images: e.images.map((i) => i.url) }))
       .filter((it) => it.question_content || (it.images && it.images.length))
@@ -1252,7 +1287,7 @@ export default function RecognizePage() {
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
                 <Text className="block text-sm font-semibold text-foreground">题目（{board.length} 题）</Text>
-                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干</Text>
+                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图片可编辑</Text>
               </View>
               {board.map((e, idx) => (
                 <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
@@ -1280,7 +1315,7 @@ export default function RecognizePage() {
                           src={img.url}
                           mode="aspectFill"
                           style={{ width: '100%', height: '100%' }}
-                          onClick={() => Taro.previewImage({ urls: e.images.map((x) => x.url), current: img.url })}
+                          onClick={() => setEditImg({ entryIdx: idx, imgIdx: j, url: img.url })}
                         />
                         <View
                           onClick={() => removeEntryImage(idx, j)}
@@ -1689,6 +1724,18 @@ export default function RecognizePage() {
           enableSaveToInbox={false}
           onCancel={() => setCropEditor(null)}
           onConfirm={(p) => void handleCropConfirm(p)}
+        />
+      ) : null}
+
+      {/* 题目卡点开已裁剪的图 → 全功能编辑器（思傅 2026-10-21：裁剪/旋转/灰度/高清）。
+          结果原位替换该题这张图（handleEntryImgEdited），不新建条目。 */}
+      {editImg ? (
+        <ImageEditor
+          visible
+          src={editImg.url}
+          enableSaveToInbox={false}
+          onCancel={() => setEditImg(null)}
+          onConfirm={(p) => void handleEntryImgEdited(p)}
         />
       ) : null}
 

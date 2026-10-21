@@ -8,9 +8,10 @@ import { Switch } from '@/components/ui/switch'
 import {
   fetchTimelineDetail, fetchSubjects, updateQuestion, searchSolution, exportDocument,
   addToReviewBook, removeFromReviewBook, deleteTimeline,
-  fetchSimilar, markReviewed,
+  fetchSimilar, markReviewed, uploadImage, ocrPage,
   type Subject, type TimelineItem,
 } from '@/services/api'
+import ImageEditor from '@/components/image-editor'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 
@@ -56,6 +57,11 @@ export default function DetailPage() {
   const [similar, setSimilar] = useState<SimilarItem[]>([])
   const [similarOpen, setSimilarOpen] = useState(false)
   const [similarLoading, setSimilarLoading] = useState(false)
+  // 题面图操作（思傅 2026-10-21：详情页支持对图片做模式转换/裁剪/旋转/黑白/高清 + 文字识别）
+  const [editorImg, setEditorImg] = useState('')           // 正在编辑的图片签名 URL
+  const [editorBusy, setEditorBusy] = useState(false)      // 编辑结果上传/替换中
+  const [ocrBusy, setOcrBusy] = useState(false)            // 图片文字识别中
+  const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
 
   const load = async () => {
     const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
@@ -122,6 +128,62 @@ export default function DetailPage() {
       console.error('导出失败', e)
       Taro.showToast({ title: '导出失败', icon: 'none' })
     }
+  }
+
+  // ---------- 题面图操作（思傅 2026-10-21） ----------
+
+  /** 「编辑」：打开 ImageEditor——裁剪 / 旋转 / 黑白灰度 / 智能高清 / 去手写全在里面 */
+  const handleEditImage = (url: string) => setEditorImg(url)
+
+  /** 编辑完成：结果以 attach 上传（持久化、不建条目）→ 原位替换该题面图的 file_key */
+  const handleEditorConfirm = async (tempPath: string) => {
+    if (!item || !editorImg) { setEditorImg(''); return }
+    const urls = item.question_image_urls || []
+    const keys = item.content?.question_images || []
+    const idx = urls.indexOf(editorImg)
+    if (idx < 0 || idx >= keys.length) { setEditorImg(''); return }
+    setEditorBusy(true)
+    try {
+      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      const nextKeys = keys.map((k, i) => (i === idx ? up.key : k))
+      await updateQuestion(item.id, { question_images: nextKeys })
+      setEditorImg('')
+      Taro.showToast({ title: '图片已更新', icon: 'success' })
+      await load()
+    } catch (e) {
+      console.error('题面图替换失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '替换失败，请重试', icon: 'none' })
+    } finally {
+      setEditorBusy(false)
+    }
+  }
+
+  /** 「识别文字」：对该题面图跑快速 OCR（小图局部识别，快 1~3s），结果进面板供追加/替换题干 */
+  const handleOcrImage = async (url: string) => {
+    setOcrBusy(true)
+    try {
+      const r = await ocrPage(url, 'fast', { rectify: false })
+      const text = (r.page_text || []).map((s) => s.text.trim()).filter(Boolean).join('\n')
+      if (!text) {
+        Taro.showToast({ title: '未识别到文字，可手动输入', icon: 'none' })
+        return
+      }
+      setOcrResult(text)
+    } catch (e) {
+      console.error('图片识别失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
+    } finally {
+      setOcrBusy(false)
+    }
+  }
+
+  /** 把识别结果写进题干：mode=append 追加 / replace 替换 */
+  const applyOcrResult = (mode: 'append' | 'replace') => {
+    const t = ocrResult.trim()
+    if (!t) return
+    setQContent((prev) => (mode === 'replace' ? t : prev.trim() ? `${prev.trim()}\n${t}` : t))
+    setOcrResult('')
+    Taro.showToast({ title: mode === 'replace' ? '已替换题干' : '已追加到题干', icon: 'success' })
   }
 
   // 加入 / 移出复习本
@@ -260,6 +322,7 @@ export default function DetailPage() {
   }
 
   return (
+    <>
     <ScrollView scrollY className="h-full bg-background">
       <View className="px-4 pt-4 pb-32">
         {item && (
@@ -316,16 +379,37 @@ export default function DetailPage() {
 
         {item?.question_image_urls?.length ? (
           <View className="mb-4">
-            <Text className="block text-xs text-muted-foreground mb-2">题面图</Text>
-            <View className="flex flex-row flex-wrap gap-2">
+            <View className="flex flex-row items-center justify-between mb-2">
+              <Text className="block text-xs text-muted-foreground">题面图</Text>
+              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字</Text>
+            </View>
+            <View className="flex flex-row flex-wrap gap-3">
               {item.question_image_urls.map((u) => (
-                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
-                  <Image
-                    src={u}
-                    mode="aspectFill"
-                    style={{ width: '100%', height: '100%' }}
-                    onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
-                  />
+                <View key={u} className="flex flex-col items-center" style={{ width: 92 }}>
+                  <View className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                    <Image
+                      src={u}
+                      mode="aspectFill"
+                      style={{ width: '100%', height: '100%' }}
+                      onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
+                    />
+                  </View>
+                  <View className="flex flex-row items-center gap-2 mt-1">
+                    <View
+                      className="px-2 rounded"
+                      style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      onClick={() => handleEditImage(u)}
+                    >
+                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>编辑</Text>
+                    </View>
+                    <View
+                      className="px-2 rounded"
+                      style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
+                    >
+                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                    </View>
+                  </View>
                 </View>
               ))}
             </View>
@@ -495,5 +579,43 @@ export default function DetailPage() {
         </Button>
       </View>
     </ScrollView>
+
+      {/* 识别结果面板（思傅 2026-10-21）：题面图 OCR → 追加/替换进题干 */}
+      {ocrResult ? (
+        <View className="z-50" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)' }} onClick={() => setOcrResult('')}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '72vh' }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">识别结果（可追加或替换题干）</Text>
+            <ScrollView scrollY style={{ maxHeight: '42vh' }}>
+              <Text className="block text-sm text-foreground leading-relaxed">{ocrResult}</Text>
+            </ScrollView>
+            <View className="flex flex-row items-center gap-2 mt-4">
+              <Button className="flex-1 h-11 rounded-xl" onClick={() => applyOcrResult('append')}>
+                <Text className="block text-sm">追加到题干</Text>
+              </Button>
+              <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={() => applyOcrResult('replace')}>
+                <Text className="block text-sm">替换题干</Text>
+              </Button>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={() => setOcrResult('')}>
+                <Text className="block text-sm">关闭</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+      ) : null}
+
+      {/* 题面图编辑器：裁剪/旋转/黑白灰度/智能高清/去手写；结果原位替换该图，不新建条目 */}
+      <ImageEditor
+        visible={!!editorImg}
+        src={editorImg}
+        enableSaveToInbox={false}
+        onCancel={() => setEditorImg('')}
+        onConfirm={(p) => void handleEditorConfirm(p)}
+      />
+      {editorBusy ? (
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
+      ) : null}
+    </>
   )
 }

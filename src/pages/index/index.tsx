@@ -45,6 +45,9 @@ export default function IndexPage() {
   const [pickerItem, setPickerItem] = useState<TimelineItem | null>(null)
   // 「更多操作」弹层（#3：对已加入最近题目的资料再裁剪 / 高清 / 去手写）
   const [moreItem, setMoreItem] = useState<TimelineItem | null>(null)
+  // 学科筛选（思傅 2026-10-21：点学科 = 就地筛选下方「最近题目」，不再跳复习本；
+  // '' = 全部。与顶部「全部 ›」的跳转是两回事）
+  const [subjectFilter, setSubjectFilter] = useState('')
   // 图片编辑器状态（复用 ImageEditor）
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
   const [editorSrc, setEditorSrc] = useState('')
@@ -52,13 +55,14 @@ export default function IndexPage() {
   const [savingEdit, setSavingEdit] = useState(false)
   const sel = useSelection()
 
-  const load = async () => {
+  const load = async (sid = subjectFilter) => {
     setLoading(true)
     setAuth(getAuthState())
     try {
       const [ov, list, subs] = await Promise.all([
         fetchOverview(),
-        fetchTimeline({ scope: 'recent', pageSize: 20 }),
+        // 学科筛选走后端（subjectId），不是前端过滤——否则只能筛已加载的 20 条
+        fetchTimeline({ scope: 'recent', subjectId: sid || undefined, pageSize: 20 }),
         fetchSubjects().catch(() => [] as Subject[]),
       ])
       setOverview(ov)
@@ -70,6 +74,12 @@ export default function IndexPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  /** 点学科胶囊：就地筛选下方最近题目（不跳页）；再点一次 / 点「全部」取消 */
+  const filterSubject = (sid: string) => {
+    setSubjectFilter(sid)
+    void load(sid)
   }
 
   useDidShow(() => {
@@ -88,10 +98,6 @@ export default function IndexPage() {
   const goDocImport = () => {
     Taro.setStorageSync('recog_mode', 'doc')
     Taro.navigateTo({ url: '/pages/recognize/index' })
-  }
-  const goSubject = (subjectId?: string) => {
-    Taro.setStorageSync('filter_subject_id', subjectId || '')
-    Taro.switchTab({ url: '/pages/subject/index' })
   }
   const goReviewBook = () => {
     Taro.setStorageSync('filter_subject_id', '')
@@ -360,25 +366,27 @@ export default function IndexPage() {
                 <StatCard label="复习本" value={overview?.review_total ?? 0} onTap={goReviewBook} />
               </View>
 
-              {/* 学科入口 */}
+              {/* 学科分类（思傅 2026-10-21：就地筛选下方最近题目，不再跳复习本） */}
               <View className="mb-2 flex flex-row items-center justify-between">
                 <Text className="block text-sm font-semibold text-foreground">学科分类</Text>
-                <Text className="block text-xs text-muted-foreground" onClick={() => goSubject()}>全部 ›</Text>
+                <Text className="block text-xs text-muted-foreground">点学科只看该科题目</Text>
               </View>
               <View className="flex flex-row flex-wrap gap-2 mb-5">
-                {overview?.subject_stats?.length ? (
-                  overview.subject_stats.map((s) => (
-                    <SubjectBadge
-                      key={s.subject_id}
-                      name={s.name}
-                      color={s.color}
-                      trailing={<Text className="block text-xs opacity-70">{s.count}</Text>}
-                      onClick={() => goSubject(s.subject_id)}
-                    />
-                  ))
-                ) : (
+                {/* 「全部」：清除学科筛选（思傅 2026-10-21 新增） */}
+                <SubjectBadge name="全部" active={!subjectFilter} onClick={() => filterSubject('')} />
+                {overview?.subject_stats?.map((s) => (
+                  <SubjectBadge
+                    key={s.subject_id}
+                    name={s.name}
+                    color={s.color}
+                    active={subjectFilter === s.subject_id}
+                    trailing={<Text className="block text-xs opacity-70">{s.count}</Text>}
+                    onClick={() => filterSubject(s.subject_id)}
+                  />
+                ))}
+                {!overview?.subject_stats?.length ? (
                   <Text className="block text-xs text-muted-foreground">暂无分类数据</Text>
-                )}
+                ) : null}
               </View>
 
               {/* 最近题目（统一收件箱） */}
@@ -389,6 +397,17 @@ export default function IndexPage() {
                 </View>
                 <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
               </View>
+              {/* 学科筛选提示条（点「✕ 显示全部」或上面的「全部」清除） */}
+              {subjectFilter ? (
+                <View className="flex flex-row items-center gap-2 mb-2">
+                  <Text className="block text-xs" style={{ color: '#BE3E2D' }}>
+                    只看「{subjects.find((s) => s.id === subjectFilter)?.name
+                      || overview?.subject_stats?.find((s) => s.subject_id === subjectFilter)?.name
+                      || '该学科'}」
+                  </Text>
+                  <Text className="block text-xs text-muted-foreground" onClick={() => filterSubject('')}>✕ 显示全部</Text>
+                </View>
+              ) : null}
 
               {inbox.length ? (
                 <View className="space-y-3">

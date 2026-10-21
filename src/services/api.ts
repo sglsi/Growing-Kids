@@ -433,6 +433,8 @@ export function updateQuestion(
     status?: 'answered' | 'pending'
     mastered?: boolean
     tags?: string[]
+    /** 题面图 file_key 全量替换（详情页「编辑图片」后原位替换；后端按 content 合并） */
+    question_images?: string[]
   },
 ) {
   const patch: Parameters<typeof updateTimeline>[1] = {}
@@ -444,7 +446,8 @@ export function updateQuestion(
     payload.answer_content !== undefined ||
     payload.solution !== undefined ||
     payload.wrong_answer !== undefined ||
-    payload.status !== undefined
+    payload.status !== undefined ||
+    payload.question_images !== undefined
   ) {
     patch.content = {
       question: payload.question_content,
@@ -452,7 +455,8 @@ export function updateQuestion(
       solution: payload.solution,
       wrong_answer: payload.wrong_answer,
       status: payload.status,
-    }
+      ...(payload.question_images !== undefined ? { question_images: payload.question_images } : {}),
+    } as NonNullable<Parameters<typeof updateTimeline>[1]>['content']
   }
   return updateTimeline(id, patch)
 }

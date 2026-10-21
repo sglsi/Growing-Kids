@@ -116,7 +116,11 @@ export class TimelineController {
   async findOne(@Req() req: RequestWithUser, @Param('id') id: string) {
     const userId = requireUserId(req)
     const data = await this.timelineService.findOne(userId, id)
-    return { code: 200, msg: 'success', data }
+    // ⚠️ 必须补签名 URL（思傅 2026-10-21：详情页只看到文字看不到图）——
+    //    findOne 此前直接返回裸行，question_image_urls/answer_image_urls/url/thumb_url
+    //    全缺失，前端按 url 渲染的图片统统不显示（列表走 list/overview 有补，所以首页能看）。
+    const [withUrl] = await this.timelineService.withUrls([data])
+    return { code: 200, msg: 'success', data: withUrl }
   }
 
   @Put(':id')
@@ -124,7 +128,10 @@ export class TimelineController {
   async update(@Req() req: RequestWithUser, @Param('id') id: string, @Body() dto: UpdateTimelineDto) {
     const userId = requireUserId(req)
     const data = await this.timelineService.update(userId, id, dto)
-    return { code: 200, msg: 'success', data }
+    // 同 findOne：更新后若返回裸行，详情页 setItem(updated) 会把签名 URL 冲掉
+    // ⇒ 保存一次后图片从页面消失。必须补 withUrls。
+    const [withUrl] = await this.timelineService.withUrls([data])
+    return { code: 200, msg: 'success', data: withUrl }
   }
 
   @Delete(':id')
