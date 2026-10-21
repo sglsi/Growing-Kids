@@ -14,8 +14,9 @@ import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
   fetchSubjects, updateTimeline, replaceTimelineImage,
-  type Overview, type TimelineItem, type Subject, type ImageAction,
+  type Overview, type TimelineItem, type Subject, type ImageAction, type Paged,
 } from '@/services/api'
+import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
 import { BUILD_META } from '@/build-meta'
@@ -56,8 +57,25 @@ export default function IndexPage() {
   const sel = useSelection()
 
   const load = async (sid = subjectFilter) => {
-    setLoading(true)
     setAuth(getAuthState())
+    // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
+    // 先同步读本地缓存渲染首帧（0 网络等待），再后台刷新、静默回写。
+    // 写操作已在 api.ts 收口失效缓存，这里取到即是最新。
+    const listKey = cacheListKey('tl', { scope: 'recent', subjectId: sid || '', pageSize: 20 })
+    const cachedOv = cacheGet<Overview>('tl:ov')
+    const cachedList = cacheGet<Paged<TimelineItem>>(listKey)
+    const cachedSubs = cacheGet<Subject[]>('subj:list')
+    if (cachedOv || cachedList || cachedSubs) {
+      if (cachedOv) setOverview(cachedOv)
+      if (cachedList) {
+        setInbox(cachedList.list)
+        setInboxTotal(cachedList.total)
+      }
+      if (cachedSubs) setSubjects(cachedSubs)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
     try {
       const [ov, list, subs] = await Promise.all([
         fetchOverview(),
@@ -69,8 +87,15 @@ export default function IndexPage() {
       setInbox(list.list)
       setInboxTotal(list.total)
       setSubjects(subs)
+      cacheSet('tl:ov', ov)
+      cacheSet(listKey, list)
+      if (subs.length) cacheSet('subj:list', subs)
     } catch (e) {
       console.error('加载概览失败', e)
+      // 有缓存则静默保留（刷新失败不打扰）；完全无缓存才提示
+      if (!cachedOv && !cachedList) {
+        Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
+      }
     } finally {
       setLoading(false)
     }

@@ -13,8 +13,9 @@ import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/ra
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument,
-  type Subject, type TimelineItem, type DocItem,
+  type Subject, type TimelineItem, type DocItem, type Paged,
 } from '@/services/api'
+import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import { FileText, FolderOpen } from 'lucide-react-taro'
@@ -52,17 +53,33 @@ export default function DocumentPage() {
 
   useDidShow(() => {
     if (subjects.length === 0) {
-      fetchSubjects().then(setSubjects).catch(() => {})
+      const cachedSubs = cacheGet<Subject[]>('subj:list')
+      if (cachedSubs) setSubjects(cachedSubs)
+      fetchSubjects()
+        .then((s) => {
+          setSubjects(s)
+          if (s.length) cacheSet('subj:list', s)
+        })
+        .catch(() => {})
     }
     sel.exit()
     loadDocs()
   })
 
   const loadDocs = async () => {
-    setDocsLoading(true)
+    // SWR（思傅 2026-10-21）：文档列表先读缓存，后台刷新回写
+    const listKey = cacheListKey('doc', { pageSize: 100 })
+    const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
+    if (cached) {
+      setDocs(cached.list || [])
+      setDocsLoading(false)
+    } else {
+      setDocsLoading(true)
+    }
     try {
       const res = await fetchDocuments({ pageSize: 100 })
       setDocs(res.list)
+      cacheSet(listKey, res)
     } catch (e) {
       console.error('加载文档失败', e)
     } finally {
@@ -76,11 +93,17 @@ export default function DocumentPage() {
     try {
       // v4：汇总数据源为 timeline（kind=question），已掌握过滤与时间/学科筛选均在后端
       const { start, end } = getDateRange(range, latestTimestamp)
-      const res = await fetchTimeline({
-        scope: 'recent',
-        subjectId: activeSubject || undefined,
-        pageSize: 100,
-      })
+      // SWR：重复预览同一筛选时先读缓存（写操作已失效 tl 域，拿到即最新）
+      const listKey = cacheListKey('tl', { scope: 'recent', subjectId: activeSubject || '', pageSize: 100 })
+      let res = cacheGet<Paged<TimelineItem>>(listKey)
+      if (!res) {
+        res = await fetchTimeline({
+          scope: 'recent',
+          subjectId: activeSubject || undefined,
+          pageSize: 100,
+        })
+        cacheSet(listKey, res)
+      }
       let list = res.list.filter((it) => it.kind === 'question')
       // 自动模式：首次预览时把最新一条记录为锚点
       if (!latestTimestamp && range === 'auto' && list[0]) {

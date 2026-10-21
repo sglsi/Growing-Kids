@@ -11,6 +11,7 @@ import {
   fetchSimilar, markReviewed, uploadImage, ocrPage,
   type Subject, type TimelineItem,
 } from '@/services/api'
+import { cacheGet, cacheSet } from '@/services/cache'
 import ImageEditor from '@/components/image-editor'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
@@ -63,16 +64,36 @@ export default function DetailPage() {
   const [ocrBusy, setOcrBusy] = useState(false)            // 图片文字识别中
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
 
-  const load = async () => {
-    const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
+  /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
+  const applyItem = (it: TimelineItem) => {
     setItem(it)
-    setSubjects(subs)
     setSubjectId(it.subject_id || '')
     setQContent(it.content?.question || '')
     setAContent(it.content?.answer || '')
     setSolution(it.content?.solution || '')
     setMastered(it.mastered)
     setPlan(computePlan(it.created_at, it.content?.review_count))
+  }
+
+  const load = async () => {
+    // SWR（思傅 2026-10-21）：先同步读缓存铺首帧，再后台刷新。
+    // 本页写操作（保存/改图/识别入库/复习本）都走 api.ts，成功后已失效 tl 域，
+    // 因此这里的 load() 缓存必然已空，拿到的是最新数据。
+    const itemKey = `tl:item:${id}`
+    const cached = cacheGet<TimelineItem>(itemKey)
+    if (cached) applyItem(cached)
+    const cachedSubs = cacheGet<Subject[]>('subj:list')
+    if (cachedSubs) setSubjects(cachedSubs)
+    try {
+      const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
+      applyItem(it)
+      setSubjects(subs)
+      cacheSet(itemKey, it)
+      if (subs.length) cacheSet('subj:list', subs)
+    } catch (e) {
+      console.error('加载题目失败', e)
+      if (!cached) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
+    }
   }
 
   useEffect(() => {

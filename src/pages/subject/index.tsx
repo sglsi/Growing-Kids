@@ -12,8 +12,9 @@ import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/ra
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
-  type Subject, type TimelineItem,
+  type Subject, type TimelineItem, type Paged,
 } from '@/services/api'
+import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
 
 const PAGE_SIZE = 20
@@ -40,6 +41,22 @@ export default function SubjectPage() {
     const { subjectId, keyword: kw, tag, page: p, since, append } = opts
     if (append) setLoadingMore(true)
     else setLoading(true)
+    // SWR（思傅 2026-10-21）：只对「第一页、非追加」查询读缓存——
+    // 分页追加的中间页缓存意义小且 key 会膨胀；写操作已在 api.ts 失效 tl 域。
+    const listKey = append
+      ? ''
+      : cacheListKey('tl', { scope: 'review', subjectId, keyword: kw, tag, since: since || '', page: p, pageSize: PAGE_SIZE })
+    const cached = listKey ? cacheGet<Paged<TimelineItem>>(listKey) : null
+    if (cached && !append) {
+      setItems(cached.list)
+      setTotal(cached.total)
+      setPage(cached.page)
+      if (cached.list[0]) {
+        const ts = cached.list[0].added_to_review_at || cached.list[0].created_at
+        if (ts) setLatestTimestamp(ts)
+      }
+      setLoading(false)
+    }
     try {
       const res = await fetchTimeline({
         scope: 'review',
@@ -53,6 +70,7 @@ export default function SubjectPage() {
       setItems((prev) => (append ? [...prev, ...res.list] : res.list))
       setTotal(res.total)
       setPage(res.page)
+      if (listKey) cacheSet(listKey, res)
       // 记录当前结果中最新一条的时间，作为"自动"模式的锚点
       if (!append && res.list[0]) {
         const ts = res.list[0].added_to_review_at || res.list[0].created_at
@@ -69,8 +87,11 @@ export default function SubjectPage() {
   const init = async () => {
     try {
       if (subjects.length === 0) {
+        const cachedSubs = cacheGet<Subject[]>('subj:list')
+        if (cachedSubs) setSubjects(cachedSubs)
         const subs = await fetchSubjects()
         setSubjects(subs)
+        if (subs.length) cacheSet('subj:list', subs)
       }
     } catch (e) {
       console.error('加载学科失败', e)

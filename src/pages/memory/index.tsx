@@ -12,6 +12,7 @@ import {
   fetchMemories, batchDeleteMemories,
   type Memory, type MemoryCategory, MEMORY_CATEGORIES,
 } from '@/services/memory'
+import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 
 type CatValue = MemoryCategory | 'all'
 
@@ -31,8 +32,23 @@ export default function MemoryHomePage() {
   const sel = useSelection()
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setErrorMsg(null)
+    // SWR（思傅 2026-10-21）：先同步读缓存渲染首帧，再后台刷新回写
+    const listKey = cacheListKey('mem', {
+      category: category === 'all' ? '' : category,
+      keyword: activeKeyword || '',
+      page: 1,
+      pageSize: 50,
+    })
+    const cached = cacheGet<{ list: Memory[]; total: number }>(listKey)
+    if (cached) {
+      setList(cached.list || [])
+      setTotal(cached.total || 0)
+      setErrorMsg(null)
+      setLoading(false)
+    } else {
+      setLoading(true)
+      setErrorMsg(null)
+    }
     try {
       const res = await fetchMemories({
         category: category === 'all' ? undefined : category,
@@ -42,8 +58,11 @@ export default function MemoryHomePage() {
       })
       // 列表响应需要解包：res.data.data.list
       const data = (res as any).data?.data || (res as any).data || res
-      setList((data.list || []) as Memory[])
-      setTotal(data.total || 0)
+      const nextList = (data.list || []) as Memory[]
+      const nextTotal = data.total || 0
+      setList(nextList)
+      setTotal(nextTotal)
+      cacheSet(listKey, { list: nextList, total: nextTotal })
     } catch (e) {
       const msg = e instanceof Error ? e.message : '加载失败'
       setErrorMsg(msg)

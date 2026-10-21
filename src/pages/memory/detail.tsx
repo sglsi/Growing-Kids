@@ -8,6 +8,7 @@ import {
   type Memory, type MemoryMedia,
   MEMORY_CATEGORIES, getMemoryCategoryLabel, getMemoryMoodLabel, getMemoryMoodEmoji,
 } from '@/services/memory'
+import { cacheGet, cacheSet } from '@/services/cache'
 import { getSubjectColor, formatDate } from '@/types'
 
 export default function MemoryDetailPage() {
@@ -20,12 +21,22 @@ export default function MemoryDetailPage() {
 
   const load = useCallback(async () => {
     if (!id) return
-    setLoading(true)
+    // SWR（思傅 2026-10-21）：先读缓存铺首帧，再后台刷新；写操作已失效 mem 域
+    const itemKey = `mem:item:${id}`
+    const cached = cacheGet<{ memory: Memory; media: MemoryMedia[] }>(itemKey)
+    if (cached) {
+      setMemory(cached.memory || null)
+      setMedia(cached.media || [])
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
     try {
       const res = await fetchMemoryDetail(id)
       const data = (res as any).data?.data || (res as any).data || res
       setMemory(data.memory as Memory)
       setMedia((data.media || []) as MemoryMedia[])
+      cacheSet(itemKey, { memory: data.memory, media: data.media || [] })
     } catch (e) {
       Taro.showToast({ title: '加载失败', icon: 'none' })
     } finally {

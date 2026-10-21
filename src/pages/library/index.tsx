@@ -11,8 +11,9 @@ import { confirmDelete, useSelection } from '@/lib/use-selection'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
   fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile,
-  type LibraryDoc, type Subject,
+  type LibraryDoc, type Subject, type Paged,
 } from '@/services/api'
+import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 
 /**
@@ -28,16 +29,28 @@ export default function LibraryPage() {
   const sel = useSelection()
 
   const load = async (opts: { keyword?: string; subjectId?: string } = {}) => {
-    setLoading(true)
+    // SWR（思傅 2026-10-21）：先同步读缓存渲染，再后台刷新回写
+    const kw = (opts.keyword !== undefined ? opts.keyword : keyword) || undefined
+    const sid = opts.subjectId || undefined
+    const listKey = cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', pageSize: 100 })
+    const cached = cacheGet<Paged<LibraryDoc>>(listKey)
+    if (cached) {
+      setDocs(cached.list)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
     try {
       const res = await fetchLibrary({
-        keyword: (opts.keyword !== undefined ? opts.keyword : keyword) || undefined,
-        subjectId: opts.subjectId || undefined,
+        keyword: kw,
+        subjectId: sid,
         pageSize: 100,
       })
       setDocs(res.list)
+      cacheSet(listKey, res)
     } catch (e) {
       console.error('加载资料库失败', e)
+      if (!cached) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
@@ -45,7 +58,15 @@ export default function LibraryPage() {
 
   useDidShow(() => {
     sel.exit()
-    fetchSubjects().then(setSubjects).catch(() => {})
+    // 学科列表也走缓存（少一次请求；变化时 api.ts 已失效 subj 域）
+    const cachedSubs = cacheGet<Subject[]>('subj:list')
+    if (cachedSubs) setSubjects(cachedSubs)
+    fetchSubjects()
+      .then((s) => {
+        setSubjects(s)
+        if (s.length) cacheSet('subj:list', s)
+      })
+      .catch(() => {})
     load()
   })
 
