@@ -66,6 +66,15 @@ export class UploadController {
     const purposeRaw = b.purpose ?? q.purpose ?? ''
     const purpose = String(Array.isArray(purposeRaw) ? purposeRaw[0] : purposeRaw).trim()
     const archive = purpose === 'save' || purpose === '1' || purpose === 'true'
+    // ── purpose 语义表（新增调用场景务必照此选，选错会多建/少建记录）──
+    //   save | 1 | true  → 归档：图片建 timeline(kind=image)、文档建 library 条目
+    //   temp             → 临时：ingestTemp，ref_count=0，24h 后由孤儿 GC 回收
+    //   memory           → 持久化但不建条目（成长记忆，key 由 memory_media 关联）
+    //   attach 及其他值  → 持久化但不建条目：作为**附件**被别处引用，
+    //                      例如错题提取的裁剪图 → 由题目的 content.question_images 引用
+    // ⚠️ 附件类上传绝不能写成 save：那会在上传瞬间就多出一条「最近题目」，
+    //    随后保存题目又建一条 ⇒ 首页同一道题显示成两行
+    //    （思傅 2026-10-21 复测「图文分家」的真正根因，见 handleCropConfirm）。
 
     // ===== 存储优化管线（复习本与项目设计.md §11.3 策略 1/2/4 + 5②/7）=====
     // 压缩（→WebP+缩略图）→ 内容去重（命中复用，不重复占对象存储）→ 落库。

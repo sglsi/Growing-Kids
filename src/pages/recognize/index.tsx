@@ -743,10 +743,16 @@ export default function RecognizePage() {
     if (entryIdx == null || !path) return
     setBoardBusy(true)
     try {
-      // ⭐ purpose='save'：裁剪出来的错题图要随题目正式入错题库，必须走「正式归档」上传，
-      //    不能用默认的 temp —— temp 上传 24h 后会被 GC 回收，导致「只有文字入库、图片裂掉/没入库」
-      //    （与 handleSaveImageDirect 同源修复：图片直存也用 purpose='save'）。
-      const up = await uploadImage(path, { purpose: 'save' })
+      // ⭐⚠️ purpose='attach'（思傅 2026-10-21 复测修复，勿改回 'save'）：
+      //    裁剪图是「挂到题目上」的附件，**不能**再单独建一条记录——
+      //    purpose='save' 会让后端 upload.controller 在上传时就建一条 kind='image'
+      //    的 timeline 记录（archive=true 分支），之后「存入错题库」又建一条
+      //    kind='question' ⇒ **首页出现两道题**（图一条、题一条），即分家的真正根因。
+      //    'attach' 在后端属于「非 archive、非 temp」：走 ingest() 正式存储
+      //    （引用计数 +1，永久保留，不会被 24h 孤儿 GC 回收），且不建任何条目，
+      //    只返回 key/url，由本题保存时写进 content.question_images。
+      //    对照：handleSaveImageDirect（整卷图直存）确需 'save'，那是要单独成条目的。
+      const up = await uploadImage(path, { purpose: 'attach' })
       setBoard((prev) =>
         prev.map((e, i) => (i === entryIdx ? { ...e, images: [...e.images, { url: up.url, key: up.key }] } : e)),
       )

@@ -100,7 +100,17 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
 //   purpose='memory' → 归档进「成长记忆」（2026-10-01 远端新增）
 // ============================================================
 export interface UploadOpts {
-  purpose?: 'save' | 'temp' | 'memory'
+  /**
+   * 上传用途（后端 upload.controller 的 purpose 语义表）：
+   *  - 'save'   ：归档——图片建一条 timeline(kind=image)、文档建一条 library 条目
+   *  - 'temp'   ：临时——ref_count=0，24h 后由孤儿 GC 回收（用完即弃的中间态）
+   *  - 'memory' ：持久化但不建条目（成长记忆，key 由 memory_media 关联）
+   *  - 'attach' ：持久化但**不建条目**——作为附件被别处引用（例：错题提取的裁剪图，
+   *               key 由题目的 content.question_images 引用）
+   * ⚠️ 附件类（attach）写错成 save 会在上传时就多出一条「最近题目」，
+   *    与随后保存的题目重复 ⇒ 首页同一题显示两行（2026-10-21 复测分家真因）。
+   */
+  purpose?: 'save' | 'temp' | 'memory' | 'attach'
 }
 
 // ============================================================
