@@ -60,14 +60,35 @@ export default function IndexPage() {
    */
   const [editorTarget, setEditorTarget] = useState<'item' | 'questionImage'>('item')
   const [editorIndex, setEditorIndex] = useState(0)
-  // 列表滚动位置（思傅 2026-10-21：进详情退出后回到上次位置，不回顶部）
+  // 列表滚动位置（思傅 2026-10-21 / 2026-10-22 增强）：
+  // 进详情退出后回到「同一道题」——按 id 锚定（而非像素偏移，列表重排也不再跑偏）；
+  // 列表内操作（加入复习本/删除/编辑保存/筛选）一律不触发回滚，停在当前位置。
   const [scrollTop, setScrollTop] = useState(0)
-  const scrollRef = useRef(0)
-  const restoredRef = useRef(false)
-  /** 待恢复的滚动位（等 load 完成、列表渲染后再 setScrollTop，避免 skeleton 高度不足滚不到位） */
-  const pendingRestoreRef = useRef(0)
+  const scrollRef = useRef(0) // 当前实际滚动位（onScroll 持续更新）
+  const restoredRef = useRef(false) // 防止每次 show 都被强行拉回旧位置
+  /** 待恢复的题目 id（仅「从详情返回」路径写入；列表内操作不写 → 不会误滚） */
+  const pendingRestoreIdRef = useRef<string>('')
+  /** 离开首页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
+  const restoreItemIdRef = useRef<string>('')
   const [savingEdit, setSavingEdit] = useState(false)
   const sel = useSelection()
+
+  /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
+  const scrollToItemById = (id: string, extra = 0) => {
+    const q = Taro.createSelectorQuery()
+    q.select('#list-scroll').scrollOffset()
+    q.select('#list-scroll').boundingClientRect()
+    q.select(`#tl-item-${id}`).boundingClientRect()
+    q.exec((res: any) => {
+      const so = res[0] as { scrollTop: number } | null
+      const sv = res[1] as { top: number } | null
+      const it = res[2] as { top: number } | null
+      if (!so || !sv || !it) return
+      const target = Math.max(0, so.scrollTop + (it.top - sv.top) - extra)
+      setScrollTop(target - 1)
+      setTimeout(() => setScrollTop(target), 40)
+    })
+  }
 
   const load = async (sid = subjectFilter) => {
     setAuth(getAuthState())
@@ -111,17 +132,11 @@ export default function IndexPage() {
       }
     } finally {
       setLoading(false)
-      // 列表已渲染出来（loading 结束）→ 此刻再恢复滚动位，否则 skeleton 阶段滚不到位
-      const pending = pendingRestoreRef.current
-      if (pending > 0) {
-        pendingRestoreRef.current = 0
-        // 双帧后设：等 React 把列表节点真正渲染进 ScrollView，高度足够才滚得动。
-        // 先设 pending-1 再设 pending：确保 scrollTop 值发生变化，Taro 受控组件才真正触发滚动
-        // （值若与上次相同，部分平台不会下发 scrollTo → 表现为「回到顶部」）。
-        setTimeout(() => {
-          setScrollTop(Math.max(0, pending - 1))
-          setTimeout(() => setScrollTop(pending), 40)
-        }, 60)
+      // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
+      const rid = pendingRestoreIdRef.current
+      if (rid) {
+        pendingRestoreIdRef.current = ''
+        setTimeout(() => scrollToItemById(rid, 8), 60)
       }
     }
   }
@@ -134,12 +149,10 @@ export default function IndexPage() {
 
   useDidShow(() => {
     sel.exit()
-    // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），不回顶部。
-    // 只恢复一次，避免每次 show 都被强行拉回旧位置。
-    // ⚠️ 不能在这里立刻 setScrollTop：此刻列表多为 skeleton（高度不足），
-    //    滚不到位。改为记入 pendingRestoreRef，等 load() 完成、列表渲染出来后再恢复。
-    if (!restoredRef.current && scrollRef.current > 0) {
-      pendingRestoreRef.current = scrollRef.current
+    // 从详情页返回：回到「同一道题」（按 id 锚定），不回顶部。只恢复一次。
+    // 仅靠 restoreItemIdRef 判断（handleOpen 写入）；列表内操作不写它 → 不会误滚。
+    if (!restoredRef.current && restoreItemIdRef.current) {
+      pendingRestoreIdRef.current = restoreItemIdRef.current
       restoredRef.current = true
     }
     load()
@@ -328,8 +341,8 @@ export default function IndexPage() {
    */
   const handleOpen = (item: TimelineItem) => {
     if (sel.selecting) { sel.toggle(item.id); return }
-    // 从详情返回后要回到此处：位置由 onScroll 持续记在 scrollRef，
-    // 这里只标记「下一轮 useDidShow 需要恢复一次」
+    // 记录点的是哪道题，回来时按 id 锚回原题（而非像素偏移 → 列表重排也不跑偏）
+    restoreItemIdRef.current = item.id
     restoredRef.current = false
     Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
   }
@@ -386,6 +399,7 @@ export default function IndexPage() {
         }}
       />
       <ScrollView
+        id="list-scroll"
         scrollY
         scrollTop={scrollTop}
         onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
@@ -529,17 +543,18 @@ export default function IndexPage() {
               {inbox.length ? (
                 <View className="space-y-3">
                   {inbox.map((item) => (
-                    <ReviewItemCard
-                      key={item.id}
-                      item={item}
-                      selecting={sel.selecting}
-                      checked={sel.selected.has(item.id)}
-                      onOpen={handleOpen}
-                      onTapImage={handleTapImage}
-                      onLongPress={(it) => sel.longPress(it.id)}
-                      onChangeSubject={openSubjectPicker}
-                      onMore={openMore}
-                    />
+                    <View id={`tl-item-${item.id}`} key={item.id}>
+                      <ReviewItemCard
+                        item={item}
+                        selecting={sel.selecting}
+                        checked={sel.selected.has(item.id)}
+                        onOpen={handleOpen}
+                        onTapImage={handleTapImage}
+                        onLongPress={(it) => sel.longPress(it.id)}
+                        onChangeSubject={openSubjectPicker}
+                        onMore={openMore}
+                      />
+                    </View>
                   ))}
                 </View>
               ) : (

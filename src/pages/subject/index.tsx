@@ -33,12 +33,31 @@ export default function SubjectPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState(false)
   const sel = useSelection()
-  // 列表滚动位置（思傅 2026-10-21：进详情退出后回到上次位置，不回顶部；与首页同一规则）
+  // 列表滚动位置（思傅 2026-10-21 / 2026-10-22 增强：与首页同一规则，按 id 锚回原题）
   const [scrollTop, setScrollTop] = useState(0)
   const scrollRef = useRef(0)
   const restoredRef = useRef(false)
-  /** 待恢复的滚动位（等 load 完成、列表渲染后再 setScrollTop，避免 skeleton 高度不足滚不到位） */
-  const pendingRestoreRef = useRef(0)
+  /** 待恢复的题目 id（仅「从详情返回」路径写入；列表内操作不写 → 不会误滚） */
+  const pendingRestoreIdRef = useRef<string>('')
+  /** 离开本页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
+  const restoreItemIdRef = useRef<string>('')
+
+  /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
+  const scrollToItemById = (id: string, extra = 0) => {
+    const q = Taro.createSelectorQuery()
+    q.select('#list-scroll').scrollOffset()
+    q.select('#list-scroll').boundingClientRect()
+    q.select(`#tl-item-${id}`).boundingClientRect()
+    q.exec((res: any) => {
+      const so = res[0] as { scrollTop: number } | null
+      const sv = res[1] as { top: number } | null
+      const it = res[2] as { top: number } | null
+      if (!so || !sv || !it) return
+      const target = Math.max(0, so.scrollTop + (it.top - sv.top) - extra)
+      setScrollTop(target - 1)
+      setTimeout(() => setScrollTop(target), 40)
+    })
+  }
 
   // 从当前页数据里汇总出现过的标签，供筛选
   const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
@@ -87,14 +106,11 @@ export default function SubjectPage() {
     } finally {
       setLoading(false)
       setLoadingMore(false)
-      // 列表已渲染出来（loading 结束）→ 恢复滚动位（双帧 + 先设偏移值强制 Taro 触发滚动）
-      const pending = pendingRestoreRef.current
-      if (pending > 0) {
-        pendingRestoreRef.current = 0
-        setTimeout(() => {
-          setScrollTop(Math.max(0, pending - 1))
-          setTimeout(() => setScrollTop(pending), 40)
-        }, 60)
+      // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
+      const rid = pendingRestoreIdRef.current
+      if (rid) {
+        pendingRestoreIdRef.current = ''
+        setTimeout(() => scrollToItemById(rid, 8), 60)
       }
     }
   }
@@ -123,9 +139,9 @@ export default function SubjectPage() {
   }
 
   useDidShow(() => {
-    // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），只恢复一次
-    if (!restoredRef.current && scrollRef.current > 0) {
-      pendingRestoreRef.current = scrollRef.current
+    // 从详情页返回：回到「同一道题」（按 id 锚定），只恢复一次
+    if (!restoredRef.current && restoreItemIdRef.current) {
+      pendingRestoreIdRef.current = restoreItemIdRef.current
       restoredRef.current = true
     }
     init()
@@ -158,7 +174,8 @@ export default function SubjectPage() {
       Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })
       return
     }
-    // 从详情返回后回到此处：位置由 onScroll 记在 scrollRef，这里只标记下一轮 show 需恢复
+    // 记录点的是哪道题，回来时按 id 锚回原题（而非像素偏移 → 列表重排也不跑偏）
+    restoreItemIdRef.current = item.id
     restoredRef.current = false
     Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
   }
@@ -243,6 +260,7 @@ export default function SubjectPage() {
       </View>
 
       <ScrollView
+        id="list-scroll"
         scrollY
         scrollTop={scrollTop}
         onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
@@ -265,15 +283,16 @@ export default function SubjectPage() {
             <>
               <View className="space-y-3">
                 {items.map((it) => (
-                  <ReviewItemCard
-                    key={it.id}
-                    item={it}
-                    selecting={sel.selecting}
-                    checked={sel.selected.has(it.id)}
-                    onOpen={handleOpen}
-                    onLongPress={(x) => sel.longPress(x.id)}
-                    timeField="added_to_review_at"
-                  />
+                  <View id={`tl-item-${it.id}`} key={it.id}>
+                    <ReviewItemCard
+                      item={it}
+                      selecting={sel.selecting}
+                      checked={sel.selected.has(it.id)}
+                      onOpen={handleOpen}
+                      onLongPress={(x) => sel.longPress(x.id)}
+                      timeField="added_to_review_at"
+                    />
+                  </View>
                 ))}
               </View>
               <View className="py-4 flex items-center justify-center">
