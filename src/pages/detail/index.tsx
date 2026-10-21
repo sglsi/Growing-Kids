@@ -344,9 +344,11 @@ export default function DetailPage() {
                 }
               }}
             >
-              <Text className="block text-sm text-primary">
-                {subjects.find((s) => s.id === subjectId)?.name || '选择学科'}
-              </Text>
+              <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
+                <Text className="block text-sm text-primary">
+                  {subjects.find((s) => s.id === subjectId)?.name || '选择学科'}
+                </Text>
+              </View>
             </Picker>
           </View>
 
@@ -395,7 +397,9 @@ export default function DetailPage() {
                 value={Math.max(0, subjects.findIndex((s) => s.id === subjectId))}
                 onChange={(e) => setSubjectId(subjects[Number(e.detail.value)]?.id || subjectId)}
               >
-                <Text className="block text-xs text-muted-foreground">切换学科</Text>
+                <View className="px-3 py-1 rounded-full" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
+                  <Text className="block text-xs text-primary">切换学科</Text>
+                </View>
               </Picker>
             </View>
             <Text

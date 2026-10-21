@@ -155,17 +155,12 @@ const ENHANCE_STRENGTHS: { value: 'weak' | 'medium' | 'strong'; label: string }[
  * 给默认值，不满意就自己拖到满意为止。滑杆归一化到 [0,1]，各模式映射到自己的合理区间：
  *  - brighten（增亮）：s=0 → 几乎不亮；s=1 → 提亮明显
  *  - enhance（增强并锐化）：s=0 → 轻提对比；s=1 → 强对比 + 强锐化
- *  - bw（黑白二值化）：s=0 → 偏软（文字易断/偏灰）；s=1 → 偏硬（噪点易被拉成黑点）
- *    默认 0.5 恰好落在此前 A/B 实测定型的 Sauvola k=0.2 等效点上（保持老行为不回归）
+ *  - bw（黑白二值化）：s=0.5 = 稳健基准（背景白、字清晰）；s<0.5 字略细（防糊），
+ *    s>0.5 字略粗（防断笔）。幅度克制，两端都不崩成黑团/全白
  *  - gray（灰度）：s 叠加轻微对比，让不同明暗的原图层次都合适
  *  - original：无效果，不展示滑杆
  */
 const PRESET_SLIDER_DEFAULT = 0.5
-
-/** 把滑杆 [0,1] 映射成 Sauvola k（小→阈值高、墨少=偏软；大→阈值低、墨多=偏硬） */
-function sliderToSauvolaK(s: number): number {
-  return 0.2 + (s - 0.5) * 0.34 // s=0.5 → 0.2（历史定型值），s∈[0,1] → k∈[0.03, 0.37]
-}
 
 const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
   { value: 'classical', label: '标准', hint: '轻量锐化 · CPU 友好' },
@@ -2377,7 +2372,9 @@ function applyPresetPixels(
   }
 
   if (preset === 'bw') {
-    binarizeWhiteBgBlackInk(d, n, w, h, sliderToSauvolaK(slider))
+    // 思傅 2026-10-21：纯扫 Sauvola k 会让两端崩（s 小→字糊成黑团，s 大→全白）。
+    // 改为「稳健基线 + 滑块控制墨迹粗细」，两端都保持可读。
+    binarizeWhiteBgBlackInk(d, n, w, h, slider)
     return
   }
 }
@@ -2396,7 +2393,23 @@ function applyPresetPixels(
  * 参数经真实故障图 A/B 实测定型：k=0.2、窗口 = max(15, 短边/15) 取奇、
  * R=128、3x3 中值去孤立斑（保标点：中值阈 5/9 邻域）。
  */
-function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number, kParam: number = 0.2) {
+/**
+ * 白底黑字二值化（思傅 2026-10-21 重做：稳健基线 + 滑块微调墨迹粗细）。
+ *
+ * ── 为什么不用「扫 Sauvola k」调滑块（2026-10-21 教训）────────────────
+ * 旧实现滑块线性映射到 Sauvola 的 k（自适应程度）：s→0 时阈值抬高、判墨暴增，
+ * 字糊成黑团；s→1 时阈值压低、判墨几乎为零，图近乎全白——两端都不可用。
+ * k 是「局部自适应程度」，不是「黑白对比」，拿它当滑块等于把整图推向极端。
+ *
+ * 新做法：
+ *  1. 先用**固定 k=0.2**（历史真实故障图 A/B 定型值）跑 Sauvola 局部自适应，
+ *     得到一张稳健可读的基准二值图（背景白、文字黑）。
+ *  2. 滑块 s∈[0,1] 只做**小幅墨迹粗细微调**（膨胀/侵蚀墨迹 + 阈值偏置）：
+ *     s=0.5 恰好 = 基准原样；s<0.5 墨迹略收（字变细、防糊）；s>0.5 墨迹略放
+ *     （字变粗、防断笔）。幅度克制（±），保证两端依旧可读、不会崩成黑团/全白。
+ *  3. 3x3 中值去斑保标点；自动反相兜底（暗背景照片）。
+ */
+function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number, slider: number = PRESET_SLIDER_DEFAULT) {
   const gray = new Float64Array(n)
   for (let i = 0; i < n; i++) {
     gray[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
@@ -2406,7 +2419,7 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
   if (win % 2 === 0) win += 1
   const r = (win - 1) / 2
   const area = win * win
-  // 积分图（边缘复制 padding）：S[i+1][j+1] = pad[i][j] + S[i][j+1] + S[i+1][j] − S[i][j]
+  // 积分图（边缘复制 padding）
   const pw = w + 2 * r
   const ph = h + 2 * r
   const SW = pw + 1
@@ -2415,7 +2428,6 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
   for (let i = 0; i < ph; i++) {
     const rowBase = (i + 1) * SW
     const prevBase = i * SW
-    // 边缘复制：padding 区取最近的边缘像素值
     const gy = i < r ? 0 : i >= ph - r ? h - 1 : i - r
     for (let j = 0; j < pw; j++) {
       const gx = j < r ? 0 : j >= pw - r ? w - 1 : j - r
@@ -2426,8 +2438,12 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
       intSq[idx] = v2 + intSq[prevBase + j + 1] + intSq[rowBase + j] - intSq[prevBase + j]
     }
   }
-  const K = kParam
+  // ⭐ 固定稳健基线 k=0.2（不再随滑块扫），只做局部自适应
+  const K = 0.2
   const R = 128
+  // 滑块 → 阈值偏置（小幅，两端不崩）：s=0.5 → 0；s<0.5 → 阈值略降(墨少=字细)
+  // s>0.5 → 阈值略升(墨多=字粗)。偏置幅度控制在 ±14 亮度，保证可读。
+  const bias = (slider - 0.5) * 28
   const bin = new Uint8Array(n)
   let ink = 0
   for (let y = 0; y < h; y++) {
@@ -2441,14 +2457,14 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
       const mean = s / area
       const variance = sq / area - mean * mean
       const std = variance > 0 ? Math.sqrt(variance) : 0
-      const T = mean * (1 + K * (std / R - 1))
+      const T = mean * (1 + K * (std / R - 1)) + bias
       const isInk = gray[y * w + x] < T
       if (isInk) ink++
       bin[y * w + x] = isInk ? 0 : 255
     }
   }
-  // 3x3 中值去斑：孤立噪点（<5/9 邻域为墨）被抹掉，成片笔画完整保留（标点不误伤）
-  const out = new Uint8Array(n)
+  // 3x3 中值去斑：孤立噪点抹掉，成片笔画保留（标点不误伤）
+  const med = new Uint8Array(n)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let black = 0
@@ -2461,7 +2477,32 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
           if (bin[ny * w + nx] === 0) black++
         }
       }
-      out[y * w + x] = black >= 5 ? 0 : 255
+      med[y * w + x] = black >= 5 ? 0 : 255
+    }
+  }
+  // ⭐ 滑块控制墨迹粗细：s>0.5 轻微膨胀（保断笔、字稍粗），s<0.5 轻微侵蚀（防糊、字稍细）
+  //    幅度克制（1~2 像素内），两端仍可读。s=0.5 不做形态学，保持基准。
+  const morph = Math.round((slider - 0.5) * 4) // -2..2，0=不动
+  const out = new Uint8Array(n)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x
+      if (morph === 0) { out[i] = med[i]; continue }
+      // 取邻域墨迹数（3x3），按 morph 方向判定
+      let black = 0
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy
+        if (ny < 0 || ny >= h) continue
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx
+          if (nx < 0 || nx >= w) continue
+          if (med[ny * w + nx] === 0) black++
+        }
+      }
+      // morph>0 膨胀：black>=阈值即变黑（阈值随 morph 降低→更易黑=变粗）
+      // morph<0 侵蚀：black>阈值才保黑（阈值随 morph 升高→更易白=变细）
+      const need = morph > 0 ? Math.max(1, 5 - morph) : 5 - morph
+      out[i] = black >= need ? 0 : 255
     }
   }
   // 自动反相兜底：暗背景/曝光异常照片（墨迹过半 → 实际是黑底白字）
