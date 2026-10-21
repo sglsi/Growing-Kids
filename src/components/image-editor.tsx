@@ -150,6 +150,23 @@ const ENHANCE_STRENGTHS: { value: 'weak' | 'medium' | 'strong'; label: string }[
   { value: 'strong', label: '强' },
 ]
 
+/**
+ * 思傅 2026-10-21：「黑白/灰度在有些图上好、有些图上不好」→ 强度从三档按钮改为**滑杆**，
+ * 给默认值，不满意就自己拖到满意为止。滑杆归一化到 [0,1]，各模式映射到自己的合理区间：
+ *  - brighten（增亮）：s=0 → 几乎不亮；s=1 → 提亮明显
+ *  - enhance（增强并锐化）：s=0 → 轻提对比；s=1 → 强对比 + 强锐化
+ *  - bw（黑白二值化）：s=0 → 偏软（文字易断/偏灰）；s=1 → 偏硬（噪点易被拉成黑点）
+ *    默认 0.5 恰好落在此前 A/B 实测定型的 Sauvola k=0.2 等效点上（保持老行为不回归）
+ *  - gray（灰度）：s 叠加轻微对比，让不同明暗的原图层次都合适
+ *  - original：无效果，不展示滑杆
+ */
+const PRESET_SLIDER_DEFAULT = 0.5
+
+/** 把滑杆 [0,1] 映射成 Sauvola k（小→阈值高、墨少=偏软；大→阈值低、墨多=偏硬） */
+function sliderToSauvolaK(s: number): number {
+  return 0.2 + (s - 0.5) * 0.34 // s=0.5 → 0.2（历史定型值），s∈[0,1] → k∈[0.03, 0.37]
+}
+
 const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
   { value: 'classical', label: '标准', hint: '轻量锐化 · CPU 友好' },
   { value: 'espcn', label: '神经网络', hint: 'ESPCN · 细节更好 · 慢' },
@@ -186,6 +203,8 @@ export default function ImageEditor({
   const [activePreset, setActivePreset] = useState<string>('enhance')
   /** 强度档位 */
   const [enhanceStrength, setEnhanceStrength] = useState<'weak' | 'medium' | 'strong'>('medium')
+  /** ⭐ 思傅 2026-10-21：画面模式强度滑杆（0~1，默认 0.5），实时重算预览 */
+  const [presetSlider, setPresetSlider] = useState(PRESET_SLIDER_DEFAULT)
   /** 多模式预览的「原图底稿」：换模式时以它为输入重新生成，避免在处理结果上二次叠加增强 */
   const [enhanceBase, setEnhanceBase] = useState<string>('')
   const [srPanelOpen, setSrPanelOpen] = useState(false)
@@ -231,6 +250,8 @@ export default function ImageEditor({
   const [canvasCss, setCanvasCss] = useState<{ w: number; h: number }>({ w: CANVAS_CSS_SIDE, h: CANVAS_CSS_SIDE })
 
   const canvasNodeRef = useRef<any>(null)
+  /** 强度滑杆拖动节流定时器（顶部声明，遵守 hooks 调用顺序） */
+  const sliderTimerRef = useRef<any>(null)
   const dragRef = useRef<{
     target: DragTarget
     startX: number
@@ -334,6 +355,7 @@ export default function ImageEditor({
     setModeThumbs({})
     setActivePreset('enhance')
     setEnhanceStrength('medium')
+    setPresetSlider(PRESET_SLIDER_DEFAULT)
     setEnhanceBase('')
     setActiveMode('bw')
     setSrPanelOpen(false)
@@ -1313,7 +1335,7 @@ export default function ImageEditor({
    * 点击即出预览（百毫秒级），不走后端；结果缓存到 modeThumbs 复用（二次点击秒切）。
    * 仅「高清扩展」超分才走后端（见 runEnhance）。
    */
-  const pickEnhanceModeLocal = async (preset: string) => {
+  const pickEnhanceModeLocal = async (preset: string, sliderVal?: number) => {
     if (aiBusy || busy) return
     setActivePreset(preset)
     // 原图模式直接回退底稿（无需计算）
@@ -1322,8 +1344,9 @@ export default function ImageEditor({
       setCurrentSrc(base)
       return
     }
-    // 缓存命中：直接切换主图（秒切，无等待）
-    const cached = modeThumbs[preset]?.url
+    // 缓存命中：直接切换主图（秒切，无等待）。⚠️ 键必须带滑杆值，否则拖杆后会拿到旧档结果
+    const s = sliderVal !== undefined ? sliderVal : presetSlider
+    const cached = modeThumbs[`${preset}@${s.toFixed(2)}`]?.url
     if (cached) {
       setCurrentSrc(cached)
       return
@@ -1334,8 +1357,8 @@ export default function ImageEditor({
     Taro.showLoading({ title: '预览中…', mask: false })
     try {
       const base = enhanceBase || currentSrc
-      const out = await renderLocalPreset(base, preset)
-      setModeThumbs((m) => ({ ...m, [preset]: { url: out } }))
+      const out = await renderLocalPreset(base, preset, s)
+      setModeThumbs((m) => ({ ...m, [`${preset}@${s.toFixed(2)}`]: { url: out } }))
       setCurrentSrc(out)
     } catch (e) {
       console.warn('[image-editor] 本地预览失败', e)
@@ -1347,10 +1370,24 @@ export default function ImageEditor({
   }
 
   /**
+   * ⭐ 思傅 2026-10-21：强度滑杆拖动 → 实时按新强度重算当前模式预览。
+   * 节流 160ms（拖动中不逐帧重算，松手立即出最终图），复用 pickEnhanceModeLocal 的缓存。
+   */
+  const onPresetSliderChange = (val: number) => {
+    setPresetSlider(val)
+    if (activeMode === 'hd' || activeMode === 'original') return
+    if (sliderTimerRef.current) clearTimeout(sliderTimerRef.current)
+    sliderTimerRef.current = setTimeout(() => {
+      // 重算时不复用「旧滑杆值」的缓存，也不受 modeThumbs 旧键影响（键已带 s）
+      void pickEnhanceModeLocal(activePreset === 'enhance' && activeMode ? activeMode : activePreset, val)
+    }, 160)
+  }
+
+  /**
    * 把指定「基础画面模式」应用到原图底稿，前端 Canvas 实时渲染并返回临时文件。
    * 不依赖后端，规避网络往返；像素操作（灰度/增亮/二值化/锐化）在客户端完成，点击即显。
    */
-  const renderLocalPreset = async (baseSrc: string, preset: string): Promise<string> => {
+  const renderLocalPreset = async (baseSrc: string, preset: string, sliderVal: number): Promise<string> => {
     const node = await waitCanvasNode()
     if (!node) throw new Error('画布未就绪，请稍后重试')
     const presetSrc = await toLocalIfRemote(baseSrc)
@@ -1370,7 +1407,7 @@ export default function ImageEditor({
     ctx.clearRect(0, 0, w, h)
     ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, w, h)
     const imageData = ctx.getImageData(0, 0, w, h)
-    applyPresetPixels(imageData.data, imageData.data.length / 4, w, h, preset, enhanceStrength)
+    applyPresetPixels(imageData.data, imageData.data.length / 4, w, h, preset, enhanceStrength, sliderVal)
     ctx.putImageData(imageData, 0, 0)
     await waitCanvasCss(w, h)
     return new Promise<string>((resolve, reject) => {
@@ -1744,7 +1781,9 @@ export default function ImageEditor({
             <View className="flex flex-row justify-between">
               {ENHANCE_PRESETS.map((p) => {
                 const active = activePreset === p.value
-                const thumb = modeThumbs[p.value]
+                // 缓存键带滑杆值（preset@0.50），取当前滑杆档下的图；没有就用该模式任意一张缩略
+                const thumb = modeThumbs[`${p.value}@${presetSlider.toFixed(2)}`]
+                  || Object.entries(modeThumbs).find(([k]) => k.startsWith(`${p.value}@`))?.[1]
                 if (!thumb?.url) return null
                 return (
                   <View key={p.value} className="flex flex-col items-center" onClick={() => pickEnhanceModeLocal(p.value)}>
@@ -1769,6 +1808,39 @@ export default function ImageEditor({
                 )
               })}
             </View>
+            {/* ⭐ 思傅 2026-10-21：强度滑杆也在「选择效果」栏露出（与智能高清抽屉同一状态），
+                用户不进抽屉也能调黑白/灰度/增亮/增强的强度 */}
+            {activePreset && activePreset !== 'original' && activePreset !== 'hd' ? (
+              <View className="mt-3">
+                <View className="flex flex-row items-center justify-between mb-1">
+                  <Text className="block text-white text-opacity-70 text-xs">效果强度</Text>
+                  <Text className="block text-white text-xs">{Math.round(presetSlider * 100)}</Text>
+                </View>
+                <Slider
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round(presetSlider * 100)}
+                  activeColor="#3b82f6"
+                  backgroundColor="rgba(255,255,255,0.18)"
+                  block-size={18}
+                  block-color="#3b82f6"
+                  style={{ margin: 0 }}
+                  onChanging={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
+                  onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
+                />
+                <View className="flex flex-row items-center justify-between mt-1">
+                  <Text className="block text-white text-opacity-50 text-[10px]">轻</Text>
+                  <Text
+                    className="block text-white text-opacity-70 text-[10px]"
+                    onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
+                  >
+                    恢复默认
+                  </Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">重</Text>
+                </View>
+              </View>
+            ) : null}
           </View>
         )}
 
@@ -1853,7 +1925,7 @@ export default function ImageEditor({
         ) : null}
 
         <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
-          <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '使用此图（返回）')}</Text>
+          <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
         </Button>
       </View>
 
@@ -1952,7 +2024,45 @@ export default function ImageEditor({
               </View>
             )}
 
-            {/* 强度档位（P1）：把"是否过头"的把控权交给用户 */}
+            {/* ⭐ 思傅 2026-10-21：强度滑杆（默认 0.5），拖动实时重算当前模式预览——
+                不同来源图片明暗/清晰度不同，三档不够用，交给用户自己调到满意 */}
+            {activeMode !== 'hd' && activeMode !== 'original' ? (
+              <View className="mb-4 mt-3">
+                <View className="flex flex-row items-center justify-between mb-2">
+                  <Text className="block text-white text-opacity-70 text-xs">
+                    效果强度（{activeMode === 'bw' ? '黑白' : activeMode === 'gray' ? '灰度' : activeMode === 'brighten' ? '增亮' : '增强并锐化'}）
+                  </Text>
+                  <Text className="block text-white text-xs">{Math.round(presetSlider * 100)}</Text>
+                </View>
+                <Slider
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round(presetSlider * 100)}
+                  activeColor="#3b82f6"
+                  backgroundColor="rgba(255,255,255,0.18)"
+                  block-size={18}
+                  block-color="#3b82f6"
+                  style={{ margin: 0 }}
+                  onChanging={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
+                  onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
+                />
+                <View className="flex flex-row items-center justify-between mt-1">
+                  <Text className="block text-white text-opacity-50 text-[10px]">轻</Text>
+                  <Text
+                    className="block text-white text-opacity-70 text-[10px]"
+                    onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
+                  >
+                    恢复默认
+                  </Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">重</Text>
+                </View>
+              </View>
+            ) : null}
+
+            {/* 增强强度（P1）：把"是否过头"的把控权交给用户 */}
+            {activeMode === 'hd' && (
+              <>
             <Text className="block text-white text-opacity-70 text-xs mb-2 mt-3">增强强度</Text>
             <View className="flex flex-row gap-2 mb-4">
               {ENHANCE_STRENGTHS.map((s) => {
@@ -1974,6 +2084,8 @@ export default function ImageEditor({
                 )
               })}
             </View>
+              </>
+            )}
 
             <View className="flex flex-row gap-3">
               <Button
@@ -2202,6 +2314,7 @@ function applyPresetPixels(
   h: number,
   preset: string,
   strength: 'weak' | 'medium' | 'strong',
+  slider: number = PRESET_SLIDER_DEFAULT,
 ) {
   if (preset === 'original') return
 
@@ -2210,12 +2323,21 @@ function applyPresetPixels(
       const g = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
       d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = g
     }
+    // 思傅 2026-10-21：灰度也带滑杆（对比强度）——不同明暗/清晰度的原图灰度后层次不同，
+    // 用户拖杆在 1.0（原样灰度）↔ 1.55（强对比、更"立"）之间自选
+    const contrast = 1.0 + slider * 0.55
+    for (let i = 0; i < n; i++) {
+      const v = clamp255((d[4 * i] - 128) * contrast + 128)
+      d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v
+    }
     return
   }
 
   if (preset === 'brighten') {
-    const a = 1.18
-    const b = 42
+    // s=0.5 → 等价老默认 a≈1.18/b=42；s=0 → 几乎不变；s=1 → 明显提亮
+    const s = slider
+    const a = 1.0 + s * 0.36
+    const b = s * 84
     for (let i = 0; i < n; i++) {
       d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
       d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
@@ -2225,19 +2347,21 @@ function applyPresetPixels(
   }
 
   if (preset === 'enhance') {
-    const a = 1.3 + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
-    const b = 12
+    // s=0.5 → 等价老默认 a=1.3 / sharpen=0.9；s 越大对比与锐化越强
+    const base = 1.0 + slider * 0.6
+    const a = base + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
+    const b = slider * 24
     for (let i = 0; i < n; i++) {
       d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
       d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
       d[4 * i + 2] = clamp255((d[4 * i + 2] - 128) * a + 128 + b)
     }
-    sharpen3x3(d, w, h, strength === 'strong' ? 1.2 : strength === 'weak' ? 0.6 : 0.9)
+    sharpen3x3(d, w, h, 0.15 + slider * 1.5)
     return
   }
 
   if (preset === 'bw') {
-    binarizeWhiteBgBlackInk(d, n, w, h)
+    binarizeWhiteBgBlackInk(d, n, w, h, sliderToSauvolaK(slider))
     return
   }
 }
@@ -2256,7 +2380,7 @@ function applyPresetPixels(
  * 参数经真实故障图 A/B 实测定型：k=0.2、窗口 = max(15, 短边/15) 取奇、
  * R=128、3x3 中值去孤立斑（保标点：中值阈 5/9 邻域）。
  */
-function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number) {
+function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number, kParam: number = 0.2) {
   const gray = new Float64Array(n)
   for (let i = 0; i < n; i++) {
     gray[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
@@ -2286,7 +2410,7 @@ function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: 
       intSq[idx] = v2 + intSq[prevBase + j + 1] + intSq[rowBase + j] - intSq[prevBase + j]
     }
   }
-  const K = 0.2
+  const K = kParam
   const R = 128
   const bin = new Uint8Array(n)
   let ink = 0
