@@ -311,7 +311,16 @@ export class TimelineService {
     // ⚠️ 必须支持原位替换（前端编辑已入库图片时直接 PUT file_key/thumb_key）。
     // 旧方案「新建条目+软删旧条目」会让新条目插到列表最前、旧条目软删失败时残留，
     // 造成「编辑 A 后编辑 B，打开的却是 A 的图」的错位（列表顺序每次编辑都在变）。
-    if (dto.file_key !== undefined) payload.file_key = dto.file_key
+    //
+    // ⚠️ thumb_key 与 file_key 是**两个独立存储位置**（列表渲染 thumb_url || url）。
+    //    调用方只换 file_key 不换 thumb_key ⇒ 列表仍显示旧缩略图
+    //    （思傅 2026-10-21 反馈「改了图列表还是旧图」的真因，非缓存）。
+    //    防御：换 file_key 而未显式给 thumb_key 时，默认让缩略图跟随主图，
+    //    保证任何调用方都不会留下过期缩略图。
+    if (dto.file_key !== undefined) {
+      payload.file_key = dto.file_key
+      if (dto.thumb_key === undefined) payload.thumb_key = dto.file_key
+    }
     if (dto.thumb_key !== undefined) payload.thumb_key = dto.thumb_key
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered

@@ -167,7 +167,9 @@ export default function DetailPage() {
     try {
       const up = await uploadImage(tempPath, { purpose: 'attach' })
       if (item.kind === 'image') {
-        await updateTimeline(item.id, { file_key: up.key })
+        // ⚠️ thumb_key 必须同步换：列表卡片渲染 thumb_url || url，而 thumb_url 来自
+        //    另一列 thumb_key。只换 file_key 会让列表/点开仍显示旧图（思傅 2026-10-21 反馈）。
+        await updateTimeline(item.id, { file_key: up.key, thumb_key: up.thumb_key || null })
       } else {
         const urls = item.question_image_urls || []
         const keys = item.content?.question_images || []

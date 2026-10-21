@@ -174,7 +174,7 @@ async function compressForUpload(filePath: string): Promise<string> {
 export async function uploadFile(
   filePath: string,
   opts: UploadOpts = {},
-): Promise<{ key: string; url: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
+): Promise<{ key: string; url: string; thumb_key?: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
   // 上传前先在本机粗压（省流量）；服务端还会再精压一次
   const srcPath = await compressForUpload(filePath)
   const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : `/api/upload${opts.purpose ? `?purpose=${opts.purpose}` : ''}`
@@ -196,7 +196,7 @@ export async function uploadFile(
   console.log('[Upload Response]', res.statusCode, res.data)
   const body = typeof res.data === 'string'
     ? JSON.parse(res.data)
-    : (res.data as ApiEnvelope<{ key: string; url: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }>)
+    : (res.data as ApiEnvelope<{ key: string; url: string; thumb_key?: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }>)
   if (res.statusCode < 200 || res.statusCode >= 300) {
     // 配额超限（413）时把 code 带出去，便于 UI 区分「空间满」与「张数满」并引导清理/升级
     const err = new Error(body?.msg || '上传失败') as Error & { quotaCode?: string; quota?: unknown }
@@ -229,12 +229,15 @@ export async function uploadFile(
 export async function uploadImage(
   filePathOrUrl: string,
   opts: UploadOpts = {},
-): Promise<{ key: string; url: string; timeline_id?: string }> {
+): Promise<{ key: string; url: string; thumb_key?: string; thumb_url?: string; timeline_id?: string }> {
   // ⚠️ 必须用 isRemoteImageUrl：开发者工具的 tempFilePath 是 `http://tmp/…`，
   // 若当成远程 URL 复用 → 根本不上传 → 后端拿到 `http://tmp/…` →
   // `getaddrinfo ENOTFOUND tmp`（全页 OCR / 智能高清全线失败的元凶）。
   const isRemote = isRemoteImageUrl(filePathOrUrl)
-  if (!isRemote) return uploadFile(filePathOrUrl, opts)
+  if (!isRemote) {
+    const up = await uploadFile(filePathOrUrl, opts)
+    return { key: up.key, url: up.url, thumb_key: up.thumb_key, thumb_url: up.thumb_url, timeline_id: up.timeline_id }
+  }
 
   // 远程图：只有在需要落库（save）时才下载再上传；否则直接复用 URL
   if (opts.purpose !== 'save') {
@@ -245,7 +248,7 @@ export async function uploadImage(
   const localPath = (dl as any)?.tempFilePath
   if (!localPath) throw new Error('处理结果下载失败，无法保存')
   const up = await uploadFile(localPath, opts)
-  return { key: up.key, url: up.url, timeline_id: up.timeline_id }
+  return { key: up.key, url: up.url, thumb_key: up.thumb_key, thumb_url: up.thumb_url, timeline_id: up.timeline_id }
 }
 
 // ============================================================
@@ -462,7 +465,12 @@ export function updateTimeline(
     content?: TimelineContentPayload
     /** kind=image 的原位替换：直接更新条目指向的文件 key（列表顺序不变） */
     file_key?: string
-    thumb_key?: string
+    /**
+     * 缩略图 key。与 file_key 是**两个独立存储位置**，换主图必须同步换它，
+     * 否则列表仍渲染旧 thumb_url（思傅 2026-10-21 反馈）。
+     * 传 null = 显式清空，让列表回退用 file_key 对应的主图。
+     */
+    thumb_key?: string | null
   },
 ) {
   return invalidateAfter(
@@ -545,16 +553,28 @@ export function batchDeleteTimeline(ids: string[]) {
  *   用户按记忆位置点「更多」会打开**别的题目的图**（正是「编辑 A 后操作 B，看到的却是 A」的根因）。
  *   原位替换后条目 id 不变、位置不变、学科/复习本等属性全部保留。
  *
- * 做法：编辑结果以 purpose='temp' 上传（不落库）→ PUT /api/timeline/:id 更新 file_key/thumb_key。
+ * 做法：编辑结果以 purpose='attach' 上传（持久化、不建条目）→
+ *       PUT /api/timeline/:id 更新 file_key/thumb_key。
+ *
+ * ⚠️ 两处历史坑（2026-10-21 思傅反馈修复）：
+ *   1) 旧代码只 PUT `file_key` 不 PUT `thumb_key`。列表卡片渲染的是
+ *      `item.thumb_url || item.url`，而 thumb_url 来自**另一列** thumb_key
+ *      ⇒ 主图换了、缩略图还指向旧文件 ⇒ 列表/点开仍显示「未修改的图片」
+ *      （这不是缓存问题，是两张图分别存在 DB 的不同位置）。
+ *   2) 旧代码用 purpose='temp' 上传：temp 走 ingestTemp，ref_count=0，
+ *      24h 后就被孤儿 GC 真删 ⇒ 换过的图第二天裂掉。改用 'attach'
+ *      （走正式 ingest、登记引用计数、但不建条目）。
+ *
  * @returns 原条目 id（位置不变）
  */
 export async function replaceTimelineImage(
   oldItem: { id: string; subject_id?: string | null },
   editedFileOrUrl: string,
 ): Promise<{ id: string }> {
-  const up = await uploadImage(editedFileOrUrl, { purpose: 'temp' })
+  const up = await uploadImage(editedFileOrUrl, { purpose: 'attach' })
   if (!up?.key) throw new Error('编辑结果上传失败，请重试')
-  await updateTimeline(oldItem.id, { file_key: up.key })
+  // thumb_key 同步换新；服务端没给出缩略图时显式置 null，让列表回退用主图（绝不留旧缩略图）
+  await updateTimeline(oldItem.id, { file_key: up.key, thumb_key: up.thumb_key || null })
   return { id: oldItem.id }
 }
 
