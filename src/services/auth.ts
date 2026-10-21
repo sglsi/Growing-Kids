@@ -13,6 +13,7 @@
 import Taro from '@tarojs/taro'
 import { Network } from '@/network'
 import { buildHeaders, captureUserId, getUserId, setUserId } from '@/services/net'
+import { clearAllCache } from '@/services/cache'
 import type {
   ApiEnvelope,
 } from '@/types'
@@ -75,6 +76,8 @@ export function toAuthState(user: AuthUser): AuthState {
 export function applyLoginUser(user: AuthUser): void {
   setUserId(user.id)
   saveAuthState(toAuthState(user))
+  // 与 login() 同一动作：身份切换后旧缓存作废（详见 cache.ts 的 userId 隔离设计）
+  clearAllCache()
 }
 
 // ------------------------------------------------------------
@@ -135,6 +138,9 @@ export async function login(profile?: UpdateProfilePayload): Promise<LoginResult
   // 关键：把身份切换到正式用户，后续所有请求都用它
   setUserId(res.user.id)
   saveAuthState(toAuthState(res.user))
+  // 匿名 → 正式：userId 变了，旧匿名身份下的本地缓存全部作废（数据虽已迁移，
+  // 缓存 key 按 userId 隔离，不清会残留一段无人认领的缓存；顺带防切换账号串数据）
+  clearAllCache()
   return res
 }
 
@@ -178,6 +184,8 @@ export async function logout(): Promise<void> {
   } catch {
     /* ignore */
   }
+  // 本地读缓存（SWR）按 userId 隔离，登出即整体清空，防止下次登录看到上账号数据
+  clearAllCache()
 }
 
 /**

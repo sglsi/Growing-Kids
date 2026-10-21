@@ -14,6 +14,7 @@ import Taro from '@tarojs/taro'
 import { Network } from '@/network'
 import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders, captureUserId } from '@/services/net'
+import { invalidateDomain } from '@/services/cache'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
   SimilarItem, ReviewPlan,
@@ -56,6 +57,30 @@ async function unwrap<T>(p: Promise<ReqResult>): Promise<T> {
     throw new Error(body.msg || '请求失败')
   }
   return body.data
+}
+
+/**
+ * 写操作收口：请求**成功**后才按域失效本地缓存（SWR 方案的一环）。
+ *
+ * 用法：return invalidateAfter(unwrap<T>(Network.request({...})), 'tl')
+ *   - 'tl'   timeline 域（列表/详情/概览）——题目任何写操作
+ *   - 'subj' 学科域；'lib' 资料库域；'doc' 文档域
+ *   - 多域可传多个：invalidateAfter(p, 'subj', 'tl')
+ *
+ * 失败不清：请求 reject 时缓存原样保留（仍反映服务端现状，页面回退显示缓存）。
+ * 对应思傅 2026-10-21「没触发数据库操作时只读缓存；触发了就让缓存失效」。
+ */
+function invalidateAfter<T>(p: Promise<T>, ...domains: string[]): Promise<T> {
+  if (!domains.length) return p
+  return p.then(
+    (v) => {
+      for (const d of domains) invalidateDomain(d)
+      return v
+    },
+    (e) => {
+      throw e
+    },
+  )
 }
 
 // 校验并解包识别类接口响应（不允许静默失败）
@@ -181,6 +206,14 @@ export async function uploadFile(
     }
     throw err
   }
+  // 上传即建条目的 purpose（save/memory）要失效对应缓存域；
+  // temp/attach 不建条目，无需失效。
+  if (opts.purpose === 'save') {
+    invalidateDomain('tl')
+    invalidateDomain('lib')
+  } else if (opts.purpose === 'memory') {
+    invalidateDomain('mem')
+  }
   return body.data
 }
 
@@ -222,15 +255,24 @@ export function fetchSubjects() {
 }
 
 export function createSubject(payload: { name: string; color?: string; sort_order?: number }) {
-  return unwrap<Subject>(Network.request({ url: '/api/subjects', method: 'POST', data: payload, header: authHeaders() }))
+  return invalidateAfter(
+    unwrap<Subject>(Network.request({ url: '/api/subjects', method: 'POST', data: payload, header: authHeaders() })),
+    'subj', 'tl',
+  )
 }
 
 export function updateSubject(id: string, payload: { name?: string; color?: string; sort_order?: number }) {
-  return unwrap<Subject>(Network.request({ url: `/api/subjects/${id}`, method: 'PUT', data: payload, header: authHeaders() }))
+  return invalidateAfter(
+    unwrap<Subject>(Network.request({ url: `/api/subjects/${id}`, method: 'PUT', data: payload, header: authHeaders() })),
+    'subj', 'tl',
+  )
 }
 
 export function deleteSubject(id: string) {
-  return unwrap<{ id: string }>(Network.request({ url: `/api/subjects/${id}`, method: 'DELETE', header: authHeaders() }))
+  return invalidateAfter(
+    unwrap<{ id: string }>(Network.request({ url: `/api/subjects/${id}`, method: 'DELETE', header: authHeaders() })),
+    'subj', 'tl',
+  )
 }
 
 /**
@@ -355,15 +397,21 @@ export interface CreateTimelinePayload {
 }
 
 export function createTimeline(payload: CreateTimelinePayload) {
-  return unwrap<TimelineItem>(
-    Network.request({ url: '/api/timeline', method: 'POST', data: payload, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<TimelineItem>(
+      Network.request({ url: '/api/timeline', method: 'POST', data: payload, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
 /** 批量创建多条 timeline 条目（一次提取多道题时替代循环单条，一次落库） */
 export function createTimelineBatch(payloads: CreateTimelinePayload[]) {
-  return unwrap<{ list: TimelineItem[] }>(
-    Network.request({ url: '/api/timeline/batch', method: 'POST', data: { items: payloads }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ list: TimelineItem[] }>(
+      Network.request({ url: '/api/timeline/batch', method: 'POST', data: { items: payloads }, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -416,8 +464,11 @@ export function updateTimeline(
     thumb_key?: string
   },
 ) {
-  return unwrap<TimelineItem>(
-    Network.request({ url: `/api/timeline/${id}`, method: 'PUT', data: payload, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<TimelineItem>(
+      Network.request({ url: `/api/timeline/${id}`, method: 'PUT', data: payload, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -462,8 +513,11 @@ export function updateQuestion(
 }
 
 export function deleteTimeline(id: string) {
-  return unwrap<{ id: string }>(
-    Network.request({ url: `/api/timeline/${id}`, method: 'DELETE', header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ id: string }>(
+      Network.request({ url: `/api/timeline/${id}`, method: 'DELETE', header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -472,8 +526,11 @@ export const deleteQuestion = deleteTimeline
 
 /** 批量软删 */
 export function batchDeleteTimeline(ids: string[]) {
-  return unwrap<{ removed: number }>(
-    Network.request({ url: '/api/timeline/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ removed: number }>(
+      Network.request({ url: '/api/timeline/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -542,15 +599,21 @@ export async function diagnoseOcr(): Promise<Record<string, unknown>> {
 
 /** 加入复习本 */
 export function addToReviewBook(ids: string[]) {
-  return unwrap<{ updated: number }>(
-    Network.request({ url: '/api/timeline/review-book', method: 'POST', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ updated: number }>(
+      Network.request({ url: '/api/timeline/review-book', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
 /** 移出复习本 */
 export function removeFromReviewBook(ids: string[]) {
-  return unwrap<{ updated: number }>(
-    Network.request({ url: '/api/timeline/review-book', method: 'DELETE', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ updated: number }>(
+      Network.request({ url: '/api/timeline/review-book', method: 'DELETE', data: { ids }, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -563,8 +626,11 @@ export function fetchSimilar(id: string, limit = 5) {
 
 /** P2-18 艾宾浩斯复习：标记本次复习已完成，返回更新后的复习计划 */
 export function markReviewed(id: string) {
-  return unwrap<{ review_count: number; plan: ReviewPlan }>(
-    Network.request({ url: `/api/timeline/${id}/review`, method: 'POST', data: {}, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ review_count: number; plan: ReviewPlan }>(
+      Network.request({ url: `/api/timeline/${id}/review`, method: 'POST', data: {}, header: authHeaders() }),
+    ),
+    'tl',
   )
 }
 
@@ -607,20 +673,29 @@ export function createLibraryDoc(payload: {
   source?: string
   tags?: string[]
 }) {
-  return unwrap<LibraryDoc>(
-    Network.request({ url: '/api/library', method: 'POST', data: payload, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<LibraryDoc>(
+      Network.request({ url: '/api/library', method: 'POST', data: payload, header: authHeaders() }),
+    ),
+    'lib',
   )
 }
 
 export function deleteLibraryDoc(id: string) {
-  return unwrap<{ id: string }>(
-    Network.request({ url: `/api/library/${id}`, method: 'DELETE', header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ id: string }>(
+      Network.request({ url: `/api/library/${id}`, method: 'DELETE', header: authHeaders() }),
+    ),
+    'lib',
   )
 }
 
 export function batchDeleteLibrary(ids: string[]) {
-  return unwrap<{ removed: number }>(
-    Network.request({ url: '/api/library/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ removed: number }>(
+      Network.request({ url: '/api/library/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'lib',
   )
 }
 
@@ -982,8 +1057,11 @@ export interface ExportParams {
 }
 
 export function exportDocument(params: ExportParams) {
-  return unwrap<{ url: string; file_key: string; title: string }>(
-    Network.request({ url: '/api/document/export', method: 'POST', data: params, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ url: string; file_key: string; title: string }>(
+      Network.request({ url: '/api/document/export', method: 'POST', data: params, header: authHeaders() }),
+    ),
+    'doc',
   )
 }
 
@@ -1000,14 +1078,20 @@ export function fetchDocuments(opts: { type?: string; keyword?: string; page?: n
 }
 
 export function batchDeleteDocuments(ids: string[]) {
-  return unwrap<{ removed: number }>(
-    Network.request({ url: '/api/documents/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ removed: number }>(
+      Network.request({ url: '/api/documents/batch-delete', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'doc',
   )
 }
 
 export function deleteDocument(id: string) {
-  return unwrap<{ id: string }>(
-    Network.request({ url: `/api/documents/${id}`, method: 'DELETE', header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ id: string }>(
+      Network.request({ url: `/api/documents/${id}`, method: 'DELETE', header: authHeaders() }),
+    ),
+    'doc',
   )
 }
 
@@ -1015,8 +1099,11 @@ export function deleteDocument(id: string) {
 // 图片合成 PDF（素材 id 现指 timeline item id）
 // ============================================================
 export function combineToPdf(ids: string[]) {
-  return unwrap<{ url: string; key: string; doc_id: string; pages: number; fillRatio: number }>(
-    Network.request({ url: '/api/pdf/combine', method: 'POST', data: { ids }, header: authHeaders() }),
+  return invalidateAfter(
+    unwrap<{ url: string; key: string; doc_id: string; pages: number; fillRatio: number }>(
+      Network.request({ url: '/api/pdf/combine', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'doc',
   )
 }
 

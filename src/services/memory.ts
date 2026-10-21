@@ -1,4 +1,19 @@
 import { Network } from '@/network'
+import { invalidateDomain } from '@/services/cache'
+
+/** 写操作收口：成功后失效 mem 缓存域（与 api.ts 的 invalidateAfter 同义） */
+function invalidateAfter<T>(p: Promise<T>, ...domains: string[]): Promise<T> {
+  if (!domains.length) return p
+  return p.then(
+    (v) => {
+      for (const d of domains) invalidateDomain(d)
+      return v
+    },
+    (e) => {
+      throw e
+    },
+  )
+}
 
 export type MemoryCategory = 'study' | 'life' | 'hobby' | 'feel' | 'other'
 export type MemoryMood = 'happy' | 'calm' | 'excited' | 'thoughtful' | 'sad' | 'proud'
@@ -128,43 +143,61 @@ export function fetchMemoryDetail(id: string) {
 
 /** 创建 */
 export function createMemory(payload: CreateMemoryPayload) {
-  return Network.request<Memory>({ url: '/api/memories', method: 'POST', data: payload })
+  return invalidateAfter(
+    Network.request<Memory>({ url: '/api/memories', method: 'POST', data: payload }),
+    'mem',
+  )
 }
 
 /** 修改 */
 export function updateMemory(id: string, payload: UpdateMemoryPayload) {
-  return Network.request<Memory>({ url: `/api/memories/${id}`, method: 'PATCH', data: payload })
+  return invalidateAfter(
+    Network.request<Memory>({ url: `/api/memories/${id}`, method: 'PATCH', data: payload }),
+    'mem',
+  )
 }
 
 /** 删除（软删） */
 export function deleteMemory(id: string) {
-  return Network.request<{ id: string }>({ url: `/api/memories/${id}`, method: 'DELETE' })
+  return invalidateAfter(
+    Network.request<{ id: string }>({ url: `/api/memories/${id}`, method: 'DELETE' }),
+    'mem',
+  )
 }
 
 /** 批量删除 */
 export function batchDeleteMemories(ids: string[]) {
-  return Network.request<{ count: number }>({
-    url: '/api/memories/batch-delete',
-    method: 'POST',
-    data: { ids },
-  })
+  return invalidateAfter(
+    Network.request<{ count: number }>({
+      url: '/api/memories/batch-delete',
+      method: 'POST',
+      data: { ids },
+    }),
+    'mem',
+  )
 }
 
 /** 追加媒体 */
 export function addMemoryMedia(memoryId: string, payload: CreateMemoryMediaPayload) {
-  return Network.request<MemoryMedia>({
-    url: `/api/memories/${memoryId}/media`,
-    method: 'POST',
-    data: payload,
-  })
+  return invalidateAfter(
+    Network.request<MemoryMedia>({
+      url: `/api/memories/${memoryId}/media`,
+      method: 'POST',
+      data: payload,
+    }),
+    'mem',
+  )
 }
 
 /** 删除媒体 */
 export function deleteMemoryMedia(memoryId: string, mediaId: string) {
-  return Network.request<{ id: string }>({
-    url: `/api/memories/${memoryId}/media/${mediaId}`,
-    method: 'DELETE',
-  })
+  return invalidateAfter(
+    Network.request<{ id: string }>({
+      url: `/api/memories/${memoryId}/media/${mediaId}`,
+      method: 'DELETE',
+    }),
+    'mem',
+  )
 }
 
 /** 分类与心情常量 */
