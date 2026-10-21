@@ -214,6 +214,42 @@ export default function ReviewItemCard({
             </View>
           ) : null}
 
+          {/* ⭐ 题目附图必须在这里渲染（思傅 2026-10-21）：
+              此前只认 content.images(image_urls)，而错题提取的裁剪图存在
+              **question_images** ⇒ 图确实存进题里了，首页列表却只显示文字。
+              点缩略图看大图（stopPropagation 避免误触发进详情）。 */}
+          {(item.question_image_urls?.length || item.answer_image_urls?.length) ? (
+            <View className="flex flex-row flex-wrap gap-2 mt-2">
+              {(item.question_image_urls || []).map((u, i) => (
+                <View
+                  key={`q${i}`}
+                  className="w-16 h-16 rounded-lg overflow-hidden"
+                  onClick={(e) => {
+                    e.stopPropagation?.()
+                    Taro.previewImage({ urls: item.question_image_urls || [], current: u })
+                  }}
+                >
+                  <Image src={u} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                </View>
+              ))}
+              {(item.answer_image_urls || []).map((u, i) => (
+                <View
+                  key={`a${i}`}
+                  className="w-16 h-16 rounded-lg overflow-hidden"
+                  style={{ position: 'relative' }}
+                  onClick={(e) => {
+                    e.stopPropagation?.()
+                    Taro.previewImage({ urls: item.answer_image_urls || [], current: u })
+                  }}
+                >
+                  <Image src={u} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                  <View style={{ position: 'absolute', left: 0, bottom: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.45)' }}>
+                    <Text style={{ fontSize: 8, color: '#fff', textAlign: 'center' }}>答案</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
           {open !== goDetail && item.image_urls?.length ? (
             <Text className="block text-xs text-muted-foreground mt-2">含 {item.image_urls.length} 张图片</Text>
           ) : null}

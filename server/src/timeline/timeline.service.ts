@@ -149,7 +149,12 @@ export class TimelineService {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
       subject_id: dto.subject_id ?? null,
-      title: dto.title ?? (dto.kind === 'image' ? '图片素材' : (dto.content?.question || '').slice(0, 40)),
+      // ⚠️ 允许「只有图、没文字」的题目（思傅 2026-10-21：裁剪后不识别，只把图存入错题库）——
+      //    此时题干为空，title 兜底为「图片题目」，否则列表里是一条空白标题。
+      title: dto.title ?? (dto.kind === 'image'
+        ? '图片素材'
+        : ((dto.content?.question || '').slice(0, 40)
+          || (((dto.content?.question_images || []).length || (dto.content?.answer_images || []).length) ? '图片题目' : ''))),
       source: dto.source ?? '',
       tags: dto.tags ?? [],
     }
@@ -201,8 +206,16 @@ export class TimelineService {
       if (dto.kind === 'image' && !dto.file_key) {
         throw new BadRequestException('图片条目缺少 file_key')
       }
-      if (dto.kind === 'question' && !dto.content?.question) {
-        throw new BadRequestException('题目条目缺少 content.question')
+      // ⚠️ 判据放宽为「有题干 **或** 有题面图/答案图」（思傅 2026-10-21）：
+      //    错题提取允许「只裁剪、不识别」，这类条目只有图没有文字。
+      //    若仍要求必须有 question，批量插入会整批 400 失败（表现：点了保存什么都没进库）。
+      if (dto.kind === 'question') {
+        const c2 = dto.content || {}
+        const hasAny = !!c2.question
+          || !!((c2.question_images || []).length)
+          || !!((c2.answer_images || []).length)
+          || !!((c2.images || []).length)
+        if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
       return this.buildPayload(userId, dto)
     })

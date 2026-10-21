@@ -682,7 +682,17 @@ export default function RecognizePage() {
     // imageUrl：裁剪刚完成时用它（此时 board 状态还没更新出这张图）
     const src = imageUrl || e?.images[0]?.url
     if (!e || !src) return
-    setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
+    // ⭐ 思傅 2026-10-21：切到**精准识别时先清空上次的段落**。
+    //    换精准本就是因为快速识别效果不理想，若不清空：识别中旧内容还摊在那里、
+    //    完成后新旧段落混在一起，用户分不清哪份是新的（快速重识别则保留，便于对比）。
+    //    注意只清「识别框」的段落，不动用户已编辑的题干。
+    setBoard((prev) =>
+      prev.map((x, i) =>
+        i === entryIdx
+          ? { ...x, segments: ocrMode === 'precise' ? [] : x.segments, ocr: 'busy', err: undefined, lastMode: ocrMode }
+          : x,
+      ),
+    )
     try {
       const r = await ocrPage(src, ocrMode, { rectify: false })
       setBoard((prev) =>
@@ -756,10 +766,10 @@ export default function RecognizePage() {
       setBoard((prev) =>
         prev.map((e, i) => (i === entryIdx ? { ...e, images: [...e.images, { url: up.url, key: up.key }] } : e)),
       )
-      Taro.showToast({ title: '已裁剪入题，正在识别文字', icon: 'success' })
-      // ⭐ 裁完即识别（快速 1~3s）：用户拉框的手还没离开，本题文字已经摊在卡片里了。
-      //    失败不阻断（卡片显示「识别失败，重试」），图已经进本题了。
-      await runEntryOcr(entryIdx, 'fast', up.url)
+      // ⚠️ 思傅 2026-10-21：裁剪后**不再自动识别**——识别与否交给用户点「识别本题」决定。
+      //    （旧行为裁完自动跑快速 OCR：不想要文字的题白等 1~3s，想精准识别的还要先清一遍）
+      //    不识别也能直接存入错题库（只存图），后端已放宽「无题干但有题面图」的校验。
+      Taro.showToast({ title: '已裁剪入题，需要文字请点「识别本题」', icon: 'success' })
     } catch (e) {
       console.error('裁剪图上传失败', e)
       Taro.showToast({ title: '裁剪图上传失败，请重试', icon: 'none' })
@@ -813,8 +823,11 @@ export default function RecognizePage() {
       return
     }
     // ── 分家守护：1 图 + 1 文字 → 确认是否合并 ──
+    // ⚠️ 「只有图」必须限定为**跑过识别却没有文字**（e.segments.length>0）：
+    //    思傅 2026-10-21 起允许「只裁剪、不识别」（图片题），那是有意为之，
+    //    此时若还弹合并提示就是误报，白打扰。
     let list = items
-    const imgOnlyIdx = board.findIndex((e) => e.images.length && !e.text.trim())
+    const imgOnlyIdx = board.findIndex((e) => e.images.length && !e.text.trim() && e.segments.length > 0)
     const textOnlyIdx = board.findIndex((e) => !e.images.length && e.text.trim())
     if (imgOnlyIdx >= 0 && textOnlyIdx >= 0) {
       const merge = await new Promise<boolean>((resolve) => {
@@ -1239,7 +1252,7 @@ export default function RecognizePage() {
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
                 <Text className="block text-sm font-semibold text-foreground">题目（{board.length} 题）</Text>
-                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题 ③ 勾选入题干</Text>
+                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干</Text>
               </View>
               {board.map((e, idx) => (
                 <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
@@ -1324,7 +1337,7 @@ export default function RecognizePage() {
                     </View>
                   ) : (
                     <Text className="block text-[10px] text-muted-foreground mb-2">
-                      点上方「＋裁剪题目」，从来源页框出这道题的区域（裁完自动识别文字）
+                      点上方「＋裁剪题目」，从来源页框出这道题的区域；不需要文字可直接存入错题库
                     </Text>
                   )}
 
