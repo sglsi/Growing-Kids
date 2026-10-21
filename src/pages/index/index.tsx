@@ -1,6 +1,6 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Trash2, BookmarkPlus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -13,7 +13,7 @@ import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
-  fetchSubjects, updateTimeline, replaceTimelineImage,
+  fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion,
   type Overview, type TimelineItem, type Subject, type ImageAction, type Paged,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
@@ -53,6 +53,17 @@ export default function IndexPage() {
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
   const [editorSrc, setEditorSrc] = useState('')
   const [editorAction, setEditorAction] = useState<ImageAction | null>(null)
+  /**
+   * 编辑器编辑的是哪种图（思傅 2026-10-21）：
+   *  - 'item'          kind=image 条目本身的图（保存 = 原位替换条目的 file_key）
+   *  - 'questionImage' 题目条目的**题面图**（保存 = 原位替换 content.question_images[index]）
+   */
+  const [editorTarget, setEditorTarget] = useState<'item' | 'questionImage'>('item')
+  const [editorIndex, setEditorIndex] = useState(0)
+  // 列表滚动位置（思傅 2026-10-21：进详情退出后回到上次位置，不回顶部）
+  const [scrollTop, setScrollTop] = useState(0)
+  const scrollRef = useRef(0)
+  const restoredRef = useRef(false)
   const [savingEdit, setSavingEdit] = useState(false)
   const sel = useSelection()
 
@@ -109,6 +120,14 @@ export default function IndexPage() {
 
   useDidShow(() => {
     sel.exit()
+    // 从详情页返回：恢复上次滚动位置（思傅 2026-10-21），不回顶部。
+    // 只恢复一次，避免每次 show 都被强行拉回旧位置。
+    if (!restoredRef.current && scrollRef.current > 0) {
+      const pos = scrollRef.current
+      restoredRef.current = true
+      // 下一帧再设：确保列表已渲染出内容，否则高度不足滚不到位
+      setTimeout(() => setScrollTop(pos), 30)
+    }
     load()
   })
 
@@ -175,8 +194,22 @@ export default function IndexPage() {
   const openMore = (item: TimelineItem) => setMoreItem(item)
   const closeMore = () => setMoreItem(null)
 
-  const openEditor = (item: TimelineItem, action: ImageAction | 'crop') => {
-    const src = item.url || item.thumb_url || ''
+  /**
+   * 打开图片编辑器（思傅 2026-10-21 规则：点图片 = 直接打开该图片并可编辑）。
+   * @param target 'item' = 图片条目本身；'questionImage' = 题目条目的题面图
+   * @param index  题面图下标（target='questionImage' 时有效）
+   * @param srcOverride 由点击处直接传来的图地址（优先使用，避免再次推导错位）
+   */
+  const openEditor = (
+    item: TimelineItem,
+    action: ImageAction | 'crop',
+    target: 'item' | 'questionImage' = 'item',
+    index = 0,
+    srcOverride?: string,
+  ) => {
+    const src = srcOverride || (target === 'questionImage'
+      ? (item.question_image_urls || [])[index] || ''
+      : (item.url || item.thumb_url || ''))
     if (!src) {
       Taro.showToast({ title: '图片地址缺失，请下拉刷新后重试', icon: 'none' })
       return
@@ -184,21 +217,35 @@ export default function IndexPage() {
     setEditorItem(item)
     setEditorSrc(src)
     setEditorAction(action === 'crop' ? null : action)
+    setEditorTarget(target)
+    setEditorIndex(index)
     closeMore()
   }
 
-  /** 编辑器返回：把编辑结果保存并替换原条目 */
+  /** 编辑器返回：把编辑结果保存并替换原图 */
   const handleEditorConfirm = async (tempFilePath: string) => {
     const item = editorItem
+    const target = editorTarget
+    const index = editorIndex
     setEditorItem(null)
     setEditorSrc('')
     if (!item) return
     setSavingEdit(true)
     Taro.showLoading({ title: '保存中…', mask: true })
     try {
-      await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
-      Taro.hideLoading()
-      Taro.showToast({ title: '已更新该资料', icon: 'success' })
+      if (target === 'questionImage') {
+        // 题目题面图：attach 上传（不建条目）→ 原位替换 question_images[index]
+        const up = await uploadImage(tempFilePath, { purpose: 'attach' })
+        const keys = item.content?.question_images || []
+        const nextKeys = keys.map((k, i) => (i === index ? up.key : k))
+        await updateQuestion(item.id, { question_images: nextKeys })
+        Taro.hideLoading()
+        Taro.showToast({ title: '图片已更新', icon: 'success' })
+      } else {
+        await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
+        Taro.hideLoading()
+        Taro.showToast({ title: '已更新该资料', icon: 'success' })
+      }
       load()
     } catch (e) {
       Taro.hideLoading()
@@ -208,6 +255,23 @@ export default function IndexPage() {
     } finally {
       setSavingEdit(false)
     }
+  }
+
+  /** 「…」里的「编辑」：图片条目编辑自身图；题目条目编辑第一张题面图 */
+  const handleMoreEdit = () => {
+    const item = moreItem
+    if (!item) return
+    const hasQuestionImg = (item.question_image_urls || []).length > 0
+    if (item.kind === 'image') {
+      openEditor(item, 'crop', 'item', 0)
+      return
+    }
+    if (hasQuestionImg) {
+      openEditor(item, 'crop', 'questionImage', 0)
+      return
+    }
+    closeMore()
+    Taro.showToast({ title: '该条目没有图片可编辑', icon: 'none' })
   }
 
   const handleMoreSubject = () => {
@@ -244,13 +308,22 @@ export default function IndexPage() {
     }
   }
 
+  /**
+   * 点列表（功能按键以外的区域）→ 进题目详情（思傅 2026-10-21 规则）。
+   * 点图**片**的走 openEditor（打开图片并可编辑），不进详情。
+   */
   const handleOpen = (item: TimelineItem) => {
     if (sel.selecting) { sel.toggle(item.id); return }
-    if (item.kind === 'image') {
-      Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })
-      return
-    }
+    // 从详情返回后要回到此处：位置由 onScroll 持续记在 scrollRef，
+    // 这里只标记「下一轮 useDidShow 需要恢复一次」
+    restoredRef.current = false
     Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
+  }
+
+  /** 点列表里的图片 → 直接打开该图片（可编辑） */
+  const handleTapImage = (item: TimelineItem, url: string, index: number, kind: 'item' | 'questionImage') => {
+    if (sel.selecting) { sel.toggle(item.id); return }
+    openEditor(item, 'crop', kind, index, url)
   }
 
   const handleDelete = async () => {
@@ -298,7 +371,12 @@ export default function IndexPage() {
           load()
         }}
       />
-      <ScrollView scrollY style={{ height: '100vh' }}>
+      <ScrollView
+        scrollY
+        scrollTop={scrollTop}
+        onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
+        style={{ height: '100vh' }}
+      >
         <View className="px-4 pt-4 pb-32">
           {/* 顶部标题 + 登录入口 */}
           <View className="mb-4 flex flex-row items-start justify-between">
@@ -443,6 +521,7 @@ export default function IndexPage() {
                       selecting={sel.selecting}
                       checked={sel.selected.has(item.id)}
                       onOpen={handleOpen}
+                      onTapImage={handleTapImage}
                       onLongPress={(it) => sel.longPress(it.id)}
                       onChangeSubject={openSubjectPicker}
                       onMore={openMore}
@@ -533,6 +612,14 @@ export default function IndexPage() {
               </View>
             )}
 
+            {/* 「编辑」：打开该条目的图片（可裁剪/旋转/灰度/高清/去手写）。
+                思傅 2026-10-21：此前的编辑入口在重构中丢失，需保留。 */}
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
+              <Crop size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">
+                {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
+              </Text>
+            </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
               <Tag size={18} color="#BE3E2D" />
               <Text className="block text-sm text-foreground">修改分类</Text>

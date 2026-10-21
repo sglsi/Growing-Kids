@@ -34,6 +34,12 @@ interface Props {
   onChangeSubject?: (item: TimelineItem) => void
   /** 点击「更多」时触发（用于对已加入的资料再做裁剪 / 智能高清 / 去手写等）；不传则不显示「更多」 */
   onMore?: (item: TimelineItem) => void
+  /**
+   * 点击列表里的**图片**时触发（思傅 2026-10-21 规则）：
+   * 点图片 = 直接打开该图片并可编辑；点其他区域才进详情。
+   * @param kind 'item' = 图片条目自身的图；'questionImage' = 题目条目的题面图
+   */
+  onTapImage?: (item: TimelineItem, url: string, index: number, kind: 'item' | 'questionImage') => void
   /** 复习本里展示「加入时间」而非创建时间 */
   timeField?: 'created_at' | 'added_to_review_at'
 }
@@ -44,7 +50,7 @@ interface Props {
  */
 export default function ReviewItemCard({
   item, showSubject = true, selecting = false, checked = false,
-  onOpen, onLongPress, timeField = 'created_at', onChangeSubject, onMore,
+  onOpen, onTapImage, onLongPress, timeField = 'created_at', onChangeSubject, onMore,
 }: Props) {
   const color = getSubjectColor(item.subjects?.color)
   const subjectName = item.subjects?.name || '未分类'
@@ -90,15 +96,23 @@ export default function ReviewItemCard({
           )}
           <View className={`w-2 self-stretch ${color.bar}`} />
           <View className="flex-1 p-3 flex flex-row gap-3">
-            <View className="w-20 h-24 flex-shrink-0 overflow-hidden rounded-lg bg-muted">
-              {thumb ? (
-                <Image src={thumb} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
-              ) : (
-                <View className="w-full h-full flex items-center justify-center">
-                  <ImageIcon size={22} color="#aaa" />
-                </View>
-              )}
-            </View>
+          {/* 点缩略图 = 打开该图片（可编辑）；点卡片其余区域 = 进详情 */}
+          <View
+            className="w-20 h-24 flex-shrink-0 overflow-hidden rounded-lg bg-muted"
+            onClick={(e) => {
+              e.stopPropagation?.()
+              if (onTapImage) onTapImage(item, thumb, 0, 'item')
+              else if (thumb) Taro.previewImage({ current: thumb, urls: [thumb] })
+            }}
+          >
+            {thumb ? (
+              <Image src={thumb} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+            ) : (
+              <View className="w-full h-full flex items-center justify-center">
+                <ImageIcon size={22} color="#aaa" />
+              </View>
+            )}
+          </View>
             <View className="flex-1 min-w-0">
               <View className="flex flex-row items-center justify-between">
                 <View className="flex flex-row items-center gap-2 mb-1">
@@ -226,7 +240,8 @@ export default function ReviewItemCard({
                   className="w-16 h-16 rounded-lg overflow-hidden"
                   onClick={(e) => {
                     e.stopPropagation?.()
-                    Taro.previewImage({ urls: item.question_image_urls || [], current: u })
+                    if (onTapImage) onTapImage(item, u, i, 'questionImage')
+                    else Taro.previewImage({ urls: item.question_image_urls || [], current: u })
                   }}
                 >
                   <Image src={u} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
