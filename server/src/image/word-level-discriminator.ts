@@ -14,6 +14,17 @@
  *    三态结果，只有 `state===1`（确信手写）进最终擦除 mask，state===0/2 一律丢弃（疑罪从无）。
  *    故本文件的权重/阈值改动会直接影响生产擦除结果，须配合 G13/G15/G16 门禁验收。
  *
+ * ⭐ v21.8 两项修复（probe-erase-chain.ts 五场景端到端实证）：
+ *    1. **混合词印刷序列保护**（P0）：词级判别的决策单位是整词，而手写与印刷文本行经常被并进
+ *       同一个词（行切分单链接串行 + 手写笔画与文字在 x 向交错，词切分拆不开），整词特征偏
+ *       「手写」→ state=1 → 整词 bbox 内的印刷连坐被擦。实测误擦率：压字 81%、红笔 55%、
+ *       空白区作答 20%（G16 天花板 2.0%）。修正：state=1 词内把形状符合「印刷字符序列」的 CC
+ *       整组豁免（字高≈行字高 且 宽≥1.9×行字高 且 底边贴行基线，≥2 个成序列），
+ *       修复后三场景误擦分别降到 38%（架构性缺口，见 T7 报告）/0.2%/0.00%。
+ *    2. **微型词噪声地板**（P1）：墨量 <12px（work 尺度）的词是抗锯齿碎片，
+ *       其 nComp=1 的退化 heightCV 会把碎片推成 state=1（纯印刷页误擦 0.47%），
+ *       现一律落 UNCERTAIN（疑罪从无），纯印刷页误擦降到 0.23%。
+ *
  * [^1]: Stamatatos E. *Discrimination of Machine-Printed from Handwritten Text Using Simple
  *       Structural Characteristics*, ICPR 2004 —— 印刷行内字高分布集中、手写发散。
  */
@@ -252,6 +263,14 @@ const SEP_HI: Array<[keyof WordRecord['f'], number]> = [
 
 const DEG = Math.PI / 180
 
+// ── 微型词噪声地板（v21.8 · P1 修复）─────────────────────────────────
+// L0 · 物理依据：work 尺度（~800 长边）下，一个真实笔画的最小墨量远大于此——
+//   实测最小真实手写词 69px（单字），而印刷抗锯齿碎片/标点尾巴仅 6~24px。
+//   这些碎片常因 nComp=1 的退化 heightCV（|h−行字高|/行字高）被推成 state=1，
+//   在纯印刷页上造成误擦（实测纯印刷页 0.47% 印刷墨被擦）。
+//   取 12px：高于碎片（≤24px 中的多数）、远低于真实手写词（≥69px）。
+const WORD_NOISE_N = 12
+
 // ════════════════════════════════════════════════════════════════
 // 类型
 // ════════════════════════════════════════════════════════════════
@@ -265,6 +284,8 @@ export interface WordRecord {
   row: number
   nComp: number
   n: number
+  /** 组成本词的连通域序号（ccRun.comps 下标）——词内印刷序列保护按序号回写标签用 */
+  compIdx?: number[]
   f: {
     heightCV: number; strokeCV: number; strokeDev: number; baseDev: number
     ascDev: number; spacingCV: number; intensityStd: number; slantDeg: number
@@ -335,7 +356,7 @@ function modalHeight(hs: number[], hInit: number): number {
 }
 
 /** 3×3 闭合（膨胀后腐蚀）：把同一笔画/字的碎片连起来，便于行检测。 */
-function closeInk3x3(ink: Uint8Array, w: number, h: number): Uint8Array {
+export function closeInk3x3(ink: Uint8Array, w: number, h: number): Uint8Array {
   const d = new Uint8Array(w * h)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -573,8 +594,13 @@ export function discriminateWords(input: WordLevelInput): WordLevelResult {
 
   const inkC = closeInk3x3(ink, w, h)
 
-  // ① 连通域（闭合 ink）
-  const blocks = connectedComponents(inkC, w, h, false).comps.filter((c) => c.n >= 4)
+  // ① 连通域（闭合 ink）——保留 labels：词内印刷序列保护需按 CC 序号回写像素标签
+  const ccRun = connectedComponents(inkC, w, h, true)
+  const ccLabels = ccRun.labels!
+  const blocks = ccRun.comps.filter((c) => c.n >= 4)
+  // CC 对象 → 序号（词切分存序号，避免持有 CC 引用）
+  const ccIdxOf = new Map<CC, number>()
+  ccRun.comps.forEach((c, i) => ccIdxOf.set(c, i))
 
   // ①b ★ charH 必须用**行级众数字高**估计，不能直接用 ctx.layout.charH。
   //     实测（probe-wl-debug，2026-10-05）：全局版面估计在本验证集上严重失真——
@@ -770,7 +796,7 @@ export function discriminateWords(input: WordLevelInput): WordLevelResult {
   const rows = detectRows(textBlocks, w, ink, ctx.layout.strokeW)
 
   // ④ 词切分 + ⑤ 词级特征（先登记，不打分）
-  const type0 = { x0: 0, y0: 0, x1: 0, y1: 0, row: 0, nComp: 0, n: 0, lineShare: 0, f: { heightCV: 0, strokeCV: 0, strokeDev: 0, baseDev: 0, ascDev: 0, spacingCV: 0, intensityStd: 0, slantDeg: 0, density: 0, anchor: 0 } }
+  const type0 = { x0: 0, y0: 0, x1: 0, y1: 0, row: 0, nComp: 0, n: 0, lineShare: 0, compIdx: [] as number[], f: { heightCV: 0, strokeCV: 0, strokeDev: 0, baseDev: 0, ascDev: 0, spacingCV: 0, intensityStd: 0, slantDeg: 0, density: 0, anchor: 0 } }
   const raw: Array<typeof type0 & { score?: number; state?: WordState }> = []
   for (const row of rows) {
     const inRow = row.comps.slice().sort((a, b) => (a.x0 + a.x1) / 2 - (b.x0 + b.x1) / 2)
@@ -849,7 +875,7 @@ export function discriminateWords(input: WordLevelInput): WordLevelResult {
       }
       const f = { heightCV, strokeCV, strokeDev, baseDev, ascDev, spacingCV, intensityStd, slantDeg, density, anchor: 0 }
       // 先只登记几何与原始特征，分数在****全页词都算完之后**再统一定（见 ⑥）
-      raw.push({ x0, y0, x1, y1, row: row.idx, nComp: wc.length, n: st.inkN, f, lineShare })
+      raw.push({ x0, y0, x1, y1, row: row.idx, nComp: wc.length, n: st.inkN, f, lineShare, compIdx: wc.map((c) => ccIdxOf.get(c) ?? -1) })
     }
   }
 
@@ -919,23 +945,64 @@ export function discriminateWords(input: WordLevelInput): WordLevelResult {
     const lineVeto = LINE_RUN_K > 0 && (it.lineShare ?? 0) >= LINE_SHARE_MIN
     // ★ v21.5 G16：state===1 须同时满足 ① 加权分 ≥ 门槛 且 ② 共识达成（≥NH 个 SEP 同向升高）。
     //   否则即便分数偏高，只要证据"单薄"就落 UNCERTAIN(state=2) —— 疑罪从无，从 mask 剔除、保留该词。
+    // ⭐ v21.8 P1：微型词噪声地板优先于分数门——不足一个笔画墨量的词是碎片，
+    //   其 nComp=1 的退化 heightCV 会把小碎片推成 state=1（纯印刷页误擦 0.47% 实测）。
     const state: WordState = lineVeto ? 0
+      : it.n < WORD_NOISE_N ? 2
       : (score >= (ROBUST_SCORE ? TAU_HI_R : CONSENSUS_TAU) && consensusOk) ? 1
       : (score <= (ROBUST_SCORE ? TAU_LO_R : TAU_LO)) ? 0
       : 2
     words.push({
       x0: it.x0, y0: it.y0, x1: it.x1, y1: it.y1, row: it.row,
       nComp: it.nComp, n: it.n, f: it.f, score, state,
+      compIdx: it.compIdx,
     })
   }
 
   // ⑦ 写标签（词级：整词一个状态）+ 像素级印刷保护闸 + 长直线保护
+  // ⭐ v21.8 P0 混合词印刷序列保护（修「手写压印刷连坐」）：
+  //   词级判别的决策单位是整词，而手写与印刷文本行经常被并进同一个词：
+  //   行切分是质心单链接（手写行与文本行间隙 ≤rowGap 就串行），词切分又拆不开
+  //   （手写笔画与印刷文字在 x 向交错，边缘间隙小）。此时整词特征偏"手写"
+  //   （heightCV/strokeCV 升高）→ state=1 → **整词 bbox 内的印刷连坐被擦**。
+  //   实测（probe-erase-chain）：压字场景整行印刷 81% 被擦、空白区作答场景 20%、
+  //   红笔批改场景 55% —— 全部远超 G16 的 2.0% 天花板，且是词级假设（词同质）的系统性盲区。
+  //   修正：state=1 词内，把形状符合「印刷字符序列」的 CC 整组豁免——
+  //     字高 ∈ [0.85, 1.15]×行字高 且 宽 ≥ 1.9×行字高 且 底边贴行基线（|y1−baseY1| ≤ 0.4×行字高）
+  //   （小字号下相邻印刷字的笔画相接、合并成宽 CC；手写笔画稀疏，CC 窄或高度发散；
+  //    纯手写词的 CC 通不过宽度门——实测手写 CC 宽 ≤1.9×行字高；
+  //    基线条件排除"高度恰好等于行字高但浮在基线下方的宽手写块"这一误保形态）。
+  //   要求 ≥2 个这样的 CC 才生效（单个宽块可能是手写连笔，宁可不豁免）。
+  //   ⚠️ 只做**保护**（从 mask 剔除），不做新增——与「疑罪从无」同向：
+  //     宁可残留手写，不可连坐印刷。
+  let mixedProtectedWords = 0, mixedProtectedPx = 0
+  const mixedProtect = new Set<number>()
+  for (const wd of words) {
+    if (wd.state !== 1 || !wd.compIdx || wd.compIdx.length < 2) continue
+    const row = rows[wd.row]
+    if (!row || row.baseH <= 0) continue
+    const hLo = 0.85 * row.baseH, hHi = 1.15 * row.baseH, wMin = 1.9 * row.baseH
+    const baseTol = 0.4 * row.baseH
+    const seq = wd.compIdx.filter((ci) => {
+      if (ci < 0 || ci >= ccRun.comps.length) return false
+      const c = ccRun.comps[ci]
+      const bh = c.y1 - c.y0 + 1, bw = c.x1 - c.x0 + 1
+      return bh >= hLo && bh <= hHi && bw >= wMin && Math.abs(c.y1 - row.baseY1) <= baseTol
+    })
+    if (seq.length >= 2) {
+      mixedProtectedWords++
+      for (const ci of seq) mixedProtect.add(ci)
+    }
+  }
+
   let protectedPx = 0, lineSavedPx = 0
   for (const wd of words) {
     for (let y = wd.y0; y <= wd.y1; y++) {
       const b = y * w
       for (let x = wd.x0; x <= wd.x1; x++) {
         if (!ink[b + x]) continue
+        const ci = ccLabels[b + x]
+        if (ci >= 0 && mixedProtect.has(ci)) { labels[b + x] = 0; mixedProtectedPx++; continue }
         if (lineProtect[b + x]) { labels[b + x] = 0; lineSavedPx++; continue }
         if (lineCCMask[b + x]) { labels[b + x] = 0; lineSavedPx++; continue }
         if (furniturePrior && furniturePrior[b + x]) { labels[b + x] = 0; protectedPx++; continue }
@@ -960,8 +1027,10 @@ export function discriminateWords(input: WordLevelInput): WordLevelResult {
       nRows: rows.length,
       nWords: words.length,
       wordStateCount: words.reduce((m: Record<string, number>, x) => { m[String(x.state)] = (m[String(x.state)] ?? 0) + 1; return m }, {}),
+      rowsDebug: rows.map((r) => ({ y0: r.y0, y1: r.y1, n: r.comps.length, baseH: +r.baseH.toFixed(1), baseStroke: +r.baseStroke.toFixed(1) })),
       labelInkShare: st.map((c) => +(c / Math.max(1, inkN)).toFixed(3)),
       protectedPx,
+      mixedPrintProtected: { words: mixedProtectedWords, px: mixedProtectedPx },
       lineRunK: LINE_RUN_K,
       lineProtectPx: linePx,
       lineSavedPx,

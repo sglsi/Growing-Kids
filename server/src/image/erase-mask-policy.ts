@@ -100,6 +100,7 @@ export async function buildEraseMask(
       erasePolicy: policy,
       wordCharH: charH,
       wordStates: wres.debug.wordStateCount,
+      mixedPrintProtected: wres.debug.mixedPrintProtected,
       printGenericProtected: protectedPx,
       note: 'v21.5 疑罪从无：仅擦词级 state===1（确信手写），印刷/疑虑一律保留',
     },
