@@ -72,7 +72,7 @@ export default function LibraryPage() {
 
   const handleOpen = (d: LibraryDoc) => {
     if (sel.selecting) { sel.toggle(d.id); return }
-    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.name))
+    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.name), d.file_key)
   }
 
   const handleDelete = async () => {

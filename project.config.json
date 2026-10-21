@@ -19,6 +19,7 @@
     },
     "condition": false
   },
+  "preloadBackgroundData": false,
   "compileType": "miniprogram",
   "packOptions": {
     "ignore": [

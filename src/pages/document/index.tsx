@@ -134,7 +134,7 @@ export default function DocumentPage() {
         end_date: end,
         include_mastered: includeMastered,
       })
-      openStorageFile(res.url, false)
+      openStorageFile(res.url, false, res.file_key)
       loadDocs()
     } catch (e) {
       console.error('导出失败', e)
@@ -148,7 +148,7 @@ export default function DocumentPage() {
 
   const handleItemOpen = (d: DocItem) => {
     if (sel.selecting) { sel.toggle(d.id); return }
-    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type))
+    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type), d.file_key)
   }
 
   const handleDelete = async () => {

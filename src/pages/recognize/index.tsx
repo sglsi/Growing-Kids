@@ -478,7 +478,7 @@ export default function RecognizePage() {
       }
       const res = await exportRecognizedDocx([synth], `OCR 片段导出 · ${new Date().toLocaleDateString('zh-CN')}`)
       Taro.showToast({ title: 'Word 已生成', icon: 'success' })
-      if (res?.url) openStorageFile(res.url, false)
+      if (res?.url) openStorageFile(res.url, false, res.file_key)
     } catch (e) {
       console.error('导出所选失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '导出失败，请重试', icon: 'none' })
@@ -826,7 +826,7 @@ export default function RecognizePage() {
     try {
       const res = await exportBoardDocx(items, `错题整理 · ${new Date().toLocaleDateString('zh-CN')}`)
       Taro.showToast({ title: 'Word 已生成', icon: 'success' })
-      if (res?.url) openStorageFile(res.url, false)
+      if (res?.url) openStorageFile(res.url, false, res.file_key)
     } catch (e) {
       console.error('导出 Word 失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '导出失败，请重试', icon: 'none' })
@@ -1089,7 +1089,7 @@ export default function RecognizePage() {
     try {
       const res = await exportRecognizedDocx(drafts, `识别结果 · ${new Date().toLocaleDateString('zh-CN')}`)
       Taro.showToast({ title: 'Word 已生成', icon: 'success' })
-      if (res?.url) openStorageFile(res.url, false)
+      if (res?.url) openStorageFile(res.url, false, res.file_key)
     } catch (e) {
       console.error('导出 Word 失败', e)
       Taro.showToast({ title: e instanceof Error ? e.message : '导出失败，请重试', icon: 'none' })

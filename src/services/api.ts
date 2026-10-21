@@ -240,7 +240,8 @@ export async function uploadImage(
   if (opts.purpose !== 'save') {
     return { key: '', url: filePathOrUrl }
   }
-  const dl = await Network.downloadFile({ url: filePathOrUrl })
+  // ⚠️ 显式 timeout 30s：微信默认 60s，慢网下干等太久（2026-10-21 真机教训）
+  const dl = await Network.downloadFile({ url: filePathOrUrl, timeout: 30000 })
   const localPath = (dl as any)?.tempFilePath
   if (!localPath) throw new Error('处理结果下载失败，无法保存')
   const up = await uploadFile(localPath, opts)

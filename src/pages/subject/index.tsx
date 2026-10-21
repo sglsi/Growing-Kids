@@ -185,7 +185,7 @@ export default function SubjectPage() {
     setBusy(true)
     try {
       const res = await combineToPdf(imageIds)
-      openStorageFile(res.url, true)
+      openStorageFile(res.url, true, res.key)
     } catch (e) {
       console.error('合成 PDF 失败', e)
       Taro.showToast({ title: '合成失败，请确认所选为图片', icon: 'none' })

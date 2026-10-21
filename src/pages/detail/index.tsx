@@ -144,7 +144,7 @@ export default function DetailPage() {
   const handlePrint = async () => {
     try {
       const res = await exportDocument({ subject_id: subjectId || undefined })
-      openStorageFile(res.url, false)
+      openStorageFile(res.url, false, res.file_key)
     } catch (e) {
       console.error('导出失败', e)
       Taro.showToast({ title: '导出失败', icon: 'none' })

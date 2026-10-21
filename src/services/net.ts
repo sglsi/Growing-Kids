@@ -68,11 +68,22 @@ export function isPdfFile(mimeOrUrl: string): boolean {
   return /pdf/i.test(mimeOrUrl)
 }
 
-/** 打开对象存储文件（文档/PDF），失败则复制链接 */
-export function openStorageFile(url: string, isPdf = false) {
+/**
+ * 打开对象存储文件（文档/PDF），失败则复制链接。
+ *
+ * @param fileKey 有则走后端代理 `/api/storage/files/{key}`（手机→局域网后端→对象存储），
+ *   避开手机直连 Supabase（新加坡）的跨境慢网——2026-10-21 真机实测直连
+ *   downloadFile 60s 超时（reportTask costTime too long: 60022ms）。
+ *   无 key 才直连原 URL。复制兜底始终用原公网 URL（浏览器可开）。
+ */
+export function openStorageFile(url: string, isPdf = false, fileKey?: string) {
   Taro.showLoading({ title: '打开文档…' })
+  const dlUrl = fileKey ? `/api/storage/files/${fileKey}` : url
+  // ⚠️ 必须显式 timeout：微信 downloadFile 默认 60s，跨境/慢网下干等太久。
+  // 30s 失败后走「复制链接」兜底，比干等 60s 体验好；失败时打 URL 便于后续诊断。
   Network.downloadFile({
-    url,
+    url: dlUrl,
+    timeout: 30000,
     success: (d) => {
       Taro.hideLoading()
       Taro.openDocument({
@@ -85,8 +96,9 @@ export function openStorageFile(url: string, isPdf = false) {
         },
       })
     },
-    fail: () => {
+    fail: (e) => {
       Taro.hideLoading()
+      console.warn('[openStorageFile] 下载失败', { url: dlUrl, err: e?.errMsg || e })
       Taro.setClipboardData({ data: url })
       Taro.showToast({ title: '加载失败，地址已复制', icon: 'none' })
     },
