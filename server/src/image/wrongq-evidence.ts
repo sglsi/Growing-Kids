@@ -137,6 +137,11 @@ function inSameSubsection(st: DocStructure | undefined, u: QuestionUnit, cy: num
  *   - 墨量达词级（n ≥ 0.35×medH²）：单笔画碎屑、斜线片段不过；
  *   - 填充率 ≥ 0.22：手写字的笔画密度；对勾/斜线/圈痕 fill ≤0.21；
  *   - 宽高比 0.3~3.2、单边 ≤ 3.5×medH：排除横贯数题的长划线与竖线。
+ *
+ * ⚠️ 已知重叠（勿当干净判据用）：粗头红笔的**大对勾**形态上可同时过词级门
+ *   （实测 n=161/fill 0.27/aspect 1.67）。单组件层面无法与订正词分开——
+ *   真正的拦截在组级：correction 要求 parts≥2（见 groupRedComponents ④），
+ *   对勾是孤立单符号，天然被挡；GT 口径「答对=红勾」由此在组级兑现。
  */
 export function isCorrectionWord(m: RedMark, medH: number): boolean {
   if (!(medH > 0)) return false
@@ -153,16 +158,37 @@ export function isCorrectionWord(m: RedMark, medH: number): boolean {
 }
 
 /**
+ * 勾/斜类笔迹判据（#R5，isStrikeMark 与订正词组级门共用）。
+ *
+ * 为什么需要几何判据（不能只凭 kind）：classifyMark 的 `n>300 → correction`
+ * 规则先于符号几何命中，粗头大红勾（实测 63×43 / n=303 / fill 0.11 / aspect 1.47）
+ * 被贴成 correction 类，仅凭 kind 的 tick 排除被绕过 → 伪 wrong 块。
+ *
+ * 判据（GT fill 模型 + 形状先验）：对勾与单笔斜线 fill ≤0.21 且宽于高；
+ * 圈/叉近方形（aspect≈1）；划改横杠墨实（fill 达标，不受本判据影响）。
+ * 故取 **aspect ≥ 1.4 且 fill < 0.22 → 勾/斜类**（不设上界：aspect>6 的薄长条
+ * 已被 classifyMark 的 underline 分支接住，5~6 区间的薄斜线同属答对类笔迹）。
+ * 真实订正词（fill ≥0.22）不受影响。
+ */
+function isTickLike(m: RedMark): boolean {
+  if (m.kind === 'tick' || m.kind === 'underline') return true
+  return m.aspect >= 1.4 && m.fill < WORD_FILL_MIN
+}
+
+/**
  * 条目级错题证据（#144）：红叉/红圈/划改——非勾、非下划线的较大红标记。
  *
  * 为什么排除 tick：GT 口径「答对=红勾」，且实测大对勾极多（p1 达词级尺寸的
  * tick 21 个），形状上与叉/圈高度重叠（classifyMark 的 aspect+fill 区间本就
  * 重叠），唯有 kind 已先行区分。underline 是排版横线，不产判定。
  * 订正词走 isCorrectionWord 路径，此处不重复计入（组级 correction 已覆盖）。
+ *
+ * #R5 几何救回（probe-verdict 实测修复）：仅凭 kind 的 tick 排除会被 n>300
+ * 贴成 correction 类的粗头大红勾绕过，改判据见 isTickLike。
  */
 export function isStrikeMark(m: RedMark, medH: number): boolean {
   if (!(medH > 0)) return false
-  if (m.kind === 'tick' || m.kind === 'underline') return false
+  if (isTickLike(m)) return false
   if (isCorrectionWord(m, medH)) return false
   const w = m.box.x1 - m.box.x0 + 1
   const h = m.box.y1 - m.box.y0 + 1
@@ -294,7 +320,15 @@ export function groupRedComponents(marks: RedMark[], medH: number): RedGroup[] {
     // ⚠️ 词级门看"单笔画墨量+填充率"，不看组总墨量——单笔勾挑拆成 3 片后
     //    总墨量 420 也能过 0.5×medH²，但最大单片 n=193、fill 0.14，
     //    词级门干净排除（Q16 实测误报）。
-    const correction = coreId >= 0 && geoOk
+    // #R5 多笔画门（probe-verdict 实测修复）：订正词组必须**多笔画**（parts≥2），
+    //    或孤立一笔但**非勾/斜类**（isTickLike）。为什么：词级门对"单组件大字"
+    //    无判别力——粗头红笔打的勾形态上恰能过线（实测 30×18 对勾 n=161/fill 0.27，
+    //    medH≈21 时词级门 0.35×medH²≈160 恰好收下），而 GT 口径「答对=红勾」。
+    //    教师"写出答案"必然成词多域（GT 订正组 Q9 四部件、Q12 九部件）；孤立的
+    //    词级红墨若是非勾形态（粗红叉/红圈/订正词，圈选标记实测 81×31/n=640），
+    //    仍按订正词计（保持 #128 标定行为，标注未经 VLM 语义确认）。
+    //    单字订正（如只写个 "5"）经 isStrikeMark 条目级路径仍可捕获，不漏判。
+    const correction = coreId >= 0 && geoOk && (members.length >= 2 || !isTickLike(marks[coreId]))
     // ④' 条目级标记证据（#144）：组内含达门的非勾标记（叉/圈/划改）。
     //     同样受组几何门约束——纯标记组无核心笔画不做修剪，几何门是防
     //     碎片链把相隔多题的标记并成一组的唯一手段。

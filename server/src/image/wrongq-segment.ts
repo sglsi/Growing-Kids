@@ -186,7 +186,7 @@ export function findQuestionTokens(text: string): QToken[] {
       // 整体跳过（仍推进 i 避免死循环）。
       i += m[0].length
       continue
-    } else if ((m = rest.match(/^(\d{1,2})(?!\d)\s*[.、.．.)）]/))) {
+    } else if ((m = rest.match(/^(\d{1,2})(?!\d)\s*[.、.．.)）](?!\d)/))) {
       // 分隔符不含逗号 → "5,000"/"1,500" 千分位自然不匹配；
       // 另排除选项字母引导的数字（"C.5." 的 5、"B.4." 的 4 等选择题选项标注）；跳过但仍推进 i
       if (/(?<![（(])[A-E]\s*[.、，,．.)）]/.test(text.slice(0, i))) { i += m[0].length; continue }
@@ -195,6 +195,11 @@ export function findQuestionTokens(text: string): QToken[] {
       // 题干内容（多字符），要么无尾巴；"10.hm"（下划线糊化，两个字符）不受影响。
       // 仅 num>20 才启用：保护小题号带单字糊尾的真实题号（如 "10.h"）。
       if (Number(m[1]) > 20 && /^[A-Za-z]$/.test(rest.slice(m[0].length))) { i += m[0].length; continue }
+      // 小数防护（#R5 probe-verdict 实测修复）："3.5 × 1.2 + 0.8" 里的 3./1./0.
+      // 被当题号 → 幻影单元挤爆平铺（sliver 过滤连真单元一并丢）+ 序列自纠把
+      // 后续真题号当重号整区 drop（数学页主路径全灭，units 1/2/3 消失）。
+      // 判据：分隔符后紧跟数字 = 小数（题号后要么是空格要么直接接题干文字），拒收。
+      // 实现为 regex 尾部 (?!\d)，不走本分支即不产 token，由后续分支自然略过。
       num = { kind: 'arabic', num: Number(m[1]), raw: m[0].trim() }
     } else if ((m = rest.match(/^(\d{1,2})(?!\d)\s+([a-z]{1,5})(?![A-Za-z])/))) {
       // F1 行中裸题号 + 空格 + 短小写词（#R1 gt-back 实测）："...the winds make it
