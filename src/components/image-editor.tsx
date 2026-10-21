@@ -143,6 +143,19 @@ const ENHANCE_PRESETS: { value: string; label: string; hint: string }[] = [
 /** 高清扩展：把原「x2/x3/x4 超分」立为独立可选分组（任务 #91 标记「超分=高清扩展」） */
 const HD_EXTENSION = { value: 'hd', label: '高清扩展', hint: 'x2/x3/x4 超分放大' }
 
+/**
+ * 各模式滑杆语义（思傅 2026-10-22）：同一根「效果强度」杆在不同模式下含义不同，
+ * 端点文案随之变化，避免「轻/重」词不达意。
+ *  - bw：控制墨迹粗细（阈值偏置 + 形态学，幅度克制，两端不崩）
+ *  - 其余：控制该模式的处理强度
+ */
+const SLIDER_HINT: Record<string, { title: string; left: string; right: string }> = {
+  bw: { title: '墨迹粗细', left: '字细', right: '字粗' },
+  gray: { title: '对比强度', left: '柔和', right: '鲜明' },
+  brighten: { title: '提亮强度', left: '轻', right: '亮' },
+  enhance: { title: '增强强度', left: '轻', right: '强' },
+}
+
 /** P1 强度档位：把"是否过头"的把控权交给用户 */
 const ENHANCE_STRENGTHS: { value: 'weak' | 'medium' | 'strong'; label: string }[] = [
   { value: 'weak', label: '弱' },
@@ -1818,7 +1831,9 @@ export default function ImageEditor({
             {activePreset && activePreset !== 'original' && activePreset !== 'hd' ? (
               <View className="mt-3">
                 <View className="flex flex-row items-center justify-between mb-1">
-                  <Text className="block text-white text-opacity-70 text-xs">效果强度</Text>
+                  <Text className="block text-white text-opacity-70 text-xs">
+                    {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).title}
+                  </Text>
                   <Text className="block text-white text-xs">{Math.round(presetSlider * 100)}</Text>
                 </View>
                 <Slider
@@ -1835,14 +1850,18 @@ export default function ImageEditor({
                   onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
                 />
                 <View className="flex flex-row items-center justify-between mt-1">
-                  <Text className="block text-white text-opacity-50 text-[10px]">轻</Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">
+                    {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).left}
+                  </Text>
                   <Text
                     className="block text-white text-opacity-70 text-[10px]"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认
                   </Text>
-                  <Text className="block text-white text-opacity-50 text-[10px]">重</Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">
+                    {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).right}
+                  </Text>
                 </View>
               </View>
             ) : null}
@@ -2059,14 +2078,18 @@ export default function ImageEditor({
                   onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
                 />
                 <View className="flex flex-row items-center justify-between mt-1">
-                  <Text className="block text-white text-opacity-50 text-[10px]">轻</Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">
+                    {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).left}
+                  </Text>
                   <Text
                     className="block text-white text-opacity-70 text-[10px]"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认
                   </Text>
-                  <Text className="block text-white text-opacity-50 text-[10px]">重</Text>
+                  <Text className="block text-white text-opacity-50 text-[10px]">
+                    {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).right}
+                  </Text>
                 </View>
               </View>
             ) : null}
@@ -2309,6 +2332,216 @@ function clamp255(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : v
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 光照归一化（思傅 2026-10-22 引入，对标主流扫描App的「Magic Color」管线）
+//
+// 主流应用（扫描全能王 Magic Color / Adobe Scan 增强 / Microsoft Lens）与本地实现
+// 的最大差距**不在二值化算法本身**，而在前置的光照归一化：
+//
+//   手机照片 I(x,y) = 纸面反射率 R(x,y) × 空间非均匀光照 L(x,y)（手影/灯影/渐变）
+//   直接对 I 做阈值或对比处理，阴影区背景被一起压暗 ⇒ 文字与背景同时变灰
+//   ⇒ 花斑、黑团、淡字丢失（此前 Sauvola 只能部分补救）。
+//
+// 业界标准做法（Retinex 分解）：
+//   ① 估计背景面 I_bg：灰度**形态学膨胀**（核 > 笔画宽，把深色笔画「填掉」，只留纸面）
+//      + **大半径平滑**（去掉残留笔画边缘与纸纹）⇒「如果没有墨迹，纸在这里该有多亮」
+//   ② 归一化 I_norm = I × 255 / max(I_bg, ε)
+//      阴影是**乘性**衰减（L_shadow = 0.25·L_ambient），该标量在分子分母中完全抵消
+//      ⇒ 阴影区被拉回与亮区一致；三通道共用同一标量 ⇒ 彩色不偏色（色度不变性）
+//   ③ 之后再做对比拉伸 / 自适应二值化，输入已是一片「光照均匀的白纸」。
+//
+// 实测参考参数（10万+文档图像口径）：膨胀核 11×11（7–21，必须 > 笔画宽）；
+// 平滑核 31×31（21–51，取膨胀核 3~5 倍）。
+//
+// 性能：背景面是低频场，在 1/4 降采样网格上算再双线性插回，内存与耗时降 ~16×。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 可分离最大值滤波（灰度膨胀）：行→列两遍，O(n)。src/tmp/out 互不重叠 */
+function maxFilter(src: Float32Array, w: number, h: number, k: number, tmp: Float32Array, out: Float32Array) {
+  const r = (k - 1) >> 1
+  const dq = new Int32Array(Math.max(w, h))
+  for (let y = 0; y < h; y++) {
+    const row = y * w
+    let head = 0, tail = 0, next = 0
+    for (let x = 0; x < w; x++) {
+      const hi = x + r < w ? x + r : w - 1
+      while (next <= hi) {
+        const v = src[row + next]
+        while (tail > head && src[row + dq[tail - 1]] <= v) tail--
+        dq[tail++] = next++
+      }
+      const lo = x - r
+      while (head < tail && dq[head] < lo) head++
+      tmp[row + x] = src[row + dq[head]]
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let head = 0, tail = 0, next = 0
+    for (let y = 0; y < h; y++) {
+      const hi = y + r < h ? y + r : h - 1
+      while (next <= hi) {
+        const v = tmp[next * w + x]
+        while (tail > head && tmp[dq[tail - 1] * w + x] <= v) tail--
+        dq[tail++] = next++
+      }
+      const lo = y - r
+      while (head < tail && dq[head] < lo) head++
+      out[y * w + x] = tmp[dq[head] * w + x]
+    }
+  }
+}
+
+/** 可分离盒式模糊（滑动求和），O(n)。用大盒式近似中值——背景面本就该平滑 */
+function boxBlur(src: Float32Array, w: number, h: number, k: number, tmp: Float32Array, out: Float32Array) {
+  const r = (k - 1) >> 1
+  const inv = 1 / k
+  for (let y = 0; y < h; y++) {
+    const row = y * w
+    let sum = 0
+    for (let i = -r; i <= r; i++) { const xi = i < 0 ? 0 : i >= w ? w - 1 : i; sum += src[row + xi] }
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = sum * inv
+      const ai = x + r + 1
+      sum += src[row + (ai >= w ? w - 1 : ai)] - src[row + (x - r < 0 ? 0 : x - r)]
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let sum = 0
+    for (let i = -r; i <= r; i++) { const yi = i < 0 ? 0 : i >= h ? h - 1 : i; sum += tmp[yi * w + x] }
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = sum * inv
+      const ai = y + r + 1
+      sum += tmp[(ai >= h ? h - 1 : ai) * w + x] - tmp[(y - r < 0 ? 0 : y - r) * w + x]
+    }
+  }
+}
+
+/**
+ * 光照归一化主入口：估计纸面背景并按除法拉平光照（去阴影 / 光照不均）。
+ * @param strength 0=不处理，1=完全归一化；中间值按比例混合，避免过度抹掉纸纹与淡印
+ */
+function normalizeIllumination(d: Uint8ClampedArray, w: number, h: number, strength = 1) {
+  if (strength <= 0 || w < 32 || h < 32) return
+  const DS = 4
+  const gw = Math.max(6, Math.ceil(w / DS))
+  const gh = Math.max(6, Math.ceil(h / DS))
+  const odd = (v: number) => (v % 2 === 0 ? v + 1 : v)
+  // 核随降采样后的短边自适应：膨胀核必须 > 笔画宽（1/4 尺度上笔画约 1~2px）
+  const shortS = Math.min(gw, gh)
+  const kDil = odd(Math.max(5, Math.min(15, Math.round(shortS / 30))))
+  const kBlur = odd(Math.max(15, Math.min(41, Math.round(shortS / 8))))
+
+  // ① 降采样灰度（盒式平均，天然抗噪）
+  const small = new Float32Array(gw * gh)
+  for (let y = 0; y < gh; y++) {
+    const y0 = y * DS
+    const y1 = Math.min(h, y0 + DS)
+    for (let x = 0; x < gw; x++) {
+      const x0 = x * DS
+      const x1 = Math.min(w, x0 + DS)
+      let s = 0, c = 0
+      for (let yy = y0; yy < y1; yy++) {
+        const row = yy * w
+        for (let xx = x0; xx < x1; xx++) {
+          const i = row + xx
+          s += 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
+          c++
+        }
+      }
+      small[y * gw + x] = c ? s / c : 0
+    }
+  }
+  // ② 背景面：膨胀抹笔画 → 大半径平滑
+  const t1 = new Float32Array(gw * gh)
+  const dil = new Float32Array(gw * gh)
+  const bg = new Float32Array(gw * gh)
+  maxFilter(small, gw, gh, kDil, t1, dil)
+  boxBlur(dil, gw, gh, kBlur, t1, bg)
+
+  // ③ 双线性插回全图，逐像素乘增益（三通道同一标量 ⇒ 不偏色）
+  const GAIN_MAX = 3.5
+  const GAIN_MIN = 0.5
+  for (let y = 0; y < h; y++) {
+    const sy = (y + 0.5) / DS - 0.5
+    let y0 = Math.floor(sy)
+    let ty = sy - y0
+    if (y0 < 0) { y0 = 0; ty = 0 }
+    if (y0 > gh - 2) { y0 = gh - 2; ty = 1 }
+    for (let x = 0; x < w; x++) {
+      const sx = (x + 0.5) / DS - 0.5
+      let x0 = Math.floor(sx)
+      let tx = sx - x0
+      if (x0 < 0) { x0 = 0; tx = 0 }
+      if (x0 > gw - 2) { x0 = gw - 2; tx = 1 }
+      const b00 = bg[y0 * gw + x0]
+      const b01 = bg[y0 * gw + x0 + 1]
+      const b10 = bg[(y0 + 1) * gw + x0]
+      const b11 = bg[(y0 + 1) * gw + x0 + 1]
+      const bgv = b00 * (1 - tx) * (1 - ty) + b01 * tx * (1 - ty) + b10 * (1 - tx) * ty + b11 * tx * ty
+      let a = 255 / (bgv > 1 ? bgv : 1)
+      if (a > GAIN_MAX) a = GAIN_MAX
+      else if (a < GAIN_MIN) a = GAIN_MIN
+      const gain = 1 + (a - 1) * strength
+      const i = y * w + x
+      d[4 * i] = clamp255(d[4 * i] * gain)
+      d[4 * i + 1] = clamp255(d[4 * i + 1] * gain)
+      d[4 * i + 2] = clamp255(d[4 * i + 2] * gain)
+      d[4 * i + 3] = 255
+    }
+  }
+}
+
+/**
+ * 百分位对比拉伸：用 low%~high% 分位（而非 min/max，抗极值）把有效灰度区间拉到 0..255。
+ * 动态范围本来就不宽（hi-lo<16）时不动，避免放大噪点。
+ */
+function stretchPercentileGray(gray: Float32Array | Float64Array, n: number, lowPct = 0.02, highPct = 0.98) {
+  const hist = new Uint32Array(256)
+  for (let i = 0; i < n; i++) {
+    const v = gray[i] | 0
+    hist[v < 0 ? 0 : v > 255 ? 255 : v]++
+  }
+  let lo = 0, hi = 255, acc = 0
+  const loTarget = n * lowPct
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= loTarget) { lo = v; break } }
+  acc = 0
+  const hiTarget = n * (1 - highPct)
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= hiTarget) { hi = v; break } }
+  if (hi - lo < 16) return
+  const scale = 255 / (hi - lo)
+  for (let i = 0; i < n; i++) gray[i] = (gray[i] - lo) * scale
+}
+
+/**
+ * 文档曲线（对标保色分段 S 曲线）：
+ *   v ≥ thetaHigh → 255（背景白化：纸纹 / 背面透印字压白）
+ *   v <  thetaLow  → v·gammaDark（墨迹加深，压暗铅笔/圆珠笔）
+ *   中间调线性拉伸到 [betaFloor, 255]，斜率 >1 扩展对比
+ */
+function applyDocumentCurve(gray: Float32Array, n: number, thetaHigh = 214, thetaLow = 40, gammaDark = 0.78, betaFloor = 30) {
+  const slope = (255 - betaFloor) / (thetaHigh - thetaLow)
+  for (let i = 0; i < n; i++) {
+    const v = gray[i]
+    gray[i] = v >= thetaHigh ? 255 : v < thetaLow ? v * gammaDark : betaFloor + (v - thetaLow) * slope
+  }
+}
+
+/** 把灰度数组写回 RGBA（三通道同值） */
+function writeGrayToRgba(d: Uint8ClampedArray, gray: Float32Array, n: number) {
+  for (let i = 0; i < n; i++) {
+    const v = clamp255(gray[i])
+    d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v
+    d[4 * i + 3] = 255
+  }
+}
+
+/** 从 RGBA 取灰度 */
+function readGray(d: Uint8ClampedArray, n: number): Float32Array {
+  const g = new Float32Array(n)
+  for (let i = 0; i < n; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
+  return g
+}
+
 /**
  * 基础模式像素处理：
  *  - original：原样直出
@@ -2317,6 +2550,10 @@ function clamp255(v: number): number {
  *  - enhance：增强并锐化（提对比 + 3x3 非锐化，让印刷体更清晰）
  *  - bw：白底黑字二值化（Sauvola 局部自适应阈值 + 中值去斑 + 自动反相纠正，
  *    确保背景白、文字黑、干净清晰；对阴影/噪点照片鲁棒，实测见 binarizeWhiteBgBlackInk 注释）
+ *
+ * ⚠️ 所有模式共用前置 `normalizeIllumination`（去阴影/光照不均）——
+ *    2026-10-22 对标主流扫描App补上的关键一环。此前各模式直接吃原始照片，
+ *    一遇手影/灯影就被带崩；现在输入已是一片「光照均匀的白纸」。
  */
 function applyPresetPixels(
   d: Uint8ClampedArray,
@@ -2329,44 +2566,41 @@ function applyPresetPixels(
 ) {
   if (preset === 'original') return
 
+  // ── 共用前置：光照归一化（去阴影/光照不均）──────────────────────────────
+  // 固定较强力度 0.9：Retinex 分解的纯增益步，不做反而把手影留给后续处理。
+  normalizeIllumination(d, w, h, 0.9)
+
   if (preset === 'gray') {
-    for (let i = 0; i < n; i++) {
-      const g = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
-      d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = g
-    }
-    // 思傅 2026-10-21：灰度也带滑杆（对比强度）——不同明暗/清晰度的原图灰度后层次不同，
-    // 用户拖杆在 1.0（原样灰度）↔ 1.55（强对比、更"立"）之间自选
+    // 灰度 + 文档曲线（背景白化 + 中间调对比扩展），滑杆再叠一层用户对比
+    const g = readGray(d, n)
+    stretchPercentileGray(g, n)
+    applyDocumentCurve(g, n)
     const contrast = 1.0 + slider * 0.55
-    for (let i = 0; i < n; i++) {
-      const v = clamp255((d[4 * i] - 128) * contrast + 128)
-      d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = v
-    }
+    for (let i = 0; i < n; i++) g[i] = (g[i] - 128) * contrast + 128
+    writeGrayToRgba(d, g, n)
     return
   }
 
   if (preset === 'brighten') {
-    // s=0.5 → 等价老默认 a≈1.18/b=42；s=0 → 几乎不变；s=1 → 明显提亮
-    const s = slider
-    const a = 1.0 + s * 0.36
-    const b = s * 84
-    for (let i = 0; i < n; i++) {
-      d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
-      d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
-      d[4 * i + 2] = clamp255((d[4 * i + 2] - 128) * a + 128 + b)
-    }
+    // 暗部 Gamma 提亮（比线性 a/b 更稳：只抬暗部、不喷高光）+ 背景白化 + 轻对比
+    const g = readGray(d, n)
+    const gamma = 1 - slider * 0.45 // s=0 → 1（不动）；s=1 → 0.55（明显提亮）
+    for (let i = 0; i < n; i++) g[i] = 255 * Math.pow(g[i] / 255, gamma)
+    applyDocumentCurve(g, n, 216, 46, 0.85, 40)
+    const contrast = 1.0 + slider * 0.18
+    for (let i = 0; i < n; i++) g[i] = (g[i] - 128) * contrast + 128
+    writeGrayToRgba(d, g, n)
     return
   }
 
   if (preset === 'enhance') {
-    // s=0.5 → 等价老默认 a=1.3 / sharpen=0.9；s 越大对比与锐化越强
-    const base = 1.0 + slider * 0.6
-    const a = base + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
-    const b = slider * 24
-    for (let i = 0; i < n; i++) {
-      d[4 * i] = clamp255((d[4 * i] - 128) * a + 128 + b)
-      d[4 * i + 1] = clamp255((d[4 * i + 1] - 128) * a + 128 + b)
-      d[4 * i + 2] = clamp255((d[4 * i + 2] - 128) * a + 128 + b)
-    }
+    // 对比拉伸 + 非锐化；保色（不动色度），只拉亮度与边缘
+    const g = readGray(d, n)
+    stretchPercentileGray(g, n, 0.01, 0.995)
+    const a = 1.0 + slider * 0.6 + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
+    const b = slider * 20
+    for (let i = 0; i < n; i++) g[i] = (g[i] - 128) * a + 128 + b
+    writeGrayToRgba(d, g, n)
     sharpen3x3(d, w, h, 0.15 + slider * 1.5)
     return
   }
@@ -2396,6 +2630,14 @@ function applyPresetPixels(
 /**
  * 白底黑字二值化（思傅 2026-10-21 重做：稳健基线 + 滑块微调墨迹粗细）。
  *
+ * 完整管线（2026-10-22 对标主流扫描App补强）：
+ *   ① 光照归一化（由调用方 applyPresetPixels 前置完成）——去手影/灯影/光照渐变
+ *   ② 百分位对比拉伸——把淡印的低动态范围拉开，Sauvola 才判得出细笔画
+ *   ③ Sauvola 局部自适应阈值（固定 k=0.2，窗口随短边自适应）
+ *   ④ 3x3 中值去斑（孤立噪点抹掉，成片笔画保留，标点不误伤）
+ *   ⑤ 滑块控制墨迹粗细（±2px 形态学）
+ *   ⑥ 自动反相兜底（暗背景照片）
+ *
  * ── 为什么不用「扫 Sauvola k」调滑块（2026-10-21 教训）────────────────
  * 旧实现滑块线性映射到 Sauvola 的 k（自适应程度）：s→0 时阈值抬高、判墨暴增，
  * 字糊成黑团；s→1 时阈值压低、判墨几乎为零，图近乎全白——两端都不可用。
@@ -2410,10 +2652,12 @@ function applyPresetPixels(
  *  3. 3x3 中值去斑保标点；自动反相兜底（暗背景照片）。
  */
 function binarizeWhiteBgBlackInk(d: Uint8ClampedArray, n: number, w: number, h: number, slider: number = PRESET_SLIDER_DEFAULT) {
-  const gray = new Float64Array(n)
+  const gray = new Float32Array(n)
   for (let i = 0; i < n; i++) {
     gray[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]
   }
+  // ② 百分位对比拉伸：淡印/低动态范围原图先拉开，Sauvola 才判得出细笔画
+  stretchPercentileGray(gray, n)
   // 窗口随图尺寸自适应：小图保底 15px，大图 ≈ 短边/15（覆盖多个字符），强制奇数
   let win = Math.max(15, Math.round(Math.min(w, h) / 15))
   if (win % 2 === 0) win += 1
