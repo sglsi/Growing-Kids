@@ -104,7 +104,9 @@ export default function WrongqOcrPanel({
           <Text className="block text-[10px] text-muted-foreground px-2 py-1">
             {saveLabel
               ? `勾选需要的段落，点「${saveText}」直接填入`
-              : '点「复制」后，到下方题目文本框长按粘贴'}
+              : onPasteToEntry
+                ? '勾选后点「存入题目」选目标题；「·有图」=该题已有裁剪图，文字存回同一题，避免图文分家'
+                : '点「复制」后，到下方题目文本框长按粘贴'}
           </Text>
 
           {/* 片段列表（阅读序，内部滚动） */}

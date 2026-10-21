@@ -13,8 +13,8 @@ import WrongqBoxEditor, { type BoxEditorItem, type PageBox } from '@/components/
 import WrongqTextPanel, { type TextPanelDraft } from '@/components/wrongq-text-panel'
 import WrongqOcrPanel from '@/components/wrongq-ocr-panel'
 import {
-  fetchSubjects, recognizePaper, recognizeSeparate, recognizeDocument,
-  recognizeDocumentByUrl, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
+  fetchSubjects, recognizePaper, recognizeSeparate,
+  recognizeDocumentByUrl, uploadFile, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
@@ -91,6 +91,11 @@ export default function RecognizePage() {
   const [questionImage, setQuestionImage] = useState('')
   const [answerImage, setAnswerImage] = useState('')
   const [docFile, setDocFile] = useState('')
+  // 导入文档（思傅 2026-10-21：「导入并识别」拆两步）——先「导入」上传文档拿 URL，
+  // 再「识别题目」提取内容；识别结果不自动入库，由用户点底部「存入错题库」自选。
+  const [docName, setDocName] = useState('')     // 展示名（文件名）
+  const [docUrl, setDocUrl] = useState('')       // 已导入的云端 URL（识别用）
+  const [docImporting, setDocImporting] = useState(false)
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -261,23 +266,16 @@ export default function RecognizePage() {
   // 保留 handler 供后续恢复（当前无 UI 调用，占位以通过 noUnusedLocals 检查）
   void handleLink
 
-  // 从资料库选择后按 URL 识别
-  const handleSelectDoc = async (d: LibraryDoc) => {
-    const subs = await ensureSubjects()
-    const sid = defaultSubject || subs[1]?.id || subs[0]?.id
-    setDocFile(d.name)
-    setLoading(true)
+  // 从资料库选择后：仅「导入」（文档已在云端，直接拿 URL）；
+  // 识别由用户点「识别题目」触发（思傅 2026-10-21：导入/识别拆两步）
+  const handleSelectDoc = (d: LibraryDoc) => {
+    setDocFile('')
+    setDocName(d.name)
+    setDocUrl(d.url || '')
     setDrafts([])
     setUnmatched([])
-    try {
-      const result = await recognizeDocumentByUrl(d.url || '', sid)
-      setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
-      Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
-    } catch (e) {
-      console.error('资料识别失败', e)
-      Taro.showToast({ title: e instanceof Error ? e.message : '识别失败，请重试', icon: 'none' })
-    } finally {
-      setLoading(false)
+    if (!d.url) {
+      Taro.showToast({ title: '该文档暂无可用文件链接', icon: 'none' })
     }
   }
 
@@ -298,9 +296,47 @@ export default function RecognizePage() {
     }
   }
 
-  const handleRecognizeDoc = async () => {
+  /** 选择本地文档：记路径与展示名；换文件即作废上次导入与识别结果 */
+  const chooseDocFile = () => {
+    pickDoc((path, name) => {
+      setDocFile(path)
+      setDocName(name || path)
+      setDocUrl('')
+      setDrafts([])
+      setUnmatched([])
+    })
+  }
+
+  /**
+   * 「导入」（思傅 2026-10-21：与「识别」拆为两步）：
+   * 仅上传文档拿云端 URL，不识别、不入库——文档先落定，用户准备好了再点「识别题目」。
+   */
+  const handleImportDoc = async () => {
     if (!docFile) {
       Taro.showToast({ title: '请先选择文档文件', icon: 'none' })
+      return
+    }
+    if (docImporting) return
+    setDocImporting(true)
+    try {
+      const up = await uploadFile(docFile)
+      setDocUrl(up.url)
+      Taro.showToast({ title: '已导入，可点「识别题目」', icon: 'success' })
+    } catch (e) {
+      console.error('文档导入失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '导入失败，请重试', icon: 'none' })
+    } finally {
+      setDocImporting(false)
+    }
+  }
+
+  /**
+   * 「识别题目」：对已导入文档跑 OCR/题目提取（原「导入并识别」的后半段）。
+   * 结果只进 drafts 供修改，**不自动入库**——底部操作条由用户自选是否存入错题库。
+   */
+  const handleRecognizeDoc = async () => {
+    if (!docUrl) {
+      Taro.showToast({ title: '请先点「导入」上传文档', icon: 'none' })
       return
     }
     const subs = await ensureSubjects()
@@ -309,7 +345,7 @@ export default function RecognizePage() {
     setDrafts([])
     setUnmatched([])
     try {
-      const result = await recognizeDocument(docFile, sid)
+      const result = await recognizeDocumentByUrl(docUrl, sid)
       setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
@@ -571,13 +607,18 @@ export default function RecognizePage() {
    * 思傅 2026-10-20 决策：文字与裁剪图必须绑定同一题——复制粘贴靠用户心记
    * 「哪段文字属于哪题」极易错配，保存后同题图文"分家"成两道题；此按钮把
    * 「选文字 → 定题目」变成一步显式操作。
+   * ⚠️ 防分家（2026-10-21 加固）：选项带「·有图」标记——文字要存回已有裁剪图的
+   *    那道题；主流程（本题 OCR →「加入题干」）本就不经过此选择器，不会分家。
    */
   const handlePasteToEntry = (text: string) => {
     const t = text.trim()
     if (!t) return
     const items = board.map((e, i) => {
       const prev = e.text.trim()
-      return prev ? `第 ${i + 1} 题：${prev.slice(0, 12)}${prev.length > 12 ? '…' : ''}` : `第 ${i + 1} 题（空）`
+      const img = e.images.length ? '·有图' : ''
+      return prev
+        ? `第 ${i + 1} 题${img}：${prev.slice(0, 12)}${prev.length > 12 ? '…' : ''}`
+        : `第 ${i + 1} 题${img}（空）`
     })
     if (board.length < MAX_BOARD_ENTRIES) items.push('＋ 存入新题目')
     Taro.showActionSheet({
@@ -1313,19 +1354,34 @@ export default function RecognizePage() {
           </>
         ) : (
           <Card className="rounded-2xl border-border p-4 mb-4">
-            <Text className="block text-xs text-muted-foreground mb-3">支持 PDF / Word(.docx) / TXT，从手机或电脑选择文档导入并自动识别题目</Text>
-            {docFile ? (
-              <View className="w-full bg-muted rounded-xl px-4 py-4 mb-3" onClick={() => pickDoc(setDocFile)}>
-                <Text className="block text-sm text-primary break-all">{docFile}</Text>
+            <Text className="block text-xs text-muted-foreground mb-3">
+              支持 PDF / Word(.docx) / TXT：先「导入」文档，再「识别题目」；识别结果自行确认后，自选是否存入错题库
+            </Text>
+            {docName ? (
+              <View className="w-full bg-muted rounded-xl px-4 py-4 mb-3" onClick={chooseDocFile}>
+                <Text className="block text-sm text-primary break-all">{docName}</Text>
+                <Text className="block text-[10px] text-muted-foreground mt-1">
+                  {docUrl ? '已导入 ✓ 可点「识别题目」' : docFile ? '已选择，点「导入」上传' : ''}
+                </Text>
               </View>
             ) : (
-              <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={() => pickDoc(setDocFile)}>
+              <View className="w-full h-28 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-3" onClick={chooseDocFile}>
                 <Text className="block text-sm text-muted-foreground">点击选择文档文件（PDF/Word/TXT）</Text>
               </View>
             )}
-            <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizeDoc}>
-              <Text className="block text-sm">{loading ? '识别中…' : '导入并识别'}</Text>
-            </Button>
+            <View className="flex flex-row items-center gap-2">
+              <Button
+                className="flex-1 h-11 rounded-xl"
+                variant="outline"
+                disabled={docImporting || !docFile}
+                onClick={handleImportDoc}
+              >
+                <Text className="block text-sm">{docImporting ? '导入中…' : docUrl ? '重新导入' : '导入'}</Text>
+              </Button>
+              <Button className="flex-1 h-11 rounded-xl" disabled={loading || !docUrl} onClick={handleRecognizeDoc}>
+                <Text className="block text-sm">{loading ? '识别中…' : '识别题目'}</Text>
+              </Button>
+            </View>
             <View className="flex items-center justify-center mt-3" onClick={() => setPicker(true)}>
               <Text className="block text-xs text-primary">从资料库选择文档</Text>
             </View>
@@ -1382,6 +1438,9 @@ export default function RecognizePage() {
                 <Text className="block text-xs text-primary" onClick={() => setShowEditor(true)}>校对圈定范围</Text>
               ) : null}
             </View>
+            <Text className="block text-[10px] text-muted-foreground mb-2">
+              是否存入错题库由你决定：点底部「存入错题库」归档，或只「导出 Word」不留库
+            </Text>
             {drafts.map((d, idx) => (
               <Card key={idx} className="rounded-2xl border-border p-4 mb-3">
                 <View className="flex flex-row items-center justify-between mb-3">
@@ -1454,7 +1513,7 @@ export default function RecognizePage() {
             <Text className="block text-sm">{exporting ? '生成中…' : '导出 Word'}</Text>
           </Button>
           <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
-            <Text className="block text-sm">{saving ? '保存中…' : '保存到最近题目'}</Text>
+            <Text className="block text-sm">{saving ? '保存中…' : '存入错题库'}</Text>
           </Button>
         </View>
       )}
