@@ -52,13 +52,25 @@ export class StorageController {
       res.status(400).json({ code: 400, msg: '非法 key' })
       return
     }
-    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+    const ext = path.extname(abs).slice(1).toLowerCase()
+
+    // 1) local 驱动（或本地盘确有该对象）：直接流盘
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+      res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream')
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+      fs.createReadStream(abs).pipe(res)
+      return
+    }
+
+    // 2) supabase 驱动代理（2026-10-21）：手机不走跨境直连对象存储，
+    //    由本服务端下载后回传——文档/PDF 的 openStorageFile 走此路径。
+    const buf = await this.storage.readObject(norm)
+    if (!buf) {
       res.status(404).json({ code: 404, msg: '对象不存在' })
       return
     }
-    const ext = path.extname(abs).slice(1).toLowerCase()
     res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream')
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
-    fs.createReadStream(abs).pipe(res)
+    res.send(buf)
   }
 }

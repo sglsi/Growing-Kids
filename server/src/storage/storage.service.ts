@@ -177,6 +177,27 @@ export class StorageService {
   }
 
   /**
+   * 按 key 读对象内容（不分驱动）：local 读磁盘；supabase 服务端 download。
+   *
+   * 用途（2026-10-21 真机 downloadFile 60s 超时根因修复）：文档/PDF 的
+   * file_key 经 `/api/storage/files/*` 代理给手机——手机走局域网连后端，
+   * 由后端服务端取对象存储，避开手机直连 Supabase（新加坡）的跨境慢网。
+   * 文档都是小文件（KB~MB 级），Buffer 全量读无压力。
+   */
+  async readObject(key: string): Promise<Buffer | null> {
+    if (!key) return null
+    if (this.driver === 'local') return this.readLocalObject(key)
+    try {
+      const { data, error } = await this.supabase!.storage.from(this.bucket).download(key)
+      if (error || !data) return null
+      return Buffer.from(await data.arrayBuffer())
+    } catch (e) {
+      console.warn('[storage] readObject 失败', key, e)
+      return null
+    }
+  }
+
+  /**
    * 删除对象（用于匿名清理 / 软删回收 / GC）；失败不抛，返回是否成功。
    */
   async deleteObject(key: string): Promise<boolean> {
