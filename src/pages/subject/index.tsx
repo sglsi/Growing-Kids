@@ -4,6 +4,7 @@ import { useState, useRef } from 'react'
 import { FileSearch, Trash2, FolderMinus } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
+import ImageEditor from '@/components/image-editor'
 import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
@@ -12,7 +13,8 @@ import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/ra
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
-  type Subject, type TimelineItem, type Paged,
+  updateQuestion, uploadImage, replaceTimelineImage,
+  type Subject, type TimelineItem, type Paged, type ImageAction,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
@@ -33,6 +35,13 @@ export default function SubjectPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState(false)
   const sel = useSelection()
+  // 图片编辑器状态（思傅 2026-10-22：复习本与首页同一套规则——点图片可直接编辑）
+  const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
+  const [editorSrc, setEditorSrc] = useState('')
+  const [editorAction, setEditorAction] = useState<ImageAction | null>(null)
+  const [editorTarget, setEditorTarget] = useState<'item' | 'questionImage'>('item')
+  const [editorIndex, setEditorIndex] = useState(0)
+  const [savingEdit, setSavingEdit] = useState(false)
   // 列表滚动位置（思傅 2026-10-21 / 2026-10-22 增强：与首页同一规则，按 id 锚回原题）
   const [scrollTop, setScrollTop] = useState(0)
   const scrollRef = useRef(0)
@@ -167,13 +176,73 @@ export default function SubjectPage() {
     load({ ...next, page: 1, since })
   }
 
+  /**
+   * 打开图片编辑器（思傅 2026-10-22：与首页同一规则——点图片 = 直接打开并可编辑）。
+   * @param target 'item' = 图片条目本身；'questionImage' = 题目条目的题面图
+   */
+  const openEditor = (
+    item: TimelineItem,
+    action: ImageAction | 'crop',
+    target: 'item' | 'questionImage' = 'item',
+    index = 0,
+    srcOverride?: string,
+  ) => {
+    const src = srcOverride || (target === 'questionImage'
+      ? (item.question_image_urls || [])[index] || ''
+      : (item.url || item.thumb_url || ''))
+    setEditorItem(item)
+    setEditorSrc(src)
+    setEditorAction(action === 'crop' ? null : action)
+    setEditorTarget(target)
+    setEditorIndex(index)
+  }
+
+  /** 点列表里的图片 → 直接打开该图片（可编辑），与首页一致 */
+  const handleTapImage = (item: TimelineItem, url: string, index: number, kind: 'item' | 'questionImage') => {
+    if (sel.selecting) { sel.toggle(item.id); return }
+    openEditor(item, 'crop', kind, index, url)
+  }
+
+  /** 编辑器返回：保存并原位替换原图（与首页 handleEditorConfirm 同规则） */
+  const handleEditorConfirm = async (tempFilePath: string) => {
+    const item = editorItem
+    const target = editorTarget
+    const index = editorIndex
+    setEditorItem(null)
+    setEditorSrc('')
+    if (!item) return
+    setSavingEdit(true)
+    Taro.showLoading({ title: '保存中…', mask: true })
+    try {
+      if (target === 'questionImage') {
+        const up = await uploadImage(tempFilePath, { purpose: 'attach' })
+        const keys = item.content?.question_images || []
+        const nextKeys = keys.map((k, i) => (i === index ? up.key : k))
+        await updateQuestion(item.id, { question_images: nextKeys })
+        Taro.hideLoading()
+        Taro.showToast({ title: '图片已更新', icon: 'success' })
+      } else {
+        // replaceTimelineImage 内部会同步换 thumb_key（否则列表仍显示旧缩略图）
+        await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
+        Taro.hideLoading()
+        Taro.showToast({ title: '已更新该资料', icon: 'success' })
+      }
+      const since = getSinceFromRange(range, latestTimestamp)
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+    } catch (e) {
+      Taro.hideLoading()
+      console.error('保存编辑结果失败', e)
+      const msg = e instanceof Error && e.message ? e.message : '保存失败，请重试'
+      Taro.showToast({ title: msg, icon: 'none' })
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
   const handleOpen = (item: TimelineItem) => {
     if (sel.selecting) { sel.toggle(item.id); return }
-    if (item.kind === 'image') {
-      // 思傅 2026-10-21 规则：点图片 = 打开该图片（这里预览大图），点其他区域才进详情
-      Taro.previewImage({ current: item.url || '', urls: [item.url || ''] })
-      return
-    }
+    // 思傅 2026-10-22：复习本与首页同一规则——点卡片任意区域都进题目详情，
+    // 只有点图片才走编辑器（见 handleTapImage）。旧行为「图片条目只预览不进详情」已废弃。
     // 记录点的是哪道题，回来时按 id 锚回原题（而非像素偏移 → 列表重排也不跑偏）
     restoreItemIdRef.current = item.id
     restoredRef.current = false
@@ -289,6 +358,7 @@ export default function SubjectPage() {
                       selecting={sel.selecting}
                       checked={sel.selected.has(it.id)}
                       onOpen={handleOpen}
+                      onTapImage={handleTapImage}
                       onLongPress={(x) => sel.longPress(x.id)}
                       timeField="added_to_review_at"
                     />
@@ -341,6 +411,20 @@ export default function SubjectPage() {
           </View>
         </BottomActionBar>
       )}
+
+      {/* 图片编辑器（思傅 2026-10-22：复习本与首页同一套规则，点图片即可编辑并原位替换） */}
+      <ImageEditor
+        visible={!!editorSrc}
+        src={editorSrc}
+        autoAction={editorAction}
+        enableSaveToInbox={false}
+        confirmText="保存并替换原图"
+        onCancel={() => { setEditorItem(null); setEditorSrc('') }}
+        onConfirm={(p) => void handleEditorConfirm(p)}
+      />
+      {savingEdit ? (
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
+      ) : null}
     </View>
   )
 }
