@@ -91,7 +91,19 @@ export class TimelineService {
       q = q.eq('in_review_book', true)
     }
 
-    if (query.subject_id) q = q.eq('subject_id', query.subject_id)
+    // ⚠️ 哨兵值（思傅 2026-10-21「点未分类筛不出题」）：
+    //   overview 的 subject_stats 把「无学科」的题目汇总为 subject_id='none'
+    //   （真实值是 NULL）。列表若直接 .eq('subject_id','none') 必然查 0 条
+    //   ⇒ 首页点「未分类」显示空列表。「语数英正常」正是因为它们是真实 id。
+    //   'none'（以及前端可能传的 'null'/'uncategorized'）一律按 IS NULL 过滤。
+    if (query.subject_id) {
+      const sid = String(query.subject_id)
+      if (sid === 'none' || sid === 'null' || sid === 'uncategorized') {
+        q = q.is('subject_id', null)
+      } else {
+        q = q.eq('subject_id', sid)
+      }
+    }
     if (query.tag) q = q.contains('tags', [query.tag])
     if (query.keyword) {
       const kw = `%${query.keyword}%`
