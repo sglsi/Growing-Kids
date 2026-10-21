@@ -1,4 +1,4 @@
-import { View, Text, Canvas, Slider, Image as TaroImage } from '@tarojs/components'
+import { View, Text, Canvas, Slider, ScrollView, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -1309,7 +1309,7 @@ export default function ImageEditor({
       setSrPanelOpen(true)
       // ⭐ 隐藏裁剪框/遮罩：模式预览需要一张干净的图（思傅 2026-10-19 反馈：
       //    裁剪框的四块遮罩盖在预览图上，效果同样看不清）。取消/确定后面板关闭，
-      //    用户点图片可随时重新进入裁剪（enterFraming）。
+      //    用户点底部「裁剪」按钮可随时重新进入裁剪。
       setFraming(false)
       // ⭐ 前端实时预览：基础模式（含默认黑白）本地即时出图，点击即显，
       //    不再走后端（对标扫描王/夸克的即时滤镜，规避秒级网络往返）。
@@ -1516,7 +1516,15 @@ export default function ImageEditor({
       <View className="flex-1 flex items-center justify-center px-4">
         <View
           id="imgEditorBox"
-          onClick={enterFraming}
+          onClick={() => {
+            // ⭐ 思傅 2026-10-21：手机屏小、看不清处理细节 → 点图片全屏放大查看，
+            // 原生预览自带双指缩放/拖动，方便看黑白/灰度/去手写等细节。
+            // 裁剪改由底部「裁剪」按钮进入（enterFraming），不再由点图触发；
+            // 裁剪模式下点图不放大（避免与裁剪框拖拽手势冲突）。
+            if (!framing && !previewError && currentSrc) {
+              Taro.previewImage({ urls: [currentSrc], current: currentSrc, showmenu: true } as any)
+            }
+          }}
           style={{ width: imgW || '100%', height: imgH || 240, position: 'relative' }}
         >
           {previewError ? (
@@ -1695,8 +1703,10 @@ export default function ImageEditor({
         </View>
       )}
 
-      {/* 底部操作 */}
-      <View className="px-4 pb-8 pt-3">
+      {/* 底部操作 ⭐ 思傅 2026-10-21 修：智能高清「确定」后 modeThumbs「选择效果」栏出现，
+          底部操作块内容变高，在 fixed inset-0 不滚动的 flex 布局里把主按钮挤出视口、不可点。
+          现改为：操作区可滚动（内容多时不挤压），主按钮独立钉在最底部始终可见可点。 */}
+      <ScrollView scrollY className="px-4 pt-3" style={{ maxHeight: '42vh', paddingBottom: 88 }}>
         {/* AI 处理行（cropOnly 模式隐藏：只做裁剪） */}
         {!cropOnly && (
           <View className="flex flex-row items-center justify-around mb-4">
@@ -1923,7 +1933,13 @@ export default function ImageEditor({
             </Text>
           </View>
         ) : null}
+      </ScrollView>
 
+      {/* ⭐ 主按钮独立钉在最底部（始终可见可点，不受上面操作区内容高度影响） */}
+      <View
+        className="absolute left-0 right-0 z-[205] px-4 pt-2"
+        style={{ bottom: 0, backgroundColor: '#000', paddingBottom: 12 }}
+      >
         <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
           <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
         </Button>
