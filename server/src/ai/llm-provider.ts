@@ -112,8 +112,63 @@ export class HeaderUtils {
 
 const DEFAULT_BASE = 'https://api.hunyuan.cloud.tencent.com/v1'
 
+/**
+ * 默认 provider（思傅 2026-10-22 定：**大模型首先用扣子**）。
+ * 未配 Key 时 LLMClient 会自动沿降级链往下走（见 llmChain），业务代码零改动。
+ */
 export function aiProviderName(): string {
-  return (process.env.AI_PROVIDER || 'hunyuan').trim().toLowerCase()
+  return (process.env.AI_PROVIDER || 'coze').trim().toLowerCase()
+}
+
+// ---------------- 大模型降级链（思傅 2026-10-22 定）----------------
+// 优先级：扣子 Coze → DeepSeek → 腾讯混元。
+// 上一级没配 Key 或调用失败，就自动降级下一级；链与顺序可用 LLM_PROVIDER_CHAIN 自定义。
+//
+// ⚠️ DeepSeek 模型名（已核实 2026-10-22）：
+//    官方名是 `deepseek-v4-flash`（思傅说的「V4.1 flash」即此）；
+//    `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 弃用，用了会直接报错。
+const DEEPSEEK_BASE = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/+$/, '')
+const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
+
+/** 某个 provider 是否配了 Key */
+export function providerHasKey(p: string): boolean {
+  if (p === 'coze') return !!(process.env.COZE_API_TOKEN || '').trim()
+  if (p === 'deepseek') return !!(process.env.DEEPSEEK_API_KEY || '').trim()
+  if (p === 'hunyuan') return !!(process.env.HUNYUAN_API_KEY || '').trim()
+  return false
+}
+
+/** 可用的大模型链（按优先级过滤掉没配 Key 的） */
+export function llmChain(): string[] {
+  const raw = (process.env.LLM_PROVIDER_CHAIN || 'coze,deepseek,hunyuan')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  return raw.filter(providerHasKey)
+}
+
+function requireAnyLlmKey(): void {
+  if (llmChain().length) return
+  throw new Error(
+    '未配置任何大模型 Key：请任选其一写入 server/.env.secrets 后重启后端 —— ' +
+      '① 扣子 COZE_API_TOKEN（首选）② DeepSeek DEEPSEEK_API_KEY（备用）③ 混元 HUNYUAN_API_KEY',
+  )
+}
+
+/** DeepSeek 模型名映射：请求了非 deepseek-* 的名字就落到默认模型（并提示一次） */
+let deepseekModelWarned = false
+function resolveDeepseekModel(requested?: string): string {
+  const fallback = process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL
+  if (requested && requested !== fallback && !requested.startsWith('deepseek') && !deepseekModelWarned) {
+    console.warn(`[ai-provider] 请求的模型「${requested}」在 DeepSeek 不存在，已映射为「${fallback}」（仅提示一次）`)
+    deepseekModelWarned = true
+  }
+  return requested && requested.startsWith('deepseek') ? requested : fallback
+}
+
+/** 是否给 DeepSeek 配了视觉模型；没配则含图消息跳过它（避免必然失败） */
+function deepseekSupportsVision(): boolean {
+  return !!(process.env.DEEPSEEK_VISION_MODEL || '').trim()
 }
 
 function hunyuanBase(): string {
@@ -222,8 +277,39 @@ async function hunyuanChat(
   throw new Error(`混元 API 调用失败（${lastErr}）`)
 }
 
-/** 把同形 Message[] 转成 OpenAI 兼容 messages（丢弃 video_url） */
-function toOpenAiMessages(messages: Message[]): Record<string, unknown>[] {
+/**
+ * DeepSeek 对话（OpenAI 兼容，思傅 2026-10-22 指定的备用模型）。
+ *
+ * 端点：POST https://api.deepseek.com/chat/completions
+ * 鉴权：Authorization: Bearer <DEEPSEEK_API_KEY>
+ * 模型：deepseek-v4-flash（默认，可用 DEEPSEEK_MODEL 覆盖）
+ */
+async function deepseekChat(body: Record<string, unknown>): Promise<Record<string, any>> {
+  const apiKey = (process.env.DEEPSEEK_API_KEY || '').trim()
+  if (!apiKey) {
+    throw new Error(
+      '未配置 DEEPSEEK_API_KEY：请到 platform.deepseek.com → API Keys 创建 Key，' +
+        '写入 server/.env.secrets 的 DEEPSEEK_API_KEY 后重启后端。',
+    )
+  }
+  const timeoutMs = Number(process.env.DEEPSEEK_TIMEOUT_MS || 120000)
+  const url = `${DEEPSEEK_BASE}/chat/completions`
+  let lastErr = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { status, json, text } = await httpJson('POST', url, body, apiKey, timeoutMs)
+    if (status >= 200 && status < 300 && json) return json as Record<string, any>
+    lastErr = `HTTP ${status}: ${extractErrMessage(json, text)}`
+    const retryable = status === 429 || status >= 500
+    if (retryable && attempt === 0) {
+      await new Promise((r) => setTimeout(r, 1200))
+      continue
+    }
+    throw new Error(`DeepSeek API 调用失败（${lastErr}）`)
+  }
+  throw new Error(`DeepSeek API 调用失败（${lastErr}）`)
+}
+
+/** 把同形 Message[] 转成 OpenAI 兼容 messages（丢弃 video_url） */function toOpenAiMessages(messages: Message[]): Record<string, unknown>[] {
   return messages.map((m) => {
     if (typeof m.content === 'string') return { role: m.role, content: m.content }
     const parts = m.content
@@ -261,49 +347,54 @@ export class LLMClient {
     _previousResponseId?: string,
     extraHeaders?: Record<string, string>,
   ): Promise<LLMResponse> {
-    if (aiProviderName() === 'coze') {
-      const { LLMClient: CozeLLM } = await import('coze-coding-dev-sdk')
-      return new CozeLLM(this.config as any, this.customHeaders).invoke(messages, llmConfig, _previousResponseId, extraHeaders)
-    }
-
+    // 思傅 2026-10-22：大模型**首先用扣子**，扣子不能用就用 DeepSeek 兜底，最后混元。
+    // 沿链逐个尝试：上一级没配 Key 或调用失败，自动降级下一级，业务代码零改动。
+    requireAnyLlmKey()
     const hasImage = messages.some(
       (m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url'),
     )
-    const body: Record<string, unknown> = {
-      model: resolveModel(llmConfig?.model, hasImage),
-      messages: toOpenAiMessages(messages),
-      stream: false,
+    // 含图消息：DeepSeek 除非显式配了视觉模型，否则跳过（否则必然失败，白跑一趟）
+    let chain = llmChain()
+    if (hasImage) {
+      const filtered = chain.filter((p) => p !== 'deepseek' || deepseekSupportsVision())
+      chain = filtered.length ? filtered : chain
     }
-    if (typeof llmConfig?.temperature === 'number') body.temperature = llmConfig.temperature
-
-    const json = await hunyuanChat(body, { ...(this.customHeaders || {}), ...(extraHeaders || {}) })
-    const choice = (json.choices as any[] | undefined)?.[0]
-    const content = contentToString(choice?.message?.content)
-    return { content }
+    const oaiMessages = toOpenAiMessages(messages)
+    let lastErr: unknown = null
+    for (const provider of chain) {
+      try {
+        if (provider === 'coze') {
+          const { LLMClient: CozeLLM } = await import('coze-coding-dev-sdk')
+          return await new CozeLLM(this.config as any, this.customHeaders).invoke(
+            messages, llmConfig, _previousResponseId, extraHeaders,
+          )
+        }
+        const body: Record<string, unknown> = {
+          model: provider === 'deepseek'
+            ? resolveDeepseekModel(llmConfig?.model)
+            : resolveModel(llmConfig?.model, hasImage),
+          messages: oaiMessages,
+          stream: false,
+        }
+        if (typeof llmConfig?.temperature === 'number') body.temperature = llmConfig.temperature
+        const json = provider === 'deepseek'
+          ? await deepseekChat(body)
+          : await hunyuanChat(body, { ...(this.customHeaders || {}), ...(extraHeaders || {}) })
+        const choice = (json.choices as any[] | undefined)?.[0]
+        const content = contentToString(choice?.message?.content)
+        if (!content) throw new Error(`${provider} 返回空内容`)
+        return { content }
+      } catch (e) {
+        lastErr = e
+        console.warn(`[ai-provider] ${provider} 调用失败，降级到下一级：${e}`)
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('大模型调用失败（降级链已全部尝试）')
   }
 }
 
 // ---------------- SearchClient ----------------
 
-/** 深度收集响应里所有形似「联网搜索结果数组」的节点（search_info/websearch/search_results/web_search） */
-function collectSearchNodes(node: unknown, out: any[], depth = 0): void {
-  if (!node || depth > 6) return
-  if (Array.isArray(node)) {
-    // 数组元素像搜索结果（有 url/title）才收
-    if (node.length && node.every((it) => it && typeof it === 'object' && ('url' in it || 'link' in it))) {
-      out.push(...node)
-    }
-    return
-  }
-  if (typeof node !== 'object') return
-  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-    if (/search_info|websearch|search_results|web_search|sources|references|citations/i.test(k)) {
-      collectSearchNodes(v, out, depth + 1)
-    } else if (typeof v === 'object') {
-      collectSearchNodes(v, out, depth + 1)
-    }
-  }
-}
 
 export class SearchClient {
   constructor(public config?: Config, public customHeaders?: Record<string, string>) {}
@@ -322,87 +413,16 @@ export class SearchClient {
       return new CozeSearch(this.config as any, this.customHeaders).advancedSearch(query, options)
     }
 
-    const count = Math.min(Math.max(options.count || 8, 1), 20)
 
-    // 策略：兼容端点的联网搜索参数形态存在两种文档口径（web_search_options / tools 声明），
-    // 逐个尝试，都失败则要求模型输出带来源的 JSON 兜底；结构化检索结果从响应任意节点深挖。
-    const attempts: Record<string, unknown>[] = [
-      { web_search_options: { enable: true, count } },
-      { tools: [{ type: 'web_search', search_source: 'lite' }] },
-      {},
-    ]
-    let webItems: WebItem[] = []
-    let lastErr = ''
-    for (const extra of attempts) {
-      try {
-        const body: Record<string, unknown> = {
-          model: process.env.HUNYUAN_MODEL || 'hunyuan-turbos-latest',
-          stream: false,
-          messages: [
-            {
-              role: 'system',
-              content:
-                '你是联网检索助手。请检索并仅输出 JSON：{"web_items":[{"title":"...","url":"https://...","summary":"摘要","content":"正文片段","site_name":"来源名"}]}，' +
-                `最多 ${count} 条，url 必须是真实可访问的 https 链接。找不到相关结果则输出 {"web_items":[]}。不要输出其他文字。`,
-            },
-            { role: 'user', content: query },
-          ],
-          ...extra,
-        }
-        const json = await hunyuanChat(body)
-        // ① 结构化节点优先（search_info 等）
-        const nodes: any[] = []
-        collectSearchNodes(json, nodes)
-        for (const n of nodes) {
-          const url = n.url || n.link
-          if (!url) continue
-          webItems.push({
-            id: String(n.id || url),
-            sort_id: webItems.length,
-            title: String(n.title || url),
-            site_name: n.site_name || (typeof n.source === 'string' ? n.source : undefined),
-            url: String(url),
-            snippet: String(n.snippet || n.summary || n.content || ''),
-            summary: n.summary ? String(n.summary) : undefined,
-            content: n.content ? String(n.content) : undefined,
-          })
-        }
-        // ② 结构化节点没有 → 解析模型输出的 JSON
-        if (!webItems.length) {
-          const content = contentToString((json.choices as any[])?.[0]?.message?.content)
-          const start = content.indexOf('{')
-          const end = content.lastIndexOf('}')
-          if (start !== -1 && end > start) {
-            try {
-              const parsed = JSON.parse(content.slice(start, end + 1)) as { web_items?: any[] }
-              for (const n of parsed.web_items || []) {
-                if (!n?.url) continue
-                webItems.push({
-                  id: String(n.id || n.url),
-                  sort_id: webItems.length,
-                  title: String(n.title || n.url),
-                  site_name: n.site_name,
-                  url: String(n.url),
-                  snippet: String(n.summary || n.content || ''),
-                  summary: n.summary,
-                  content: n.content,
-                })
-              }
-            } catch {
-              // 模型没按 JSON 输出，放弃本轮
-            }
-          }
-        }
-        if (webItems.length) break
-      } catch (e) {
-        lastErr = String((e as Error)?.message ?? e).slice(0, 200)
-      }
-    }
-
-    if (!webItems.length && lastErr) {
-      console.warn(`[ai-provider] 联网检索未取得结果: ${lastErr}`)
-    }
-    return { web_items: webItems, image_items: [] }
+    // ⚠️ 思傅 2026-10-22：除扣子外，DeepSeek 与混元都**不提供真正的检索 API**。
+    //    旧实现在这里让大模型「编一份 JSON 冒充 web_items」，URL 不由检索系统保证、
+    //    可能根本不存在 —— 那是伪造来源，已整体移除。
+    //    真搜索请改用博查（answer-search 模块，配 BOCHA_API_KEY）或把 AI_PROVIDER 设为 coze。
+    throw new Error(
+      '联网搜索不可用：当前 AI_PROVIDER 不是 coze，而 DeepSeek / 混元均无检索 API。' +
+        '请配置 BOCHA_API_KEY 走博查（answer-search 模块，题目答案用的就是它），' +
+        '或配置 COZE_API_TOKEN 并将 AI_PROVIDER 设为 coze。',
+    )
   }
 
   async webSearch(query: string, count = 5): Promise<SearchResponse> {

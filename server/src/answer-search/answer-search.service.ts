@@ -175,7 +175,8 @@ export class AnswerSearchService {
       } else {
         result = {
           source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
-          note: '联网检索与大模型均不可用：请配置 BOCHA_API_KEY（联网检索）或 HUNYUAN_API_KEY（模型兜底）后重试',
+          note: '联网检索与大模型均不可用：请配置 BOCHA_API_KEY（联网检索），或任一模型 Key' +
+            '（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_KEY 混元）后重试',
         }
       }
     }
