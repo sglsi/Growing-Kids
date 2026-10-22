@@ -62,7 +62,10 @@ const CANDIDATE_IPS = [
 
 /** 探测参数 */
 const PROBE_TIMEOUT_MS = 5000
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000
+/** 有可通 IP 时的重探间隔（封锁面慢漂移） */
+const REFRESH_INTERVAL_OK_MS = 5 * 60 * 1000
+/** 全军覆没时的重探间隔（尽快发现恢复） */
+const REFRESH_INTERVAL_EMPTY_MS = 60 * 1000
 /** 官方 DNS 结果的本地缓存 TTL（避免每次 lookup 都打一次 DNS） */
 const DNS_CACHE_TTL_MS = 60_000
 
@@ -72,7 +75,8 @@ let targetHost = ''
 let rankedIps: string[] = []
 /** 官方 DNS 结果缓存 */
 let officialCache: { at: number; ips: string[] } = { at: 0, ips: [] }
-let refreshing = false
+/** 进行中的探测（并发请求失败时共享同一轮，避免重复探测） */
+let inflight: Promise<boolean> | null = null
 
 /** 模块加载时捕获的原始 dns.lookup（补丁前后都不能丢，否则 officialIps 会递归进补丁） */
 const originalLookup = dns.lookup
@@ -138,35 +142,53 @@ function officialIps(): Promise<string[]> {
   })
 }
 
-/** 并行探测候选集，重排 rankedIps（可通的按延迟升序在前） */
-async function refreshRankedIps(): Promise<void> {
-  if (refreshing || !targetHost) return
-  refreshing = true
-  try {
-    const envPool = (process.env.SUPABASE_IP_POOL || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    const official = await officialIps()
-    const candidates = Array.from(new Set([...(envPool.length ? envPool : CANDIDATE_IPS), ...official]))
-    const results = await Promise.all(
-      candidates.map(async (ip) => ({ ip, ms: await probeIp(ip) })),
-    )
-    const ok = results
-      .filter((r) => Number.isFinite(r.ms))
-      .sort((a, b) => a.ms - b.ms)
-      .map((r) => r.ip)
-    rankedIps = ok
-    const stamp = new Date().toISOString().slice(11, 19)
-    console.info(
-      `[supabase-dns-pin] ${stamp} 探测 ${candidates.length} 个候选 IP：可通 ${ok.length} 个` +
-        (ok.length ? `，最优 ${ok.slice(0, 3).join(' / ')}` : '（全军覆没，回退官方 DNS）'),
-    )
-  } catch {
-    // 探测异常不影响主流程，下轮再试
-  } finally {
-    refreshing = false
-  }
+/**
+ * 并行探测候选集，重排 rankedIps（可通的按延迟升序在前）。
+ * 返回排名是否发生变化（供失败重试判断「重探有没有探出新局面」）。
+ *
+ * ⚠️ 全军覆没时**不清空**已有排名：封锁是布朗运动的，上一轮可通的 IP
+ * 下一轮很可能仍可通；若探到 0 就置空，会把池毒成「只剩官方 DNS」，
+ * 白白多熬一整个周期。保留旧排名 + 官方 DNS 兜底，是严格的超集，不亏。
+ */
+async function refreshRankedIps(): Promise<boolean> {
+  if (!targetHost) return false
+  if (inflight) return inflight
+  inflight = (async () => {
+    const before = rankedIps.join(',')
+    try {
+      const envPool = (process.env.SUPABASE_IP_POOL || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const official = await officialIps()
+      const candidates = Array.from(new Set([...(envPool.length ? envPool : CANDIDATE_IPS), ...official]))
+      const results = await Promise.all(
+        candidates.map(async (ip) => ({ ip, ms: await probeIp(ip) })),
+      )
+      const ok = results
+        .filter((r) => Number.isFinite(r.ms))
+        .sort((a, b) => a.ms - b.ms)
+        .map((r) => r.ip)
+      // 只在「探到了可通的」或「本来就没有旧排名」时替换——0 结果保留旧排名
+      if (ok.length > 0 || rankedIps.length === 0) rankedIps = ok
+      const stamp = new Date().toISOString().slice(11, 19)
+      console.info(
+        `[supabase-dns-pin] ${stamp} 探测 ${candidates.length} 个候选 IP：本轮可通 ${ok.length} 个` +
+          (ok.length ? `，最优 ${ok.slice(0, 3).join(' / ')}` : `（沿用旧排名 ${rankedIps.length} 个）`),
+      )
+      return rankedIps.join(',') !== before
+    } catch {
+      return false
+    } finally {
+      inflight = null
+    }
+  })()
+  return inflight
+}
+
+/** 供外部（Supabase fetch 失败重试）立即触发一轮探测并等待完成；返回排名是否变化 */
+export function forceRefreshRankedIps(): Promise<boolean> {
+  return refreshRankedIps()
 }
 
 /**
@@ -214,8 +236,14 @@ export function installSupabaseDnsPin(): void {
     return undefined
   } as typeof dns.lookup
 
-  // 立即探一轮 + 每 5 分钟重探（封锁面漂移自愈）；unref 不阻塞进程退出
-  void refreshRankedIps()
-  const timer = setInterval(() => void refreshRankedIps(), REFRESH_INTERVAL_MS)
-  timer.unref()
+  // 立即探一轮 + 动态周期重探：有可通 IP 时 5 分钟（封锁面慢漂移），
+  // 全军覆没时 60 秒（尽快发现恢复）。unref 不阻塞进程退出。
+  const scheduleNext = () => {
+    const delay = rankedIps.length ? REFRESH_INTERVAL_OK_MS : REFRESH_INTERVAL_EMPTY_MS
+    const timer = setTimeout(() => {
+      void refreshRankedIps().then(scheduleNext)
+    }, delay)
+    timer.unref()
+  }
+  void refreshRankedIps().then(scheduleNext)
 }

@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { installSupabaseDnsPin } from './supabase-dns-pin';
+import { installSupabaseDnsPin, forceRefreshRankedIps } from './supabase-dns-pin';
 
 let envLoaded = false;
 
@@ -75,6 +75,22 @@ function getSupabaseClient(token?: string): SupabaseClient {
 
   return createClient(url, key, {
     ...(token ? { global: { headers: { Authorization: `Bearer ${token}` } } } : {}),
+    // 网络韧性（2026-10-22）：GFW 间歇封锁 Cloudflare/AWS-SG 时，GET 类请求
+    // （含中间件 findById——它一挂全部接口 500「用户上下文缺失」）连接失败后
+    // 立即强制重探一轮 IP 排名；只有「排名确实变了」才重试，避免封锁持续时
+    // 每个请求都白等两倍超时。仅 GET 重试（幂等），写操作不重试防重复写入。
+    global: {
+      ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const method = (init?.method || 'GET').toUpperCase();
+        return fetch(input as any, init).catch(async (err) => {
+          if (method !== 'GET' && method !== 'HEAD') throw err;
+          const changed = await forceRefreshRankedIps();
+          if (!changed) throw err;
+          return fetch(input as any, init);
+        });
+      },
+    },
     db: {
       timeout: 60000,
     },
