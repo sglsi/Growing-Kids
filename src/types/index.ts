@@ -14,6 +14,36 @@ export interface Subject {
   created_at?: string
 }
 
+// ---------- 答案附件（思傅 2026-10-21：答案支持图片 / 文档 / 文本）----------
+export type AnswerAttachmentType = 'image' | 'doc' | 'text'
+
+/** 答案来源：手填 / 联网搜索 / OCR 识别 / 资料库选取 */
+export type AnswerSource = 'manual' | 'search' | 'ocr' | 'library'
+
+/**
+ * 一条答案附件。
+ *
+ * ⚠️ 一一对应：答案**内嵌在题目记录的 content 里**，与题目同属一条数据，
+ *    因此不存在「答案挂到别的题上」的可能（详见「题目答案功能-设计方案.md」§1.2）。
+ */
+export interface AnswerAttachment {
+  id: string
+  type: AnswerAttachmentType
+  file_key?: string
+  thumb_key?: string
+  name?: string
+  mime?: string
+  size?: number
+  /** type=text 时承载正文 */
+  text?: string
+  source?: AnswerSource
+  /** source=library 时的资料库条目 id */
+  ref_id?: string
+  /** source=search 时的参考链接 */
+  refs?: { title: string; url: string }[]
+  created_at: string
+}
+
 // 题目结构化内容（存于 timeline_items.content）
 export interface QuestionContent {
   question?: string
@@ -36,6 +66,13 @@ export interface QuestionContent {
   question_label?: string
   /** P2-18 艾宾浩斯复习阶段计数：已完成复习次数 */
   review_count?: number
+  // ---------- 答案（思傅 2026-10-21）----------
+  /** 答案附件（图片 / 文档 / 文本），与题目同记录存储 ⇒ 不可能挂错题 */
+  answer_attachments?: AnswerAttachment[]
+  answer_source?: AnswerSource | 'mixed'
+  /** 联网搜索命中的参考来源 */
+  answer_refs?: { title: string; url: string }[]
+  answer_searched_at?: string
 }
 
 /** P2-16 错因分析结论 */
@@ -125,6 +162,8 @@ export interface TimelineItem {
   question_image_urls?: string[]
   /** 答题卡/答案图签名 URL（来自 content.answer_images） */
   answer_image_urls?: string[]
+  /** 答案附件（后端已补签名 URL / 缩略图 URL） */
+  answer_attachments?: (AnswerAttachment & { url?: string; thumb_url?: string })[]
 }
 
 // 资料库文档（外部 PDF / Word / TXT 等）

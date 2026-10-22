@@ -17,7 +17,7 @@ import { buildHeaders, captureUserId } from '@/services/net'
 import { invalidateDomain } from '@/services/cache'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
-  SimilarItem, ReviewPlan,
+  SimilarItem, ReviewPlan, AnswerAttachment, AnswerSource,
 } from '@/types'
 
 export type { TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged }
@@ -495,6 +495,14 @@ export function updateQuestion(
     tags?: string[]
     /** 题面图 file_key 全量替换（详情页「编辑图片」后原位替换；后端按 content 合并） */
     question_images?: string[]
+    /** 答案附件全量替换（思傅 2026-10-21：图片 / 文档 / 文本） */
+    answer_attachments?: AnswerAttachment[]
+    /** 答案来源：manual 手填 / search 联网搜索 / ocr / mixed */
+    answer_source?: AnswerSource | 'mixed'
+    /** 联网搜索的参考来源 */
+    answer_refs?: { title: string; url: string }[]
+    /** 最近一次联网搜答案时间 */
+    answer_searched_at?: string
   },
 ) {
   const patch: Parameters<typeof updateTimeline>[1] = {}
@@ -507,7 +515,11 @@ export function updateQuestion(
     payload.solution !== undefined ||
     payload.wrong_answer !== undefined ||
     payload.status !== undefined ||
-    payload.question_images !== undefined
+    payload.question_images !== undefined ||
+    payload.answer_attachments !== undefined ||
+    payload.answer_source !== undefined ||
+    payload.answer_refs !== undefined ||
+    payload.answer_searched_at !== undefined
   ) {
     patch.content = {
       question: payload.question_content,
@@ -516,6 +528,11 @@ export function updateQuestion(
       wrong_answer: payload.wrong_answer,
       status: payload.status,
       ...(payload.question_images !== undefined ? { question_images: payload.question_images } : {}),
+      // 答案：附件 / 来源 / 参考链接（后端按 content 字段合并，未传的字段不受影响）
+      ...(payload.answer_attachments !== undefined ? { answer_attachments: payload.answer_attachments } : {}),
+      ...(payload.answer_source !== undefined ? { answer_source: payload.answer_source } : {}),
+      ...(payload.answer_refs !== undefined ? { answer_refs: payload.answer_refs } : {}),
+      ...(payload.answer_searched_at !== undefined ? { answer_searched_at: payload.answer_searched_at } : {}),
     } as NonNullable<Parameters<typeof updateTimeline>[1]>['content']
   }
   return updateTimeline(id, patch)
@@ -1064,6 +1081,95 @@ export function searchSolution(question: string) {
       header: authHeaders(),
     }),
   )
+}
+
+// ============================================================
+// 题目答案：联网搜答案（思傅 2026-10-21）
+// ============================================================
+
+/** 联网搜答案的返回（与后端 answer-search.service 对齐） */
+export interface AnswerSearchResult {
+  /** search = 有真实检索来源；llm = 无检索、纯模型推理；none = 都不可用 */
+  source: 'search' | 'llm' | 'none'
+  /** 是否经过联网核实 */
+  verified: boolean
+  answer: string
+  solution: string
+  refs: { title: string; url: string }[]
+  confidence: number
+  note?: string
+  cached?: boolean
+}
+
+/**
+ * 为指定题目联网搜答案。
+ *
+ * ⚠️ 本接口**不写库** —— 只返回候选答案，用户点「采纳」后才由调用方写入，
+ *    杜绝模型幻觉答案静默污染题库（设计方案 §2.3 安全阀）。
+ */
+export function searchAnswer(itemId: string, force = false) {
+  return unwrap<AnswerSearchResult>(
+    Network.request({
+      url: `/api/answer-search/${itemId}`,
+      method: 'POST',
+      data: { force },
+      header: authHeaders(),
+    }),
+  )
+}
+
+/** 采纳搜到的答案：写入题目（带来源标记与参考链接） */
+export function adoptAnswer(
+  itemId: string,
+  payload: { answer: string; solution?: string; refs?: { title: string; url: string }[]; source: AnswerSource | 'mixed' },
+) {
+  return updateQuestion(itemId, {
+    answer_content: payload.answer,
+    solution: payload.solution,
+    status: payload.answer ? 'answered' : 'pending',
+    answer_source: payload.source,
+    answer_refs: payload.refs,
+    answer_searched_at: new Date().toISOString(),
+  })
+}
+
+/** 保存答案附件（图片 / 文档 / 文本），与题目同记录存储 */
+export function saveAnswerAttachments(itemId: string, attachments: AnswerAttachment[]) {
+  return updateQuestion(itemId, {
+    answer_attachments: attachments,
+    answer_source: 'manual',
+    answer_searched_at: new Date().toISOString(),
+  })
+}
+
+/**
+ * 一次性保存答案的**全部字段**（文本 + 附件 + 来源 + 参考链接）。
+ *
+ * 为什么必须一次调用：后端 `content` 是按字段合并的，分开调用虽不会互相清掉，
+ * 但两次写之间用户若改了别的字段（如题干）会被其中一次覆盖，且多一次往返。
+ * 统一入口既安全又少一个请求。
+ */
+export function saveAnswer(
+  itemId: string,
+  payload: {
+    answer?: string
+    solution?: string
+    attachments?: AnswerAttachment[]
+    source?: AnswerSource | 'mixed'
+    refs?: { title: string; url: string }[]
+  },
+) {
+  return updateQuestion(itemId, {
+    answer_content: payload.answer,
+    solution: payload.solution,
+    // ⚠️ 只在确实传了文本答案时才改 status：否则「仅添加附件」会把已有答案的
+    //    条目误标成 pending（列表角标「待找答案」就冒出来了）。
+    status: payload.answer !== undefined ? (payload.answer ? 'answered' : 'pending') : undefined,
+    answer_attachments: payload.attachments,
+    answer_source: payload.source,
+    answer_refs: payload.refs,
+    answer_searched_at: new Date().toISOString(),
+  })
 }
 
 // ============================================================
