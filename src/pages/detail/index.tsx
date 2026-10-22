@@ -14,6 +14,7 @@ import {
 import { cacheGet, cacheSet } from '@/services/cache'
 import ImageEditor from '@/components/image-editor'
 import AnswerEditor from '@/components/answer-editor'
+import MathSymbolBar from '@/components/math-symbol-bar'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 
@@ -62,6 +63,8 @@ export default function DetailPage() {
   const [editorBusy, setEditorBusy] = useState(false)      // 编辑结果上传/替换中
   const [ocrBusy, setOcrBusy] = useState(false)            // 图片文字识别中
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
+  // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
+  const [solutionCursor, setSolutionCursor] = useState(-1)
 
   /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
   const applyItem = (it: TimelineItem) => {
@@ -122,6 +125,16 @@ export default function DetailPage() {
 
   // 「联网搜答案」已由 AnswerEditor 接管（带来源标注 + 采纳才入库），
   // 旧的 handleSearch（直接填文本框、无来源标注）已移除，避免两套搜题入口。
+
+  /** 数学符号/模板插入解题过程框：`|` 为插入后光标停留位（模板用） */
+  const insertSolutionSymbol = (snippet: string) => {
+    const pos = solutionCursor >= 0 ? Math.min(solutionCursor, solution.length) : solution.length
+    const marker = snippet.indexOf('|')
+    const plain = snippet.replace('|', '')
+    const next = solution.slice(0, pos) + plain + solution.slice(pos)
+    setSolution(next)
+    setSolutionCursor(marker >= 0 ? pos + marker : pos + plain.length)
+  }
 
   const handlePrint = async () => {
     try {
@@ -344,6 +357,46 @@ export default function DetailPage() {
               <Text className="block text-sm" style={{ color: '#BE3E2D' }}>删除</Text>
             </Button>
           </View>
+
+          {/* 思傅 2026-10-22：图片类题目也要支持答案输入与联网搜题。
+              图片条目此前的分支只展示图片+学科，答案区完全缺失——接入 AnswerEditor
+              （文本/附件/裁剪/联网搜答案，写入按 item.id 落到本条目的 content）+
+              详细解题过程。后端 update() 对 content 做局部合并、不校验 kind，
+              答案/搜题直接可用。 */}
+          <AnswerEditor
+            item={item}
+            onSaved={(updated) => {
+              setItem(updated)
+              setAContent(updated.content?.answer || '')
+              setSolution(updated.content?.solution || '')
+            }}
+          />
+
+          <View className="flex flex-row items-center justify-between mb-2 mt-4">
+            <Text className="block text-xs text-muted-foreground">详细解题过程</Text>
+            <MathSymbolBar onInsert={insertSolutionSymbol} />
+          </View>
+          <Card className="rounded-2xl border-border p-4 mb-2">
+            <Textarea
+              className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
+              value={solution}
+              placeholder="可粘贴或联网获取详细解析"
+              maxlength={3000}
+              cursor={solutionCursor}
+              onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
+            />
+          </Card>
+        </View>
+
+        <View style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          display: 'flex', flexDirection: 'row', gap: '12px',
+          padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
+        }}
+        >
+          <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
+            <Text className="block text-sm">{saving ? '保存中…' : '保存修改'}</Text>
+          </Button>
         </View>
 
         {/* ⭐ 思傅 2026-10-21 修：kind=image 分支此前早 return，没挂载 ImageEditor，
@@ -591,14 +644,18 @@ export default function DetailPage() {
           />
         )}
 
-        <Text className="block text-xs text-muted-foreground mb-2 mt-4">详细解题过程</Text>
+        <View className="flex flex-row items-center justify-between mb-2 mt-4">
+          <Text className="block text-xs text-muted-foreground">详细解题过程</Text>
+          <MathSymbolBar onInsert={insertSolutionSymbol} />
+        </View>
         <Card className="rounded-2xl border-border p-4 mb-2">
           <Textarea
             className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
             value={solution}
             placeholder="可粘贴或联网获取详细解析"
             maxlength={3000}
-            onInput={(e) => setSolution(e.detail.value)}
+            cursor={solutionCursor}
+            onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
           />
         </Card>
 

@@ -86,7 +86,12 @@ export class AnswerSearchService {
     // ① 取题目（含签名 URL）
     let item
     try {
-      item = await this.timelineService.findOne(userId, itemId)
+      const raw = await this.timelineService.findOne(userId, itemId)
+      // ⚠️ findOne 返回裸行（只有 file_key，没有签名 URL）——OCR 兜底要读
+      // url/question_image_urls，必须先过 withUrls 富化（与控制器 GET /:id 同路）。
+      // 2026-10-22 前此处直接用裸行，导致「图片题 OCR 题面图」兜底从未生效。
+      const [enriched] = await this.timelineService.withUrls([raw])
+      item = enriched
     } catch {
       return { source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0, note: '题目不存在或无权访问' }
     }
@@ -98,6 +103,15 @@ export class AnswerSearchService {
         question = (await this.ocrService.recognizeBlockText(item.question_image_urls[0]) || '').trim()
       } catch (e) {
         this.logger.warn(`[answer-search] 题面图 OCR 失败: ${e}`)
+      }
+    }
+    // 纯图片条目（kind=image）没有 content.question_images，主图在 url 上——
+    // 思傅 2026-10-22：图片题也要能联网搜题，兜底 OCR 主图
+    if (!question && item.url) {
+      try {
+        question = (await this.ocrService.recognizeBlockText(item.url) || '').trim()
+      } catch (e) {
+        this.logger.warn(`[answer-search] 图片条目主图 OCR 失败: ${e}`)
       }
     }
     if (!question) {
