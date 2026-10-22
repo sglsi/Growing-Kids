@@ -4,6 +4,7 @@ import Taro from '@tarojs/taro'
 import { Plus, Trash2, Crop, Globe, FileText, Check, X } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
+import MathSymbolBar from '@/components/math-symbol-bar'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
@@ -43,6 +44,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
   //    保证永不因空 item 崩渲染（2026-10-22 详情页打不开的直接崩溃点）。
   const [text, setText] = useState(item?.content?.answer || '')
   const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
+  // 答案框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
+  const [textCursor, setTextCursor] = useState(-1)
   const [saving, setSaving] = useState(false)
   const [searching, setSearching] = useState(false)
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
@@ -58,7 +61,10 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     try {
       const updated = await saveAnswer(item.id, {
         answer: nextText ?? text,
-        solution: item.content?.solution,
+        // ⚠️ 不传 solution：answer 的保存不应顺带写回 solution——父页面
+        // 「详细解题过程」框里未保存的编辑会被这里的旧值覆盖（2026-10-22
+        // 图片题接入答案区时发现的数据丢失路径）。solution 的写入只走
+        // 「采纳搜题结果」（handleAdopt 显式传）和父页面自己的保存按钮。
         attachments: nextAtts,
         source: nextAtts.length ? 'manual' : (item.content?.answer_source || 'manual'),
         refs: item.content?.answer_refs,
@@ -73,6 +79,16 @@ export default function AnswerEditor({ item, onSaved }: Props) {
   }
 
   const saveText = () => void persist(atts, text)
+
+  /** 数学符号/模板插入答案框：`|` 为插入后光标停留位（模板用） */
+  const insertAnswerSymbol = (snippet: string) => {
+    const pos = textCursor >= 0 ? Math.min(textCursor, text.length) : text.length
+    const marker = snippet.indexOf('|')
+    const plain = snippet.replace('|', '')
+    const next = text.slice(0, pos) + plain + text.slice(pos)
+    setText(next)
+    setTextCursor(marker >= 0 ? pos + marker : pos + plain.length)
+  }
 
   const addAttachment = async (a: AnswerAttachment) => {
     const next = [...atts, a]
@@ -214,12 +230,14 @@ export default function AnswerEditor({ item, onSaved }: Props) {
         </Text>
       </View>
 
+      <MathSymbolBar onInsert={insertAnswerSymbol} />
       <Textarea
         className="w-full rounded-xl border border-border p-3 text-sm"
         style={{ minHeight: 72, backgroundColor: '#fff' }}
         placeholder="输入正确答案（或点下方按钮添加图片 / 文档）"
         value={text}
-        onInput={(e) => setText(e.detail.value)}
+        cursor={textCursor}
+        onInput={(e) => { setText(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
       />
 
       {/* 附件列表 */}
