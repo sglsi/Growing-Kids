@@ -576,15 +576,20 @@ export default function DetailPage() {
 
         {/* 答案区（思傅 2026-10-21）：文本 + 图片/文档附件 + 裁剪 + 联网搜答案，
             全部按 item.id 写入该题目记录，答案与题目一一对应。
-            onSaved 同步回 aContent/solution，避免页面底部「保存」用旧 state 覆盖。 */}
-        <AnswerEditor
-          item={item!}
-          onSaved={(updated) => {
-            setItem(updated)
-            setAContent(updated.content?.answer || '')
-            setSolution(updated.content?.solution || '')
-          }}
-        />
+            onSaved 同步回 aContent/solution，避免页面底部「保存」用旧 state 覆盖。
+            ⚠️ 必须等 item 到位再挂载：AnswerEditor 的 useState 初值取 item.content，
+            首帧 item=null 时渲染会 TypeError 崩整页（2026-10-22 详情页打不开根因，
+            回归引入于 d3e4e98）。 */}
+        {item && (
+          <AnswerEditor
+            item={item}
+            onSaved={(updated) => {
+              setItem(updated)
+              setAContent(updated.content?.answer || '')
+              setSolution(updated.content?.solution || '')
+            }}
+          />
+        )}
 
         <Text className="block text-xs text-muted-foreground mb-2 mt-4">详细解题过程</Text>
         <Card className="rounded-2xl border-border p-4 mb-2">

@@ -25,12 +25,12 @@ interface Props {
   onSaved?: (item: TimelineItem) => void
 }
 
-/** 答案将存入的目标锚：优先题号标签，否则题干前 16 字 */
-function targetLabel(item: TimelineItem): string {
-  const c = item.content || {}
+/** 答案将存入的目标锚：优先题号标签，否则题干前 16 字（item 为空时返回「本题」，绝不抛） */
+function targetLabel(item: TimelineItem | null | undefined): string {
+  const c = item?.content || {}
   const label = c.question_label || ''
   if (label) return label
-  const q = (c.question || item.title || '').trim()
+  const q = (c.question || item?.title || '').trim()
   return q ? `${q.slice(0, 16)}${q.length > 16 ? '…' : ''}` : '本题'
 }
 
@@ -39,8 +39,10 @@ function newId(): string {
 }
 
 export default function AnswerEditor({ item, onSaved }: Props) {
-  const [text, setText] = useState(item.content?.answer || '')
-  const [atts, setAtts] = useState<AnswerAttachment[]>(item.content?.answer_attachments || [])
+  // ⚠️ item 可能为 null（调用方未等数据到位就挂载时会走到）——全部可选链，
+  //    保证永不因空 item 崩渲染（2026-10-22 详情页打不开的直接崩溃点）。
+  const [text, setText] = useState(item?.content?.answer || '')
+  const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
   const [saving, setSaving] = useState(false)
   const [searching, setSearching] = useState(false)
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
