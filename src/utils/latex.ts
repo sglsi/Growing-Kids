@@ -35,6 +35,10 @@ export type MathNode =
   | { t: 'deco'; kind: 'overline' | 'underline'; body: MathNode[] }
   | { t: 'style'; kind: 'bold' | 'italic' | 'normal'; body: MathNode[] }
   | { t: 'space'; w: string } // \, \; \quad 等间距
+  // 上方装饰（向量箭头/帽/点）：rich-text 不支持 svg，用「上方小字符」近似
+  | { t: 'accent'; kind: 'arrow' | 'hat' | 'widehat' | 'dot' | 'ddot'; body: MathNode[]; dir?: 'l' | 'r' | 'lr' }
+  | { t: 'binom'; top: MathNode[]; bottom: MathNode[] } // 组合数：圆括号版分数
+  | { t: 'env'; name: string; rows: MathNode[][][] } // \begin{cases}/aligned/matrix 等环境
 
 export class UnsupportedLatexError extends Error {
   constructor(msg: string) {
@@ -79,14 +83,37 @@ const OPS: Record<string, string> = {
   oint: '∮', bigcup: '⋃', bigcap: '⋂', bigvee: '⋁', bigwedge: '⋀',
   bigoplus: '⨁', bigotimes: '⨂',
   langle: '⟨', rangle: '⟩', lVert: '‖', rVert: '‖', vert: '|', Vert: '‖',
+  // 集合的否定与补（高中集合运算）
+  complement: '∁', subsetneq: '⊊', supsetneq: '⊋', varsubsetneq: '⊊',
+  nleq: '≰', ngeq: '≱', nsim: '≁', ncong: '≆', napprox: '≉',
+  nsubset: '⊄', nsupset: '⊅', nsubseteq: '⊈', nsupseteq: '⊉',
+  nequiv: '≢', nparallel: '∦', notni: '∌',
+  // 其它常用
+  box: '□', blacksquare: '■', lozenge: '◇', diamond: '◇',
+  checkmark: '✓', circledS: 'Ⓢ', wr: '≀',
 }
 
 /**  upright 函数名（\sin \log \lim …）—— 数学排版惯例：函数体正体不斜体 */
 const FUNCS = new Set([
   'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos', 'arctan',
+  'arccot', 'arcsec', 'arccsc',
   'sinh', 'cosh', 'tanh', 'coth', 'log', 'ln', 'lg', 'exp',
   'lim', 'limsup', 'liminf', 'max', 'min', 'sup', 'inf',
-  'det', 'dim', 'deg', 'arg', 'gcd', 'hom', 'ker', 'Pr', 'sec',
+  'det', 'dim', 'deg', 'arg', 'gcd', 'lcm', 'hom', 'ker', 'Pr',
+])
+
+/** \not 前缀：与后面的运算符组合成否定形式（\not= → ≠、\not\in → ∉） */
+const NOT_MAP: Record<string, string> = {
+  '=': '≠', '<': '≮', '>': '≯', leq: '≰', le: '≰', geq: '≱', ge: '≱',
+  in: '∉', ni: '∌', exists: '∄', equiv: '≢', sim: '≁', cong: '≆',
+  approx: '≉', subset: '⊄', supset: '⊅', subseteq: '⊈', supseteq: '⊉',
+  mid: '∤', nmid: '∤', parallel: '∦', nparallel: '∦',
+}
+
+/** 解析时直接忽略的命令（只影响显示样式/间距，视觉上可忽略） */
+const IGNORED_CMDS = new Set([
+  'displaystyle', 'textstyle', 'scriptstyle', 'scriptscriptstyle',
+  'limits', 'nolimits', 'ensuremath', 'relax', 'allowbreak',
 ])
 
 const FRACS = new Set(['frac', 'dfrac', 'tfrac', 'cfrac'])
@@ -244,6 +271,72 @@ class Parser {
       return [{ t: 'style', kind: 'normal', body: mapBlackboard(this.parseArg()) }]
     }
 
+    // ---------- 高中高频结构型命令 ----------
+    // 向量：\vec{a} / \overrightarrow{AB} / \overleftarrow{AB} / \overleftrightarrow{AB}
+    if (name === 'vec' || name === 'overrightarrow' || name === 'overleftarrow' || name === 'overleftrightarrow') {
+      const dir = name === 'overleftarrow' ? 'l' : name === 'overleftrightarrow' ? 'lr' : 'r'
+      return [{ t: 'accent', kind: 'arrow', dir, body: this.parseArg() }]
+    }
+    // 帽/弧：\hat{x}（统计估计量）/ \widehat{AB}（弧）
+    if (name === 'hat' || name === 'widehat') {
+      return [{ t: 'accent', kind: name, body: this.parseArg() }]
+    }
+    // 点的导数记号：\dot{x} \ddot{x}
+    if (name === 'dot' || name === 'ddot') {
+      return [{ t: 'accent', kind: name, body: this.parseArg() }]
+    }
+    // \bar{z} 是共轭复数的常用写法（\overline 的别名）
+    if (name === 'bar' || name === 'overline') {
+      return [{ t: 'deco', kind: 'overline', body: this.parseArg() }]
+    }
+    // 组合数：\binom{n}{k}（二项式定理、概率分布）
+    if (name === 'binom' || name === 'dbinom' || name === 'tbinom') {
+      return [{ t: 'binom', top: this.parseArg(), bottom: this.parseArg() }]
+    }
+    // 同余：a \equiv b \pmod{m}
+    if (name === 'pmod' || name === 'pod') {
+      return [{ t: 'style', kind: 'normal', body: [{ t: 'text', v: '(mod ' }, ...this.parseArg(), { t: 'text', v: ')' }] }]
+    }
+    if (name === 'bmod' || name === 'mod') {
+      return [{ t: 'style', kind: 'normal', body: [{ t: 'text', v: ' mod ' }] }]
+    }
+    // 否定前缀：\not= → ≠、\not\in → ∉
+    if (name === 'not') {
+      let next = ''
+      if (this.s[this.i] === '\\') {
+        this.i++
+        if (/[a-zA-Z]/.test(this.s[this.i] || '')) {
+          while (this.i < this.s.length && /[a-zA-Z]/.test(this.s[this.i])) next += this.s[this.i++]
+        } else if (this.i < this.s.length) next = this.s[this.i++]
+      } else if (this.i < this.s.length) next = this.s[this.i++]
+      const neg = NOT_MAP[next]
+      if (!neg) throw new UnsupportedLatexError(`\\not ${next}`)
+      return [{ t: 'op', v: neg, pad: true }]
+    }
+    // 绝对值专用定界符
+    if (name === 'lvert' || name === 'rvert') return [{ t: 'op', v: '|' }]
+    if (name === 'lbrace' || name === 'rbrace') return [{ t: 'text', v: name === 'lbrace' ? '{' : '}' }]
+    if (name === 'lbrack' || name === 'rbrack') return [{ t: 'text', v: name === 'lbrack' ? '[' : ']' }]
+    if (name === 'lfloor' || name === 'rfloor') return [{ t: 'text', v: name === 'lfloor' ? '⌊' : '⌋' }]
+    if (name === 'lceil' || name === 'rceil') return [{ t: 'text', v: name === 'lceil' ? '⌈' : '⌉' }]
+    // 环境：\begin{cases}…\end{cases}（分段函数）、aligned（多行推导）、pmatrix/bmatrix（矩阵）
+    if (name === 'begin') {
+      const env = this.readRawGroup()
+      const end = `\\end{${env}}`
+      const idx = this.s.indexOf(end, this.i)
+      if (idx < 0) throw new UnsupportedLatexError(`缺少 ${end}`)
+      const bodyStr = this.s.slice(this.i, idx)
+      this.i = idx + end.length
+      const rows: MathNode[][][] = []
+      // 按 \\ 分行、按 & 分列；空行/空列保留结构
+      for (const rowStr of bodyStr.split(/\\\\/)) {
+        rows.push(rowStr.split('&').map((c) => new Parser(c).parse(false)))
+      }
+      if (!rows.length) throw new UnsupportedLatexError('空环境')
+      return [{ t: 'env', name: env, rows }]
+    }
+    if (IGNORED_CMDS.has(name)) return []
+
     if (DELIM_WRAPPERS.has(name)) {
       // \left( / \right) 的定界符交给主循环解析；\left. / \right. 是空定界符，直接吃掉
       if (this.s[this.i] === '.') this.i++
@@ -256,6 +349,25 @@ class Parser {
     if (['%', '$', '#', '&', '_', '^', '{', '}', ' '].includes(name)) return [{ t: 'text', v: name }]
 
     throw new UnsupportedLatexError(`\\${name}`)
+  }
+
+  /** 原样读一个 {…} 分组的内容（不做解析），用于 \begin{env} 的环境名 */
+  private readRawGroup(): string {
+    this.expect('{')
+    let depth = 1
+    const start = this.i
+    while (this.i < this.s.length && depth > 0) {
+      const ch = this.s[this.i]
+      if (ch === '\\') {
+        this.i += 2 // 跳过转义，避免 \{ \} 干扰配对
+        continue
+      }
+      if (ch === '{') depth++
+      else if (ch === '}') depth--
+      this.i++
+    }
+    if (depth !== 0) throw new UnsupportedLatexError('缺少 }')
+    return this.s.slice(start, this.i - 1)
   }
 
   private expect(ch: string) {
@@ -290,6 +402,12 @@ const span = (style: string, children: RichTextNode[] = []): RichTextNode => ({
   attrs: { style },
   children,
 })
+
+/** 单元格内容：空单元格填一个窄空格，防止 inline-block 塌陷 */
+function cellNodes(nodes: MathNode[], color: string): RichTextNode[] {
+  const r = toRich(nodes, color)
+  return r.length ? r : [txt('\u2009')]
+}
 
 function toRich(nodes: MathNode[], color: string): RichTextNode[] {
   const out: RichTextNode[] = []
@@ -356,6 +474,61 @@ function toRich(nodes: MathNode[], color: string): RichTextNode[] {
           out.push(span('font-size:0.72em;vertical-align:super;line-height:1', toRich(n.sup, color)))
         } else if (n.sub) {
           out.push(span('font-size:0.72em;vertical-align:sub;line-height:1', toRich(n.sub, color)))
+        }
+        break
+      }
+      // 上方装饰：向量箭头 / 帽 / 弧 / 点（rich-text 无 svg，用「上方小字符」近似）
+      case 'accent': {
+        const glyph =
+          n.kind === 'arrow'
+            ? n.dir === 'l' ? '←' : n.dir === 'lr' ? '↔' : '→'
+            : n.kind === 'hat' ? '^'
+            : n.kind === 'widehat' ? '⌢'
+            : n.kind === 'dot' ? '·'
+            : '¨'
+        out.push(
+          span('display:inline-block;vertical-align:middle;text-align:center', [
+            span('display:block;font-size:0.78em;line-height:1.15;height:0.78em', [txt(glyph)]),
+            span('display:block;line-height:1.1', cellNodes(n.body, color)),
+          ]),
+        )
+        break
+      }
+      // 组合数：圆括号包住的上下两层（分数线不出头，圆括号比 frac 高）
+      case 'binom': {
+        out.push(
+          span('display:inline-block;vertical-align:middle;margin:0 0.1em', [
+            span('display:inline-block;font-size:1.2em;vertical-align:middle;font-weight:300', [txt('(')]),
+            span('display:inline-block;vertical-align:middle;text-align:center', [
+              span(`display:block;padding:0.02em 0.28em;border-bottom:1px solid ${color}`, toRich(n.top, color)),
+              span('display:block;padding:0.02em 0.28em', toRich(n.bottom, color)),
+            ]),
+            span('display:inline-block;font-size:1.2em;vertical-align:middle;font-weight:300', [txt(')')]),
+          ]),
+        )
+        break
+      }
+      // 环境：cases（分段函数）/ aligned（多行推导）/ pmatrix bmatrix vmatrix（矩阵）
+      case 'env': {
+        const stack = span('display:flex;flex-direction:column;justify-content:center;margin:0 0.25em', n.rows.map((row) =>
+          span('display:flex;flex-direction:row;align-items:center;min-height:1.45em', row.map((cell) =>
+            span('display:inline-block;vertical-align:middle', cellNodes(cell, color)),
+          )),
+        ))
+        const e = n.name
+        const delim = (ch: string) => span('display:inline-block;font-size:1.9em;line-height:1;font-weight:300', [txt(ch)])
+        if (e === 'cases' || e === 'dcases' || e === 'rcases') {
+          // 左花括号（用大字号拉伸近似）
+          out.push(span('display:inline-flex;align-items:center;vertical-align:middle', [delim('{'), stack]))
+        } else if (e === 'pmatrix' || e === 'bmatrix' || e === 'vmatrix' || e === 'Bmatrix' || e === 'Vmatrix') {
+          const ch = e.startsWith('p') ? '(' : e.startsWith('b') ? '[' : e.startsWith('B') ? '{' : '|'
+          out.push(span('display:inline-flex;align-items:center;vertical-align:middle', [delim(ch), stack, delim(ch)]))
+        } else if (e === 'array') {
+          out.push(stack)
+        } else if (e === 'aligned' || e === 'align' || e === 'alignedat' || e === 'gathered' || e === 'gather' || e === 'equation' || e === 'split') {
+          out.push(stack)
+        } else {
+          throw new UnsupportedLatexError(`begin{${e}}`)
         }
         break
       }
