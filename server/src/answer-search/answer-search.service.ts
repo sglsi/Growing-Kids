@@ -231,7 +231,10 @@ export class AnswerSearchService {
   }
 
   private parseJson(raw: string): { answer: string; solution: string } | null {
-    let s = (raw || '').trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim()
+    const text = (raw || '').trim()
+    if (!text) return null
+    // 1) 优先按 JSON 解析（混元/DeepSeek 遵循 JSON 指令时走这里）
+    let s = text.replace(/^```(json)?/i, '').replace(/```$/, '').trim()
     const start = s.indexOf('{')
     const end = s.lastIndexOf('}')
     if (start !== -1 && end !== -1) s = s.slice(start, end + 1)
@@ -241,8 +244,42 @@ export class AnswerSearchService {
         return { answer: String(p.answer_content || ''), solution: String(p.solution || '') }
       }
     } catch {
-      /* 落到下面按纯文本处理 */
+      /* JSON 解析失败 → 落到下面的标签提取 */
     }
-    return raw.trim() ? { answer: '', solution: raw.trim() } : null
+    // 2) 扣子 bot 人设输出【答案】/【解析】散文（可能不遵循 JSON 指令）→ 按标签拆分，
+    //    避免 answer 空、正文全落 solution。兼容 【正确答案】/【解题过程】/【解题步骤】 等变体。
+    const labeled = this.extractLabeled(text)
+    if (labeled && (labeled.answer || labeled.solution)) return labeled
+    // 3) 完全无结构：整段当 solution（不伪造 answer）
+    return { answer: '', solution: text }
+  }
+
+  /** 从【答案】…【解析】散文里拆出 answer/solution；找不到标签返回 null */
+  private extractLabeled(raw: string): { answer: string; solution: string } | null {
+    // 列表顺序即优先级：长/方括号标签在前，避免 【答案】 命中 【正确答案】 的子串
+    const ansLabels = ['【正确答案】', '【答案】', '答案：', '答案:']
+    const solLabels = ['【解题过程】', '【解题步骤】', '【解析】', '解析：', '解析:']
+    const pick = (labels: string[]) => {
+      for (const l of labels) {
+        const i = raw.indexOf(l)
+        if (i !== -1) return { idx: i, label: l }
+      }
+      return null
+    }
+    const ans = pick(ansLabels)
+    const sol = pick(solLabels)
+    if (!ans && !sol) return null
+    let answer = ''
+    let solution = ''
+    if (ans) {
+      const ansStart = ans.idx + ans.label.length
+      const ansEnd = sol && sol.idx > ansStart ? sol.idx : raw.length
+      answer = raw.slice(ansStart, ansEnd).trim()
+    }
+    if (sol) {
+      solution = raw.slice(sol.idx + sol.label.length).trim()
+    }
+    if (!answer && !solution) return null
+    return { answer, solution }
   }
 }

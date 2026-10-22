@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common'
+import { aiProviderName } from '../ai/llm-provider'
 import type { SearchProvider, WebItem } from './answer-search.types'
 
 /**
@@ -82,11 +83,58 @@ class NoneProvider implements SearchProvider {
 }
 
 /**
+ * 扣子联网检索（思傅 2026-10-22 定：AI_PROVIDER=coze 时联网搜也走扣子）。
+ * 复用 llm-provider 的 cozeChatSync 调 bot（bot 须已开启联网插件），
+ * 要求 bot 以 JSON 数组返回来源，解析失败则降级为空（上层走大模型兜底，绝不伪造）。
+ */
+class CozeBotSearchProvider implements SearchProvider {
+  name = 'coze' as const
+  private readonly logger = new Logger(CozeBotSearchProvider.name)
+  available(): boolean {
+    return (
+      aiProviderName() === 'coze' &&
+      !!(process.env.COZE_BOT_ID || '').trim() &&
+      !!(process.env.COZE_API_TOKEN || '').trim()
+    )
+  }
+  async search(query: string, count: number): Promise<WebItem[]> {
+    const { cozeChatSync } = await import('../ai/llm-provider')
+    const prompt =
+      `请联网搜索以下问题/关键词的答案，并以 JSON 数组返回最相关的 ${count} 条来源，` +
+      `每条格式：{"title":标题,"url":网址,"snippet":摘要}。只返回 JSON 数组本身，不要其他文字。\n问题：${query}`
+    try {
+      const { content } = await cozeChatSync([{ role: 'user', content: prompt }])
+      const m = content.match(/\[[\s\S]*\]/)
+      const arr: any[] = m ? JSON.parse(m[0]) : []
+      const items: WebItem[] = []
+      for (const it of arr) {
+        if (it?.url && typeof it.url === 'string') {
+          items.push({ title: String(it.title || ''), url: it.url, snippet: String(it.snippet || '') })
+        }
+      }
+      this.logger.log(`[answer-search] 扣子联网命中 ${items.length} 条：${query.slice(0, 40)}`)
+      return items
+    } catch (e) {
+      this.logger.warn(`[answer-search] 扣子联网解析失败，降级为空（上层走模型兜底）：${e}`)
+      return []
+    }
+  }
+}
+
+/**
  * 按配置取搜索源。
  * `ANSWER_SEARCH_PROVIDER=bocha`（默认）且配了 BOCHA_API_KEY 才用博查；
  * 否则一律降级 `none` —— 宁可走大模型兜底，也绝不返回伪造的检索结果。
  */
 export function resolveSearchProvider(): SearchProvider {
+  // 思傅 2026-10-22：AI_PROVIDER=coze 时，联网检索也走扣子 bot（需已发布为 API 且开启联网插件）
+  if (
+    aiProviderName() === 'coze' &&
+    (process.env.COZE_BOT_ID || '').trim() &&
+    (process.env.COZE_API_TOKEN || '').trim()
+  ) {
+    return new CozeBotSearchProvider()
+  }
   const want = (process.env.ANSWER_SEARCH_PROVIDER || 'bocha').trim().toLowerCase()
   if (want === 'none') return new NoneProvider()
   const bocha = new BochaProvider()

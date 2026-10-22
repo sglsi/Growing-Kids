@@ -33,7 +33,7 @@ export interface AnswerSearchResult {
 }
 
 export interface SearchProvider {
-  name: 'bocha' | 'none'
+  name: 'bocha' | 'none' | 'coze'
   /** 依赖的 key 是否已配置 */
   available(): boolean
   search(query: string, count: number): Promise<WebItem[]>
