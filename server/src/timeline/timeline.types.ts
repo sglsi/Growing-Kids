@@ -4,6 +4,41 @@ export type TimelineScope = 'recent' | 'review'
 
 import type { ErrorAnalysis } from '../ocr/ocr.types'
 
+// ---------- 答案附件（思傅 2026-10-21：答案支持图片 / 文档 / 文本多类型） ----------
+
+export type AnswerAttachmentType = 'image' | 'doc' | 'text'
+
+/** 答案来源：手填 / 联网搜索 / OCR 识别 / 资料库选取（可溯源） */
+export type AnswerSource = 'manual' | 'search' | 'ocr' | 'library'
+
+/**
+ * 一条答案附件。
+ *
+ * ⚠️ 一一对应保证：答案**内嵌在题目记录的 content 里**（不是独立表、不是靠外键），
+ *    因此物理上不存在「答案挂到别的题上」的可能 —— 见「题目答案功能-设计方案.md」§1.2。
+ */
+export interface AnswerAttachment {
+  /** 附件唯一 id（删除 / 排序 / 前端 key 用） */
+  id: string
+  type: AnswerAttachmentType
+  /** 对象存储 key（image / doc） */
+  file_key?: string
+  /** 图片缩略图 key */
+  thumb_key?: string
+  /** 原始文件名（文档如「期中解析.pdf」） */
+  name?: string
+  mime?: string
+  size?: number
+  /** type=text 时承载正文 */
+  text?: string
+  source?: AnswerSource
+  /** source=library 时的资料库条目 id */
+  ref_id?: string
+  /** source=search 时的参考链接 */
+  refs?: { title: string; url: string }[]
+  created_at: string
+}
+
 /** 题目的结构化内容（存于 timeline_items.content） */
 export interface QuestionContent {
   question?: string
@@ -32,6 +67,15 @@ export interface QuestionContent {
   question_label?: string
   /** P2-18 艾宾浩斯复习阶段计数：已完成的复习次数（计划由 created_at + 该值现算） */
   review_count?: number
+  // ---------- 答案（思傅 2026-10-21）----------
+  /** 答案附件：图片 / 文档 / 文本片段，与题目同记录存储 ⇒ 不可能挂错题 */
+  answer_attachments?: AnswerAttachment[]
+  /** 答案来源：manual 手填 / search 联网搜索 / ocr 识别 / mixed 混合 */
+  answer_source?: AnswerSource | 'mixed'
+  /** 联网搜索命中的参考来源（与附件解耦，便于单独展示「来源」） */
+  answer_refs?: { title: string; url: string }[]
+  /** 最近一次联网搜答案的时间 */
+  answer_searched_at?: string
 }
 
 export interface TimelineItem {
@@ -73,6 +117,8 @@ export interface TimelineItemWithUrl extends TimelineItem {
   question_image_urls?: string[]
   /** 答题卡/答案图签名 URL（来自 content.answer_images） */
   answer_image_urls?: string[]
+  /** 答案附件（已补签名 URL / 缩略图 URL） */
+  answer_attachments?: (AnswerAttachment & { url?: string; thumb_url?: string })[]
 }
 
 export interface TimelineListQuery {

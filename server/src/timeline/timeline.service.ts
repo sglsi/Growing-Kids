@@ -127,6 +127,17 @@ export class TimelineService {
         if (Array.isArray(aImgs) && aImgs.length) {
           enriched.answer_image_urls = await Promise.all(aImgs.map((k) => this.storageService.getPublicUrl(k)))
         }
+        // 答案附件（图片 / 文档 / 文本）：逐个补签名 URL，前端直接渲染即可
+        const atts = it.content?.answer_attachments
+        if (Array.isArray(atts) && atts.length) {
+          enriched.answer_attachments = await Promise.all(
+            atts.map(async (a) => ({
+              ...a,
+              url: a.file_key ? await this.storageService.getPublicUrl(a.file_key) : undefined,
+              thumb_url: a.thumb_key ? await this.storageService.getPublicUrl(a.thumb_key) : undefined,
+            })),
+          )
+        }
         return enriched as TimelineItem
       }),
     )
@@ -306,6 +317,11 @@ export class TimelineService {
         review_count: typeof c.review_count === 'number' ? c.review_count : 0,
         // P3：规范题号标签（错题库唯一指认「节·小类 题号」）
         question_label: c.question_label ?? null,
+        // 答案（思傅 2026-10-21）：附件 / 来源 / 参考链接与题目同记录存储
+        answer_attachments: Array.isArray(c.answer_attachments) ? c.answer_attachments : [],
+        answer_source: c.answer_source ?? null,
+        answer_refs: Array.isArray(c.answer_refs) ? c.answer_refs : [],
+        answer_searched_at: c.answer_searched_at ?? null,
       }
     }
     return payload
