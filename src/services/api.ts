@@ -1114,6 +1114,9 @@ export function searchAnswer(itemId: string, force = false) {
       method: 'POST',
       data: { force },
       header: authHeaders(),
+      // 扣子联网搜端到端实测 110~135s（bot 真跑检索插件 ~100-115s + 提炼 ~10-60s），
+      // 微信 request 默认 60s 必被前端掐断——真机上「搜答案」从来就没成功过。给到 240s。
+      timeout: 240000,
     }),
   )
 }

@@ -412,7 +412,11 @@ async function toCozeMessages(
 }
 
 /** 非流式调用扣子 bot 对话，轮询至完成，返回模型文本回复（供 LLMClient 与 SearchClient 复用） */
-export async function cozeChatSync(messages: Message[], _llmConfig?: LLMConfig): Promise<LLMResponse> {
+export async function cozeChatSync(
+  messages: Message[],
+  _llmConfig?: LLMConfig,
+  timeoutOverrideMs?: number,
+): Promise<LLMResponse> {
   const botId = COZE_BOT_ID()
   if (!botId) {
     throw new Error('未配置 COZE_BOT_ID：请在 server/.env.secrets 填入已「发布为 API 服务」的扣子智能体 ID')
@@ -433,7 +437,8 @@ export async function cozeChatSync(messages: Message[], _llmConfig?: LLMConfig):
   const convId = createJson?.data?.conversation_id
   if (!chatId || !convId) throw new Error(`扣子对话创建失败：${JSON.stringify(createJson)}`)
 
-  const timeoutMs = Number(process.env.COZE_CHAT_TIMEOUT_MS || 120000)
+  // 调用方可覆盖超时（如联网搜的 bot 带检索插件，实测 100~115s，默认 120s 擦线必挂）
+  const timeoutMs = Number(timeoutOverrideMs || process.env.COZE_CHAT_TIMEOUT_MS || 120000)
   const start = Date.now()
   let status = ''
   while (Date.now() - start < timeoutMs) {
