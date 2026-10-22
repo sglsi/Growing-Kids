@@ -15,6 +15,7 @@ import { cacheGet, cacheSet } from '@/services/cache'
 import ImageEditor from '@/components/image-editor'
 import AnswerEditor from '@/components/answer-editor'
 import MathSymbolBar from '@/components/math-symbol-bar'
+import MathText from '@/components/math-text'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 
@@ -65,6 +66,8 @@ export default function DetailPage() {
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
   // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [solutionCursor, setSolutionCursor] = useState(-1)
+  // 解题过程公式预览：编辑态看 LaTeX 源码，预览态看渲染后的数学式（思傅 2026-10-22）
+  const [previewSolution, setPreviewSolution] = useState(false)
 
   /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
   const applyItem = (it: TimelineItem) => {
@@ -372,19 +375,31 @@ export default function DetailPage() {
             }}
           />
 
-          <View className="flex flex-row items-center justify-between mb-2 mt-4">
-            <Text className="block text-xs text-muted-foreground">详细解题过程</Text>
-            <MathSymbolBar onInsert={insertSolutionSymbol} />
+          <View className="mt-4">
+            <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
+            <MathSymbolBar
+              onInsert={insertSolutionSymbol}
+              preview={previewSolution}
+              onTogglePreview={() => setPreviewSolution((v) => !v)}
+            />
           </View>
           <Card className="rounded-2xl border-border p-4 mb-2">
-            <Textarea
-              className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-              value={solution}
-              placeholder="可粘贴或联网获取详细解析"
-              maxlength={3000}
-              cursor={solutionCursor}
-              onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
-            />
+            {previewSolution ? (
+              solution.trim() ? (
+                <MathText text={solution} />
+              ) : (
+                <Text className="block text-sm text-muted-foreground">（暂无解题过程）</Text>
+              )
+            ) : (
+              <Textarea
+                className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
+                value={solution}
+                placeholder="可粘贴或联网获取详细解析"
+                maxlength={3000}
+                cursor={solutionCursor}
+                onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
+              />
+            )}
           </Card>
         </View>
 
@@ -644,19 +659,31 @@ export default function DetailPage() {
           />
         )}
 
-        <View className="flex flex-row items-center justify-between mb-2 mt-4">
-          <Text className="block text-xs text-muted-foreground">详细解题过程</Text>
-          <MathSymbolBar onInsert={insertSolutionSymbol} />
+        <View className="mt-4">
+          <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
+          <MathSymbolBar
+            onInsert={insertSolutionSymbol}
+            preview={previewSolution}
+            onTogglePreview={() => setPreviewSolution((v) => !v)}
+          />
         </View>
         <Card className="rounded-2xl border-border p-4 mb-2">
-          <Textarea
-            className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-            value={solution}
-            placeholder="可粘贴或联网获取详细解析"
-            maxlength={3000}
-            cursor={solutionCursor}
-            onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
-          />
+          {previewSolution ? (
+            solution.trim() ? (
+              <MathText text={solution} />
+            ) : (
+              <Text className="block text-sm text-muted-foreground">（暂无解题过程）</Text>
+            )
+          ) : (
+            <Textarea
+              className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
+              value={solution}
+              placeholder="可粘贴或联网获取详细解析"
+              maxlength={3000}
+              cursor={solutionCursor}
+              onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
+            />
+          )}
         </Card>
 
         <View className="mt-6">

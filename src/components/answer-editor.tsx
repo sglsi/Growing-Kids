@@ -5,6 +5,7 @@ import { Plus, Trash2, Crop, Globe, FileText, Check, X } from 'lucide-react-taro
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
+import MathText from '@/components/math-text'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
@@ -46,6 +47,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
   const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
   // 答案框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [textCursor, setTextCursor] = useState(-1)
+  // 公式预览：答案框里是 LaTeX 源码，切到预览看渲染后的数学式（思傅 2026-10-22）
+  const [preview, setPreview] = useState(false)
   const [saving, setSaving] = useState(false)
   const [searching, setSearching] = useState(false)
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
@@ -230,15 +233,30 @@ export default function AnswerEditor({ item, onSaved }: Props) {
         </Text>
       </View>
 
-      <MathSymbolBar onInsert={insertAnswerSymbol} />
-      <Textarea
-        className="w-full rounded-xl border border-border p-3 text-sm"
-        style={{ minHeight: 72, backgroundColor: '#fff' }}
-        placeholder="输入正确答案（或点下方按钮添加图片 / 文档）"
-        value={text}
-        cursor={textCursor}
-        onInput={(e) => { setText(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
+      <MathSymbolBar
+        onInsert={insertAnswerSymbol}
+        preview={preview}
+        onTogglePreview={() => setPreview((v) => !v)}
       />
+      {preview ? (
+        /* 预览态：把 LaTeX 渲染成数学式（不支持的语法自动回退源码） */
+        <View className="w-full rounded-xl border border-border p-3" style={{ minHeight: 72, backgroundColor: '#fff' }}>
+          {text.trim() ? (
+            <MathText text={text} />
+          ) : (
+            <Text className="block text-sm text-muted-foreground">（暂无答案内容）</Text>
+          )}
+        </View>
+      ) : (
+        <Textarea
+          className="w-full rounded-xl border border-border p-3 text-sm"
+          style={{ minHeight: 72, backgroundColor: '#fff' }}
+          placeholder="输入正确答案（或点下方按钮添加图片 / 文档）"
+          value={text}
+          cursor={textCursor}
+          onInput={(e) => { setText(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
+        />
+      )}
 
       {/* 附件列表 */}
       {atts.length ? (
@@ -321,11 +339,16 @@ export default function AnswerEditor({ item, onSaved }: Props) {
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />
           </View>
+          {/* 搜到的答案/解析常含 LaTeX，用 MathText 渲染成数学式（思傅 2026-10-22） */}
           {candidate.answer ? (
-            <Text className="block text-sm mb-1">{candidate.answer.slice(0, 300)}</Text>
+            <View className="mb-1">
+              <MathText text={candidate.answer.slice(0, 300)} size={14} />
+            </View>
           ) : null}
           {candidate.solution ? (
-            <Text className="block text-xs text-muted-foreground mb-2">{candidate.solution.slice(0, 200)}</Text>
+            <View className="mb-2">
+              <MathText text={candidate.solution.slice(0, 200)} size={12} color="#7A736A" />
+            </View>
           ) : null}
           {candidate.note ? (
             <Text className="block text-[10px] text-muted-foreground mb-2">{candidate.note}</Text>
