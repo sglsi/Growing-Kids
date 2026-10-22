@@ -215,6 +215,35 @@ export class ChatService {
     }
   }
 
+  /**
+   * 通用对话（思傅 2026-10-22）：中性 LLM 问答，**不带**小程序知识库与使用范围人设，
+   * 区别于上面的智能客服 sendMessage。走同一条降级链（扣子→DeepSeek→混元），
+   * 扣子时由 bot 自身中性人设作答。history 由前端传入以支持多轮（本服务不落库）。
+   */
+  async genericChat(
+    message: string,
+    history?: { role: 'user' | 'assistant'; content: string }[],
+  ): Promise<string> {
+    const msg = (message || '').trim()
+    if (!msg) return ''
+    const prior = Array.isArray(history)
+      ? history
+          .filter((h) => (h?.role === 'user' || h?.role === 'assistant') && typeof h?.content === 'string' && h.content.trim())
+          .map((h) => ({ role: h.role, content: h.content }))
+      : []
+    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+      ...prior,
+      { role: 'user', content: msg },
+    ]
+    try {
+      const resp = await this.getLlm().invoke(messages, { temperature: 0.6 })
+      return (resp?.content || '').trim()
+    } catch (e) {
+      console.error('[chat] 通用对话 LLM 调用失败:', e)
+      return '抱歉，AI 助手暂时不可用，请稍后再试。'
+    }
+  }
+
   async listMessages(sessionId: string, userId?: string): Promise<ChatMessage[]> {
     if (!sessionId) throw new BadRequestException('sessionId 必填')
     const client = getSupabaseClient()

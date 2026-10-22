@@ -89,4 +89,18 @@ export class ChatController {
     const data = await this.chatService.listMessages(sessionId, userId)
     return { code: 200, msg: 'success', data }
   }
+
+  // -------- 通用对话（中性 LLM，不带小程序知识库/人设；区别于上面的智能客服 /message）--------
+  // 走 LLMClient 降级链（扣子→DeepSeek→混元）。扣子时由 bot 自身中性人设作答。
+  // 安全：PAT 只在后端；前端经此代理，绝不直连 api.coze.cn。
+  @Post()
+  @HttpCode(200)
+  async chat(
+    @Req() req: RequestWithUser,
+    @Body() body: { message: string; history?: { role: 'user' | 'assistant'; content: string }[] },
+  ) {
+    requireUserId(req)
+    const answer = await this.chatService.genericChat(body?.message, body?.history)
+    return { code: 200, msg: 'success', data: { answer } }
+  }
 }
