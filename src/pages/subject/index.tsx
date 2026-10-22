@@ -5,6 +5,7 @@ import { FileSearch, Trash2, FolderMinus } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
 import ImageEditor from '@/components/image-editor'
+import AnswerSheet from '@/components/answer-sheet'
 import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
@@ -37,6 +38,8 @@ export default function SubjectPage() {
   const sel = useSelection()
   // 图片编辑器状态（思傅 2026-10-22：复习本与首页同一套规则——点图片可直接编辑）
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
+  // 答案面板的目标题目（思傅 2026-10-21）
+  const [answerItem, setAnswerItem] = useState<TimelineItem | null>(null)
   const [editorSrc, setEditorSrc] = useState('')
   const [editorAction, setEditorAction] = useState<ImageAction | null>(null)
   const [editorTarget, setEditorTarget] = useState<'item' | 'questionImage'>('item')
@@ -203,6 +206,13 @@ export default function SubjectPage() {
     openEditor(item, 'crop', kind, index, url)
   }
 
+  // ---------- 填答案（思傅 2026-10-21）：与首页同一套规则 ----------
+  const openAnswer = (item: TimelineItem) => setAnswerItem(item)
+  const closeAnswer = () => setAnswerItem(null)
+  const handleAnswerSaved = (updated: TimelineItem) => {
+    setItems((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
+  }
+
   /** 编辑器返回：保存并原位替换原图（与首页 handleEditorConfirm 同规则） */
   const handleEditorConfirm = async (tempFilePath: string) => {
     const item = editorItem
@@ -361,6 +371,7 @@ export default function SubjectPage() {
                       onTapImage={handleTapImage}
                       onLongPress={(x) => sel.longPress(x.id)}
                       timeField="added_to_review_at"
+                      onAnswer={openAnswer}
                     />
                   </View>
                 ))}
@@ -421,6 +432,14 @@ export default function SubjectPage() {
         confirmText="保存并替换原图"
         onCancel={() => { setEditorItem(null); setEditorSrc('') }}
         onConfirm={(p) => void handleEditorConfirm(p)}
+      />
+
+      {/* 填答案面板（复习本条目旁「＋填答案」拉起，与首页同一套规则） */}
+      <AnswerSheet
+        visible={!!answerItem}
+        item={answerItem}
+        onClose={closeAnswer}
+        onSaved={handleAnswerSaved}
       />
       {savingEdit ? (
         <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />

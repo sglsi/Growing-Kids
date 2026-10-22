@@ -40,6 +40,12 @@ interface Props {
    * @param kind 'item' = 图片条目自身的图；'questionImage' = 题目条目的题面图
    */
   onTapImage?: (item: TimelineItem, url: string, index: number, kind: 'item' | 'questionImage') => void
+  /**
+   * 点击「＋ 填答案 / 改答案」时触发（思傅 2026-10-21）。
+   * 不传则不显示按钮。点击后由**调用方**拉起答案面板，且必须把 item 传进去 ——
+   * 面板所有写入都按 item.id 定位，答案内嵌在该题目记录里，不会挂到别的题。
+   */
+  onAnswer?: (item: TimelineItem) => void
   /** 复习本里展示「加入时间」而非创建时间 */
   timeField?: 'created_at' | 'added_to_review_at'
 }
@@ -50,7 +56,7 @@ interface Props {
  */
 export default function ReviewItemCard({
   item, showSubject = true, selecting = false, checked = false,
-  onOpen, onTapImage, onLongPress, timeField = 'created_at', onChangeSubject, onMore,
+  onOpen, onTapImage, onLongPress, timeField = 'created_at', onChangeSubject, onMore, onAnswer,
 }: Props) {
   const color = getSubjectColor(item.subjects?.color)
   const subjectName = item.subjects?.name || '未分类'
@@ -225,6 +231,25 @@ export default function ReviewItemCard({
               <Text className="block flex-1 text-xs leading-relaxed" style={{ color: '#BE3E2D' }}>
                 {truncate(c.answer, 60)}
               </Text>
+              {onAnswer && !selecting ? (
+                <View
+                  className="shrink-0 px-2 rounded"
+                  style={{ backgroundColor: 'rgba(190,62,45,0.10)', paddingTop: 2, paddingBottom: 2 }}
+                  onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
+                >
+                  <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>改答案</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : onAnswer && !selecting ? (
+            <View className="mt-1 flex flex-row">
+              <View
+                className="px-2 py-1 rounded-lg border"
+                style={{ borderColor: 'rgba(190,62,45,0.35)', backgroundColor: 'rgba(190,62,45,0.04)' }}
+                onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
+              >
+                <Text className="block text-[11px]" style={{ color: '#BE3E2D' }}>＋ 填答案</Text>
+              </View>
             </View>
           ) : null}
 

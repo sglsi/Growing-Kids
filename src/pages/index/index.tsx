@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import ReviewItemCard from '@/components/review-item-card'
 import ImageEditor from '@/components/image-editor'
+import AnswerSheet from '@/components/answer-sheet'
 import { ActionBtn, BottomActionBar, EmptyCard } from '@/components/filter-header'
 import SubjectBadge from '@/components/subject-badge'
 import SelectionBar from '@/components/selection-bar'
@@ -59,6 +60,8 @@ export default function IndexPage() {
    *  - 'questionImage' 题目条目的**题面图**（保存 = 原位替换 content.question_images[index]）
    */
   const [editorTarget, setEditorTarget] = useState<'item' | 'questionImage'>('item')
+  // 答案面板的目标题目（思傅 2026-10-21）
+  const [answerItem, setAnswerItem] = useState<TimelineItem | null>(null)
   const [editorIndex, setEditorIndex] = useState(0)
   // 列表滚动位置（思傅 2026-10-21 / 2026-10-22 增强）：
   // 进详情退出后回到「同一道题」——按 id 锚定（而非像素偏移，列表重排也不再跑偏）；
@@ -220,6 +223,16 @@ export default function IndexPage() {
   // ---------- 「更多操作」（#3） ----------
   const openMore = (item: TimelineItem) => setMoreItem(item)
   const closeMore = () => setMoreItem(null)
+
+  // ---------- 填答案（思傅 2026-10-21）----------
+  // 列表条目旁的「＋填答案」：拉起页内面板（不跳页，保住滚动位置与筛选上下文）。
+  // 面板里所有写入都按 item.id 定位，答案内嵌在该题目记录里，不可能存到别的题。
+  const openAnswer = (item: TimelineItem) => setAnswerItem(item)
+  const closeAnswer = () => setAnswerItem(null)
+  /** 答案保存后：就地替换列表中该条，避免整页刷新导致滚动跳变 */
+  const handleAnswerSaved = (updated: TimelineItem) => {
+    setInbox((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
+  }
 
   /**
    * 打开图片编辑器（思傅 2026-10-21 规则：点图片 = 直接打开该图片并可编辑）。
@@ -553,6 +566,7 @@ export default function IndexPage() {
                         onLongPress={(it) => sel.longPress(it.id)}
                         onChangeSubject={openSubjectPicker}
                         onMore={openMore}
+                        onAnswer={openAnswer}
                       />
                     </View>
                   ))}
@@ -681,6 +695,14 @@ export default function IndexPage() {
         confirmText="保存并替换原图"
         onCancel={() => { setEditorItem(null); setEditorAction(null); setEditorSrc('') }}
         onConfirm={handleEditorConfirm}
+      />
+
+      {/* 填答案面板（列表条目旁「＋填答案」拉起） */}
+      <AnswerSheet
+        visible={!!answerItem}
+        item={answerItem}
+        onClose={closeAnswer}
+        onSaved={handleAnswerSaved}
       />
 
       {savingEdit && (
