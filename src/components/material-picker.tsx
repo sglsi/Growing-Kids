@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { View, Text, ScrollView } from '@tarojs/components'
 import { FileText } from 'lucide-react-taro'
 import { fetchLibrary, type LibraryDoc } from '@/services/api'
@@ -14,27 +14,37 @@ interface Props {
 /**
  * 资料库选择器（v4）
  * 旧 MaterialPicker 依赖 fetchMaterials(type)，现统一走 /api/library
+ *
+ * ⚠️ 2026-10-22 修「弹窗空白」：旧版在**渲染期**直接 `void doLoad()`
+ * （setState during render）——Web/H5 下碰巧能跑，Taro 小程序运行时
+ * 渲染相位更新被丢弃，loading 状态永远不生效，内容区一片空白
+ * （连「加载中…」都不显示）。改为标准 useEffect：visible 变 true 时加载。
  */
 export default function MaterialPicker({ visible, onClose, onSelect, title }: Props) {
   const [docs, setDocs] = useState<LibraryDoc[]>([])
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
-  const doLoad = async () => {
+  useEffect(() => {
+    if (!visible || loaded || loading) return
+    let cancelled = false
     setLoading(true)
-    try {
-      const res = await fetchLibrary({ pageSize: 100 })
-      setDocs(res.list)
-      setLoaded(true)
-    } catch {
-      // 忽略：由页面 toast
-    } finally {
-      setLoading(false)
-    }
-  }
+    ;(async () => {
+      try {
+        const res = await fetchLibrary({ pageSize: 100 })
+        if (cancelled) return
+        setDocs(res.list)
+        setLoaded(true)
+      } catch {
+        // 忽略：由页面 toast
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [visible, loaded, loading])
 
   if (!visible) return null
-  if (!loaded && !loading) void doLoad()
 
   return (
     <View
