@@ -336,6 +336,137 @@ function contentToString(content: unknown): string {
   return ''
 }
 
+// ---------------- 扣子 OpenAPI 直连（路线 A：恢复扣子大模型）----------------
+// 说明：原 coze-coding-dev-sdk 的 integration 接口只认扣子平台注入的 JWT 身份，
+// 自托管后端无论 PAT 还是空 token 都被拒（10-17/10-19/10-22 三次实测 code=190000007）。
+// 改用扣子标准 OpenAPI（api.coze.cn/v3/chat + /v1/files/upload），PAT 在此路径是官方合法用法，
+// 不依赖平台运行时。bot 须已「发布为 API 服务」(connector_ids:['API'])，ID 填 COZE_BOT_ID。
+
+const COZE_CN_BASE_URL = (process.env.COZE_CN_BASE_URL || 'https://api.coze.cn').replace(/\/+$/, '')
+const COZE_BOT_ID = () => (process.env.COZE_BOT_ID || '').trim()
+const COZE_TOKEN = () => (process.env.COZE_API_TOKEN || '').trim()
+
+function cozeAuthHeaders(): Record<string, string> {
+  const t = COZE_TOKEN()
+  if (!t) throw new Error('未配置 COZE_API_TOKEN（扣子 PAT，pat_ 开头）')
+  return { Authorization: `Bearer ${t}` }
+}
+
+/** 把图片（远程 URL / data:base64 / 裸 base64）上传到扣子，返回 file_id */
+async function cozeUploadImage(data: Buffer, filename = 'image.png'): Promise<string> {
+  const form = new FormData()
+  form.append('file', new Blob([new Uint8Array(data)], { type: 'image/png' }), filename)
+  const res = await fetch(`${COZE_CN_BASE_URL}/v1/files/upload`, {
+    method: 'POST',
+    headers: cozeAuthHeaders(),
+    body: form,
+  })
+  const json: any = await res.json().catch(() => null)
+  const id = json?.data?.id ?? json?.id
+  if (!id) throw new Error(`扣子文件上传失败：HTTP ${res.status} ${JSON.stringify(json)}`)
+  return String(id)
+}
+
+/** 同形 Message[] → 扣子 additional_messages（多模态先上传拿 file_id） */
+async function toCozeMessages(
+  messages: Message[],
+): Promise<{ role: string; content: string; content_type: string }[]> {
+  const out: { role: string; content: string; content_type: string }[] = []
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      out.push({ role: m.role, content: m.content, content_type: 'text' })
+      continue
+    }
+    const texts: string[] = []
+    const fileIds: string[] = []
+    for (const p of m.content) {
+      if (p.type === 'text') {
+        texts.push(p.text ?? '')
+        continue
+      }
+      if (p.type === 'image_url') {
+        const url = p.image_url?.url || ''
+        let buf: Buffer
+        if (url.startsWith('data:')) {
+          buf = Buffer.from(url.split(',')[1] || '', 'base64')
+        } else if (/^https?:\/\//.test(url)) {
+          const r = await fetch(url)
+          if (!r.ok) throw new Error(`下载图片失败（${r.status}）：${url}`)
+          buf = Buffer.from(await r.arrayBuffer())
+        } else {
+          buf = Buffer.from(url, 'base64')
+        }
+        fileIds.push(await cozeUploadImage(buf))
+      }
+    }
+    if (fileIds.length === 0) {
+      out.push({ role: m.role, content: texts.join('\n'), content_type: 'text' })
+    } else {
+      const parts: any[] = []
+      if (texts.length) parts.push({ type: 'text', text: texts.join('\n') })
+      for (const fid of fileIds) parts.push({ type: 'image', file_id: fid })
+      out.push({ role: m.role, content: JSON.stringify(parts), content_type: 'object_string' })
+    }
+  }
+  return out
+}
+
+/** 非流式调用扣子 bot 对话，轮询至完成，返回模型文本回复（供 LLMClient 与 SearchClient 复用） */
+export async function cozeChatSync(messages: Message[], _llmConfig?: LLMConfig): Promise<LLMResponse> {
+  const botId = COZE_BOT_ID()
+  if (!botId) {
+    throw new Error('未配置 COZE_BOT_ID：请在 server/.env.secrets 填入已「发布为 API 服务」的扣子智能体 ID')
+  }
+  const additional = await toCozeMessages(messages)
+  const createRes = await fetch(`${COZE_CN_BASE_URL}/v3/chat`, {
+    method: 'POST',
+    headers: { ...cozeAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      bot_id: botId,
+      user_id: 'growing-kids-backend',
+      additional_messages: additional,
+      stream: false,
+    }),
+  })
+  const createJson: any = await createRes.json().catch(() => null)
+  const chatId = createJson?.data?.id
+  const convId = createJson?.data?.conversation_id
+  if (!chatId || !convId) throw new Error(`扣子对话创建失败：${JSON.stringify(createJson)}`)
+
+  const timeoutMs = Number(process.env.COZE_CHAT_TIMEOUT_MS || 120000)
+  const start = Date.now()
+  let status = ''
+  while (Date.now() - start < timeoutMs) {
+    const r = await fetch(
+      `${COZE_CN_BASE_URL}/v3/chat/retrieve?chat_id=${encodeURIComponent(chatId)}&conversation_id=${encodeURIComponent(convId)}`,
+      { headers: cozeAuthHeaders() },
+    )
+    const j: any = await r.json().catch(() => null)
+    status = j?.data?.status
+    if (status === 'completed') break
+    if (status === 'failed' || status === 'canceled') {
+      throw new Error(`扣子对话${status}：${JSON.stringify(j?.data)}`)
+    }
+    await new Promise((res) => setTimeout(res, 1000))
+  }
+  if (status !== 'completed') throw new Error('扣子对话超时未完成')
+
+  const listRes = await fetch(
+    `${COZE_CN_BASE_URL}/v3/chat/message/list?chat_id=${encodeURIComponent(chatId)}&conversation_id=${encodeURIComponent(convId)}`,
+    { headers: cozeAuthHeaders() },
+  )
+  const listJson: any = await listRes.json().catch(() => null)
+  const msgs: any[] = listJson?.data ?? []
+  // 只认 type==='answer' 的最终回复。verbose（推理过程/内部事件，如 generate_answer_finish）、
+  // function_call / tool_response / follow_up 都不是答案——旧写法用 `role==='assistant'` 兜底，
+  // 会把 verbose 消息（内容是事件 JSON，非正文）误当答案取走，导致返回一堆内部事件。已修复。
+  const answerMsgs = msgs.filter((x) => x.type === 'answer' && x.content)
+  const reply = answerMsgs.length ? answerMsgs[answerMsgs.length - 1] : undefined
+  const content = reply?.content || ''
+  if (!content) throw new Error('扣子对话未返回内容')
+  return { content: typeof content === 'string' ? content : JSON.stringify(content) }
+}
+
 // ---------------- LLMClient ----------------
 
 export class LLMClient {
@@ -364,10 +495,7 @@ export class LLMClient {
     for (const provider of chain) {
       try {
         if (provider === 'coze') {
-          const { LLMClient: CozeLLM } = await import('coze-coding-dev-sdk')
-          return await new CozeLLM(this.config as any, this.customHeaders).invoke(
-            messages, llmConfig, _previousResponseId, extraHeaders,
-          )
+          return await cozeChatSync(messages, llmConfig)
         }
         const body: Record<string, unknown> = {
           model: provider === 'deepseek'
@@ -409,8 +537,10 @@ export class SearchClient {
     } = {},
   ): Promise<SearchResponse> {
     if (aiProviderName() === 'coze') {
-      const { SearchClient: CozeSearch } = await import('coze-coding-dev-sdk')
-      return new CozeSearch(this.config as any, this.customHeaders).advancedSearch(query, options)
+      const { content } = await cozeChatSync([
+        { role: 'user', content: `请联网搜索以下问题/关键词并给出要点：${query}` },
+      ])
+      return { web_items: [], image_items: [], summary: content }
     }
 
 
@@ -436,10 +566,6 @@ export class FetchClient {
   constructor(public config?: Config, public customHeaders?: Record<string, string>) {}
 
   async fetch(url: string): Promise<FetchResponse> {
-    if (aiProviderName() === 'coze') {
-      const { FetchClient: CozeFetch } = await import('coze-coding-dev-sdk')
-      return new CozeFetch(this.config as any, this.customHeaders).fetch(url)
-    }
     const timeoutMs = Number(process.env.HUNYUAN_TIMEOUT_MS || 120000)
     // 公网文档直抓（supabase 对象存储等公开链接），无需鉴权头
     const res = await httpJson('GET', url, undefined, '', timeoutMs).catch(() => null)
@@ -512,12 +638,7 @@ export class ImageGenerationClient {
   constructor(public config?: Config, public customHeaders?: Record<string, string>) {}
 
   async generate(_request: ImageGenerationRequest): Promise<ImageGenerationResponse> {
-    if (aiProviderName() === 'coze') {
-      const { ImageGenerationClient: CozeImg } = await import('coze-coding-dev-sdk')
-      const client = new CozeImg(this.config as any, this.customHeaders)
-      return client.generate(_request)
-    }
-    // 混元兼容端点仅支持文生图（images/generations），图生图编辑需另一套签名凭据，暂不接入。
+    // 图生图编辑需各供应商单独接口，当前扣子/混元均未稳定提供；前端主链路是本地管线，不受影响。
     throw new Error(IMG2IMG_UNAVAILABLE)
   }
 
