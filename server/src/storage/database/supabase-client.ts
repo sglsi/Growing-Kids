@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { installSupabaseDnsPin } from './supabase-dns-pin';
 
 let envLoaded = false;
 
@@ -38,6 +39,10 @@ function envAny(...names: string[]): string | undefined {
 
 function getSupabaseCredentials(): SupabaseCredentials {
   loadEnv();
+
+  // 安装 DNS IP 池兜底（幂等）——GFW 间歇封锁官方 Cloudflare IP 时
+  // 自动改试备用 anycast IP，详见 supabase-dns-pin.ts 文件头注释。
+  installSupabaseDnsPin();
 
   const url = envAny('SUPABASE_URL', 'COZE_SUPABASE_URL');
   const anonKey = envAny('SUPABASE_ANON_KEY', 'COZE_SUPABASE_ANON_KEY');
