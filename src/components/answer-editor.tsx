@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { View, Text, Textarea, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { Plus, Trash2, Crop, Globe, FileText, Check, X } from 'lucide-react-taro'
+import { Plus, Trash2, Crop, Globe, FileText, Check, X, Bot } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
@@ -47,10 +47,13 @@ export default function AnswerEditor({ item, onSaved }: Props) {
   const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
   // 答案框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [textCursor, setTextCursor] = useState(-1)
-  // 公式预览：答案框里是 LaTeX 源码，切到预览看渲染后的数学式（思傅 2026-10-22）
-  const [preview, setPreview] = useState(false)
+  // 答案默认展示**渲染后的数学式**（有内容时），点「编辑」才切到 LaTeX 源码。
+  // 思傅 2026-10-23：此前默认编辑态，打开详情页看到的是一堆 LaTeX 源码，观感差。
+  // 无内容时默认编辑态，方便直接输入。
+  const [preview, setPreview] = useState(() => !!(item?.content?.answer || '').trim())
   const [saving, setSaving] = useState(false)
-  const [searching, setSearching] = useState(false)
+  // 当前正在进行的解题模式（null=空闲）：'search' 联网搜题 / 'ai' AI 解题
+  const [searching, setSearching] = useState<'search' | 'ai' | null>(null)
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
   // 裁剪：进入编辑器前先记住目标，确认后写回**同一条** item
   const [cropSrc, setCropSrc] = useState('')
@@ -180,21 +183,24 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     Taro.showToast({ title: '已加入答案', icon: 'success' })
   }
 
-  // ---------- 联网搜答案 ----------
-  const handleSearch = async () => {
-    setSearching(true)
+  // ---------- 联网搜题 / AI 解题（思傅 2026-10-23：两者彻底拆开，不再混为「联网搜答案」） ----------
+  // 联网搜题 = 只做真实网络检索，直接给来源摘要+链接，不喂给 AI
+  // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
+  const handleSearch = async (mode: 'search' | 'ai') => {
+    setSearching(mode)
     setCandidate(null)
+    const label = mode === 'search' ? '联网搜题' : 'AI 解题'
     try {
-      const res = await searchAnswer(item.id)
+      const res = await searchAnswer(item.id, false, mode)
       setCandidate(res)
       if (res.source === 'none') {
-        Taro.showToast({ title: res.note || '未能搜到答案', icon: 'none' })
+        Taro.showToast({ title: res.note || `${label}未成功`, icon: 'none' })
       }
     } catch (e) {
-      console.error('搜答案失败', e)
-      Taro.showToast({ title: '搜题失败，请稍后重试', icon: 'none' })
+      console.error(`${label}失败`, e)
+      Taro.showToast({ title: `${label}失败，请稍后重试`, icon: 'none' })
     } finally {
-      setSearching(false)
+      setSearching(null)
     }
   }
 
@@ -211,6 +217,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       })
       setText(candidate.answer)
       setCandidate(null)
+      // 采纳后切到预览态：立刻看到渲染后的数学式，而不是一堆 LaTeX 源码
+      setPreview(true)
       onSaved?.(updated)
       Taro.showToast({ title: '已采纳', icon: 'success' })
     } catch (e) {
@@ -221,7 +229,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     }
   }
 
-  const btn = 'flex flex-row items-center gap-1 px-2 py-1 rounded-lg border border-border'
+  const btn = 'flex flex-row items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border'
 
   return (
     <View className="mb-4">
@@ -306,27 +314,33 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       <View className="flex flex-row flex-wrap gap-2 mt-2">
         <View className={btn} onClick={() => void pickImage()}>
           <Plus size={12} color="#BE3E2D" />
-          <Text className="block text-[11px]">图片</Text>
+          <Text className="block text-xs">图片</Text>
           <Crop size={10} color="#9A948A" />
         </View>
         <View className={btn} onClick={() => void pickDoc()}>
           <Plus size={12} color="#BE3E2D" />
-          <Text className="block text-[11px]">文档</Text>
+          <Text className="block text-xs">文档</Text>
         </View>
         <View className={btn} onClick={() => setPickerOpen(true)}>
           <FileText size={12} color="#BE3E2D" />
-          <Text className="block text-[11px]">资料库</Text>
+          <Text className="block text-xs">资料库</Text>
         </View>
-        <View className={btn} onClick={() => void handleSearch()}>
+        {/* 联网搜题：只做真实网络检索，不喂给 AI */}
+        <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
           <Globe size={12} color="#BE3E2D" />
-          <Text className="block text-[11px]">{searching ? '搜题中…' : '联网搜答案'}</Text>
+          <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
+        </View>
+        {/* AI 解题：只做模型推理，不检索 */}
+        <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
+          <Bot size={12} color="#BE3E2D" />
+          <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
         </View>
         <View
           className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
           style={{ backgroundColor: saving ? '#E8E2D9' : '#BE3E2D' }}
           onClick={() => { if (!saving) saveText() }}
         >
-          <Text className="block text-[11px]" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
+          <Text className="block text-xs" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
         </View>
       </View>
 
@@ -334,8 +348,12 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       {candidate && candidate.source !== 'none' ? (
         <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(190,62,45,0.35)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(190,62,45,0.04)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
-            <Text className="block text-xs font-semibold" style={{ color: candidate.verified ? '#BE3E2D' : '#B4761F' }}>
-              {candidate.verified ? `搜到参考答案（联网 · ${candidate.refs.length} 条来源）` : '⚠️ 未联网核实（模型推理）'}
+            <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'search' ? '#BE3E2D' : '#B4761F' }}>
+              {candidate.source === 'search'
+                ? `网络检索结果（${candidate.refs.length} 条来源）`
+                : candidate.source === 'llm'
+                  ? 'AI 推理结果（未联网核实）'
+                  : '结果'}
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />
           </View>
@@ -348,6 +366,27 @@ export default function AnswerEditor({ item, onSaved }: Props) {
           {candidate.solution ? (
             <View className="mb-2">
               <MathText text={candidate.solution.slice(0, 200)} size={12} color="#7A736A" />
+            </View>
+          ) : null}
+          {/* 参考来源：联网搜题的价值就在这——点一下复制链接去浏览器看原文 */}
+          {candidate.refs.length ? (
+            <View className="mb-2">
+              <Text className="block text-[10px] text-muted-foreground mb-1">参考来源（点击复制链接）</Text>
+              {candidate.refs.map((r, i) => (
+                <View
+                  key={`${r.url}-${i}`}
+                  className="flex flex-row items-center mb-1"
+                  onClick={() => {
+                    Taro.setClipboardData({ data: r.url })
+                    Taro.showToast({ title: '链接已复制', icon: 'none' })
+                  }}
+                >
+                  <Text className="block text-[10px] mr-1" style={{ color: '#BE3E2D' }}>{i + 1}.</Text>
+                  <Text className="flex-1 block text-[11px]" style={{ color: '#BE3E2D' }} numberOfLines={1}>
+                    {r.title || r.url}
+                  </Text>
+                </View>
+              ))}
             </View>
           ) : null}
           {candidate.note ? (

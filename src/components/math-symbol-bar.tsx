@@ -59,29 +59,29 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
   return (
     <View className="mb-2">
       <View className="flex flex-row items-center justify-between">
-        <Text className="flex-1 block text-[10px] text-muted-foreground">
-          支持 LaTeX（如 $\frac{1}{2}$），不会打可用下面的符号面板
+        <Text className="flex-1 block text-xs text-muted-foreground">
+          支持 LaTeX 公式，不会打可用下面的符号面板
         </Text>
 
-        {/* 公式预览：编辑时是源码，切到预览看渲染后的数学式（思傅 2026-10-22） */}
+        {/* 公式预览：默认就是渲染态，切过去看/改 LaTeX 源码（思傅 2026-10-23） */}
         {onTogglePreview ? (
           <View
-            className="flex flex-row items-center px-2 h-7 rounded-lg mr-1.5"
+            className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
             style={{ backgroundColor: preview ? '#BE3E2D' : 'rgba(190,62,45,0.08)' }}
             onClick={onTogglePreview}
           >
-            <Text className="block text-[11px]" style={{ color: preview ? '#fff' : '#BE3E2D' }}>
-              {preview ? '返回源码' : '公式预览'}
+            <Text className="block text-xs" style={{ color: preview ? '#fff' : '#BE3E2D' }}>
+              {preview ? '编辑' : '公式预览'}
             </Text>
           </View>
         ) : null}
 
         <View
-          className="flex flex-row items-center gap-1 px-2 h-7 rounded-lg"
+          className="flex flex-row items-center gap-1 px-2.5 h-8 rounded-lg"
           style={{ backgroundColor: open ? '#BE3E2D' : 'rgba(190,62,45,0.08)' }}
           onClick={() => setOpen((v) => !v)}
         >
-          <Text className="block text-[11px]" style={{ color: open ? '#fff' : '#BE3E2D' }}>
+          <Text className="block text-xs" style={{ color: open ? '#fff' : '#BE3E2D' }}>
             {open ? '收起符号面板' : 'Ω 数学符号'}
           </Text>
         </View>
@@ -91,7 +91,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         <View className="mt-2 rounded-xl border border-border bg-muted/40 p-2">
           {GROUPS.map((g) => (
             <View key={g.label} className="mb-2">
-              <Text className="block text-[10px] text-muted-foreground mb-1">{g.label}</Text>
+              <Text className="block text-[11px] text-muted-foreground mb-1">{g.label}</Text>
               <ScrollView scrollX className="w-full whitespace-nowrap">
                 <View className="flex flex-row gap-1.5">
                   {g.items.map((s) => (

@@ -66,7 +66,8 @@ export default function DetailPage() {
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
   // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [solutionCursor, setSolutionCursor] = useState(-1)
-  // 解题过程公式预览：编辑态看 LaTeX 源码，预览态看渲染后的数学式（思傅 2026-10-22）
+  // 解题过程公式预览：默认渲染态（有内容时直接看数学式），点「编辑」才看源码
+  // （思傅 2026-10-23：默认编辑态打开详情页看到的是一堆 LaTeX 源码）
   const [previewSolution, setPreviewSolution] = useState(false)
 
   /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
@@ -76,6 +77,8 @@ export default function DetailPage() {
     setQContent(it.content?.question || '')
     setAContent(it.content?.answer || '')
     setSolution(it.content?.solution || '')
+    // 有解题过程就默认展示渲染后的数学式，空则留在编辑态方便直接输入
+    setPreviewSolution(!!(it.content?.solution || '').trim())
     setMastered(it.mastered)
     setPlan(computePlan(it.created_at, it.content?.review_count))
   }

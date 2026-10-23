@@ -1102,17 +1102,21 @@ export interface AnswerSearchResult {
 }
 
 /**
- * 为指定题目联网搜答案。
+ * 为指定题目获取答案。
  *
  * ⚠️ 本接口**不写库** —— 只返回候选答案，用户点「采纳」后才由调用方写入，
  *    杜绝模型幻觉答案静默污染题库（设计方案 §2.3 安全阀）。
+ *
+ * mode（思傅 2026-10-23 拆分）：
+ *   'search' = 联网搜题：只做真实网络检索，直接给来源摘要+链接，不喂给 AI
+ *   'ai'     = AI 解题：只做模型推理，不检索，明确标注未联网核实
  */
-export function searchAnswer(itemId: string, force = false) {
+export function searchAnswer(itemId: string, force = false, mode: 'search' | 'ai' = 'search') {
   return unwrap<AnswerSearchResult>(
     Network.request({
       url: `/api/answer-search/${itemId}`,
       method: 'POST',
-      data: { force },
+      data: { force, mode },
       header: authHeaders(),
       // 扣子联网搜端到端实测 110~135s（bot 真跑检索插件 ~100-115s + 提炼 ~10-60s），
       // 微信 request 默认 60s 必被前端掐断——真机上「搜答案」从来就没成功过。给到 240s。
