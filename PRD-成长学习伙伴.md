@@ -1,5 +1,8 @@
 # 成长学习伙伴 · 产品需求与设计文档
 
+> 📌 **归档状态**：本文为历史设计稿，**已并入 `docs/design/GK-SRS-01-软件需求规格说明书.md`（GK-SRS-01 软件需求规格说明书）**。
+> 现行规范与现状以 GK 文档为准；本文仅作决策凭据与演进过程留档，**不再单独维护**。
+
 > 文档类型：PRD + 数据模型 + API 契约（"需求/设计"层）
 > 配套视觉规范：仓库内 `DESIGN.md`（气质/配色）、`design_guidelines.md`（组件/导航规范）——**本文档不重复视觉，直接复用**
 > 技术底座：Taro 4 + React + TypeScript 前端 / NestJS + Drizzle ORM + Zod 后端（pnpm monorepo）
