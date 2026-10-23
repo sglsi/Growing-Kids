@@ -257,6 +257,48 @@ export default function DetailPage() {
     Taro.showToast({ title: mode === 'replace' ? '已替换题干' : '已追加到题干', icon: 'success' })
   }
 
+  /**
+   * 删除详情页里的某张图（思傅 2026-10-23）：
+   * 题面图 / 答题卡图 / 旧版 images 兜底图均可删。
+   * 前端拿到的是一签名 URL，按 URL 反查下标后**全量替换**对应 key 数组
+   * （后端 content 局部合并，未传字段不受影响）。删除只解引用、不物理删文件，
+   * 与「编辑替换」同一语义，存储由孤儿 GC 兜底回收。
+   */
+  const handleDeleteImage = async (which: 'question' | 'answer' | 'legacy', url: string) => {
+    if (!item) return
+    const ok = await new Promise<boolean>((resolve) =>
+      Taro.showModal({
+        title: '确认删除',
+        content: '删除后不可恢复，是否继续？',
+        success: (r) => resolve(!!r.confirm),
+        fail: () => resolve(false),
+      }),
+    )
+    if (!ok) return
+    const urls = which === 'question' ? item.question_image_urls || []
+      : which === 'answer' ? item.answer_image_urls || []
+        : item.image_urls || []
+    const keys = which === 'question' ? item.content?.question_images || []
+      : which === 'answer' ? item.content?.answer_images || []
+        : item.content?.images || []
+    const idx = urls.indexOf(url)
+    if (idx < 0 || idx >= keys.length) {
+      Taro.showToast({ title: '未找到该图片，请刷新后重试', icon: 'none' })
+      return
+    }
+    const nextKeys = keys.filter((_, i) => i !== idx)
+    try {
+      if (which === 'question') await updateQuestion(item.id, { question_images: nextKeys })
+      else if (which === 'answer') await updateQuestion(item.id, { answer_images: nextKeys })
+      else await updateQuestion(item.id, { images: nextKeys })
+      Taro.showToast({ title: '图片已删除', icon: 'success' })
+      await load()
+    } catch (e) {
+      console.error('删除图片失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '删除失败，请重试', icon: 'none' })
+    }
+  }
+
   // 加入 / 移出复习本
   const toggleReviewBook = async () => {
     if (!item) return
@@ -354,15 +396,25 @@ export default function DetailPage() {
           </Card>
 
           {/* 图片条目详情也要能编辑（思傅 2026-10-21 规则：点开图片可编辑）：
-              编辑结果 attach 上传 → 原位替换该条目的 file_key（与首页一致，不新建条目）。 */}
+              编辑结果 attach 上传 → 原位替换该条目的 file_key（与首页一致，不新建条目）。
+              思傅 2026-10-23：图片条目删除 = 删整条（图即条目），确认后走 handleDelete。 */}
           <View className="flex flex-row items-center justify-between mb-4">
             <Text className="block text-xs text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清</Text>
-            <View
-              className="px-3 rounded-lg"
-              style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
-              onClick={() => handleEditImage(item.url || item.thumb_url || '')}
-            >
-              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
+            <View className="flex flex-row items-center gap-2">
+              <View
+                className="px-3 rounded-lg"
+                style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                onClick={() => handleEditImage(item.url || item.thumb_url || '')}
+              >
+                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
+              </View>
+              <View
+                className="px-3 rounded-lg"
+                style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                onClick={handleDelete}
+              >
+                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
+              </View>
             </View>
           </View>
 
@@ -537,11 +589,11 @@ export default function DetailPage() {
           <View className="mb-4">
             <View className="flex flex-row items-center justify-between mb-2">
               <Text className="block text-xs text-muted-foreground">题面图</Text>
-              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字</Text>
+              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字 ·「删除」移除</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-3">
               {item.question_image_urls.map((u) => (
-                <View key={u} className="flex flex-col items-center" style={{ width: 92 }}>
+                <View key={u} className="flex flex-col items-center" style={{ width: 116 }}>
                   <View className="w-24 h-24 rounded-lg overflow-hidden border border-border">
                     <Image
                       src={u}
@@ -550,20 +602,27 @@ export default function DetailPage() {
                       onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
                     />
                   </View>
-                  <View className="flex flex-row items-center gap-2 mt-1">
+                  <View className="flex flex-row items-center gap-1 mt-1">
                     <View
-                      className="px-2 rounded"
+                      className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => handleEditImage(u)}
                     >
                       <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>编辑</Text>
                     </View>
                     <View
-                      className="px-2 rounded"
+                      className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
                     >
                       <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                    </View>
+                    <View
+                      className="px-1.5 rounded"
+                      style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      onClick={() => void handleDeleteImage('question', u)}
+                    >
+                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
                     </View>
                   </View>
                 </View>
@@ -574,16 +633,28 @@ export default function DetailPage() {
 
         {item?.answer_image_urls?.length ? (
           <View className="mb-4">
-            <Text className="block text-xs text-muted-foreground mb-2">答题卡图</Text>
-            <View className="flex flex-row flex-wrap gap-2">
+            <View className="flex flex-row items-center justify-between mb-2">
+              <Text className="block text-xs text-muted-foreground">答题卡图</Text>
+              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
+            </View>
+            <View className="flex flex-row flex-wrap gap-3">
               {item.answer_image_urls.map((u) => (
-                <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
-                  <Image
-                    src={u}
-                    mode="aspectFill"
-                    style={{ width: '100%', height: '100%' }}
-                    onClick={() => Taro.previewImage({ current: u, urls: item.answer_image_urls || [u] })}
-                  />
+                <View key={u} className="flex flex-col items-center" style={{ width: 96 }}>
+                  <View className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                    <Image
+                      src={u}
+                      mode="aspectFill"
+                      style={{ width: '100%', height: '100%' }}
+                      onClick={() => Taro.previewImage({ current: u, urls: item.answer_image_urls || [u] })}
+                    />
+                  </View>
+                  <View
+                    className="px-1.5 rounded mt-1"
+                    style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                    onClick={() => void handleDeleteImage('answer', u)}
+                  >
+                    <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
+                  </View>
                 </View>
               ))}
             </View>
@@ -591,17 +662,32 @@ export default function DetailPage() {
         ) : null}
 
         {!item?.question_image_urls?.length && !item?.answer_image_urls?.length && item?.image_urls?.length ? (
-          <View className="flex flex-row flex-wrap gap-2 mb-4">
-            {item.image_urls.map((u) => (
-              <View key={u} className="w-24 h-24 rounded-lg overflow-hidden border border-border">
-                <Image
-                  src={u}
-                  mode="aspectFill"
-                  style={{ width: '100%', height: '100%' }}
-                  onClick={() => Taro.previewImage({ current: u, urls: item.image_urls || [u] })}
-                />
-              </View>
-            ))}
+          <View className="mb-4">
+            <View className="flex flex-row items-center justify-between mb-2">
+              <Text className="block text-xs text-muted-foreground">图片</Text>
+              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
+            </View>
+            <View className="flex flex-row flex-wrap gap-3">
+              {item.image_urls.map((u) => (
+                <View key={u} className="flex flex-col items-center" style={{ width: 96 }}>
+                  <View className="w-24 h-24 rounded-lg overflow-hidden border border-border">
+                    <Image
+                      src={u}
+                      mode="aspectFill"
+                      style={{ width: '100%', height: '100%' }}
+                      onClick={() => Taro.previewImage({ current: u, urls: item.image_urls || [u] })}
+                    />
+                  </View>
+                  <View
+                    className="px-1.5 rounded mt-1"
+                    style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                    onClick={() => void handleDeleteImage('legacy', u)}
+                  >
+                    <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
           </View>
         ) : null}
 

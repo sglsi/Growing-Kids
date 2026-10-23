@@ -495,6 +495,10 @@ export function updateQuestion(
     tags?: string[]
     /** 题面图 file_key 全量替换（详情页「编辑图片」后原位替换；后端按 content 合并） */
     question_images?: string[]
+    /** 答题卡/答案图 file_key 全量替换（思傅 2026-10-23：详情页支持删除答案图） */
+    answer_images?: string[]
+    /** 旧版图片 file_key 全量替换（content.images 兜底渲染路径，思傅 2026-10-23） */
+    images?: string[]
     /** 答案附件全量替换（思傅 2026-10-21：图片 / 文档 / 文本） */
     answer_attachments?: AnswerAttachment[]
     /** 答案来源：manual 手填 / search 联网搜索（含 ima 知识库）/ ocr / mixed */
@@ -516,6 +520,8 @@ export function updateQuestion(
     payload.wrong_answer !== undefined ||
     payload.status !== undefined ||
     payload.question_images !== undefined ||
+    payload.answer_images !== undefined ||
+    payload.images !== undefined ||
     payload.answer_attachments !== undefined ||
     payload.answer_source !== undefined ||
     payload.answer_refs !== undefined ||
@@ -528,6 +534,9 @@ export function updateQuestion(
       wrong_answer: payload.wrong_answer,
       status: payload.status,
       ...(payload.question_images !== undefined ? { question_images: payload.question_images } : {}),
+      // 答题卡/答案图、旧版图片的全量替换（后端按 content 字段合并，未传的字段不受影响）
+      ...(payload.answer_images !== undefined ? { answer_images: payload.answer_images } : {}),
+      ...(payload.images !== undefined ? { images: payload.images } : {}),
       // 答案：附件 / 来源 / 参考链接（后端按 content 字段合并，未传的字段不受影响）
       ...(payload.answer_attachments !== undefined ? { answer_attachments: payload.answer_attachments } : {}),
       ...(payload.answer_source !== undefined ? { answer_source: payload.answer_source } : {}),

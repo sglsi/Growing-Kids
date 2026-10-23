@@ -51,6 +51,8 @@ export interface QuestionContent {
   solution?: string
   wrong_answer?: string
   status?: 'answered' | 'pending'
+  /** 旧版图片 file_key（早期识别流程写入；新流程用 question_images/answer_images，此字段仅兜底渲染与删除） */
+  images?: string[]
   /** 以下字段与后端 timeline 存储对齐，消除前后端类型漂移（错题提取切块流程写入） */
   question_images?: string[]
   answer_images?: string[]
