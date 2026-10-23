@@ -19,6 +19,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import { FileText, FolderOpen } from 'lucide-react-taro'
+import { BRAND } from '@/lib/theme'
 
 type Range = RangeValue
 type Tab = 'generate' | 'library'
@@ -196,7 +197,7 @@ export default function DocumentPage() {
             className="flex flex-row items-center gap-1 rounded-xl border border-border bg-background px-3 h-9"
             onClick={goLibrary}
           >
-            <FolderOpen size={14} color="#BE3E2D" />
+            <FolderOpen size={14} color={BRAND} />
             <Text className="block text-sm text-foreground whitespace-nowrap">资料库</Text>
           </View>
         </View>
@@ -313,7 +314,7 @@ export default function DocumentPage() {
                         <CheckDot checked={sel.selected.has(d.id)} size={20} />
                       )}
                       <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                        <FileText size={20} color="#BE3E2D" />
+                        <FileText size={20} color={BRAND} />
                       </View>
                       <View className="flex-1 min-w-0">
                         <View className="flex flex-row items-center gap-2">

@@ -2,6 +2,7 @@ import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState } from 'react'
 import type { PageTextSegment } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 /**
  * #150 人工辅助错题整理：图片右侧的「OCR 文本栏」。
@@ -87,8 +88,8 @@ export default function WrongqOcrPanel({
       <View className="flex flex-row items-center justify-between px-2 py-2" style={{ borderBottomWidth: 0.5, borderBottomColor: '#f0ece4', borderBottomStyle: 'solid' }}>
         <View className="flex flex-row items-center gap-1" style={{ flex: 1, minWidth: 0 }}>
           <Text className="block text-xs font-semibold text-foreground">{headTitle}</Text>
-          {pageLabel ? <Text className="block text-[10px] text-muted-foreground">{pageLabel}</Text> : null}
-          <Text className="block text-[10px] text-muted-foreground">{segments.length} 段</Text>
+          {pageLabel ? <Text className="block text-xs text-muted-foreground">{pageLabel}</Text> : null}
+          <Text className="block text-xs text-muted-foreground">{segments.length} 段</Text>
         </View>
         {/* ⚠️ 交互元素一律用 View 不用 Text：Taro 4.1.9 的 removeEventListener
             在 Text 解绑最后一个事件时会读 componentsAlias['pure-text']._num
@@ -101,7 +102,7 @@ export default function WrongqOcrPanel({
 
       {expanded ? (
         <>
-          <Text className="block text-[10px] text-muted-foreground px-2 py-1">
+          <Text className="block text-xs text-muted-foreground px-2 py-1">
             {saveLabel
               ? `勾选需要的段落，点「${saveText}」直接填入`
               : onPasteToEntry
@@ -113,7 +114,7 @@ export default function WrongqOcrPanel({
           <ScrollView scrollY style={{ flex: 1, minHeight: 0 }} scrollWithAnimation>
             {segments.length === 0 ? (
               <View className="px-2 py-6 items-center">
-                <Text className="block text-[10px] text-muted-foreground text-center">
+                <Text className="block text-xs text-muted-foreground text-center">
                   {busy
                     ? 'OCR 识别中…'
                     : error
@@ -121,7 +122,7 @@ export default function WrongqOcrPanel({
                       : '尚未识别 · 点下方「快速/精准」开始，也可直接手动输入'}
                 </Text>
                 {error && !busy ? (
-                  <Text className="block text-[10px] mt-2 text-center" style={{ color: '#BE3E2D' }}>
+                  <Text className="block text-xs mt-2 text-center" style={{ color: BRAND }}>
                     修复后重试，或改用另一种识别模式
                   </Text>
                 ) : null}
@@ -140,8 +141,8 @@ export default function WrongqOcrPanel({
                       style={{
                         width: 14, height: 14, borderRadius: 3, marginTop: 2, flexShrink: 0,
                         borderWidth: 1.5, borderStyle: 'solid',
-                        borderColor: on ? '#BE3E2D' : '#C9C2B8',
-                        backgroundColor: on ? '#BE3E2D' : 'transparent',
+                        borderColor: on ? BRAND : '#C9C2B8',
+                        backgroundColor: on ? BRAND : 'transparent',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                       }}
                       onClick={() => toggle(i)}
@@ -150,7 +151,7 @@ export default function WrongqOcrPanel({
                     </View>
                     {/* 文本（View 承载点击：见文件顶部说明） */}
                     <View
-                      className="block text-[11px] text-foreground"
+                      className="block text-xs text-foreground"
                       style={{
                         flex: 1,
                         lineHeight: '16px',
@@ -164,7 +165,7 @@ export default function WrongqOcrPanel({
                     {/* 单段复制 */}
                       <View
                         className="block text-xs shrink-0"
-                        style={{ color: '#BE3E2D', marginTop: 2 }}
+                        style={{ color: BRAND, marginTop: 2 }}
                         onClick={() => copyOne(seg.text)}
                       >
                       复制
@@ -187,7 +188,7 @@ export default function WrongqOcrPanel({
             {n > 0 && onPasteToEntry ? (
               <View
                 className="block text-xs mr-2"
-                style={{ color: '#BE3E2D', fontWeight: '500' }}
+                style={{ color: BRAND, fontWeight: '500' }}
                 onClick={() => {
                   const text = segments
                     .map((s, i) => ({ s, i }))
@@ -202,11 +203,11 @@ export default function WrongqOcrPanel({
               </View>
             ) : null}
             {n > 0 ? (
-              <View className="block text-xs" style={{ color: '#BE3E2D' }} onClick={copySelected}>
+              <View className="block text-xs" style={{ color: BRAND }} onClick={copySelected}>
                 复制所选（{n}）
               </View>
             ) : (
-              <View className="block text-[10px] text-muted-foreground">已选 0 段</View>
+              <View className="block text-xs text-muted-foreground">已选 0 段</View>
             )}
           </View>
         </>

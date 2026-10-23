@@ -10,6 +10,7 @@ import {
 } from '@/services/memory'
 import { cacheGet, cacheSet } from '@/services/cache'
 import { getSubjectColor, formatDate } from '@/types'
+import { BRAND } from '@/lib/theme'
 
 export default function MemoryDetailPage() {
   const [params] = useState(() => Taro.getCurrentInstance().router?.params || {})
@@ -55,7 +56,7 @@ export default function MemoryDetailPage() {
       title: '删除记忆',
       content: '确定要删除这条记忆吗？此操作无法撤销。',
       confirmText: '删除',
-      confirmColor: '#BE3E2D',
+      confirmColor: BRAND,
       success: async (r) => {
         if (r.confirm) {
           try {
@@ -75,7 +76,7 @@ export default function MemoryDetailPage() {
       title: '删除媒体',
       content: '从记忆中删除此媒体？',
       confirmText: '删除',
-      confirmColor: '#BE3E2D',
+      confirmColor: BRAND,
       success: async (r) => {
         if (r.confirm) {
           try {
@@ -257,7 +258,7 @@ export default function MemoryDetailPage() {
           className="w-full h-12 rounded-xl border-red-200"
           onClick={onDelete}
         >
-          <Trash2 size={16} color="#BE3E2D" />
+          <Trash2 size={16} color={BRAND} />
           <Text className="block text-sm text-primary ml-2">删除记忆</Text>
         </Button>
       </View>

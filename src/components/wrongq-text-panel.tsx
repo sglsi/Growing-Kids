@@ -2,6 +2,7 @@ import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState } from 'react'
 import type { PageTextSegment } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 /**
  * P3（#131 / 设计文档 §4.8）：全页 OCR 文本面板（选择粘贴）。
@@ -112,8 +113,8 @@ export default function WrongqTextPanel(props: Props) {
                     style={{
                       width: 16, height: 16, borderRadius: 3, marginTop: 2, flexShrink: 0,
                       borderWidth: 1.5, borderStyle: 'solid',
-                      borderColor: on ? '#BE3E2D' : '#C9C2B8',
-                      backgroundColor: on ? '#BE3E2D' : 'transparent',
+                      borderColor: on ? BRAND : '#C9C2B8',
+                      backgroundColor: on ? BRAND : 'transparent',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                     }}
                   >
@@ -141,13 +142,13 @@ export default function WrongqTextPanel(props: Props) {
             <View style={{ flex: 1 }} />
             {n > 0 ? (
               <>
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => pickDraft('question')}>
+                <Text className="block text-xs" style={{ color: BRAND }} onClick={() => pickDraft('question')}>
                   粘贴到题干
                 </Text>
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => pickDraft('answer')}>
+                <Text className="block text-xs" style={{ color: BRAND }} onClick={() => pickDraft('answer')}>
                   粘贴到答案
                 </Text>
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={exportSelected}>
+                <Text className="block text-xs" style={{ color: BRAND }} onClick={exportSelected}>
                   导出所选（{n}）
                 </Text>
               </>

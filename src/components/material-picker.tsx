@@ -3,6 +3,7 @@ import { View, Text, ScrollView } from '@tarojs/components'
 import { FileText } from 'lucide-react-taro'
 import { fetchLibrary, type LibraryDoc } from '@/services/api'
 import { formatTime } from '@/lib/use-selection'
+import { BRAND } from '@/lib/theme'
 
 interface Props {
   visible: boolean
@@ -85,7 +86,7 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
                   onClick={() => { onSelect(d); onClose() }}
                 >
                   <View className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
-                    <FileText size={18} color="#BE3E2D" />
+                    <FileText size={18} color={BRAND} />
                   </View>
                   <View className="flex-1 min-w-0">
                     <Text className="block text-sm text-foreground truncate">{d.name}</Text>

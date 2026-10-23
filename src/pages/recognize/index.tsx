@@ -20,6 +20,7 @@ import {
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
+import { BRAND } from '@/lib/theme'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -1231,13 +1232,13 @@ export default function RecognizePage() {
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-3">
                 <Text className="block text-sm font-semibold text-foreground">来源页</Text>
-                <Text className="block text-[10px] text-muted-foreground">先选图，再到下方题目里「＋裁剪题目」</Text>
+                <Text className="block text-xs text-muted-foreground">先选图，再到下方题目里「＋裁剪题目」</Text>
               </View>
               {!curPage ? (
                 <View className="w-full h-40 border-2 border-dashed border-border rounded-xl flex items-center justify-center" onClick={() => void addBoardPages()}>
                   <View className="flex flex-col items-center">
                     <Text className="block text-sm text-muted-foreground">点击拍照 / 选择作业图片</Text>
-                    <Text className="block text-[10px] text-muted-foreground mt-1">支持一次多选，再从图里逐题裁剪</Text>
+                    <Text className="block text-xs text-muted-foreground mt-1">支持一次多选，再从图里逐题裁剪</Text>
                   </View>
                 </View>
               ) : (
@@ -1272,7 +1273,7 @@ export default function RecognizePage() {
                           onClick={() => switchPage(i)}
                           style={{
                             width: 46, height: 46, borderRadius: 8, overflow: 'hidden', flexShrink: 0, position: 'relative',
-                            border: `2px solid ${i === activePage ? '#BE3E2D' : '#ece8e0'}`,
+                            border: `2px solid ${i === activePage ? BRAND : '#ece8e0'}`,
                           }}
                         >
                           <TaroImage src={p.url} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
@@ -1300,7 +1301,7 @@ export default function RecognizePage() {
                     </View>
                   </ScrollView>
                   <View className="flex flex-row items-center justify-between mt-2">
-                    <Text className="block text-[10px] text-muted-foreground">点图片可编辑 · 共 {boardPages.length} 页</Text>
+                    <Text className="block text-xs text-muted-foreground">点图片可编辑 · 共 {boardPages.length} 页</Text>
                     <View className="flex flex-row items-center gap-3">
                       <Text
                         className="block text-xs text-primary"
@@ -1309,7 +1310,7 @@ export default function RecognizePage() {
                         看大图
                       </Text>
                       {curPage.ocr === 'error' ? (
-                        <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => void retryPageOcr(activePage)}>
+                        <Text className="block text-xs" style={{ color: BRAND }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
                         </Text>
                       ) : null}
@@ -1323,13 +1324,13 @@ export default function RecognizePage() {
                     style={{
                       backgroundColor: 'rgba(190,62,45,0.08)',
                       borderWidth: 1,
-                      borderColor: 'rgba(190,62,45,0.35)',
+                      borderColor: 'rgba(190, 62, 45, 0.25)',
                     }}
                     onClick={() => { if (!diagLoading) void handleDiagnose() }}
                   >
                     <Text
                       className="block text-xs"
-                      style={{ color: diagLoading ? '#B08D84' : '#BE3E2D', fontWeight: '500' }}
+                      style={{ color: diagLoading ? '#B08D84' : BRAND, fontWeight: '500' }}
                     >
                       {diagLoading ? '诊断中…（约 30 秒）' : 'OCR 识别异常？点此「一键诊断」'}
                     </Text>
@@ -1343,30 +1344,30 @@ export default function RecognizePage() {
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
                 <Text className="block text-sm font-semibold text-foreground">题目（{board.length} 题）</Text>
-                <Text className="block text-[10px] text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图=打开编辑</Text>
+                <Text className="block text-xs text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图=打开编辑</Text>
               </View>
               {board.map((e, idx) => (
-                <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? '#BE3E2D' : '#ece8e0'}` }}>
+                <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? BRAND : '#ece8e0'}` }}>
                   <View className="flex flex-row items-center justify-between mb-2">
                     <View className="flex flex-row items-center gap-2">
                       <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
                       {cropEditor?.entryIdx === idx ? (
-                        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>裁剪中…</Text>
+                        <Text className="block text-xs" style={{ color: BRAND }}>裁剪中…</Text>
                       ) : e.ocr === 'busy' ? (
-                        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>识别中…</Text>
+                        <Text className="block text-xs" style={{ color: BRAND }}>识别中…</Text>
                       ) : null}
                     </View>
                     <View className="flex flex-row items-center gap-3">
                       <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
                       <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => removeEntry(idx)}>删除</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }} onClick={() => removeEntry(idx)}>删除</Text>
                     </View>
                   </View>
 
                   {/* ① 裁剪图组 + 裁剪入口 */}
                   <View className="flex flex-row items-center flex-wrap gap-2 mb-2">
                     {e.images.map((img, j) => (
-                      <View key={j} style={{ width: 64, height: 64, borderRadius: 8, overflow: 'hidden', position: 'relative', border: `1px solid ${j === 0 ? '#BE3E2D' : '#ece8e0'}` }}>
+                      <View key={j} style={{ width: 64, height: 64, borderRadius: 8, overflow: 'hidden', position: 'relative', border: `1px solid ${j === 0 ? BRAND : '#ece8e0'}` }}>
                         <TaroImage
                           src={img.url}
                           mode="aspectFill"
@@ -1389,8 +1390,8 @@ export default function RecognizePage() {
                       className="flex flex-col items-center justify-center"
                       style={{ width: 64, height: 64, borderRadius: 8, border: '1px dashed #C9C2B8' }}
                     >
-                      <Text style={{ fontSize: 14, color: '#BE3E2D', lineHeight: '16px' }}>＋</Text>
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>裁剪题目</Text>
+                      <Text style={{ fontSize: 14, color: BRAND, lineHeight: '16px' }}>＋</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>裁剪题目</Text>
                     </View>
                   </View>
 
@@ -1401,7 +1402,7 @@ export default function RecognizePage() {
                         className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                         style={{
                           backgroundColor: '#FFF7F0',
-                          border: '1px solid rgba(190,62,45,0.3)',
+                          border: '1px solid rgba(190, 62, 45, 0.25)',
                           opacity: e.ocr === 'busy' ? 0.5 : 1,
                         }}
                         onClick={() => {
@@ -1409,13 +1410,13 @@ export default function RecognizePage() {
                           void runEntryOcr(idx, 'fast')
                         }}
                       >
-                        <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                        <Text className="block text-xs font-medium" style={{ color: BRAND }}>
                           {e.ocr === 'busy' && e.lastMode === 'fast' ? '识别中…' : '识别本题（快速）'}
                         </Text>
                       </View>
                       <View
                         className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
-                        style={{ backgroundColor: '#BE3E2D', opacity: e.ocr === 'busy' ? 0.5 : 1 }}
+                        style={{ backgroundColor: BRAND, opacity: e.ocr === 'busy' ? 0.5 : 1 }}
                         onClick={() => {
                           if (e.ocr === 'busy') return
                           void runEntryOcr(idx, 'precise')
@@ -1427,7 +1428,7 @@ export default function RecognizePage() {
                       </View>
                     </View>
                   ) : (
-                    <Text className="block text-[10px] text-muted-foreground mb-2">
+                    <Text className="block text-xs text-muted-foreground mb-2">
                       点上方「＋裁剪题目」，从来源页框出这道题的区域；不需要文字可直接存入错题库
                     </Text>
                   )}
@@ -1474,7 +1475,7 @@ export default function RecognizePage() {
                       className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                       style={{
                         backgroundColor: '#FFF7F0',
-                        border: '1px solid rgba(190,62,45,0.3)',
+                        border: '1px solid rgba(190, 62, 45, 0.25)',
                         opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
                       }}
                       onClick={() => {
@@ -1482,14 +1483,14 @@ export default function RecognizePage() {
                         void runPageOcr(curPage, 'fast')
                       }}
                     >
-                      <Text className="block text-xs font-medium" style={{ color: '#BE3E2D' }}>
+                      <Text className="block text-xs font-medium" style={{ color: BRAND }}>
                         {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '整页快速识别中…' : '整页快速识别'}
                       </Text>
                     </View>
                     <View
                       className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                       style={{
-                        backgroundColor: '#BE3E2D',
+                        backgroundColor: BRAND,
                         opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
                       }}
                       onClick={() => {
@@ -1502,7 +1503,7 @@ export default function RecognizePage() {
                       </Text>
                     </View>
                   </View>
-                  <Text className="block text-[10px] text-muted-foreground mt-1">
+                  <Text className="block text-xs text-muted-foreground mt-1">
                     次要入口：整页识别会把本页换成摆正后的图；文字请存入「·有图」的同一道题，避免图文分家
                   </Text>
                   {curPage.segments.length ? (
@@ -1529,7 +1530,7 @@ export default function RecognizePage() {
             {docName ? (
               <View className="w-full bg-muted rounded-xl px-4 py-4 mb-3" onClick={chooseDocFile}>
                 <Text className="block text-sm text-primary break-all">{docName}</Text>
-                <Text className="block text-[10px] text-muted-foreground mt-1">
+                <Text className="block text-xs text-muted-foreground mt-1">
                   {docUrl ? '已导入 ✓ 可点「识别题目」' : docFile ? '已选择，点「导入」上传' : ''}
                 </Text>
               </View>
@@ -1607,7 +1608,7 @@ export default function RecognizePage() {
                 <Text className="block text-xs text-primary" onClick={() => setShowEditor(true)}>校对圈定范围</Text>
               ) : null}
             </View>
-            <Text className="block text-[10px] text-muted-foreground mb-2">
+            <Text className="block text-xs text-muted-foreground mb-2">
               是否存入错题库由你决定：点底部「存入错题库」归档，或只「导出 Word」不留库
             </Text>
             {drafts.map((d, idx) => (
@@ -1616,10 +1617,10 @@ export default function RecognizePage() {
                   <View className="flex flex-row items-center gap-2">
                     <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
                     {d.question_label ? (
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{d.question_label}</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>{d.question_label}</Text>
                     ) : null}
                     {d.level === 2 ? (
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>小题（已含大题题干）</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>小题（已含大题题干）</Text>
                     ) : null}
                   </View>
                   <View className="flex flex-row gap-3">
@@ -1650,7 +1651,7 @@ export default function RecognizePage() {
                   <Text className="block text-xs text-muted-foreground mb-2 line-through">原错答：{d.wrong_answer}</Text>
                 ) : null}
 
-                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190,62,45,0.04)' }}>
+                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}>
                   <Textarea
                     className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.answer_content}
@@ -1747,7 +1748,7 @@ export default function RecognizePage() {
             </View>
             <ScrollView scrollY style={{ padding: 16, fontSize: 12, lineHeight: '1.7' }}>
               {diagError ? (
-                <Text style={{ color: '#BE3E2D' }}>{diagError}</Text>
+                <Text style={{ color: BRAND }}>{diagError}</Text>
               ) : (
                 <Text style={{ whiteSpace: 'pre-wrap', color: '#333', fontSize: 12 }}>{diagText}</Text>
               )}
@@ -1822,7 +1823,7 @@ export default function RecognizePage() {
 function ImgActionBtn({ icon: Icon, label, onClick }: { icon?: any; label: string; onClick: () => void }) {
   return (
     <View className="flex-1 flex flex-row items-center justify-center gap-1 bg-muted rounded-lg py-2" onClick={onClick}>
-      {Icon ? <Icon size={14} color="#BE3E2D" /> : null}
+      {Icon ? <Icon size={14} color={BRAND} /> : null}
       <Text className="block text-xs text-primary">{label}</Text>
     </View>
   )

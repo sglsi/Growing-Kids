@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
 import type { TimelineItem, ErrorAnalysis } from '@/types'
+import { BRAND } from '@/lib/theme'
 
 /**
  * 错因类型 → 角标配色（与详情页红橙色系呼应，但按错因语义分色，便于列表一眼分拣）
@@ -101,7 +102,7 @@ export default function ReviewItemCard({
             </View>
           )}
           <View className={`w-2 self-stretch ${color.bar}`} />
-          <View className="flex-1 p-3 flex flex-row gap-3">
+          <View className="flex-1 p-4 flex flex-row gap-3">
           {/* 点缩略图 = 打开该图片（可编辑）；点卡片其余区域 = 进详情 */}
           <View
             className="w-20 h-24 flex-shrink-0 overflow-hidden rounded-lg bg-muted"
@@ -210,7 +211,7 @@ export default function ReviewItemCard({
               )}
               {/* P3：规范题号标签（节·小类 题号）——复习本/错题库列表唯一指认题目 */}
               {c.question_label ? (
-                <Badge className="border rounded-full px-2 py-0 text-xs" style={{ backgroundColor: 'rgba(190,62,45,0.08)', color: '#BE3E2D', borderColor: 'rgba(190,62,45,0.25)' }}>
+                <Badge className="border border-brand-line bg-brand-soft text-brand rounded-full px-2 py-0 text-xs">
                   {c.question_label}
                 </Badge>
               ) : null}
@@ -227,17 +228,16 @@ export default function ReviewItemCard({
 
           {c.answer ? (
             <View className="flex flex-row items-start gap-2 bg-muted bg-opacity-60 rounded-lg p-2">
-              <Text className="block text-xs font-medium shrink-0 pt-1" style={{ color: '#BE3E2D' }}>正确答案</Text>
-              <Text className="block flex-1 text-xs leading-relaxed" style={{ color: '#BE3E2D' }}>
+              <Text className="block text-xs font-medium shrink-0 pt-1 text-brand">正确答案</Text>
+              <Text className="block flex-1 text-xs leading-relaxed text-brand">
                 {truncate(c.answer, 60)}
               </Text>
               {onAnswer && !selecting ? (
                 <View
-                  className="shrink-0 px-2 rounded"
-                  style={{ backgroundColor: 'rgba(190,62,45,0.10)', paddingTop: 2, paddingBottom: 2 }}
+                  className="shrink-0 px-2 py-1 rounded-lg bg-brand-soft"
                   onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
                 >
-                  <Text className="block text-xs" style={{ color: '#BE3E2D' }}>改答案</Text>
+                  <Text className="block text-xs" style={{ color: BRAND }}>改答案</Text>
                 </View>
               ) : null}
             </View>
@@ -245,10 +245,10 @@ export default function ReviewItemCard({
             <View className="mt-1 flex flex-row">
               <View
                 className="px-2 py-1 rounded-lg border"
-                style={{ borderColor: 'rgba(190,62,45,0.35)', backgroundColor: 'rgba(190,62,45,0.04)' }}
+                style={{ borderColor: 'rgba(190, 62, 45, 0.25)', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}
                 onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
               >
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>＋ 填答案</Text>
+                <Text className="block text-xs" style={{ color: BRAND }}>＋ 填答案</Text>
               </View>
             </View>
           ) : null}

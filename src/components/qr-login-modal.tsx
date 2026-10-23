@@ -5,6 +5,7 @@ import { Network } from '@/network'
 import { applyLoginUser } from '@/services/auth'
 import { buildHeaders } from '@/services/net'
 import type { AuthUser } from '@/types/auth'
+import { BRAND } from '@/lib/theme'
 
 /**
  * H5 扫码登录弹层（思傅 2026-10-20 拍板）：电脑浏览器没有 wx.login，
@@ -161,7 +162,7 @@ export default function QrLoginModal({ visible, onClose, onSuccess }: Props) {
         ) : null}
         {phase === 'error' ? (
           <View style={{ height: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ fontSize: 13, color: '#BE3E2D', textAlign: 'center', marginBottom: 12, lineHeight: '20px' }}>{msg}</Text>
+            <Text style={{ fontSize: 13, color: BRAND, textAlign: 'center', marginBottom: 12, lineHeight: '20px' }}>{msg}</Text>
             <Button onClick={() => void startLogin()}>重试</Button>
           </View>
         ) : null}

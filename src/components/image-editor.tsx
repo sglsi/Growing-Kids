@@ -1695,7 +1695,7 @@ export default function ImageEditor({
       {/* 对比滑杆：拖动即可在「擦除前 / 擦除后」之间扫（P3 对标夸克） */}
       {compareMode && beforeSrc && (
         <View className="px-6 pb-1 flex flex-row items-center gap-3">
-          <Text className="block text-white text-opacity-70 text-[11px]">前</Text>
+          <Text className="block text-white text-opacity-70 text-xs">前</Text>
           <Slider
             className="flex-1"
             min={0}
@@ -1707,7 +1707,7 @@ export default function ImageEditor({
             blockSize={18}
             onChange={(e: any) => setCompareRatio(clamp((e?.detail?.value ?? 50) / 100, 0, 1))}
           />
-          <Text className="block text-white text-opacity-70 text-[11px]">后</Text>
+          <Text className="block text-white text-opacity-70 text-xs">后</Text>
         </View>
       )}
 
@@ -1817,7 +1817,7 @@ export default function ImageEditor({
                       <TaroImage src={thumb.url} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
                     </View>
                     <Text
-                      className="block text-[10px] mt-1"
+                      className="block text-xs mt-1"
                       style={{ color: active ? '#3b82f6' : 'rgba(255,255,255,0.6)' }}
                     >
                       {p.label}
@@ -1850,7 +1850,7 @@ export default function ImageEditor({
                   onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
                 />
                 <View className="flex flex-row items-center justify-between mt-1">
-                  <Text className="block text-white text-opacity-50 text-[10px]">
+                  <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).left}
                   </Text>
                   <Text
@@ -1859,7 +1859,7 @@ export default function ImageEditor({
                   >
                     恢复默认
                   </Text>
-                  <Text className="block text-white text-opacity-50 text-[10px]">
+                  <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).right}
                   </Text>
                 </View>
@@ -1934,12 +1934,12 @@ export default function ImageEditor({
           <View
             className="flex flex-row items-center justify-center mb-2"
             style={{
-              backgroundColor: 'rgba(190,62,45,0.18)',
+              backgroundColor: 'rgba(190, 62, 45, 0.25)',
               borderRadius: 999,
               paddingTop: 6,
               paddingBottom: 6,
               borderWidth: 1,
-              borderColor: 'rgba(190,62,45,0.45)',
+              borderColor: 'rgba(190, 62, 45, 0.25)',
             }}
           >
             <Text className="block text-xs" style={{ color: '#FFD9CF' }}>
@@ -1997,7 +1997,7 @@ export default function ImageEditor({
                     }}
                   >
                     <Text className="block text-white text-sm font-medium">{m.label}</Text>
-                    <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
+                    <Text className="block text-white text-opacity-60 text-xs mt-1">{m.hint}</Text>
                   </View>
                 )
               })}
@@ -2023,7 +2023,7 @@ export default function ImageEditor({
                         onClick={() => setSrScale(s.value)}
                       >
                         <Text className="block text-white text-sm font-medium">{s.label}</Text>
-                        <Text className="block text-white text-opacity-60 text-[10px] mt-1">{s.hint}</Text>
+                        <Text className="block text-white text-opacity-60 text-xs mt-1">{s.hint}</Text>
                       </View>
                     )
                   })}
@@ -2046,7 +2046,7 @@ export default function ImageEditor({
                         onClick={() => setSrMode(m.value)}
                       >
                         <Text className="block text-white text-sm font-medium">{m.label}</Text>
-                        <Text className="block text-white text-opacity-60 text-[10px] mt-1">{m.hint}</Text>
+                        <Text className="block text-white text-opacity-60 text-xs mt-1">{m.hint}</Text>
                       </View>
                     )
                   })}
@@ -2078,7 +2078,7 @@ export default function ImageEditor({
                   onChange={(e: any) => onPresetSliderChange(Number(e.detail.value) / 100)}
                 />
                 <View className="flex flex-row items-center justify-between mt-1">
-                  <Text className="block text-white text-opacity-50 text-[10px]">
+                  <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).left}
                   </Text>
                   <Text
@@ -2087,7 +2087,7 @@ export default function ImageEditor({
                   >
                     恢复默认
                   </Text>
-                  <Text className="block text-white text-opacity-50 text-[10px]">
+                  <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).right}
                   </Text>
                 </View>

@@ -18,6 +18,7 @@ import {
   fetchSubjects, uploadFile,
 } from '@/services/api'
 import type { Subject } from '@/types'
+import { BRAND } from '@/lib/theme'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -568,7 +569,7 @@ export default function MemoryEditPage() {
         <View className="flex flex-row gap-2 mt-3 flex-wrap">
           {canPickImage && (
             <Button variant="outline" className="rounded-xl h-10" onClick={onPickImages}>
-              <Camera size={16} color="#BE3E2D" />
+              <Camera size={16} color={BRAND} />
               <Text className="block text-sm text-foreground ml-1">图片 ({imageCount}/9)</Text>
             </Button>
           )}
@@ -578,7 +579,7 @@ export default function MemoryEditPage() {
               className={`rounded-xl h-10 ${recording ? 'border-primary' : ''}`}
               onClick={recording ? onStopRecord : onStartRecord}
             >
-              <Music size={16} color="#BE3E2D" />
+              <Music size={16} color={BRAND} />
               <Text className="block text-sm text-foreground ml-1">
                 {recording ? `录音中 ${recordSec}s 点击停止` : `录音 (${audioMedia.length}/5)`}
               </Text>
@@ -586,7 +587,7 @@ export default function MemoryEditPage() {
           )}
           {canPickVideo && (
             <Button variant="outline" className="rounded-xl h-10" onClick={onPickVideo}>
-              <Film size={16} color="#BE3E2D" />
+              <Film size={16} color={BRAND} />
               <Text className="block text-sm text-foreground ml-1">视频 ({videoMedia.length}/3)</Text>
             </Button>
           )}

@@ -21,6 +21,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
+import { BRAND } from '@/lib/theme'
 
 const PAGE_SIZE = 20
 
@@ -567,7 +568,7 @@ export default function SubjectPage() {
                     style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
                     onClick={() => { openEditor(moreItem, action); closeMore() }}
                   >
-                    <Icon size={20} color="#BE3E2D" />
+                    <Icon size={20} color={BRAND} />
                     <Text className="block text-xs text-foreground mt-1">{label}</Text>
                   </View>
                 ))}
@@ -575,21 +576,21 @@ export default function SubjectPage() {
             )}
 
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
-              <Crop size={18} color="#BE3E2D" />
+              <Crop size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">
                 {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
               </Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
-              <Tag size={18} color="#BE3E2D" />
+              <Tag size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">修改分类</Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
-              <BookmarkMinus size={18} color="#BE3E2D" />
+              <BookmarkMinus size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">移出复习本</Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
-              <Trash2 size={18} color="#BE3E2D" />
+              <Trash2 size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">删除</Text>
             </View>
             <View className="mt-2">

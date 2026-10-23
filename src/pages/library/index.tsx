@@ -15,6 +15,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
+import { BRAND } from '@/lib/theme'
 
 /**
  * 资料库：外部 PDF / Word / TXT 等文档
@@ -200,7 +201,7 @@ export default function LibraryPage() {
                       <CheckDot checked={checked} size={20} />
                     )}
                     <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                      <FileText size={20} color="#BE3E2D" />
+                      <FileText size={20} color={BRAND} />
                     </View>
                     <View className="flex-1 min-w-0">
                       <View className="flex flex-row items-center gap-2">

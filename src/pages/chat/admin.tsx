@@ -22,6 +22,7 @@ import {
   deleteKnowledgeArticle,
   type KnowledgeArticle,
 } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 interface FormState {
   id?: string
@@ -187,7 +188,7 @@ export default function ChatAdminPage() {
           onClick={openCreate}
           className="rounded-xl"
           style={{
-            backgroundColor: '#BE3E2D',
+            backgroundColor: BRAND,
             padding: '6px 12px',
             display: 'flex',
             flexDirection: 'row',
@@ -271,8 +272,8 @@ export default function ChatAdminPage() {
                       className="flex flex-row items-center gap-1"
                       style={{ padding: '4px 0' }}
                     >
-                      <Trash2 size={14} color="#BE3E2D" />
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>
+                      <Trash2 size={14} color={BRAND} />
+                      <Text className="block text-xs" style={{ color: BRAND }}>
                         删除
                       </Text>
                     </View>

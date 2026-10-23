@@ -1,5 +1,6 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import { useState } from 'react'
+import { BRAND } from '@/lib/theme'
 
 /**
  * 数学符号快捷输入栏（思傅 2026-10-22：答案/解题过程/题目栏对数学支持不友好，
@@ -124,10 +125,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         {onTogglePreview ? (
           <View
             className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
-            style={{ backgroundColor: preview ? '#BE3E2D' : 'rgba(190,62,45,0.08)' }}
+            style={{ backgroundColor: preview ? BRAND : 'rgba(190,62,45,0.08)' }}
             onClick={onTogglePreview}
           >
-            <Text className="block text-xs" style={{ color: preview ? '#fff' : '#BE3E2D' }}>
+            <Text className="block text-xs" style={{ color: preview ? '#fff' : BRAND }}>
               {preview ? '编辑' : '完成'}
             </Text>
           </View>
@@ -135,10 +136,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
 
         <View
           className="flex flex-row items-center gap-1 px-2.5 h-8 rounded-lg"
-          style={{ backgroundColor: open ? '#BE3E2D' : 'rgba(190,62,45,0.08)' }}
+          style={{ backgroundColor: open ? BRAND : 'rgba(190,62,45,0.08)' }}
           onClick={() => setOpen((v) => !v)}
         >
-          <Text className="block text-xs" style={{ color: open ? '#fff' : '#BE3E2D' }}>
+          <Text className="block text-xs" style={{ color: open ? '#fff' : BRAND }}>
             {open ? '收起符号面板' : 'Ω 数学符号'}
           </Text>
         </View>
@@ -154,10 +155,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
                   key={g.label}
                   className={tab}
                   style={{
-                    backgroundColor: i === page ? '#BE3E2D' : '#fff',
+                    backgroundColor: i === page ? BRAND : '#fff',
                     borderWidth: 1,
                     borderStyle: 'solid',
-                    borderColor: i === page ? '#BE3E2D' : '#e5e0d8',
+                    borderColor: i === page ? BRAND : '#e5e0d8',
                   }}
                   onClick={() => setPage(i)}
                 >

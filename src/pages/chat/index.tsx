@@ -8,6 +8,7 @@ import {
   fetchChatHistory,
   type ChatMessage,
 } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 const SESSION_KEY = 'chat:session_id'
 const WELCOME_TEXT =
@@ -231,7 +232,7 @@ export default function ChatPage() {
           onClick={canSend ? handleSend : undefined}
           className="rounded-full"
           style={{
-            backgroundColor: canSend ? '#BE3E2D' : '#d6d2c5',
+            backgroundColor: canSend ? BRAND : '#d6d2c5',
             width: '40px',
             height: '40px',
             display: 'flex',
@@ -258,7 +259,7 @@ function Bubble({
       <View className="flex flex-row items-start gap-2 mb-3">
         <View
           className="rounded-full flex items-center justify-center flex-shrink-0"
-          style={{ width: '32px', height: '32px', backgroundColor: '#BE3E2D' }}
+          style={{ width: '32px', height: '32px', backgroundColor: BRAND }}
         >
           <Bot size={18} color="#fff" />
         </View>
@@ -287,7 +288,7 @@ function Bubble({
       <View
         className="rounded-2xl rounded-tr-sm"
         style={{
-          backgroundColor: '#BE3E2D',
+          backgroundColor: BRAND,
           padding: '10px 14px',
           maxWidth: '78%',
         }}

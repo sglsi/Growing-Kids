@@ -10,6 +10,7 @@ import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 /**
  * 题目答案编辑区（思傅 2026-10-21）
@@ -270,7 +271,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       {/* 目标锚：常驻提示，防止把答案加错题 */}
       <View className="flex flex-row items-center justify-between mb-2">
         <Text className="block text-xs text-muted-foreground">正确答案</Text>
-        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>
+        <Text className="block text-xs" style={{ color: BRAND }}>
           答案将存入：{label}
         </Text>
       </View>
@@ -322,14 +323,14 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                     />
                   ) : a.type === 'text' ? (
                     <View className="w-full h-full p-1 flex items-center justify-center bg-muted">
-                      <Text className="block text-[10px] text-center" style={{ fontSize: 9 }}>
+                      <Text className="block text-xs text-center">
                         {(a.text || '').slice(0, 20)}
                       </Text>
                     </View>
                   ) : (
                     <View className="w-full h-full flex flex-col items-center justify-center bg-muted">
-                      <FileText size={18} color="#BE3E2D" />
-                      <Text className="block text-[9px] mt-1 px-1 text-center" numberOfLines={1}>
+                      <FileText size={18} color={BRAND} />
+                      <Text className="block text-xs mt-1 px-1 text-center" numberOfLines={1}>
                         {a.name || '文档'}
                       </Text>
                     </View>
@@ -340,7 +341,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                   style={{ right: -4, top: -4 }}
                   onClick={() => void removeAttachment(a.id)}
                 >
-                  <Trash2 size={14} color="#BE3E2D" />
+                  <Trash2 size={14} color={BRAND} />
                 </View>
               </View>
             )
@@ -351,38 +352,38 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       {/* 操作按钮 */}
       <View className="flex flex-row flex-wrap gap-2 mt-2">
         <View className={btn} onClick={() => void pickImage()}>
-          <Plus size={12} color="#BE3E2D" />
+          <Plus size={12} color={BRAND} />
           <Text className="block text-xs">图片</Text>
           <Crop size={10} color="#9A948A" />
         </View>
         <View className={btn} onClick={() => void pickDoc()}>
-          <Plus size={12} color="#BE3E2D" />
+          <Plus size={12} color={BRAND} />
           <Text className="block text-xs">文档</Text>
         </View>
         <View className={btn} onClick={() => setPickerOpen(true)}>
-          <FileText size={12} color="#BE3E2D" />
+          <FileText size={12} color={BRAND} />
           <Text className="block text-xs">资料库</Text>
         </View>
         {/* 联网搜题：只做真实网络检索，不喂给 AI */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
-          <Globe size={12} color="#BE3E2D" />
+          <Globe size={12} color={BRAND} />
           <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
         </View>
         {/* 知识库：只检索 ima 知识库（秒级），不喂给 AI */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
-          <BookOpen size={12} color="#BE3E2D" />
+          <BookOpen size={12} color={BRAND} />
           <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '知识库'}</Text>
         </View>
         {/* AI 解题：只做模型推理，不检索 */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
-          <Bot size={12} color="#BE3E2D" />
+          <Bot size={12} color={BRAND} />
           <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
         </View>
         {/* 保存：仅编辑态需要（预览态内容即已入库内容；附件操作都是即时保存） */}
         {mode === 'edit' ? (
           <View
             className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
-            style={{ backgroundColor: saving ? '#E8E2D9' : '#BE3E2D' }}
+            style={{ backgroundColor: saving ? '#E8E2D9' : BRAND }}
             onClick={() => { if (!saving) saveText() }}
           >
             <Text className="block text-xs" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
@@ -392,9 +393,9 @@ export default function AnswerEditor({ item, onSaved }: Props) {
 
       {/* 搜到的候选答案：必须「采纳」才入库 */}
       {candidate && candidate.source !== 'none' ? (
-        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(190,62,45,0.35)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(190,62,45,0.04)' : 'rgba(232,163,61,0.08)' }}>
+        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(190, 62, 45, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(190, 62, 45, 0.08)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
-            <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : '#BE3E2D' }}>
+            <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND }}>
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
                 : candidate.source === 'kb'
@@ -420,7 +421,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
               知识库条目没有外链，只列表展示 */}
           {candidate.refs.length ? (
             <View className="mb-2">
-              <Text className="block text-[10px] text-muted-foreground mb-1">
+              <Text className="block text-xs text-muted-foreground mb-1">
                 {candidate.source === 'kb' ? '相关知识库条目' : '参考来源（点击复制链接）'}
               </Text>
               {candidate.refs.map((r, i) => (
@@ -433,8 +434,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                     Taro.showToast({ title: '链接已复制', icon: 'none' })
                   }}
                 >
-                  <Text className="block text-[10px] mr-1" style={{ color: '#BE3E2D' }}>{i + 1}.</Text>
-                  <Text className="flex-1 block text-xs" style={{ color: '#BE3E2D' }} numberOfLines={1}>
+                  <Text className="block text-xs mr-1" style={{ color: BRAND }}>{i + 1}.</Text>
+                  <Text className="flex-1 block text-xs" style={{ color: BRAND }} numberOfLines={1}>
                     {r.title || r.url}
                   </Text>
                 </View>
@@ -442,12 +443,12 @@ export default function AnswerEditor({ item, onSaved }: Props) {
             </View>
           ) : null}
           {candidate.note ? (
-            <Text className="block text-[10px] text-muted-foreground mb-2">{candidate.note}</Text>
+            <Text className="block text-xs text-muted-foreground mb-2">{candidate.note}</Text>
           ) : null}
           <View className="flex flex-row gap-2">
             <View
               className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
-              style={{ backgroundColor: '#BE3E2D' }}
+              style={{ backgroundColor: BRAND }}
               onClick={() => void handleAdopt()}
             >
               <Check size={12} color="#fff" />

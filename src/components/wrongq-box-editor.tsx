@@ -1,6 +1,7 @@
 import { View, Text, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState, useRef, useEffect } from 'react'
+import { BRAND } from '@/lib/theme'
 
 /**
  * P2（#130 / 设计文档 §4.7）：错题圈定结果页的「原图 + 系统圈框叠加」编辑器。
@@ -159,7 +160,7 @@ export default function WrongqBoxEditor(props: Props) {
           title: '删除这道题？',
           content: '框选与识别结果都会被移除，之后可在空白处重新画框补捞',
           confirmText: '删除',
-          confirmColor: '#BE3E2D',
+          confirmColor: BRAND,
           success: (r) => { if (r.confirm) props.onDelete(id) },
         })
       } else {
@@ -281,9 +282,9 @@ export default function WrongqBoxEditor(props: Props) {
   if (!visible || !imageSrc) return null
 
   const colorOf = (it: BoxEditorItem) =>
-    it.active ? (it.verdict === 'wrong' ? '#BE3E2D' : '#B45309') : '#9CA3AF'
+    it.active ? (it.verdict === 'wrong' ? BRAND : '#B45309') : '#9CA3AF'
   const chipBgOf = (it: BoxEditorItem) =>
-    it.active ? (it.verdict === 'wrong' ? '#BE3E2D' : '#B45309') : '#6B7280'
+    it.active ? (it.verdict === 'wrong' ? BRAND : '#B45309') : '#6B7280'
 
   return (
     <View className="rounded-2xl border-border p-3 mb-3" style={{ backgroundColor: '#fff', border: '1px solid #ece8e0' }}>
@@ -297,7 +298,7 @@ export default function WrongqBoxEditor(props: Props) {
       </Text>
       {busy ? (
         <View className="rounded-xl px-3 py-1 mb-2" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
-          <Text className="block text-xs" style={{ color: '#BE3E2D' }}>正在按新框重新识别…</Text>
+          <Text className="block text-xs" style={{ color: BRAND }}>正在按新框重新识别…</Text>
         </View>
       ) : null}
 
@@ -322,7 +323,7 @@ export default function WrongqBoxEditor(props: Props) {
                   borderStyle: 'solid',
                   borderColor: colorOf(it),
                   borderRadius: 3,
-                  backgroundColor: sel ? 'rgba(190,62,45,0.06)' : 'transparent',
+                  backgroundColor: sel ? 'rgba(190, 62, 45, 0.08)' : 'transparent',
                   opacity: it.active ? 1 : 0.55,
                 }}
               >
@@ -386,7 +387,7 @@ export default function WrongqBoxEditor(props: Props) {
       {/* 图例 */}
       <View className="flex flex-row items-center gap-3 mt-2">
         <View className="flex flex-row items-center gap-1">
-          <View style={{ width: 10, height: 10, borderRadius: 2, borderWidth: 1.5, borderStyle: 'solid', borderColor: '#BE3E2D' }} />
+          <View style={{ width: 10, height: 10, borderRadius: 2, borderWidth: 1.5, borderStyle: 'solid', borderColor: BRAND }} />
           <Text className="block text-xs text-muted-foreground">错题</Text>
         </View>
         <View className="flex flex-row items-center gap-1">

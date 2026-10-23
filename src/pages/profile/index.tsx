@@ -15,6 +15,7 @@ import {
   fetchOverview, fetchStorageUsage, formatBytes,
   type Overview, type StorageUsage,
 } from '@/services/api'
+import { BRAND } from '@/lib/theme'
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -181,7 +182,7 @@ export default function ProfilePage() {
                   你的题目、复习本与资料已与微信账号绑定，换设备登录即可找回。
                 </Text>
                 <Button variant="outline" className="w-full h-11 rounded-xl" disabled={busy} onClick={handleLogout}>
-                  <LogOut size={16} color="#BE3E2D" />
+                  <LogOut size={16} color={BRAND} />
                   <Text className="block text-sm ml-2">退出登录</Text>
                 </Button>
               </>
@@ -207,9 +208,9 @@ export default function ProfilePage() {
             <View className="flex flex-row items-center gap-3">
               <View
                 className="rounded-xl flex items-center justify-center"
-                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(190,62,45,0.10)' }}
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}
               >
-                <Bot size={20} color="#BE3E2D" />
+                <Bot size={20} color={BRAND} />
               </View>
               <View className="flex-1">
                 <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
@@ -232,7 +233,7 @@ export default function ProfilePage() {
           {usage && (
             <Card className="rounded-2xl border-border p-4 mb-5">
               <View className="flex flex-row items-center gap-2 mb-2">
-                <HardDrive size={16} color="#BE3E2D" />
+                <HardDrive size={16} color={BRAND} />
                 <Text className="block text-sm font-semibold text-foreground">存储空间</Text>
                 <View className="flex-1" />
                 <Text className="block text-xs text-muted-foreground">

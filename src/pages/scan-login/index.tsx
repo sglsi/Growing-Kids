@@ -6,6 +6,7 @@ import { Network } from '@/network'
 import { applyLoginUser } from '@/services/auth'
 import { buildHeaders, captureUserId, getUserId } from '@/services/net'
 import type { AuthUser } from '@/types/auth'
+import { BRAND } from '@/lib/theme'
 
 /**
  * H5 扫码登录·手机端落地页（思傅 2026-10-20 拍板）。
@@ -112,7 +113,7 @@ export default function ScanLoginPage() {
         {phase === 'fail' || phase === 'invalid' ? (
           <>
             <Text style={{ fontSize: 32, marginBottom: 8 }}>⚠️</Text>
-            <Text style={{ fontSize: 13, color: '#BE3E2D', lineHeight: '22px', textAlign: 'center', marginBottom: 16 }}>
+            <Text style={{ fontSize: 13, color: BRAND, lineHeight: '22px', textAlign: 'center', marginBottom: 16 }}>
               {phase === 'invalid' ? '链接无效或参数缺失' : msg}
             </Text>
             {phase === 'fail' ? (

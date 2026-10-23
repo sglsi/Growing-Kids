@@ -19,6 +19,7 @@ import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
+import { BRAND } from '@/lib/theme'
 
 /** P2-18 艾宾浩斯间隔（与后端 timeline/review.ts 保持一致） */
 const EBBINGHAUS_INTERVALS = [1, 2, 4, 7, 15, 30]
@@ -407,21 +408,21 @@ export default function DetailPage() {
                 style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={() => handleEditImage(item.url || item.thumb_url || '')}
               >
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
+                <Text className="block text-xs" style={{ color: BRAND }}>编辑</Text>
               </View>
               <View
                 className="px-3 rounded-lg"
                 style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={() => { if (!ocrBusy) void handleOcrImage(item.url || item.thumb_url || '') }}
               >
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                <Text className="block text-xs" style={{ color: BRAND }}>{ocrBusy ? '识别中' : '识别'}</Text>
               </View>
               <View
                 className="px-3 rounded-lg"
                 style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={handleDelete}
               >
-                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
+                <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
               </View>
             </View>
           </View>
@@ -432,7 +433,7 @@ export default function DetailPage() {
               （handleSave 早已带 question_content）。 */}
           <View className="flex flex-row items-center justify-between mb-2">
             <Text className="block text-sm font-semibold text-foreground">题目</Text>
-            <Text className="block text-[10px] text-muted-foreground">识别或手动输入题干</Text>
+            <Text className="block text-xs text-muted-foreground">识别或手动输入题干</Text>
           </View>
           <MathSymbolBar onInsert={insertQuestionSymbol} />
           <Card className="rounded-2xl border-border p-4 mb-4">
@@ -479,7 +480,7 @@ export default function DetailPage() {
               <Text className="block text-sm">{item.in_review_book ? '移出复习本' : '加入复习本'}</Text>
             </Button>
             <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={handleDelete}>
-              <Text className="block text-sm" style={{ color: '#BE3E2D' }}>删除</Text>
+              <Text className="block text-sm" style={{ color: BRAND }}>删除</Text>
             </Button>
           </View>
 
@@ -625,7 +626,7 @@ export default function DetailPage() {
           <Text className="block text-sm font-semibold text-foreground">题目</Text>
           {item?.content?.question_label ? (
             <View style={{ backgroundColor: 'rgba(190,62,45,0.08)', borderRadius: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 2, paddingBottom: 2 }}>
-              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{item.content.question_label}</Text>
+              <Text className="block text-xs" style={{ color: BRAND }}>{item.content.question_label}</Text>
             </View>
           ) : null}
         </View>
@@ -645,7 +646,7 @@ export default function DetailPage() {
           <View className="mb-4">
             <View className="flex flex-row items-center justify-between mb-2">
               <Text className="block text-xs text-muted-foreground">题面图</Text>
-              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字 ·「删除」移除</Text>
+              <Text className="block text-xs text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字 ·「删除」移除</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-3">
               {item.question_image_urls.map((u) => (
@@ -664,21 +665,21 @@ export default function DetailPage() {
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => handleEditImage(u)}
                     >
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>编辑</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
                     >
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>{ocrBusy ? '识别中' : '识别'}</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => void handleDeleteImage('question', u)}
                     >
-                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
+                      <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
                     </View>
                   </View>
                 </View>
@@ -691,7 +692,7 @@ export default function DetailPage() {
           <View className="mb-4">
             <View className="flex flex-row items-center justify-between mb-2">
               <Text className="block text-xs text-muted-foreground">答题卡图</Text>
-              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
+              <Text className="block text-xs text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-3">
               {item.answer_image_urls.map((u) => (
@@ -709,7 +710,7 @@ export default function DetailPage() {
                     style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('answer', u)}
                   >
-                    <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
                   </View>
                 </View>
               ))}
@@ -721,7 +722,7 @@ export default function DetailPage() {
           <View className="mb-4">
             <View className="flex flex-row items-center justify-between mb-2">
               <Text className="block text-xs text-muted-foreground">图片</Text>
-              <Text className="block text-[10px] text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
+              <Text className="block text-xs text-muted-foreground">点图看大图 ·「删除」移除该图</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-3">
               {item.image_urls.map((u) => (
@@ -739,7 +740,7 @@ export default function DetailPage() {
                     style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('legacy', u)}
                   >
-                    <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
                   </View>
                 </View>
               ))}
@@ -749,8 +750,8 @@ export default function DetailPage() {
 
         {/* P2-16 错因分析 */}
         {item?.content?.error_analysis?.label && (
-          <Card className="rounded-2xl border p-4 mb-4" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190,62,45,0.04)' }}>
-            <Text className="block text-sm font-semibold mb-1" style={{ color: '#BE3E2D' }}>错因分析</Text>
+          <Card className="rounded-2xl border p-4 mb-4" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}>
+            <Text className="block text-sm font-semibold mb-1" style={{ color: BRAND }}>错因分析</Text>
             <Text className="block text-sm font-medium text-foreground mb-1">{item.content.error_analysis.label}</Text>
             {item.content.error_analysis.reason && (
               <Text className="block text-xs text-muted-foreground mb-1">{item.content.error_analysis.reason}</Text>
@@ -773,13 +774,13 @@ export default function DetailPage() {
                 <View key={s.stage} className="flex flex-col items-center px-1">
                   <View
                     className={`w-6 h-6 rounded-full flex items-center justify-center ${s.done ? 'border-0' : 'bg-muted border border-border'}`}
-                    style={s.done ? { backgroundColor: '#BE3E2D' } : undefined}
+                    style={s.done ? { backgroundColor: BRAND } : undefined}
                   >
-                    <Text className={`text-[10px] ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: '#fff' } : undefined}>
+                    <Text className={`text-xs ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: '#fff' } : undefined}>
                       {s.done ? '✓' : s.stage}
                     </Text>
                   </View>
-                  <Text className="block text-[10px] text-muted-foreground mt-1">第{s.day}天</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">第{s.day}天</Text>
                 </View>
               ))}
             </View>
@@ -812,12 +813,12 @@ export default function DetailPage() {
                     <View className="flex flex-row items-center justify-between">
                       <View className="flex flex-row gap-1 flex-wrap">
                         {s.shared_tags.map((t) => (
-                          <Text key={t} className="block text-[10px]" style={{ color: '#BE3E2D', backgroundColor: 'rgba(190,62,45,0.1)' }}>
+                          <Text key={t} className="block text-xs" style={{ color: BRAND, backgroundColor: 'rgba(190, 62, 45, 0.08)' }}>
                             {t}
                           </Text>
                         ))}
                       </View>
-                      <Text className="block text-[10px] text-muted-foreground">相似度 {Math.round(s.score * 100)}%</Text>
+                      <Text className="block text-xs text-muted-foreground">相似度 {Math.round(s.score * 100)}%</Text>
                     </View>
                   </View>
                 ))}
@@ -873,7 +874,7 @@ export default function DetailPage() {
         </Card>
 
         <View className="mt-6">
-          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: '#BE3E2D' }}>
+          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND }}>
             删除这条记录
           </Text>
         </View>

@@ -21,6 +21,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
 import { BUILD_META } from '@/build-meta'
+import { BRAND } from '@/lib/theme'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -455,7 +456,7 @@ export default function IndexPage() {
               {isLoggedIn() && auth?.avatarUrl ? (
                 <Image src={auth.avatarUrl} className="rounded-full" style={{ width: '24px', height: '24px' }} mode="aspectFill" />
               ) : (
-                <CircleUser size={20} color={isLoggedIn() ? '#BE3E2D' : '#9A948A'} />
+                <CircleUser size={20} color={isLoggedIn() ? BRAND : '#9A948A'} />
               )}
               <Text className="block text-xs text-foreground">
                 {isLoggedIn() ? (auth?.nickname || '我的') : '登录'}
@@ -478,10 +479,10 @@ export default function IndexPage() {
                 paddingTop: 3,
                 paddingBottom: 3,
                 borderWidth: 1,
-                borderColor: 'rgba(190,62,45,0.3)',
+                borderColor: 'rgba(190, 62, 45, 0.25)',
               }}
             >
-              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>
+              <Text className="block text-xs" style={{ color: BRAND }}>
                 📦 包版本 {BUILD_META.label} · 点我查看后端域名
               </Text>
             </View>
@@ -494,7 +495,7 @@ export default function IndexPage() {
               onClick={goRecognize}
             >
               <View className="flex flex-row items-center justify-center w-9 h-9 rounded-full bg-primary-foreground">
-                <Camera size={18} color="#BE3E2D" />
+                <Camera size={18} color={BRAND} />
               </View>
               <View className="flex-1">
                 <Text className="block text-sm font-medium text-primary-foreground">拍照 / 相册识别</Text>
@@ -527,7 +528,7 @@ export default function IndexPage() {
           ) : (
             <>
               {/* 数据统计 */}
-              <View className="flex flex-row gap-3 mb-4">
+              <View className="flex flex-row gap-3 mb-6">
                 <StatCard label="本周新增" value={overview?.week_total ?? 0} highlight />
                 <StatCard label="收件箱" value={overview?.total ?? 0} />
                 <StatCard label="复习本" value={overview?.review_total ?? 0} onTap={goReviewBook} />
@@ -535,10 +536,10 @@ export default function IndexPage() {
 
               {/* 学科分类（思傅 2026-10-21：就地筛选下方最近题目，不再跳复习本） */}
               <View className="mb-2 flex flex-row items-center justify-between">
-                <Text className="block text-sm font-semibold text-foreground">学科分类</Text>
+                <Text className="block text-base font-semibold text-foreground">学科分类</Text>
                 <Text className="block text-xs text-muted-foreground">点学科只看该科题目</Text>
               </View>
-              <View className="flex flex-row flex-wrap gap-2 mb-5">
+              <View className="flex flex-row flex-wrap gap-2 mb-6">
                 {/* 「全部」：清除学科筛选（思傅 2026-10-21 新增） */}
                 <SubjectBadge name="全部" active={!subjectFilter} onClick={() => filterSubject('')} />
                 {overview?.subject_stats?.map((s) => (
@@ -559,7 +560,7 @@ export default function IndexPage() {
               {/* 最近题目（统一收件箱） */}
               <View className="mb-2 flex flex-row items-center justify-between">
                 <View className="flex flex-col">
-                  <Text className="block text-sm font-semibold text-foreground">最近题目</Text>
+                  <Text className="block text-base font-semibold text-foreground">最近题目</Text>
                   <Text className="block text-xs text-muted-foreground mt-1">共 {inboxTotal} 条 · 点学科标签可改分类，点「…」可再编辑</Text>
                 </View>
                 <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
@@ -567,7 +568,7 @@ export default function IndexPage() {
               {/* 学科筛选提示条（点「✕ 显示全部」或上面的「全部」清除） */}
               {subjectFilter ? (
                 <View className="flex flex-row items-center gap-2 mb-2">
-                  <Text className="block text-xs" style={{ color: '#BE3E2D' }}>
+                  <Text className="block text-xs" style={{ color: BRAND }}>
                     只看「{subjects.find((s) => s.id === subjectFilter)?.name
                       || overview?.subject_stats?.find((s) => s.subject_id === subjectFilter)?.name
                       || '该学科'}」
@@ -671,7 +672,7 @@ export default function IndexPage() {
                     style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
                     onClick={() => openEditor(moreItem, action)}
                   >
-                    <Icon size={20} color="#BE3E2D" />
+                    <Icon size={20} color={BRAND} />
                     <Text className="block text-xs text-foreground mt-1">{label}</Text>
                   </View>
                 ))}
@@ -681,28 +682,28 @@ export default function IndexPage() {
             {/* 「编辑」：打开该条目的图片（可裁剪/旋转/灰度/高清/去手写）。
                 思傅 2026-10-21：此前的编辑入口在重构中丢失，需保留。 */}
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
-              <Crop size={18} color="#BE3E2D" />
+              <Crop size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">
                 {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
               </Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
-              <Tag size={18} color="#BE3E2D" />
+              <Tag size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">修改分类</Text>
             </View>
             {moreItem.in_review_book ? (
               <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
-                <BookmarkMinus size={18} color="#BE3E2D" />
+                <BookmarkMinus size={18} color={BRAND} />
                 <Text className="block text-sm text-foreground">移出复习本</Text>
               </View>
             ) : (
               <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreReview}>
-                <BookmarkPlus size={18} color="#BE3E2D" />
+                <BookmarkPlus size={18} color={BRAND} />
                 <Text className="block text-sm text-foreground">加入复习本</Text>
               </View>
             )}
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
-              <Trash2 size={18} color="#BE3E2D" />
+              <Trash2 size={18} color={BRAND} />
               <Text className="block text-sm text-foreground">删除</Text>
             </View>
             <View className="mt-2">
@@ -742,11 +743,12 @@ export default function IndexPage() {
 
 function StatCard({ label, value, highlight, onTap }: { label: string; value: number; highlight?: boolean; onTap?: () => void }) {
   return (
-    <Card className={`flex-1 rounded-2xl border-border p-3 ${highlight ? 'bg-primary' : ''}`} onClick={onTap}>
-      <Text className={`block text-2xl font-bold ${highlight ? 'text-primary-foreground' : 'text-foreground'}`}>
+    <Card className={`flex-1 rounded-2xl border-border p-4 ${highlight ? 'bg-primary' : ''}`} onClick={onTap}>
+      {/* 字阶 D1/D5：数字 24px 拉开视觉重量，标签 12px 弱化——靠尺寸而非颜色建立层级 */}
+      <Text className={`block text-2xl font-bold leading-tight ${highlight ? 'text-primary-foreground' : 'text-foreground'}`}>
         {value}
       </Text>
-      <Text className={`block text-xs mt-1 ${highlight ? 'text-primary-foreground opacity-70' : 'text-muted-foreground'}`}>
+      <Text className={`block text-xs mt-1 ${highlight ? 'text-primary-foreground opacity-80' : 'text-muted-foreground'}`}>
         {label}
       </Text>
     </Card>

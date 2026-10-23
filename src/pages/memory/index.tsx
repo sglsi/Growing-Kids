@@ -13,6 +13,7 @@ import {
   type Memory, type MemoryCategory, MEMORY_CATEGORIES,
 } from '@/services/memory'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
+import { BRAND } from '@/lib/theme'
 
 type CatValue = MemoryCategory | 'all'
 
@@ -109,7 +110,7 @@ export default function MemoryHomePage() {
             title: '确认删除',
             content: `确定删除「${m.title || m.content?.slice(0, 20) || '该记忆'}」吗？`,
             confirmText: '删除',
-            confirmColor: '#BE3E2D',
+            confirmColor: BRAND,
             success: async (rs) => {
               if (rs.confirm) {
                 try {
@@ -134,7 +135,7 @@ export default function MemoryHomePage() {
       title: '批量删除',
       content: `确定删除选中的 ${ids.length} 条记忆？`,
       confirmText: '删除',
-      confirmColor: '#BE3E2D',
+      confirmColor: BRAND,
       success: async (rs) => {
         if (rs.confirm) {
           try {
