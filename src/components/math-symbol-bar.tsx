@@ -28,13 +28,14 @@ interface Chip {
 interface Group {
   label: string
   chips: Chip[]
-  /** 序号页用多行网格（20 个横滑太长），符号页横滑省地方 */
+  /** 符号/希腊字母/序号页用多行网格（思傅 2026-10-23：与常用序号同款排列），模板页横滑 */
   wrap?: boolean
 }
 
 const PAGES: Group[] = [
   {
     label: '常用符号',
+    wrap: true,
     chips: [
       { label: '√', insert: '√' }, { label: '∛', insert: '∛' },
       { label: '²', insert: '²' }, { label: '³', insert: '³' }, { label: 'ⁿ', insert: 'ⁿ' },
@@ -60,6 +61,7 @@ const PAGES: Group[] = [
   },
   {
     label: '希腊字母',
+    wrap: true,
     chips: [
       // 小写 24 个全量
       ...['α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ',
@@ -169,17 +171,22 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
 
           {/* 当前页内容 */}
           {PAGES[page].wrap ? (
-            <View className="flex flex-row flex-wrap gap-1.5">
-              {PAGES[page].chips.map((c) => (
-                <View
-                  key={c.label}
-                  className="px-2.5 h-8 rounded-lg border border-border bg-white flex items-center justify-center"
-                  onClick={() => onInsert(c.insert)}
-                >
-                  <Text className="block text-xs text-foreground">{c.label}</Text>
-                </View>
-              ))}
-            </View>
+            /* 网格页（常用符号/希腊字母/常用序号，思傅 2026-10-23 统一为序号同款排列）：
+               最多展示三行（3×32px 芯片 + 2×6px 间距 = 108px），超出上下滑动。
+               公式模板页仍是横滑——中文标签横滑更省纵向空间。 */
+            <ScrollView scrollY style={{ height: 108 }} className="w-full">
+              <View className="flex flex-row flex-wrap gap-1.5">
+                {PAGES[page].chips.map((c) => (
+                  <View
+                    key={c.label}
+                    className="px-2.5 h-8 rounded-lg border border-border bg-white flex items-center justify-center"
+                    onClick={() => onInsert(c.insert)}
+                  >
+                    <Text className="block text-xs text-foreground">{c.label}</Text>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
           ) : (
             <ScrollView scrollX className="w-full whitespace-nowrap">
               <View className="flex flex-row gap-1.5">
