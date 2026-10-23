@@ -1,8 +1,9 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState, useRef } from 'react'
-import { FileSearch, Trash2, FolderMinus } from 'lucide-react-taro'
+import { FileSearch, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Eraser, Tag } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Button } from '@/components/ui/button'
 import ReviewItemCard from '@/components/review-item-card'
 import ImageEditor from '@/components/image-editor'
 import AnswerSheet from '@/components/answer-sheet'
@@ -10,17 +11,26 @@ import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
 import SelectionBar from '@/components/selection-bar'
+import SubjectBadge from '@/components/subject-badge'
 import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
-  updateQuestion, uploadImage, replaceTimelineImage,
+  updateTimeline, updateQuestion, uploadImage, replaceTimelineImage,
   type Subject, type TimelineItem, type Paged, type ImageAction,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
 
 const PAGE_SIZE = 20
+
+/** 「更多操作」里可对图片执行的 AI 动作（与首页同一套，思傅 2026-10-23 对齐） */
+const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
+  { action: 'crop', label: '裁剪', icon: Crop },
+  { action: 'auto', label: '自动调正', icon: Wand },
+  { action: 'enhance', label: '智能高清', icon: Sparkles },
+  { action: 'erase', label: '去手写', icon: Eraser },
+]
 
 export default function SubjectPage() {
   const [subjects, setSubjects] = useState<Subject[]>([])
@@ -53,6 +63,10 @@ export default function SubjectPage() {
   const pendingRestoreIdRef = useRef<string>('')
   /** 离开本页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
   const restoreItemIdRef = useRef<string>('')
+  // 「更多操作」弹层（思傅 2026-10-23：复习本条目也要有「…」——编辑/改分类/移出复习本/删除）
+  const [moreItem, setMoreItem] = useState<TimelineItem | null>(null)
+  // 学科选择弹层（「…」→ 修改分类）
+  const [pickerItem, setPickerItem] = useState<TimelineItem | null>(null)
 
   /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
   const scrollToItemById = (id: string, extra = 0) => {
@@ -204,6 +218,91 @@ export default function SubjectPage() {
   const handleTapImage = (item: TimelineItem, url: string, index: number, kind: 'item' | 'questionImage') => {
     if (sel.selecting) { sel.toggle(item.id); return }
     openEditor(item, 'crop', kind, index, url)
+  }
+
+  // ---------- 「…」更多操作（思傅 2026-10-23：复习本与首页同一套入口） ----------
+  const openMore = (item: TimelineItem) => setMoreItem(item)
+  const closeMore = () => setMoreItem(null)
+
+  /** 「编辑」：图片条目编辑自身图；题目条目编辑第一张题面图 */
+  const handleMoreEdit = () => {
+    const item = moreItem
+    if (!item) return
+    const hasQuestionImg = (item.question_image_urls || []).length > 0
+    if (item.kind === 'image') {
+      openEditor(item, 'crop', 'item', 0)
+      closeMore()
+      return
+    }
+    if (hasQuestionImg) {
+      openEditor(item, 'crop', 'questionImage', 0)
+      closeMore()
+      return
+    }
+    closeMore()
+    Taro.showToast({ title: '该条目没有图片可编辑', icon: 'none' })
+  }
+
+  /** 「修改分类」：弹学科选择层 */
+  const handleMoreSubject = () => {
+    const item = moreItem
+    closeMore()
+    if (item) setPickerItem(item)
+  }
+  const closePicker = () => setPickerItem(null)
+  const applySubject = async (sub: Subject | null) => {
+    const item = pickerItem
+    if (!item) return
+    closePicker()
+    try {
+      await updateTimeline(item.id, { subject_id: sub ? sub.id : null })
+      Taro.showToast({ title: sub ? `已归为「${sub.name}」` : '已设为未分类', icon: 'none' })
+      const since = getSinceFromRange(range, latestTimestamp)
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+    } catch (e) {
+      console.error('改分类失败', e)
+      const msg = e instanceof Error && e.message ? e.message : '更新失败，请重试'
+      Taro.showToast({ title: msg, icon: 'none' })
+    }
+  }
+
+  /** 「移出复习本」：复习本列表里逐条移出（与底部批量「移出复习本」同一接口） */
+  const handleMoreRemoveReview = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    setBusy(true)
+    try {
+      await removeFromReviewBook([item.id])
+      Taro.showToast({ title: '已移出复习本', icon: 'success' })
+      const since = getSinceFromRange(range, latestTimestamp)
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleMoreDelete = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    const ok = await confirmDelete(1, '条')
+    if (!ok) return
+    setBusy(true)
+    try {
+      await batchDeleteTimeline([item.id])
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      const since = getSinceFromRange(range, latestTimestamp)
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
   }
 
   // ---------- 填答案（思傅 2026-10-21）：与首页同一套规则 ----------
@@ -371,6 +470,7 @@ export default function SubjectPage() {
                       onTapImage={handleTapImage}
                       onLongPress={(x) => sel.longPress(x.id)}
                       timeField="added_to_review_at"
+                      onMore={openMore}
                       onAnswer={openAnswer}
                     />
                   </View>
@@ -441,6 +541,83 @@ export default function SubjectPage() {
         onClose={closeAnswer}
         onSaved={handleAnswerSaved}
       />
+
+      {/* 「更多操作」弹层（思傅 2026-10-23：复习本条目「…」——与首页同一套，
+          移出复习本替代加入；zIndex 200 压过底部悬浮条与固定头） */}
+      {moreItem && (
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={closeMore}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '80vh' }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">
+              {moreItem.kind === 'image' ? '编辑这张图片' : '更多操作'}
+            </Text>
+
+            {moreItem.kind === 'image' && (
+              <View className="flex flex-row flex-wrap gap-3 mb-4">
+                {IMAGE_ACTIONS.map(({ action, label, icon: Icon }) => (
+                  <View
+                    key={action}
+                    className="flex flex-col items-center justify-center rounded-xl border border-border"
+                    style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
+                    onClick={() => { openEditor(moreItem, action); closeMore() }}
+                  >
+                    <Icon size={20} color="#BE3E2D" />
+                    <Text className="block text-xs text-foreground mt-1">{label}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
+              <Crop size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">
+                {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
+              </Text>
+            </View>
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
+              <Tag size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">修改分类</Text>
+            </View>
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
+              <BookmarkMinus size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">移出复习本</Text>
+            </View>
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
+              <Trash2 size={18} color="#BE3E2D" />
+              <Text className="block text-sm text-foreground">删除</Text>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closeMore}>
+                <Text className="block text-sm">取消</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* 学科选择弹层（「…」→ 修改分类） */}
+      {pickerItem && (
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={closePicker}>
+          <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '70vh' }} onClick={(e) => e.stopPropagation?.()}>
+            <Text className="block text-sm font-semibold text-foreground mb-3">选择分类</Text>
+            <View className="overflow-y-auto">
+              {subjects.map((s) => (
+                <View key={s.id} className="mb-2">
+                  <SubjectBadge name={s.name} color={s.color} showArrow onClick={() => applySubject(s)} />
+                </View>
+              ))}
+              <View className="flex flex-row items-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 mb-2" onClick={() => applySubject(null)}>
+                <Text className="block text-sm text-muted-foreground">未分类 / 清除</Text>
+              </View>
+            </View>
+            <View className="mt-2">
+              <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closePicker}>
+                <Text className="block text-sm">取消</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+      )}
+
       {savingEdit ? (
         <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
       ) : null}
