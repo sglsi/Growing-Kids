@@ -16,6 +16,7 @@ import ImageEditor from '@/components/image-editor'
 import AnswerEditor from '@/components/answer-editor'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
+import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 
@@ -66,9 +67,12 @@ export default function DetailPage() {
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
   // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [solutionCursor, setSolutionCursor] = useState(-1)
-  // 解题过程公式预览：默认渲染态（有内容时直接看数学式），点「编辑」才看源码
-  // （思傅 2026-10-23：默认编辑态打开详情页看到的是一堆 LaTeX 源码）
-  const [previewSolution, setPreviewSolution] = useState(false)
+  // 解题过程两种模式（思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac 这类命令）：
+  //   view = 渲染态，显示数学式（有内容时默认）
+  //   edit = 编辑态，Textarea 里放的是**可读形式**（1/2、√3、x²、∠ABC、→a），
+  //          「完成」时再转回 LaTeX。solution 始终是库里的 LaTeX（唯一真相）。
+  const [solutionMode, setSolutionMode] = useState<'view' | 'edit'>('edit')
+  const [solutionEditing, setSolutionEditing] = useState('')
 
   /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
   const applyItem = (it: TimelineItem) => {
@@ -78,7 +82,9 @@ export default function DetailPage() {
     setAContent(it.content?.answer || '')
     setSolution(it.content?.solution || '')
     // 有解题过程就默认展示渲染后的数学式，空则留在编辑态方便直接输入
-    setPreviewSolution(!!(it.content?.solution || '').trim())
+    const hasSol = !!(it.content?.solution || '').trim()
+    setSolutionMode(hasSol ? 'view' : 'edit')
+    setSolutionEditing(hasSol ? '' : '')
     setMastered(it.mastered)
     setPlan(computePlan(it.created_at, it.content?.review_count))
   }
@@ -132,14 +138,32 @@ export default function DetailPage() {
   // 「联网搜答案」已由 AnswerEditor 接管（带来源标注 + 采纳才入库），
   // 旧的 handleSearch（直接填文本框、无来源标注）已移除，避免两套搜题入口。
 
-  /** 数学符号/模板插入解题过程框：`|` 为插入后光标停留位（模板用） */
+  /**
+   * 数学符号/模板插入解题过程框：`|` 为插入后光标停留位（模板用）。
+   * 预览态点符号面板会自动进入编辑态（先把已有内容转成可读形式再插入）。
+   */
   const insertSolutionSymbol = (snippet: string) => {
-    const pos = solutionCursor >= 0 ? Math.min(solutionCursor, solution.length) : solution.length
+    const cur = solutionMode === 'edit' ? solutionEditing : latexToReadable(solution)
+    const pos = solutionCursor >= 0 ? Math.min(solutionCursor, cur.length) : cur.length
     const marker = snippet.indexOf('|')
     const plain = snippet.replace('|', '')
-    const next = solution.slice(0, pos) + plain + solution.slice(pos)
-    setSolution(next)
+    const next = cur.slice(0, pos) + plain + cur.slice(pos)
+    setSolutionEditing(next)
+    if (solutionMode !== 'edit') setSolutionMode('edit')
     setSolutionCursor(marker >= 0 ? pos + marker : pos + plain.length)
+  }
+
+  /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
+  const startSolutionEdit = () => {
+    setSolutionEditing(latexToReadable(solution))
+    setSolutionCursor(-1)
+    setSolutionMode('edit')
+  }
+
+  /** 完成编辑：可读形式 → LaTeX（只改 state；入库由页面底部「保存修改」统一负责） */
+  const finishSolutionEdit = () => {
+    setSolution(readableToLatex(solutionEditing))
+    setSolutionMode('view')
   }
 
   const handlePrint = async () => {
@@ -382,25 +406,25 @@ export default function DetailPage() {
             <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
             <MathSymbolBar
               onInsert={insertSolutionSymbol}
-              preview={previewSolution}
-              onTogglePreview={() => setPreviewSolution((v) => !v)}
+              preview={solutionMode === 'view'}
+              onTogglePreview={() => { if (solutionMode === 'view') startSolutionEdit(); else finishSolutionEdit() }}
             />
           </View>
           <Card className="rounded-2xl border-border p-4 mb-2">
-            {previewSolution ? (
+            {solutionMode === 'view' ? (
               solution.trim() ? (
                 <MathText text={solution} />
               ) : (
-                <Text className="block text-sm text-muted-foreground">（暂无解题过程）</Text>
+                <Text className="block text-sm text-muted-foreground">（暂无解题过程，点「编辑」输入）</Text>
               )
             ) : (
               <Textarea
                 className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-                value={solution}
-                placeholder="可粘贴或联网获取详细解析"
+                value={solutionEditing}
+                placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
                 maxlength={3000}
                 cursor={solutionCursor}
-                onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
+                onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
               />
             )}
           </Card>
@@ -666,25 +690,25 @@ export default function DetailPage() {
           <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
           <MathSymbolBar
             onInsert={insertSolutionSymbol}
-            preview={previewSolution}
-            onTogglePreview={() => setPreviewSolution((v) => !v)}
+            preview={solutionMode === 'view'}
+            onTogglePreview={() => { if (solutionMode === 'view') startSolutionEdit(); else finishSolutionEdit() }}
           />
         </View>
         <Card className="rounded-2xl border-border p-4 mb-2">
-          {previewSolution ? (
+          {solutionMode === 'view' ? (
             solution.trim() ? (
               <MathText text={solution} />
             ) : (
-              <Text className="block text-sm text-muted-foreground">（暂无解题过程）</Text>
+              <Text className="block text-sm text-muted-foreground">（暂无解题过程，点「编辑」输入）</Text>
             )
           ) : (
             <Textarea
               className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-              value={solution}
-              placeholder="可粘贴或联网获取详细解析"
+              value={solutionEditing}
+              placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
               maxlength={3000}
               cursor={solutionCursor}
-              onInput={(e) => { setSolution(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
+              onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
             />
           )}
         </Card>

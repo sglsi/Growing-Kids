@@ -6,6 +6,7 @@ import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
+import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
@@ -47,10 +48,15 @@ export default function AnswerEditor({ item, onSaved }: Props) {
   const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
   // 答案框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [textCursor, setTextCursor] = useState(-1)
-  // 答案默认展示**渲染后的数学式**（有内容时），点「编辑」才切到 LaTeX 源码。
-  // 思傅 2026-10-23：此前默认编辑态，打开详情页看到的是一堆 LaTeX 源码，观感差。
-  // 无内容时默认编辑态，方便直接输入。
-  const [preview, setPreview] = useState(() => !!(item?.content?.answer || '').trim())
+  // 答案区两种模式（思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac 这类命令）：
+  //   view = 渲染态，显示数学式（默认，有答案时）
+  //   edit = 编辑态，Textarea 里放的是**可读形式**（1/2、√3、x²、∠ABC、→a），
+  //          进入编辑时才把库存 LaTeX 转成可读形式，保存时再转回 LaTeX 入库。
+  //          text 始终保存库里的 LaTeX（唯一真相），editing 才是编辑中的可读文本。
+  const [mode, setMode] = useState<'view' | 'edit'>(() =>
+    (item?.content?.answer || '').trim() ? 'view' : 'edit',
+  )
+  const [editing, setEditing] = useState('')
   const [saving, setSaving] = useState(false)
   // 当前正在进行的解题模式（null=空闲）：'search' 联网搜题 / 'ai' AI 解题
   const [searching, setSearching] = useState<'search' | 'ai' | null>(null)
@@ -84,15 +90,42 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     }
   }
 
-  const saveText = () => void persist(atts, text)
+  /** 保存答案文本：编辑态走可读形式→LaTeX 转换，预览态直接存 */
+  const saveText = () => {
+    if (mode === 'edit') {
+      void saveEditing()
+    } else {
+      void persist(atts, text)
+    }
+  }
 
-  /** 数学符号/模板插入答案框：`|` 为插入后光标停留位（模板用） */
+  /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
+  const startEdit = () => {
+    setEditing(latexToReadable(text))
+    setTextCursor(-1)
+    setMode('edit')
+  }
+
+  /** 保存并回到预览：可读形式 → LaTeX 入库 */
+  const saveEditing = async () => {
+    const latex = readableToLatex(editing)
+    setText(latex)
+    setMode('view')
+    await persist(atts, latex)
+  }
+
+  /**
+   * 数学符号/模板插入答案框：`|` 为插入后光标停留位（模板用）。
+   * 在预览态点符号面板会自动进入编辑态（先把已有内容转成可读形式再插入）。
+   */
   const insertAnswerSymbol = (snippet: string) => {
-    const pos = textCursor >= 0 ? Math.min(textCursor, text.length) : text.length
+    const cur = mode === 'edit' ? editing : latexToReadable(text)
+    const pos = textCursor >= 0 ? Math.min(textCursor, cur.length) : cur.length
     const marker = snippet.indexOf('|')
     const plain = snippet.replace('|', '')
-    const next = text.slice(0, pos) + plain + text.slice(pos)
-    setText(next)
+    const next = cur.slice(0, pos) + plain + cur.slice(pos)
+    setEditing(next)
+    if (mode !== 'edit') setMode('edit')
     setTextCursor(marker >= 0 ? pos + marker : pos + plain.length)
   }
 
@@ -217,8 +250,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       })
       setText(candidate.answer)
       setCandidate(null)
-      // 采纳后切到预览态：立刻看到渲染后的数学式，而不是一堆 LaTeX 源码
-      setPreview(true)
+      // 采纳后回到预览态：立刻看到渲染后的数学式
+      setMode('view')
       onSaved?.(updated)
       Taro.showToast({ title: '已采纳', icon: 'success' })
     } catch (e) {
@@ -243,26 +276,30 @@ export default function AnswerEditor({ item, onSaved }: Props) {
 
       <MathSymbolBar
         onInsert={insertAnswerSymbol}
-        preview={preview}
-        onTogglePreview={() => setPreview((v) => !v)}
+        preview={mode === 'view'}
+        onTogglePreview={() => { if (mode === 'view') startEdit(); else void saveEditing() }}
       />
-      {preview ? (
-        /* 预览态：把 LaTeX 渲染成数学式（不支持的语法自动回退源码） */
-        <View className="w-full rounded-xl border border-border p-3" style={{ minHeight: 72, backgroundColor: '#fff' }}>
+      {mode === 'view' ? (
+        /* 预览态：把 LaTeX 渲染成数学式（不支持的语法自动回退源码）；点一下进入编辑 */
+        <View
+          className="w-full rounded-xl border border-border p-3"
+          style={{ minHeight: 72, backgroundColor: '#fff' }}
+          onClick={() => startEdit()}
+        >
           {text.trim() ? (
             <MathText text={text} />
           ) : (
-            <Text className="block text-sm text-muted-foreground">（暂无答案内容）</Text>
+            <Text className="block text-sm text-muted-foreground">（暂无答案内容，点此输入）</Text>
           )}
         </View>
       ) : (
         <Textarea
           className="w-full rounded-xl border border-border p-3 text-sm"
           style={{ minHeight: 72, backgroundColor: '#fff' }}
-          placeholder="输入正确答案（或点下方按钮添加图片 / 文档）"
-          value={text}
+          placeholder="输入正确答案（1/2、√3、x² 等写法即可，或点上方符号面板）"
+          value={editing}
           cursor={textCursor}
-          onInput={(e) => { setText(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
+          onInput={(e) => { setEditing(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
         />
       )}
 
@@ -335,13 +372,16 @@ export default function AnswerEditor({ item, onSaved }: Props) {
           <Bot size={12} color="#BE3E2D" />
           <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
         </View>
-        <View
-          className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
-          style={{ backgroundColor: saving ? '#E8E2D9' : '#BE3E2D' }}
-          onClick={() => { if (!saving) saveText() }}
-        >
-          <Text className="block text-xs" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
-        </View>
+        {/* 保存：仅编辑态需要（预览态内容即已入库内容；附件操作都是即时保存） */}
+        {mode === 'edit' ? (
+          <View
+            className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
+            style={{ backgroundColor: saving ? '#E8E2D9' : '#BE3E2D' }}
+            onClick={() => { if (!saving) saveText() }}
+          >
+            <Text className="block text-xs" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
+          </View>
+        ) : null}
       </View>
 
       {/* 搜到的候选答案：必须「采纳」才入库 */}

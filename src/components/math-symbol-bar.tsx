@@ -6,10 +6,13 @@ import { useState } from 'react'
  * 要能方便输入特殊符号）。
  *
  * 设计：
- *  - 三组：常用符号 / 希腊字母 / 公式模板（LaTeX 片段）；
+ *  - 三组：常用符号 / 希腊字母 / 公式模板；
  *  - 点击即插入到输入框光标处（Taro Textarea 的 cursor 属性控制光标）；
- *  - 公式模板里的 `|` 是「插入后光标停留位」标记，如 `\frac{|}{}` 插入成
- *    `\frac{}{}` 且光标落在第一个花括号里，直接接着填分子。
+ *  - 公式模板插入的是**可读形式**（思傅 2026-10-23：编辑界面不能出现
+ *    \frac 这类源码，用户只编辑认识的符号）：`√|`、`^(|)`、`_(|)`、`/`、
+ *    `C(|, )`，保存时会由 readableToLatex 转成标准 LaTeX 入库；
+ *  - 模板里的 `|` 是「插入后光标停留位」标记，如 `√|` 插入成 `√` 且光标
+ *    落在根号后面，直接接着填被开方式；
  *  - 默认收起只占一行按钮，点开后面板展开，避免常驻占地方。
  */
 
@@ -33,12 +36,7 @@ const GROUPS: { label: string; items: string[] }[] = [
   {
     label: '公式模板',
     items: [
-      '\\frac{|}{}', '\\sqrt{|}', '^{|}', '_{|}',
-      '\\angle ', '\\triangle ', '\\circ ', '\\overline{|}',
-      '\\pm ', '\\leq ', '\\geq ', '\\approx ', '\\neq ',
-      '\\times ', '\\div ', '\\cdot ',
-      '\\sum ', '\\int ', '\\parallel ', '\\perp ',
-      '\\therefore ', '\\because ',
+      '√|', '^(|)', '_(|)', '/', 'C(|, )', '∑|', '∫|',
     ],
   },
 ]
@@ -46,7 +44,7 @@ const GROUPS: { label: string; items: string[] }[] = [
 interface Props {
   /** 插入一段文本（调用方负责写回 value 与光标） */
   onInsert: (snippet: string) => void
-  /** 传入则显示「公式预览 / 返回源码」开关（编辑态看源码、预览态看渲染结果） */
+  /** 传入则显示「编辑 / 完成」开关（预览态点它进入编辑，编辑态点它保存回预览） */
   preview?: boolean
   onTogglePreview?: () => void
 }
@@ -60,10 +58,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
     <View className="mb-2">
       <View className="flex flex-row items-center justify-between">
         <Text className="flex-1 block text-xs text-muted-foreground">
-          支持 LaTeX 公式，不会打可用下面的符号面板
+          数学符号不会打？点开下面面板插入
         </Text>
 
-        {/* 公式预览：默认就是渲染态，切过去看/改 LaTeX 源码（思傅 2026-10-23） */}
+        {/* 编辑 / 完成：预览态点「编辑」改内容，编辑态点「完成」保存回渲染态（思傅 2026-10-23） */}
         {onTogglePreview ? (
           <View
             className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
@@ -71,7 +69,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
             onClick={onTogglePreview}
           >
             <Text className="block text-xs" style={{ color: preview ? '#fff' : '#BE3E2D' }}>
-              {preview ? '编辑' : '公式预览'}
+              {preview ? '编辑' : '完成'}
             </Text>
           </View>
         ) : null}
