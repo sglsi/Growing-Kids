@@ -73,7 +73,7 @@ export interface QuestionContent {
   /** 答案来源：manual 手填 / search 联网搜索 / ocr 识别 / mixed 混合 */
   answer_source?: AnswerSource | 'mixed'
   /** 联网搜索命中的参考来源（与附件解耦，便于单独展示「来源」） */
-  answer_refs?: { title: string; url: string }[]
+  answer_refs?: { title: string; url?: string }[]
   /** 最近一次联网搜答案的时间 */
   answer_searched_at?: string
 }
