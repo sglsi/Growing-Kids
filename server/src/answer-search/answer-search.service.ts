@@ -8,17 +8,20 @@ import { resolveSearchProvider } from './search-provider'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
- * 联网搜答案：博查真搜索为主，大模型为备用兜底。
+ * 题目答案的两种获取方式（思傅 2026-10-23 明确拆分，互不混淆）：
  *
- * 降级矩阵（设计见「题目答案功能-设计方案.md」§3.1）：
- *   搜索成功 + 模型可用 → 模型**基于检索片段**提炼（答案有据可依，带来源）  source=search / verified=true
- *   搜索成功 + 模型不可用 → 直接返回检索摘要片段                          source=search / verified=true
- *   搜索失败 + 模型可用 → 模型纯推理                                      source=llm   / verified=false
- *   两者都不可用     → 明确报错，**绝不伪造**                              source=none
+ *   mode=search（联网搜题）：**只做真实网络检索**，不喂给 AI 解题。
+ *     直接返回最相关来源的摘要 + 参考链接，让用户自己看原文。
+ *     检索不到就如实说检索不到，**绝不拿 AI 答案冒充搜索结果**。      source=search / verified=true
  *
- * ⚠️ 与旧 `/api/search/solve` 的本质区别：
- *    旧实现在 provider=hunyuan 时是让大模型编造 JSON 搜索结果（URL 未必真实）；
- *    本服务里「检索」与「推理」职责分离，检索结果只来自真实搜索 API。
+ *   mode=ai（AI 解题）：**只做模型推理**，不检索。
+ *     模型基于学科知识推导，明确标注「未联网核实」。                  source=llm / verified=false
+ *
+ *   两者都失败 → source=none，明确说明原因，绝不伪造。
+ *
+ * ⚠️ 历史：早期版本把两者混在一条链里（检索成功→AI 基于检索提炼，失败→AI 纯推理），
+ *    导致按钮叫「联网搜答案」但结果可能是 AI 推理——思傅 2026-10-23 指出此问题。
+ *    现按「检索」与「推理」彻底分离；原 RAG 提炼（refine）随之移除。
  */
 
 const CACHE_PREFIX = 'ans:srch:'
@@ -81,8 +84,9 @@ export class AnswerSearchService {
   async searchAnswer(
     userId: string,
     itemId: string,
-    opts: { force?: boolean } = {},
+    opts: { force?: boolean; mode?: 'search' | 'ai' } = {},
   ): Promise<AnswerSearchResult> {
+    const mode: 'search' | 'ai' = opts.mode === 'ai' ? 'ai' : 'search'
     // ① 取题目（含签名 URL）
     let item
     try {
@@ -121,9 +125,10 @@ export class AnswerSearchService {
       }
     }
 
-    // ③ 缓存（24h，按题干内容哈希）
+    // ③ 缓存（24h，按题干内容哈希；⚠️ key 必须带 mode——检索结果与推理结果不能混用，
+    //    否则先调过联网搜题再点 AI 解题，会拿到检索缓存冒充 AI 结果）
     const qHash = createHash('sha256').update(question).digest('hex').slice(0, 32)
-    const cacheKey = `${CACHE_PREFIX}${qHash}`
+    const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`
     if (!opts.force) {
       const cached = memGet<AnswerSearchResult>(cacheKey)
       if (cached) return { ...cached, cached: true }
@@ -138,59 +143,53 @@ export class AnswerSearchService {
       }
     }
 
-    // ⑤ 主：真实联网搜索
-    const provider = resolveSearchProvider()
-    let items: WebItem[] = []
-    let searchErr = ''
-    try {
-      items = await provider.search(question, 8)
-    } catch (e) {
-      searchErr = String(e)
-      this.logger.warn(`[answer-search] 搜索失败，降级: ${searchErr}`)
-    }
-    const conf = relevance(question, items)
-    const usable = items.length > 0 && conf > 0
-
-    // ⑥ 组装检索上下文
-    const context = items
-      .slice(0, 6)
-      .map((i, idx) => `[${idx + 1}] ${i.title}\n${i.summary || i.snippet || ''}${i.url ? `\n来源: ${i.url}` : ''}`)
-      .join('\n\n')
-    const refs = items.filter((i) => i.url).slice(0, 5).map((i) => ({ title: i.title, url: i.url }))
-
-    // ⑦ 提炼 / 兜底
+    // ⑤ 按 mode 分两条互不混淆的路径
     let result: AnswerSearchResult
-    if (usable) {
-      const refined = await this.refine(question, context)
-      if (refined) {
-        result = {
-          source: 'search', verified: true, answer: refined.answer, solution: refined.solution,
-          refs, confidence: Number(conf.toFixed(2)), note: '来自联网检索，请核对后采纳',
-        }
-      } else {
-        // 模型不可用：直接给检索摘要，仍有真实来源、verified 依然为 true
+
+    if (mode === 'ai') {
+      // ---------- AI 解题：只推理，不检索 ----------
+      const deduced = await this.deduce(question)
+      result = deduced
+        ? {
+            source: 'llm', verified: false, answer: deduced.answer, solution: deduced.solution,
+            refs: [], confidence: 0,
+            note: 'AI 推理结果，未联网核实，请自行判断',
+          }
+        : {
+            source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
+            note: 'AI 解题失败：请检查模型 Key（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_TOKEN 混元）后重试',
+          }
+    } else {
+      // ---------- 联网搜题：只检索，不喂给 AI ----------
+      const provider = resolveSearchProvider()
+      let items: WebItem[] = []
+      let searchErr = ''
+      try {
+        items = await provider.search(question, 8)
+      } catch (e) {
+        searchErr = String(e)
+        this.logger.warn(`[answer-search] 检索失败: ${searchErr}`)
+      }
+      const conf = relevance(question, items)
+      const usable = items.length > 0 && conf > 0
+      const refs = items.filter((i) => i.url).slice(0, 5).map((i) => ({ title: i.title, url: i.url }))
+
+      if (usable) {
+        // 直接给来源摘要，不做 AI 整理——用户点链接看原文，答案可溯源
         const top = items[0]
         result = {
           source: 'search', verified: true,
           answer: (top.summary || top.snippet || '').slice(0, 500),
           solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
           refs, confidence: Number(conf.toFixed(2)),
-          note: '来自联网检索（未做模型提炼），请核对后采纳',
-        }
-      }
-    } else {
-      const deduced = await this.deduce(question)
-      if (deduced) {
-        result = {
-          source: 'llm', verified: false, answer: deduced.answer, solution: deduced.solution,
-          refs: [], confidence: 0,
-          note: searchErr ? `联网检索不可用（${searchErr.slice(0, 60)}），以下为模型推理结果，未联网核实` : '未检索到相关资料，以下为模型推理结果，未联网核实',
+          note: '来自网络检索（未做 AI 整理），请核对后采纳',
         }
       } else {
         result = {
           source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
-          note: '联网检索与大模型均不可用：请配置 BOCHA_API_KEY（联网检索），或任一模型 Key' +
-            '（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_KEY 混元）后重试',
+          note: searchErr
+            ? `联网检索失败（${searchErr.slice(0, 60)}），可改试「AI 解题」`
+            : '未在网络上检索到该题的相关资料，可改试「AI 解题」',
         }
       }
     }
@@ -199,30 +198,7 @@ export class AnswerSearchService {
     return result
   }
 
-  /** 基于检索片段提炼答案（RAG）：模型的输入被限定在检索内容里，答案可溯源 */
-  private async refine(question: string, context: string): Promise<{ answer: string; solution: string } | null> {
-    try {
-      const r = await this.llm.invoke(
-        [
-          {
-            role: 'system',
-            content:
-              '你是一名解题老师。请**严格依据下方联网检索资料**解出这道题，给出【正确答案】与【解题过程】。' +
-              '若资料不足以确定答案，只能基于学科常识做严谨推导，并在解题过程开头注明「依据学科常识推导」。' +
-              '只输出 JSON：{"answer_content":"最终答案","solution":"分步骤解题过程"}，不要输出 markdown 代码块或其他文字。',
-          },
-          { role: 'user', content: `题目：\n${question}\n\n联网检索资料：\n${context || '（无）'}` },
-        ],
-        { temperature: 0.2 },
-      )
-      return this.parseJson(r.content)
-    } catch (e) {
-      this.logger.warn(`[answer-search] 模型提炼失败，改为直接给检索摘要: ${e}`)
-      return null
-    }
-  }
-
-  /** 无检索结果时的模型兜底（明确标注未联网核实） */
+  /** AI 解题（mode=ai）：只做模型推理，不联网检索，结果明确标注未核实 */
   private async deduce(question: string): Promise<{ answer: string; solution: string } | null> {
     try {
       const r = await this.llm.invoke(
@@ -230,7 +206,7 @@ export class AnswerSearchService {
           {
             role: 'system',
             content:
-              '你是一名解题老师。下方题目没有可靠的联网检索资料，请基于学科知识严谨推导，' +
+              '你是一名解题老师。请基于学科知识严谨推导下方题目，' +
               '给出【正确答案】与【解题过程】。只输出 JSON：{"answer_content":"最终答案","solution":"分步骤解题过程"}，不要输出 markdown 代码块或其他文字。',
           },
           { role: 'user', content: `题目：\n${question}` },
