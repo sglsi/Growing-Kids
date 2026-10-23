@@ -88,10 +88,17 @@ export default function SubjectPage() {
   // 从当前页数据里汇总出现过的标签，供筛选
   const tagPool = Array.from(new Set(items.flatMap((it) => it.tags || []))).slice(0, 12)
 
-  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; since?: string; append?: boolean }) => {
-    const { subjectId, keyword: kw, tag, page: p, since, append } = opts
+  /**
+   * 加载复习本列表。
+   * ⚠️ silent（思傅 2026-10-23 修「移出/加入复习本后跳到第 1 题」）：
+   * 列表内写操作后缓存已被 api.ts 失效，非 silent 的 load 会 setLoading(true) →
+   * 骨架屏替换整个列表 → ScrollView 内容塌缩 → 滚动位置被钳到顶部。
+   * silent = 不置 loading、不显骨架，旧列表留屏，后台静默替换（与首页同规则）。
+   */
+  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; since?: string; append?: boolean; silent?: boolean }) => {
+    const { subjectId, keyword: kw, tag, page: p, since, append, silent } = opts
     if (append) setLoadingMore(true)
-    else setLoading(true)
+    else if (!silent) setLoading(true)
     // SWR（思傅 2026-10-21）：只对「第一页、非追加」查询读缓存——
     // 分页追加的中间页缓存意义小且 key 会膨胀；写操作已在 api.ts 失效 tl 域。
     const listKey = append
@@ -106,7 +113,7 @@ export default function SubjectPage() {
         const ts = cached.list[0].added_to_review_at || cached.list[0].created_at
         if (ts) setLatestTimestamp(ts)
       }
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
     try {
       const res = await fetchTimeline({
@@ -130,7 +137,7 @@ export default function SubjectPage() {
     } catch (e) {
       console.error('加载复习本失败', e)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
       setLoadingMore(false)
       // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
       const rid = pendingRestoreIdRef.current
@@ -258,7 +265,7 @@ export default function SubjectPage() {
       await updateTimeline(item.id, { subject_id: sub ? sub.id : null })
       Taro.showToast({ title: sub ? `已归为「${sub.name}」` : '已设为未分类', icon: 'none' })
       const since = getSinceFromRange(range, latestTimestamp)
-      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       console.error('改分类失败', e)
       const msg = e instanceof Error && e.message ? e.message : '更新失败，请重试'
@@ -276,7 +283,7 @@ export default function SubjectPage() {
       await removeFromReviewBook([item.id])
       Taro.showToast({ title: '已移出复习本', icon: 'success' })
       const since = getSinceFromRange(range, latestTimestamp)
-      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -296,7 +303,7 @@ export default function SubjectPage() {
       await batchDeleteTimeline([item.id])
       Taro.showToast({ title: '已删除', icon: 'success' })
       const since = getSinceFromRange(range, latestTimestamp)
-      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -337,7 +344,7 @@ export default function SubjectPage() {
         Taro.showToast({ title: '已更新该资料', icon: 'success' })
       }
       const since = getSinceFromRange(range, latestTimestamp)
-      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       Taro.hideLoading()
       console.error('保存编辑结果失败', e)
@@ -366,7 +373,7 @@ export default function SubjectPage() {
       Taro.showToast({ title: '已移出复习本', icon: 'success' })
       sel.exit()
       const since = getSinceFromRange(range, latestTimestamp)
-      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -385,7 +392,7 @@ export default function SubjectPage() {
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
       const since = getSinceFromRange(range, latestTimestamp)
-      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since })
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })

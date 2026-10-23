@@ -93,7 +93,16 @@ export default function IndexPage() {
     })
   }
 
-  const load = async (sid = subjectFilter) => {
+  /**
+   * 加载列表。
+   * ⚠️ silent（思傅 2026-10-23 修「加入/移出复习本后跳到第 1 题」）：
+   * 列表内写操作（加入/移出复习本、删除、编辑保存）后缓存已被 api.ts 失效，
+   * 非 silent 的 load 会走 setLoading(true) → 整页骨架屏 → ScrollView 内容塌缩 →
+   * 滚动位置被原生钳到顶部 ⇒ 操作完 visually 跳回第 1 题（已改过两次都没治住，
+   * 前两次只修了「从详情返回」的锚回，没治列表内操作这条路径）。
+   * silent = 不置 loading、不显骨架，旧列表留在屏上，后台拉新数据静默替换。
+   */
+  const load = async (sid = subjectFilter, opts: { silent?: boolean } = {}) => {
     setAuth(getAuthState())
     // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
     // 先同步读本地缓存渲染首帧（0 网络等待），再后台刷新、静默回写。
@@ -109,8 +118,8 @@ export default function IndexPage() {
         setInboxTotal(cachedList.total)
       }
       if (cachedSubs) setSubjects(cachedSubs)
-      setLoading(false)
-    } else {
+      if (!opts.silent) setLoading(false)
+    } else if (!opts.silent) {
       setLoading(true)
     }
     try {
@@ -134,7 +143,7 @@ export default function IndexPage() {
         Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
       }
     } finally {
-      setLoading(false)
+      if (!opts.silent) setLoading(false)
       // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
       const rid = pendingRestoreIdRef.current
       if (rid) {
@@ -286,7 +295,7 @@ export default function IndexPage() {
         Taro.hideLoading()
         Taro.showToast({ title: '已更新该资料', icon: 'success' })
       }
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       Taro.hideLoading()
       console.error('保存编辑结果失败', e)
@@ -326,7 +335,7 @@ export default function IndexPage() {
     try {
       await addToReviewBook([item.id])
       Taro.showToast({ title: '已加入复习本', icon: 'success' })
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -340,7 +349,7 @@ export default function IndexPage() {
     try {
       await removeFromReviewBook([item.id])
       Taro.showToast({ title: '已移出复习本', icon: 'success' })
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -355,7 +364,7 @@ export default function IndexPage() {
     try {
       await batchDeleteTimeline([item.id])
       Taro.showToast({ title: '已删除', icon: 'success' })
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -389,7 +398,7 @@ export default function IndexPage() {
       await batchDeleteTimeline(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -405,7 +414,7 @@ export default function IndexPage() {
       await addToReviewBook(Array.from(sel.selected))
       Taro.showToast({ title: '已加入复习本', icon: 'success' })
       sel.exit()
-      load()
+      load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })

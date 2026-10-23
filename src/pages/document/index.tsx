@@ -66,14 +66,20 @@ export default function DocumentPage() {
     loadDocs()
   })
 
-  const loadDocs = async () => {
+  /**
+   * 加载文档列表。
+   * ⚠️ silent（思傅 2026-10-23：与首页/复习本/资料库/记忆同一规则）：
+   * 导出/删除后缓存已失效，非 silent 会 setDocsLoading(true) → 骨架屏替换列表 →
+   * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
+   */
+  const loadDocs = async (opts: { silent?: boolean } = {}) => {
     // SWR（思傅 2026-10-21）：文档列表先读缓存，后台刷新回写
     const listKey = cacheListKey('doc', { pageSize: 100 })
     const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
     if (cached) {
       setDocs(cached.list || [])
-      setDocsLoading(false)
-    } else {
+      if (!opts.silent) setDocsLoading(false)
+    } else if (!opts.silent) {
       setDocsLoading(true)
     }
     try {
@@ -83,7 +89,7 @@ export default function DocumentPage() {
     } catch (e) {
       console.error('加载文档失败', e)
     } finally {
-      setDocsLoading(false)
+      if (!opts.silent) setDocsLoading(false)
     }
   }
 
@@ -135,7 +141,7 @@ export default function DocumentPage() {
         include_mastered: includeMastered,
       })
       openStorageFile(res.url, false, res.file_key)
-      loadDocs()
+      loadDocs({ silent: true })
     } catch (e) {
       console.error('导出失败', e)
       Taro.showToast({ title: '导出失败', icon: 'none' })
@@ -160,7 +166,7 @@ export default function DocumentPage() {
       await batchDeleteDocuments(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
-      loadDocs()
+      loadDocs({ silent: true })
     } catch (e) {
       console.error('删除失败', e)
       Taro.showToast({ title: '删除失败', icon: 'none' })

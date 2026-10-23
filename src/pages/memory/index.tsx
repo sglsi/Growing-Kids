@@ -31,7 +31,13 @@ export default function MemoryHomePage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const sel = useSelection()
 
-  const load = useCallback(async () => {
+  /**
+   * 加载记忆列表。
+   * ⚠️ silent（思傅 2026-10-23：与首页/复习本/资料库同一规则）：
+   * 删除后缓存已失效，非 silent 的 load 会 setLoading(true) → 骨架屏替换列表 →
+   * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
+   */
+  const load = useCallback(async (opts: { silent?: boolean } = {}) => {
     // SWR（思傅 2026-10-21）：先同步读缓存渲染首帧，再后台刷新回写
     const listKey = cacheListKey('mem', {
       category: category === 'all' ? '' : category,
@@ -44,8 +50,8 @@ export default function MemoryHomePage() {
       setList(cached.list || [])
       setTotal(cached.total || 0)
       setErrorMsg(null)
-      setLoading(false)
-    } else {
+      if (!opts.silent) setLoading(false)
+    } else if (!opts.silent) {
       setLoading(true)
       setErrorMsg(null)
     }
@@ -67,7 +73,7 @@ export default function MemoryHomePage() {
       const msg = e instanceof Error ? e.message : '加载失败'
       setErrorMsg(msg)
     } finally {
-      setLoading(false)
+      if (!opts.silent) setLoading(false)
     }
   }, [category, activeKeyword])
 
@@ -109,7 +115,7 @@ export default function MemoryHomePage() {
                 try {
                   await batchDeleteMemories([m.id])
                   Taro.showToast({ title: '已删除', icon: 'success' })
-                  load()
+                  load({ silent: true })
                 } catch (e) {
                   Taro.showToast({ title: '删除失败', icon: 'none' })
                 }
@@ -132,10 +138,10 @@ export default function MemoryHomePage() {
       success: async (rs) => {
         if (rs.confirm) {
           try {
-            await batchDeleteMemories(ids)
-            Taro.showToast({ title: `已删除 ${ids.length} 条`, icon: 'success' })
-            sel.exit()
-            load()
+                  await batchDeleteMemories(ids)
+                  Taro.showToast({ title: `已删除 ${ids.length} 条`, icon: 'success' })
+                  sel.exit()
+                  load({ silent: true })
           } catch (e) {
             Taro.showToast({ title: '删除失败', icon: 'none' })
           }
@@ -223,7 +229,7 @@ export default function MemoryHomePage() {
       ) : errorMsg ? (
         <View className="px-4 pt-8 flex flex-col items-center">
           <Text className="block text-sm text-muted-foreground">加载失败：{errorMsg}</Text>
-          <Button className="mt-4 rounded-xl bg-primary" onClick={load}>
+          <Button className="mt-4 rounded-xl bg-primary" onClick={() => void load()}>
             <Text className="block text-sm text-primary-foreground">重试</Text>
           </Button>
         </View>

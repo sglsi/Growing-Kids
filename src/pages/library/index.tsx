@@ -28,7 +28,13 @@ export default function LibraryPage() {
   const [busy, setBusy] = useState(false)
   const sel = useSelection()
 
-  const load = async (opts: { keyword?: string; subjectId?: string } = {}) => {
+  /**
+   * 加载资料库。
+   * ⚠️ silent（思傅 2026-10-23：与首页/复习本同一规则）：
+   * 删除/上传后缓存已失效，非 silent 的 load 会 setLoading(true) → 骨架屏替换列表 →
+   * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
+   */
+  const load = async (opts: { keyword?: string; subjectId?: string; silent?: boolean } = {}) => {
     // SWR（思傅 2026-10-21）：先同步读缓存渲染，再后台刷新回写
     const kw = (opts.keyword !== undefined ? opts.keyword : keyword) || undefined
     const sid = opts.subjectId || undefined
@@ -36,8 +42,8 @@ export default function LibraryPage() {
     const cached = cacheGet<Paged<LibraryDoc>>(listKey)
     if (cached) {
       setDocs(cached.list)
-      setLoading(false)
-    } else {
+      if (!opts.silent) setLoading(false)
+    } else if (!opts.silent) {
       setLoading(true)
     }
     try {
@@ -52,7 +58,7 @@ export default function LibraryPage() {
       console.error('加载资料库失败', e)
       if (!cached) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
     } finally {
-      setLoading(false)
+      if (!opts.silent) setLoading(false)
     }
   }
 
@@ -84,7 +90,7 @@ export default function LibraryPage() {
       await batchDeleteLibrary(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
-      load()
+      load({ silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -99,7 +105,7 @@ export default function LibraryPage() {
     try {
       await deleteLibraryDoc(d.id)
       Taro.showToast({ title: '已删除', icon: 'success' })
-      load()
+      load({ silent: true })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '删除失败', icon: 'none' })
@@ -121,7 +127,7 @@ export default function LibraryPage() {
       await uploadFile(f.path, { purpose: 'save' })
       Taro.hideLoading()
       Taro.showToast({ title: '已归档到资料库', icon: 'success' })
-      load()
+      load({ silent: true })
     } catch (e) {
       Taro.hideLoading()
       Taro.showToast({ title: '请在小程序中从聊天/文件选择文档', icon: 'none' })
