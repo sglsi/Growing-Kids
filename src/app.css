@@ -22,11 +22,21 @@ root-portal {
   --secondary: #f1ede4;
   --secondary-foreground: #2a2825;
   --muted: #f1ede4;
-  --muted-foreground: #8a8275;
+  /* 次要文字：#8A8275 于纸底仅 3.55:1，低于 WCAG AA 4.5:1；
+     改为 #6F685C → 5.16:1（视觉美学设计方案 3.1.1） */
+  --muted-foreground: #6f685c;
   --accent: #f1ede4;
   --accent-foreground: #2a2825;
-  --correct: #be3e2d;
-  --destructive: #c04a3a;
+  /* 【朱】唯一强调色。原命名 --correct（"正确"）名不副实：
+     它实际承担主操作/TabBar 选中/关键标记等强调职责，故正名为 --brand */
+  --brand: #be3e2d;
+  /* 强调色仅允许三档派生，杜绝散落的透明度（实测原有 15 种：0.04/0.06/0.08/0.1/0.18/
+     0.25/0.3/0.35/0.45/0.75/0.9/0.92 …）。新增用法必须从这三档里选： */
+  --brand-soft: rgba(190, 62, 45, 0.08); /* 淡底：芯片、标签背景、选中态 */
+  --brand-line: rgba(190, 62, 45, 0.25); /* 描边：强调态边框 */
+  /* 【危】删除/错误。原 #C04A3A 与强调色几乎同色相，无法区分；
+     下潜到 #A8321F（相对亮度 0.107 vs 0.147）拉开明度差 */
+  --destructive: #a8321f;
   --destructive-foreground: #faf8f3;
   --border: #e4ded1;
   --input: #e4ded1;
@@ -101,6 +111,10 @@ root-portal {
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* 【纸墨朱】品牌令牌 → Tailwind 工具类（视觉美学设计方案 3.1） */
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-line: var(--brand-line);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
