@@ -13,6 +13,31 @@ import { requireUserId, type RequestWithUser } from '../shared/user-context'
 
 const IMAGE_MIME_PREFIX = 'image/'
 
+/**
+ * 修正上传文件名的编码（思傅 2026-10-23 修「资料库文档中文名不显示/乱码」）：
+ *  - 前端会把真实文件名走 formData.original_name 传上来（encodeURIComponent 过）；
+ *  - 其他端/老调用方可能只给 multipart 的 filename 头——HTTP 头的非 ASCII 字节
+ *    会被 Node 按 latin1 读入 ⇒「数学试卷.pdf」变「æ•°å­¦è¯•å†.pdf」。
+ * 按顺序尝试：百分号解码 → latin1→utf8 回转（带合法性校验，纯 ASCII 原样返回）。
+ */
+function decodeUploadFileName(raw: string): string {
+  if (!raw) return ''
+  let s = String(raw)
+  // 1) 前端 encodeURIComponent 过（formData.original_name 的约定）
+  if (/%[0-9A-Fa-f]{2}/.test(s)) {
+    try { s = decodeURIComponent(s) } catch { /* 不是合法百分号编码，保留原值 */ }
+  }
+  // 2) UTF-8 字节被按 latin1 读入的乱码（典型特征：À-ÿ 区间字符）
+  if (/[\u00C0-\u00FF]/.test(s)) {
+    try {
+      const fixed = Buffer.from(s, 'binary').toString('utf8')
+      // 回转结果含替换符说明原串本就是合法 latin1 文本（如法文名），不采用
+      if (fixed && !fixed.includes('\uFFFD')) s = fixed
+    } catch { /* 保留 */ }
+  }
+  return s.trim()
+}
+
 @Controller('upload')
 export class UploadController {
   constructor(
@@ -66,6 +91,15 @@ export class UploadController {
     const purposeRaw = b.purpose ?? q.purpose ?? ''
     const purpose = String(Array.isArray(purposeRaw) ? purposeRaw[0] : purposeRaw).trim()
     const archive = purpose === 'save' || purpose === '1' || purpose === 'true'
+
+    // 展示名（思傅 2026-10-23）：优先 formData.original_name（前端显式传的用户选中文件的
+    // 真实名字，UTF-8 安全），回落 multipart filename 头（微信 uploadFile 默认给的是
+    // 临时路径名 tmp_xxx.pdf，且中文会被按 latin1 读成乱码，故必须过 decodeUploadFileName）。
+    // 此前直接用 file.originalname ⇒ 资料库文档「不能正常显示中文名称」的根因。
+    const origNameRaw = b.original_name ?? q.original_name ?? ''
+    const displayName = decodeUploadFileName(String(Array.isArray(origNameRaw) ? origNameRaw[0] : origNameRaw))
+      || decodeUploadFileName(file.originalname)
+      || ''
     // ── purpose 语义表（新增调用场景务必照此选，选错会多建/少建记录）──
     //   save | 1 | true  → 归档：图片建 timeline(kind=image)、文档建 library 条目
     //   temp             → 临时：ingestTemp，ref_count=0，24h 后由孤儿 GC 回收
@@ -130,7 +164,7 @@ export class UploadController {
         // 写入 thumb_key / width / height，使列表能走缩略图（此前这些字段恒空 → 列表拉原图）
         const item = await this.timelineService.create(userId, {
           kind: 'image',
-          title: file.originalname || fileName,
+          title: displayName || fileName,
           file_key: key,
           thumb_key: ing.thumbKey,
           mime_type: ing.mimeType,
@@ -144,7 +178,7 @@ export class UploadController {
       } else {
         // 文档 → 资料库
         const doc = await this.libraryService.create(userId, {
-          name: file.originalname || fileName,
+          name: displayName || fileName,
           file_key: key,
           thumb_key: ing.thumbKey,
           mime_type: ing.mimeType,

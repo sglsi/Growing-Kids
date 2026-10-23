@@ -124,7 +124,7 @@ export default function LibraryPage() {
       // 后端 /api/upload 检测为非图片时自动归档到 library，并回传 library_id
       // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
       //    表现为「提示已归档，但资料库里没有」。
-      await uploadFile(f.path, { purpose: 'save' })
+      await uploadFile(f.path, { purpose: 'save', fileName: f.name })
       Taro.hideLoading()
       Taro.showToast({ title: '已归档到资料库', icon: 'success' })
       load({ silent: true })

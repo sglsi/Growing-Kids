@@ -136,6 +136,15 @@ export interface UploadOpts {
    *    与随后保存的题目重复 ⇒ 首页同一题显示两行（2026-10-21 复测分家真因）。
    */
   purpose?: 'save' | 'temp' | 'memory' | 'attach'
+  /**
+   * 原始文件名（思傅 2026-10-23 修「资料库文档中文名不显示」）：
+   * 微信 uploadFile 的 multipart filename 取的是**临时文件路径名**（tmp_xxx.pdf），
+   * 后端拿不到用户选文件的真实名字 ⇒ 资料库里显示一串随机名。
+   * 这里把真实文件名走 formData.original_name 上传（表单字段值是 UTF-8 安全的，
+   * 不像 Content-Disposition 的 filename 头会被按 latin1 读成乱码），
+   * 后端优先读它来命名 library 条目 / timeline 标题。
+   */
+  fileName?: string
 }
 
 // ============================================================
@@ -182,6 +191,8 @@ export async function uploadFile(
   // 部分容器/中间层会丢弃 query，部分会丢弃表单字段，两端都读即可确保后端拿到。
   const formData: Record<string, string> = {}
   if (opts.purpose) formData.purpose = opts.purpose
+  // 原始文件名随表单上传（UTF-8 安全；见 UploadOpts.fileName 注释）
+  if (opts.fileName) formData.original_name = encodeURIComponent(opts.fileName)
   const res = await Network.uploadFile({
     url,
     filePath: srcPath,
