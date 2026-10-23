@@ -174,6 +174,14 @@ class Parser {
           if (kind === '^') sup = arg
           else sub = arg
         }
+        // ⚠️ 度数特例：90^\circ 的 \circ 应渲染成 ° 而不是 ○（圆圈运算符）。
+        // 2026-10-23 修：此前 OPS 表把 \circ 一律映射成 ○，导致 90^\circ 显示成 90○。
+        // ⚠️ 修这个 bug 时曾把 base 吞掉（90^\circ → °），必须先把 base 放回去。
+        if (sup && sup.length === 1 && sup[0].t === 'op' && sup[0].v === '○') {
+          if (base) out.push(base)
+          out.push({ t: 'op', v: '°', pad: false })
+          continue
+        }
         out.push({ t: 'script', base, sup, sub })
         continue
       }
@@ -606,6 +614,338 @@ function splitInlineMath(line: string): MathPiece[] {
 /** 整行是否含公式 */
 export function lineHasMath(line: MathPiece[]): boolean {
   return line.some((p) => p.kind === 'math')
+}
+
+// ---------------- LaTeX ↔ 人类可读形式 ----------------
+//
+// 思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac{...} 这类命令。
+// 因此编辑态把 LaTeX 转成"认识的符号"（1/2、√3、x²、∠ABC、→a），
+// 保存时再尽量转回标准 LaTeX，保住展示层的真分数/真根号效果。
+//
+// 设计原则：
+//   - latexToReadable 复用上面的 Parser（AST → 字符串），不重新发明解析
+//   - readableToLatex 只处理明确的模式，认不出的原样保留（绝不猜测）
+//   - 往返目标：readableToLatex(latexToReadable(x)) 与 x 渲染结果一致
+
+/** 上标 unicode（x^2 → x²） */
+const SUP_UNICODE: Record<string, string> = {
+  '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+  '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+  '+': '⁺', '-': '⁻', n: 'ⁿ', i: 'ⁱ', '(': '⁽', ')': '⁾',
+}
+/** 下标 unicode（a_1 → a₁） */
+const SUB_UNICODE: Record<string, string> = {
+  '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+  '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+  '+': '₊', '-': '₋', a: 'ₐ', e: 'ₑ', i: 'ᵢ', o: 'ₒ', x: 'ₓ', n: 'ₙ',
+  '(': '₍', ')': '₎',
+}
+
+/** AST → 人类可读字符串 */
+function toReadable(nodes: MathNode[]): string {
+  let out = ''
+  for (const n of nodes) {
+    switch (n.t) {
+      case 'text':
+      case 'ord':
+      case 'op':
+        out += n.v
+        break
+      case 'group':
+        out += toReadable(n.kids)
+        break
+      case 'style':
+        out += toReadable(n.body)
+        break
+      case 'space':
+        out += ' '
+        break
+      case 'frac':
+        out += `${wrapReadable(toReadable(n.num))}/${wrapReadable(toReadable(n.den))}`
+        break
+      case 'sqrt': {
+        // 根指数：3 → ∛ 字形（回转时按字面文本保留，渲染正确）；
+        // 其它指数（n√x）退化为「指数+根号」字面形式，渲染视觉正确但不规范。
+        const idx = n.index && n.index.length ? toReadable(n.index) : ''
+        const prefix = idx === '3' ? '∛' : idx ? `${idx}√` : '√'
+        out += `${prefix}${wrapReadable(toReadable(n.body))}`
+        break
+      }
+      case 'script': {
+        if (n.base) out += toReadable([n.base])
+        // 先下标后上标（阅读顺序 x₁²、∑_(i=1)ⁿ；两种顺序都能被
+        // readableToLatex 正确回转，这里选更符合书写习惯的一种）
+        if (n.sub) out += subToReadable(toReadable(n.sub))
+        if (n.sup) out += supToReadable(toReadable(n.sup))
+        break
+      }
+      case 'accent': {
+        const body = toReadable(n.body)
+        if (n.kind === 'arrow') out += `${n.dir === 'l' ? '←' : n.dir === 'lr' ? '↔' : '→'}${body}`
+        else if (n.kind === 'hat') out += `${body}(帽)`
+        else if (n.kind === 'widehat') out += `${body}(弧)`
+        else if (n.kind === 'dot') out += `${body}(点)`
+        else out += `${body}(两点)`
+        break
+      }
+      case 'deco':
+        out += `${toReadable(n.body)}(${n.kind === 'overline' ? '上划线' : '下划线'})`
+        break
+      case 'binom':
+        out += `C(${toReadable(n.top)},${toReadable(n.bottom)})`
+        break
+      case 'env': {
+        if (n.name === 'cases' || n.name === 'dcases' || n.name === 'rcases') {
+          // 分段函数：两列时按「条件 时 值」读，一列时直接分号连接
+          out += n.rows
+            .map((r) => (r.length >= 2 ? `${toReadable(r[1])}时${toReadable(r[0])}` : toReadable(r[0] || [])))
+            .join('；')
+        } else {
+          out += n.rows.map((r) => r.map((c) => toReadable(c)).join(' ')).join('；')
+        }
+        break
+      }
+    }
+  }
+  return out
+}
+
+/** 分子/分母含加减时加括号，避免 a/b+c 被读成 a/(b+c) 之外的歧义 */
+function wrapReadable(s: string): string {
+  const t = s.trim()
+  if (t.length > 1 && /[+\-]/.test(t) && !/^\(.*\)$/.test(t)) return `(${t})`
+  return t
+}
+
+/** 上标内容 → unicode（单位字符直接转，其它用 ^(...)） */
+function supToReadable(s: string): string {
+  const t = s.trim()
+  if (t.length === 1 && SUP_UNICODE[t]) return SUP_UNICODE[t]
+  return t ? `^(${t})` : ''
+}
+function subToReadable(s: string): string {
+  const t = s.trim()
+  if (t.length === 1 && SUB_UNICODE[t]) return SUB_UNICODE[t]
+  return t ? `_(${t})` : ''
+}
+
+/**
+ * LaTeX → 人类可读形式（编辑态展示用）。
+ *
+ * ⚠️ 三种输入都要覆盖（2026-10-23 修：此前只处理 $...$ 包裹的公式，
+ *    而符号面板插入的是裸 \frac{|}{}、AI 答案也常混用，导致编辑态仍显示源码）：
+ *    ① $...$ / $$...$$ / \[...\] / \(...\) 包裹的公式段
+ *    ② 没有 $ 包裹的裸 LaTeX 段（含反斜杠命令的文本）
+ *    ③ 纯文字段原样保留（用户认识的字不该被动）
+ * 解析失败时原样返回（保留用户已有内容，绝不丢字）。
+ */
+export function latexToReadable(src: string): string {
+  const s = (src || '').trim()
+  if (!s) return ''
+
+  const convert = (tex: string): string => {
+    const t = (tex || '').trim()
+    if (!t) return ''
+    try {
+      return toReadable(new Parser(t).parse(false))
+    } catch {
+      return t // 不支持的语法原样保留，至少不丢内容
+    }
+  }
+
+  // ① 行间公式（可能跨行）→ 独占一行
+  let out = s.replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]/g, (_m, a, b) => `\n${convert(a ?? b ?? '')}\n`)
+  // ① 行内公式
+  out = out.replace(/\$([^$\n]+?)\$|\\\(([\s\S]+?)\\\)/g, (_m, a, b) => convert(a ?? b ?? ''))
+  // ② 裸 LaTeX 段：同一行里凡含 \命令 的都按公式转换（幂等：已转换的可读形式不含反斜杠）
+  out = out.replace(/[^$\n]*\\[a-zA-Z]+[^$\n]*/g, (seg) => convert(seg))
+  return out
+}
+
+/** 人类可读形式 → LaTeX（保存时用；认不出的模式原样保留，绝不猜测） */
+export function readableToLatex(src: string): string {
+  const s = src || ''
+  if (!s) return ''
+
+  // ① 切成原子：数字字母串 / 括号组 / 单个符号
+  const atoms: string[] = []
+  let i = 0
+  while (i < s.length) {
+    const c = s[i]
+    if (/[0-9a-zA-Z]/.test(c)) {
+      let j = i
+      while (j < s.length && /[0-9a-zA-Z]/.test(s[j])) j++
+      atoms.push(s.slice(i, j))
+      i = j
+      continue
+    }
+    if (c === '(') {
+      let depth = 0
+      let j = i
+      for (; j < s.length; j++) {
+        if (s[j] === '(') depth++
+        else if (s[j] === ')') {
+          depth--
+          if (depth === 0) {
+            j++
+            break
+          }
+        }
+      }
+      atoms.push(s.slice(i, j))
+      i = j
+      continue
+    }
+    atoms.push(c)
+    i++
+  }
+
+  // ② 合并「前缀运算」：√X、→X、←X、C(a,b) 各成一个原子（否则 15/√3 会被拆散）
+  const DECO_MARK: Record<string, string> = {
+    '(帽)': 'hat', '(弧)': 'widehat', '(上划线)': 'overline', '(下划线)': 'underline',
+    '(点)': 'dot', '(两点)': 'ddot',
+  }
+  const merged: string[] = []
+  for (let k = 0; k < atoms.length; k++) {
+    const a = atoms[k]
+    const next = atoms[k + 1]
+    if ((a === '√' || a === '→' || a === '←') && next && /^[0-9a-zA-Z(]/.test(next)) {
+      merged.push(a + next)
+      k++
+      continue
+    }
+    if (a === 'C' && next && next.startsWith('(') && next.endsWith(')') && next.length > 2) {
+      const inner = next.slice(1, -1)
+      const ci = inner.indexOf(',')
+      if (ci > 0) {
+        merged.push(`C(${inner.slice(0, ci)},${inner.slice(ci + 1)})`)
+        k++
+        continue
+      }
+    }
+    merged.push(a)
+  }
+
+  // ③ 反向查表：unicode 上/下标 → 数字
+  const SUP_REV: Record<string, string> = {}
+  for (const [k, v] of Object.entries(SUP_UNICODE)) SUP_REV[v] = k
+  const SUB_REV: Record<string, string> = {}
+  for (const [k, v] of Object.entries(SUB_UNICODE)) SUB_REV[v] = k
+
+  /** 单个原子 → LaTeX。括号组要**递归转换内部**，否则 (1/2) 里的 / 不会变成 \frac */
+  const atomToLatex = (a: string): string => {
+    if (a.startsWith('(') && a.endsWith(')') && a.length > 2) {
+      return `(${readableToLatex(a.slice(1, -1))})`
+    }
+    if (a.startsWith('√')) {
+      const arg = a.slice(1)
+      return `\\sqrt{${arg.startsWith('(') && arg.endsWith(')') && arg.length > 2 ? readableToLatex(arg.slice(1, -1)) : arg}}`
+    }
+    if (a.startsWith('→')) {
+      const arg = a.slice(1)
+      // ⚠️ 光秃秃的 →（如「n → ∞」里 → 后跟的不是字母/括号）：原样保留，
+      //    绝不生成空参 \vec{}（2026-10-23：n \to \infty 回转成 n \vec{} ∞）
+      if (!arg) return a
+      return `\\vec{${arg.startsWith('(') && arg.endsWith(')') && arg.length > 2 ? readableToLatex(arg.slice(1, -1)) : arg}}`
+    }
+    if (a.startsWith('←')) {
+      const arg = a.slice(1)
+      if (!arg) return a
+      return `\\overleftarrow{${arg.startsWith('(') && arg.endsWith(')') && arg.length > 2 ? readableToLatex(arg.slice(1, -1)) : arg}}`
+    }
+    const cm = a.match(/^C\((.+),(.+)\)$/)
+    if (cm) return `\\binom{${cm[1]}}{${cm[2]}}`
+    return a
+  }
+
+  /** 去掉最外层括号（frac/根号的参数本身已分组，括号只会多个可见括号） */
+  const stripParen = (s: string): string =>
+    s.startsWith('(') && s.endsWith(')') && s.length > 2 ? s.slice(1, -1) : s
+
+  /**
+   * 从已生成文本末尾取回一个原子（分数/上下标/装饰要挂到它上面）。
+   * 顺序即优先级：先匹配「命令+花括号组」「基元+花括号组」，再匹配普通原子，
+   * 否则 \frac{a}{b} 只会被取回 \frac{a}、剩下 {b} 变游离文本。
+   *
+   * ⚠️ 2026-10-23 修：第二、三分支必须认「base + ^/_ + {组}」——
+   * x^{2}、x_1、x_{1}^{2}、∑_{i=1}^{n} 这类带上下标的原子要能**整体**取回。
+   * 旧正则写的是 base{...}（漏了 ^/_ 标记），只能取回末字符 '}'，
+   * 导致 \frac{x^2}{y_1} 回转成 x^{2\frac{}}{y}_{1}（原子被拦腰拆断）。
+   * 第一分支额外允许「命令+花括号」后再跟上下标（\sqrt{x}^{2}）。
+   */
+  const takeLastAtom = (built: string): { atom: string; rest: string } | null => {
+    const m = built.match(
+      /(?:\\[a-zA-Z]+(?:\{(?:[^{}]|\{[^{}]*\})*\})+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|(?:[0-9a-zA-Z√→←∑∫π∆Ω∛]|[\u03b1-\u03c9\u0391-\u03a9])+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|√\([^]*\)|∛\([^]*\)|[→←][0-9a-zA-Z]+|C\([^]*\)|[0-9a-zA-Z]+|\([^]*\)|\\[a-zA-Z]+|.)$/,
+    )
+    if (!m || !m[0]) return null
+    return { atom: m[0], rest: built.slice(0, built.length - m[0].length) }
+  }
+
+  let out = ''
+  for (let k = 0; k < merged.length; k++) {
+    const a = merged[k]
+    const next = merged[k + 1]
+
+    // 上标 unicode：挂到前一个原子 → ^{x}
+    if (SUP_REV[a] && out) {
+      const t = takeLastAtom(out)
+      if (t) {
+        out = `${t.rest}${t.atom}^{${SUP_REV[a]}}`
+        continue
+      }
+    }
+    // 下标 unicode：挂到前一个原子 → _{x}
+    if (SUB_REV[a] && out) {
+      const t = takeLastAtom(out)
+      if (t) {
+        out = `${t.rest}${t.atom}_{${SUB_REV[a]}}`
+        continue
+      }
+    }
+    // 显式括号上下标：_(i=1) / ^(n)（求和/求极限的上下限常用）
+    if ((a === '_' || a === '^') && next && next.startsWith('(') && next.endsWith(')') && next.length > 2 && out) {
+      const t = takeLastAtom(out)
+      if (t && t.atom) {
+        out = `${t.rest}${t.atom}${a}{${next.slice(1, -1)}}`
+        k++
+        continue
+      }
+    }
+    // 装饰后缀：z(帽) → \hat{z}
+    if (DECO_MARK[a] && out) {
+      const t = takeLastAtom(out)
+      if (t) {
+        out = `${t.rest}\\${DECO_MARK[a]}{${t.atom}}`
+        continue
+      }
+    }
+    // 分数：A/B → \frac{A}{B}（A、B 各取一个原子；参数去外层括号）
+    if (a === '/' && out && next) {
+      const t = takeLastAtom(out)
+      if (t && t.atom) {
+        // 分母后紧跟的上下标属于分母（运算优先级：下标绑定紧邻的基元）：
+        // a/b₁ → \frac{a}{b_{1}}，而不是把 ₁ 挂到整个分数上变成 (\frac{a}{b})_{1}
+        let den = stripParen(atomToLatex(next))
+        let m = k + 2
+        while (m < merged.length) {
+          const u = merged[m]
+          if (SUP_REV[u]) { den += `^{${SUP_REV[u]}}`; m++; continue }
+          if (SUB_REV[u]) { den += `_{${SUB_REV[u]}}`; m++; continue }
+          if ((u === '_' || u === '^') && merged[m + 1]?.startsWith('(')) {
+            den += `${u}{${merged[m + 1].slice(1, -1)}}`
+            m += 2
+            continue
+          }
+          break
+        }
+        out = `${t.rest}\\frac{${stripParen(t.atom)}}{${den}}`
+        k = m - 1
+        continue
+      }
+    }
+    out += atomToLatex(a)
+  }
+  return out
 }
 
 /**
