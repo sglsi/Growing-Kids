@@ -73,6 +73,8 @@ const OPS: Record<string, string> = {
   supseteq: '⊇', emptyset: '∅', varnothing: '∅',
   angle: '∠', measuredangle: '∡', triangle: '△', square: '□', bigcirc: '○',
   perp: '⊥', parallel: '∥', mid: '∣', nmid: '∤',
+  // 度量符号：百分号/千分号（\% 走单字符命令通道，\permil 在此映射）
+  permil: '‰', percent: '%',
   therefore: '∴', because: '∵', degree: '°', prime: '′', dagger: '†',
   ddagger: '‡', ldots: '…', cdots: '⋯', vdots: '⋮', ddots: '⋱', dots: '…',
   to: '→', rightarrow: '→', longrightarrow: '⟶', leftarrow: '←',
@@ -796,6 +798,25 @@ export function readableToLatex(src: string): string {
       i = j
       continue
     }
+    // 大括号组同理（模板「大括号」插入 {|}，填完是 {x}）：
+    // 必须整体成原子，否则被拆成单字符，atomToLatex 的 {X}→\lbrace 分支无从生效
+    if (c === '{') {
+      let depth = 0
+      let j = i
+      for (; j < s.length; j++) {
+        if (s[j] === '{') depth++
+        else if (s[j] === '}') {
+          depth--
+          if (depth === 0) {
+            j++
+            break
+          }
+        }
+      }
+      atoms.push(s.slice(i, j))
+      i = j
+      continue
+    }
     atoms.push(c)
     i++
   }
@@ -855,6 +876,11 @@ export function readableToLatex(src: string): string {
     }
     const cm = a.match(/^C\((.+),(.+)\)$/)
     if (cm) return `\\binom{${cm[1]}}{${cm[2]}}`
+    // 大括号模板 {X} → \lbrace X \rbrace（模板「大括号」插入的就是 {|} 形态；
+    // LaTeX 语义里裸 {X} 是分组、不显示括号，必须显式转定界符才能看见花括号）
+    if (a.startsWith('{') && a.endsWith('}') && a.length > 2) {
+      return `\\lbrace ${readableToLatex(a.slice(1, -1))} \\rbrace`
+    }
     return a
   }
 
@@ -875,7 +901,7 @@ export function readableToLatex(src: string): string {
    */
   const takeLastAtom = (built: string): { atom: string; rest: string } | null => {
     const m = built.match(
-      /(?:\\[a-zA-Z]+(?:\{(?:[^{}]|\{[^{}]*\})*\})+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|(?:[0-9a-zA-Z√→←∑∫π∆Ω∛]|[\u03b1-\u03c9\u0391-\u03a9])+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|√\([^]*\)|∛\([^]*\)|[→←][0-9a-zA-Z]+|C\([^]*\)|[0-9a-zA-Z]+|\([^]*\)|\\[a-zA-Z]+|.)$/,
+      /(?:\\[a-zA-Z]+(?:\{(?:[^{}]|\{[^{}]*\})*\})+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|(?:[0-9a-zA-Z√→←∑∫π∆Ω∛]|[\u03b1-\u03c9\u0391-\u03a9])+(?:[\^_](?:\{[^{}]*\}|[0-9a-zA-Z]))*|√\([^]*\)|∛\([^]*\)|[→←][0-9a-zA-Z]+|C\([^]*\)|[0-9a-zA-Z]+|\([^]*\)|\{[^{}]*\}|\\[a-zA-Z]+|.)$/,
     )
     if (!m || !m[0]) return null
     return { atom: m[0], rest: built.slice(0, built.length - m[0].length) }
