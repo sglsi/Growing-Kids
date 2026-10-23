@@ -1252,12 +1252,32 @@ export function deleteDocument(id: string) {
 }
 
 // ============================================================
-// 图片合成 PDF（素材 id 现指 timeline item id）
+// 图片合成 PDF / Word（素材 id 现指 timeline item id）
 // ============================================================
-export function combineToPdf(ids: string[]) {
+
+/** 合成格式：pdf=多图拼页省纸；docx=顺排可编辑（家长可加批注再打印） */
+export type CombineFormat = 'pdf' | 'docx'
+
+export interface CombineResult {
+  url: string
+  key: string
+  doc_id: string
+  /** PDF 为实际页数；DOCX 为按图高估算的页数 */
+  pages: number
+  /** PDF 为版面填充率；DOCX 恒为 0 */
+  fillRatio: number
+  images: number
+}
+
+export function combineToPdf(ids: string[], format: CombineFormat = 'pdf') {
   return invalidateAfter(
-    unwrap<{ url: string; key: string; doc_id: string; pages: number; fillRatio: number }>(
-      Network.request({ url: '/api/pdf/combine', method: 'POST', data: { ids }, header: authHeaders() }),
+    unwrap<CombineResult>(
+      Network.request({
+        url: '/api/pdf/combine',
+        method: 'POST',
+        data: { ids, format },
+        header: authHeaders(),
+      }),
     ),
     'doc',
   )

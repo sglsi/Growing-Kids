@@ -402,22 +402,36 @@ export default function SubjectPage() {
     }
   }
 
-  const handleCombinePdf = async () => {
+  /**
+   * 合成导出：PDF = 多图拼页省纸，Word = 顺排可编辑（方便家长加批注再打印）。
+   * 两者共用同一批选中的图片素材，由用户在弹层里选目标格式。
+   */
+  const handleCombine = async () => {
     const imageIds = items.filter((it) => sel.selected.has(it.id) && it.kind === 'image').map((it) => it.id)
     if (!imageIds.length) {
       Taro.showToast({ title: '请选择图片资料', icon: 'none' })
       return
     }
-    setBusy(true)
-    try {
-      const res = await combineToPdf(imageIds)
-      openStorageFile(res.url, true, res.key)
-    } catch (e) {
-      console.error('合成 PDF 失败', e)
-      Taro.showToast({ title: '合成失败，请确认所选为图片', icon: 'none' })
-    } finally {
-      setBusy(false)
-    }
+    Taro.showActionSheet({
+      itemList: ['合成 PDF（智能拼页，省纸）', '合成 Word（可编辑后再打印）'],
+      success: async (r) => {
+        const format: 'pdf' | 'docx' = r.tapIndex === 1 ? 'docx' : 'pdf'
+        setBusy(true)
+        Taro.showLoading({ title: '合成中…' })
+        try {
+          const res = await combineToPdf(imageIds, format)
+          Taro.hideLoading()
+          openStorageFile(res.url, format === 'pdf', res.key)
+        } catch (e) {
+          Taro.hideLoading()
+          console.error('合成失败', format, e)
+          Taro.showToast({ title: '合成失败，请确认所选为图片', icon: 'none' })
+        } finally {
+          setBusy(false)
+        }
+      },
+      fail: () => {},
+    })
   }
 
   const canLoadMore = items.length < total
@@ -506,9 +520,10 @@ export default function SubjectPage() {
           <View style={{ flex: 1 }}>
             <ActionBtn
               icon={<FileSearch size={16} color="#fff" />}
-              label="合成PDF"
+              label="合成PDF/WORD"
+              compact
               disabled={sel.isEmpty || busy}
-              onClick={handleCombinePdf}
+              onClick={handleCombine}
             />
           </View>
           <View style={{ flex: 1 }}>

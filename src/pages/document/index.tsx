@@ -333,7 +333,7 @@ export default function DocumentPage() {
               ) : (
                 <EmptyCard
                   title="暂无文档"
-                  hint="在「汇总生成」导出 Word，或在复习本合成 PDF，会自动归档到这里"
+                  hint="在「汇总生成」导出 Word，或在复习本合成 PDF/Word，都会自动归档到这里"
                   actionLabel="去资料库"
                   onAction={goLibrary}
                 />

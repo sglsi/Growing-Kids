@@ -60,10 +60,18 @@
 ## 8. PDF 合成与文档导出
 
 **要写**：
-- 多图拼页合成 PDF（复习本导出）、DOCX/PDF 生成；
+- **合成导出双格式**（2026-10-24 定稿）：复习本批量选择后同一入口「合成PDF/WORD」，由用户选格式——
+  - `PDF`：`pdf-lib` + Guillotine-BSSF 智能拼页，多图共用一页、省纸少留白，适合直接打印；
+  - `DOCX`：`docx` 库图片顺排（A4 + 34pt 页边距），家长可编辑、加批注后再打印；
+  - 两路共用素材下载与格式归一（见下条），产物统一归档 `documents`（`type` 分别为 `pdf`/`docx`）；
 - 导出记录入库 ⚠️ `mime_type` 长度（docx 的 71 字符曾超过 varchar(64) 导致**每次导出静默丢记录**，0013 已放宽至 128）；
 - 打开/分享导出的文件（走代理 + file_key）；
 - 大文件与超时的兜底（复制链接）。
+
+**已确认的两个坑（2026-10-24 实跑坐实，勿回退）**：
+
+1. ⚠️ **对象存储 key 只接受 ASCII**。Supabase 会拒 `Invalid key`，中文文件名（如 `复习资料-xxx.pdf`）上传必然失败；`local` 驱动不报错 ⇒ 本地联调正常、切 supabase 才炸。**规则：key 一律 ASCII（如 `review-pack-${Date.now()}.pdf`），中文只出现在 `documents.title`（展示名）与 `original_name`（上传原名）**。
+2. ⚠️ **素材格式必须归一**。pdf-lib 与 docx 都只吃 PNG/JPEG，而素材里存在 WebP 等格式 ⇒ 症状是「PDF 报『所选素材中没有可合成的图片』」「Word 里图片损坏打不开」，二者根因同一个。**规则：合成前用 `sharp` 读 metadata，非 png/jpeg 时按 `hasAlpha` 转 PNG 或 JPEG(quality 92)**；sharp 失败才回退头部解析（保持旧行为）。
 
 ## 9. 配额与容量
 

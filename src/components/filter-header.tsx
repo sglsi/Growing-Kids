@@ -149,18 +149,22 @@ export function BottomActionBar({ children }: { children?: React.ReactNode }) {
   )
 }
 
-/** 圆形操作按钮（合成PDF / 删除 / 加入复习本） */
-export function ActionBtn({ icon, label, danger, primary, disabled, onClick }: {
+/**
+ * 底部操作按钮（合成PDF/WORD / 删除 / 移出复习本）。
+ * `compact`：标签较长（如「合成PDF/WORD」）时收窄字号与间距，避免在三等分栏里折行。
+ */
+export function ActionBtn({ icon, label, danger, primary, disabled, onClick, compact }: {
   icon: React.ReactNode; label: string; danger?: boolean; primary?: boolean; disabled?: boolean; onClick: () => void
+  compact?: boolean
 }) {
   const bg = danger ? 'bg-red-600' : primary ? 'bg-primary' : 'bg-primary'
   return (
     <View
-      className={`flex flex-row items-center justify-center gap-2 h-11 rounded-xl ${disabled ? 'opacity-50' : ''} ${bg}`}
+      className={`flex flex-row items-center justify-center h-11 rounded-xl px-1 ${compact ? 'gap-1' : 'gap-2'} ${disabled ? 'opacity-50' : ''} ${bg}`}
       onClick={() => { if (!disabled) onClick() }}
     >
       {icon}
-      <Text className="block text-sm text-primary-foreground">{label}</Text>
+      <Text className={`block ${compact ? 'text-xs' : 'text-sm'} text-primary-foreground`}>{label}</Text>
     </View>
   )
 }
