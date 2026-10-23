@@ -179,7 +179,7 @@ export class AnswerSearchService {
         try {
           items = await ima.search(question, 8)
         } catch (e) {
-          kbErr = String(e)
+          kbErr = e instanceof Error ? e.message : String(e)
           this.logger.warn(`[answer-search] ima 知识库检索失败: ${kbErr}`)
         }
         // ima 检索已按语义相关度排序，非空即采用（confidence 仅作参考信息展示）
@@ -195,11 +195,15 @@ export class AnswerSearchService {
             note: '来自 ima 知识库（未做 AI 整理），请核对后采纳',
           }
         } else {
+          // 220021 = ima 日配额耗尽（按调用计数，零命中也扣）——专属文案，别混在泛化失败里
+          const quotaHit = /220021|已达上限/.test(kbErr)
           result = {
             source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
-            note: kbErr
-              ? `知识库检索失败（${kbErr.slice(0, 80)}），可改试「联网搜题」或「AI 解题」`
-              : '知识库中未找到该题的相关内容，可改试「联网搜题」或「AI 解题」',
+            note: quotaHit
+              ? '知识库今日调用次数已达上限，请明天再试；可改试「联网搜题」或「AI 解题」'
+              : kbErr
+                ? `知识库检索失败（${kbErr.slice(0, 80)}），可改试「联网搜题」或「AI 解题」`
+                : '知识库中未找到该题的相关内容，可改试「联网搜题」或「AI 解题」',
           }
         }
       }
