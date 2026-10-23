@@ -94,7 +94,7 @@ export default function WrongqOcrPanel({
             在 Text 解绑最后一个事件时会读 componentsAlias['pure-text']._num
             （映射表缺该键）直接崩（#16641，app.tsx 已挂兜底补丁）。
             View 的 pure-view/static-view 别名编译期就存在，安全。 */}
-        <View className="block text-[10px] text-muted-foreground shrink-0" onClick={() => setExpanded((v) => !v)}>
+        <View className="block text-xs text-muted-foreground shrink-0" onClick={() => setExpanded((v) => !v)}>
           {expanded ? '收起' : '展开'}
         </View>
       </View>
@@ -162,11 +162,11 @@ export default function WrongqOcrPanel({
                       {seg.text}
                     </View>
                     {/* 单段复制 */}
-                    <View
-                      className="block text-[10px] shrink-0"
-                      style={{ color: '#BE3E2D', marginTop: 2 }}
-                      onClick={() => copyOne(seg.text)}
-                    >
+                      <View
+                        className="block text-xs shrink-0"
+                        style={{ color: '#BE3E2D', marginTop: 2 }}
+                        onClick={() => copyOne(seg.text)}
+                      >
                       复制
                     </View>
                   </View>
@@ -177,16 +177,16 @@ export default function WrongqOcrPanel({
 
           {/* 操作条：全选 / 清空 / 存入题目 / 复制所选（交互元素均为 View，见顶部说明） */}
           <View className="flex flex-row items-center gap-2 px-2 py-2" style={{ borderTopWidth: 0.5, borderTopColor: '#f0ece4', borderTopStyle: 'solid' }}>
-            <View className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set(segments.map((_, i) => i)))}>
+            <View className="block text-xs text-muted-foreground" onClick={() => setSelected(new Set(segments.map((_, i) => i)))}>
               全选
             </View>
-            <View className="block text-[10px] text-muted-foreground" onClick={() => setSelected(new Set())}>
+            <View className="block text-xs text-muted-foreground" onClick={() => setSelected(new Set())}>
               清空
             </View>
             <View style={{ flex: 1 }} />
             {n > 0 && onPasteToEntry ? (
               <View
-                className="block text-[10px] mr-2"
+                className="block text-xs mr-2"
                 style={{ color: '#BE3E2D', fontWeight: '500' }}
                 onClick={() => {
                   const text = segments
@@ -202,7 +202,7 @@ export default function WrongqOcrPanel({
               </View>
             ) : null}
             {n > 0 ? (
-              <View className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={copySelected}>
+              <View className="block text-xs" style={{ color: '#BE3E2D' }} onClick={copySelected}>
                 复制所选（{n}）
               </View>
             ) : (

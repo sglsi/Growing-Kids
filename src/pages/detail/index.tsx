@@ -593,7 +593,7 @@ export default function DetailPage() {
             </View>
             <View className="flex flex-row flex-wrap gap-3">
               {item.question_image_urls.map((u) => (
-                <View key={u} className="flex flex-col items-center" style={{ width: 116 }}>
+                <View key={u} className="flex flex-col items-center" style={{ width: 124 }}>
                   <View className="w-24 h-24 rounded-lg overflow-hidden border border-border">
                     <Image
                       src={u}
@@ -602,27 +602,27 @@ export default function DetailPage() {
                       onClick={() => Taro.previewImage({ current: u, urls: item.question_image_urls || [u] })}
                     />
                   </View>
-                  <View className="flex flex-row items-center gap-1 mt-1">
+                  <View className="flex flex-row items-center flex-wrap justify-center gap-1 mt-1">
                     <View
                       className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => handleEditImage(u)}
                     >
-                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>编辑</Text>
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>编辑</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
                     >
-                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
                       style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => void handleDeleteImage('question', u)}
                     >
-                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
                     </View>
                   </View>
                 </View>
@@ -653,7 +653,7 @@ export default function DetailPage() {
                     style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('answer', u)}
                   >
-                    <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
                   </View>
                 </View>
               ))}
@@ -683,7 +683,7 @@ export default function DetailPage() {
                     style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('legacy', u)}
                   >
-                    <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
                   </View>
                 </View>
               ))}

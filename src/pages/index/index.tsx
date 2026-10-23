@@ -472,7 +472,7 @@ export default function IndexPage() {
                 borderColor: 'rgba(190,62,45,0.3)',
               }}
             >
-              <Text className="block text-[11px]" style={{ color: '#BE3E2D' }}>
+              <Text className="block text-xs" style={{ color: '#BE3E2D' }}>
                 📦 包版本 {BUILD_META.label} · 点我查看后端域名
               </Text>
             </View>

@@ -434,7 +434,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                   }}
                 >
                   <Text className="block text-[10px] mr-1" style={{ color: '#BE3E2D' }}>{i + 1}.</Text>
-                  <Text className="flex-1 block text-[11px]" style={{ color: '#BE3E2D' }} numberOfLines={1}>
+                  <Text className="flex-1 block text-xs" style={{ color: '#BE3E2D' }} numberOfLines={1}>
                     {r.title || r.url}
                   </Text>
                 </View>
@@ -451,13 +451,13 @@ export default function AnswerEditor({ item, onSaved }: Props) {
               onClick={() => void handleAdopt()}
             >
               <Check size={12} color="#fff" />
-              <Text className="block text-[11px]" style={{ color: '#fff' }}>采纳</Text>
+              <Text className="block text-xs" style={{ color: '#fff' }}>采纳</Text>
             </View>
             <View
               className="px-3 py-1 rounded-lg border border-border"
               onClick={() => setCandidate(null)}
             >
-              <Text className="block text-[11px] text-muted-foreground">放弃</Text>
+              <Text className="block text-xs text-muted-foreground">放弃</Text>
             </View>
           </View>
         </View>

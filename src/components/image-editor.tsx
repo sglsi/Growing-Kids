@@ -1854,7 +1854,7 @@ export default function ImageEditor({
                     {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).left}
                   </Text>
                   <Text
-                    className="block text-white text-opacity-70 text-[10px]"
+                    className="block text-white text-opacity-70 text-xs"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认
@@ -2082,7 +2082,7 @@ export default function ImageEditor({
                     {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).left}
                   </Text>
                   <Text
-                    className="block text-white text-opacity-70 text-[10px]"
+                    className="block text-white text-opacity-70 text-xs"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认

@@ -237,7 +237,7 @@ export default function ReviewItemCard({
                   style={{ backgroundColor: 'rgba(190,62,45,0.10)', paddingTop: 2, paddingBottom: 2 }}
                   onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
                 >
-                  <Text className="block text-[10px]" style={{ color: '#BE3E2D' }}>改答案</Text>
+                  <Text className="block text-xs" style={{ color: '#BE3E2D' }}>改答案</Text>
                 </View>
               ) : null}
             </View>
@@ -248,7 +248,7 @@ export default function ReviewItemCard({
                 style={{ borderColor: 'rgba(190,62,45,0.35)', backgroundColor: 'rgba(190,62,45,0.04)' }}
                 onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
               >
-                <Text className="block text-[11px]" style={{ color: '#BE3E2D' }}>＋ 填答案</Text>
+                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>＋ 填答案</Text>
               </View>
             </View>
           ) : null}

@@ -1259,7 +1259,7 @@ export default function RecognizePage() {
                         backgroundColor: 'rgba(0,0,0,0.55)',
                       }}
                     >
-                      <Text style={{ color: '#fff', fontSize: 10 }}>编辑</Text>
+                      <Text style={{ color: '#fff', fontSize: 12 }}>编辑</Text>
                     </View>
                   </View>
 
@@ -1303,17 +1303,17 @@ export default function RecognizePage() {
                     <Text className="block text-[10px] text-muted-foreground">点图片可编辑 · 共 {boardPages.length} 页</Text>
                     <View className="flex flex-row items-center gap-3">
                       <Text
-                        className="block text-[10px] text-primary"
+                        className="block text-xs text-primary"
                         onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
                       >
                         看大图
                       </Text>
                       {curPage.ocr === 'error' ? (
-                        <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={() => void retryPageOcr(activePage)}>
+                        <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
                         </Text>
                       ) : null}
-                      <Text className="block text-[10px] text-primary" onClick={() => void addBoardPages()}>添加图片</Text>
+                      <Text className="block text-xs text-primary" onClick={() => void addBoardPages()}>添加图片</Text>
                     </View>
                   </View>
 
@@ -1357,9 +1357,9 @@ export default function RecognizePage() {
                       ) : null}
                     </View>
                     <View className="flex flex-row items-center gap-3">
-                      <Text className="block text-[10px] text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
-                      <Text className="block text-[10px] text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
-                      <Text className="block text-[10px]" style={{ color: '#BE3E2D' }} onClick={() => removeEntry(idx)}>删除</Text>
+                      <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
+                      <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }} onClick={() => removeEntry(idx)}>删除</Text>
                     </View>
                   </View>
 
@@ -1380,7 +1380,7 @@ export default function RecognizePage() {
                             backgroundColor: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}
                         >
-                          <Text style={{ color: '#fff', fontSize: 11, lineHeight: '13px' }}>×</Text>
+                          <Text style={{ color: '#fff', fontSize: 12, lineHeight: '14px' }}>×</Text>
                         </View>
                       </View>
                     ))}
@@ -1390,7 +1390,7 @@ export default function RecognizePage() {
                       style={{ width: 64, height: 64, borderRadius: 8, border: '1px dashed #C9C2B8' }}
                     >
                       <Text style={{ fontSize: 14, color: '#BE3E2D', lineHeight: '16px' }}>＋</Text>
-                      <Text className="block text-[9px]" style={{ color: '#BE3E2D' }}>裁剪题目</Text>
+                      <Text className="block text-xs" style={{ color: '#BE3E2D' }}>裁剪题目</Text>
                     </View>
                   </View>
 
