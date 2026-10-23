@@ -1,7 +1,7 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState, useRef } from 'react'
-import { Trash2, BookmarkPlus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
+import { Trash2, BookmarkPlus, BookmarkMinus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -13,7 +13,7 @@ import SubjectBadge from '@/components/subject-badge'
 import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
-  fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook,
+  fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook, removeFromReviewBook,
   fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion,
   type Overview, type TimelineItem, type Subject, type ImageAction, type Paged,
 } from '@/services/api'
@@ -326,6 +326,20 @@ export default function IndexPage() {
     try {
       await addToReviewBook([item.id])
       Taro.showToast({ title: '已加入复习本', icon: 'success' })
+      load()
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    }
+  }
+  /** 思傅 2026-10-23：已加入复习本的题目，「…」里要能直接移出（原来只有加入、没有移出） */
+  const handleMoreRemoveReview = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    try {
+      await removeFromReviewBook([item.id])
+      Taro.showToast({ title: '已移出复习本', icon: 'success' })
       load()
     } catch (e) {
       console.error(e)
@@ -667,7 +681,12 @@ export default function IndexPage() {
               <Tag size={18} color="#BE3E2D" />
               <Text className="block text-sm text-foreground">修改分类</Text>
             </View>
-            {!moreItem.in_review_book && (
+            {moreItem.in_review_book ? (
+              <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
+                <BookmarkMinus size={18} color="#BE3E2D" />
+                <Text className="block text-sm text-foreground">移出复习本</Text>
+              </View>
+            ) : (
               <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreReview}>
                 <BookmarkPlus size={18} color="#BE3E2D" />
                 <Text className="block text-sm text-foreground">加入复习本</Text>
