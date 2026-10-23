@@ -5,21 +5,26 @@ import { memGet, memSet } from '../shared/mem-cache'
 import { TimelineService } from '../timeline/timeline.service'
 import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
+import { ImaKnowledgeProvider } from './ima-provider'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
- * 题目答案的两种获取方式（思傅 2026-10-23 明确拆分，互不混淆）：
+ * 题目答案的三种获取方式（思傅 2026-10-23 明确拆分，互不混淆）：
  *
  *   mode=search（联网搜题）：**只做真实网络检索**，不喂给 AI 解题。
  *     直接返回最相关来源的摘要 + 参考链接，让用户自己看原文。
  *     检索不到就如实说检索不到，**绝不拿 AI 答案冒充搜索结果**。      source=search / verified=true
  *
+ *   mode=kb（知识库）：**只检索 ima 知识库**，不喂给 AI。
+ *     思傅自建知识库内容权威、检索秒级（联网搜题实测 83s，知识库 <2s），
+ *     作为第三种解题来源；未配凭据时给出明确配置指引，绝不静默降级。    source=kb / verified=true
+ *
  *   mode=ai（AI 解题）：**只做模型推理**，不检索。
  *     模型基于学科知识推导，明确标注「未联网核实」。                  source=llm / verified=false
  *
- *   两者都失败 → source=none，明确说明原因，绝不伪造。
+ *   三者都失败 → source=none，明确说明原因，绝不伪造。
  *
- * ⚠️ 历史：早期版本把两者混在一条链里（检索成功→AI 基于检索提炼，失败→AI 纯推理），
+ * ⚠️ 历史：早期版本把「检索」和「推理」混在一条链里（检索成功→AI 基于检索提炼，失败→AI 纯推理），
  *    导致按钮叫「联网搜答案」但结果可能是 AI 推理——思傅 2026-10-23 指出此问题。
  *    现按「检索」与「推理」彻底分离；原 RAG 提炼（refine）随之移除。
  */
@@ -84,9 +89,10 @@ export class AnswerSearchService {
   async searchAnswer(
     userId: string,
     itemId: string,
-    opts: { force?: boolean; mode?: 'search' | 'ai' } = {},
+    opts: { force?: boolean; mode?: 'search' | 'ai' | 'kb' } = {},
   ): Promise<AnswerSearchResult> {
-    const mode: 'search' | 'ai' = opts.mode === 'ai' ? 'ai' : 'search'
+    const mode: 'search' | 'ai' | 'kb' =
+      opts.mode === 'ai' ? 'ai' : opts.mode === 'kb' ? 'kb' : 'search'
     // ① 取题目（含签名 URL）
     let item
     try {
@@ -143,7 +149,7 @@ export class AnswerSearchService {
       }
     }
 
-    // ⑤ 按 mode 分两条互不混淆的路径
+    // ⑤ 按 mode 分三条互不混淆的路径
     let result: AnswerSearchResult
 
     if (mode === 'ai') {
@@ -159,6 +165,44 @@ export class AnswerSearchService {
             source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
             note: 'AI 解题失败：请检查模型 Key（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_TOKEN 混元）后重试',
           }
+    } else if (mode === 'kb') {
+      // ---------- 知识库检索：只查 ima 知识库，不喂给 AI ----------
+      const ima = new ImaKnowledgeProvider()
+      if (!ima.available()) {
+        result = {
+          source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
+          note: `知识库未配置（缺 ${ima.missingKeys().join(' / ')}）：请在服务器 .env.secrets 填入 IMA_CLIENT_ID / IMA_API_KEY / IMA_KB_ID（ima.qq.com/agent-interface 获取）后重跑 encrypt-env 并重启后端`,
+        }
+      } else {
+        let items: WebItem[] = []
+        let kbErr = ''
+        try {
+          items = await ima.search(question, 8)
+        } catch (e) {
+          kbErr = String(e)
+          this.logger.warn(`[answer-search] ima 知识库检索失败: ${kbErr}`)
+        }
+        // ima 检索已按语义相关度排序，非空即采用（confidence 仅作参考信息展示）
+        const conf = relevance(question, items)
+        if (items.length > 0) {
+          const top = items[0]
+          result = {
+            source: 'kb', verified: true,
+            answer: (top.summary || top.snippet || '').slice(0, 500),
+            solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
+            refs: items.slice(0, 5).map((i) => ({ title: i.title, url: i.url })),
+            confidence: Number(conf.toFixed(2)),
+            note: '来自 ima 知识库（未做 AI 整理），请核对后采纳',
+          }
+        } else {
+          result = {
+            source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
+            note: kbErr
+              ? `知识库检索失败（${kbErr.slice(0, 80)}），可改试「联网搜题」或「AI 解题」`
+              : '知识库中未找到该题的相关内容，可改试「联网搜题」或「AI 解题」',
+          }
+        }
+      }
     } else {
       // ---------- 联网搜题：只检索，不喂给 AI ----------
       const provider = resolveSearchProvider()

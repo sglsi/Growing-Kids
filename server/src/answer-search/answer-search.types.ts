@@ -17,13 +17,14 @@ export interface WebItem {
  *    杜绝模型幻觉答案静默污染题库。
  */
 export interface AnswerSearchResult {
-  /** search = 有真实检索来源；llm = 无检索、纯模型推理；none = 搜索与模型都不可用 */
-  source: 'search' | 'llm' | 'none'
-  /** 是否经过联网核实 */
+  /** search = 有真实网络来源；kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用 */
+  source: 'search' | 'kb' | 'llm' | 'none'
+  /** 是否经过核实（检索类=true；纯模型推理=false） */
   verified: boolean
   answer: string
   solution: string
-  refs: { title: string; url: string }[]
+  /** 参考来源；知识库条目没有外链，url 为空串（前端按「无链接」展示，不提供复制） */
+  refs: { title: string; url?: string }[]
   /** 相关性 0~1（检索片段与题干的显著片段重叠率） */
   confidence: number
   /** 降级 / 异常的人类可读说明 */

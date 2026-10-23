@@ -14,6 +14,7 @@ export class AnswerSearchController {
    *
    * mode（思傅 2026-10-23 明确拆分）：
    *   search = 联网搜题：**只做真实网络检索**，不喂给 AI 解题，直接给来源摘要+链接
+   *   kb     = 知识库：**只检索 ima 知识库**（秒级），不喂给 AI；未配凭据时返回配置指引
    *   ai     = AI 解题：**只做模型推理**，不检索，明确标注未联网核实
    */
   @Post(':id')
@@ -21,10 +22,10 @@ export class AnswerSearchController {
   async searchAnswer(
     @Req() req: RequestWithUser,
     @Param('id') id: string,
-    @Body() body: { force?: boolean; mode?: 'search' | 'ai' } = {},
+    @Body() body: { force?: boolean; mode?: 'search' | 'ai' | 'kb' } = {},
   ) {
     const userId = requireUserId(req)
-    const mode = body?.mode === 'ai' ? 'ai' : 'search'
+    const mode = body?.mode === 'ai' ? 'ai' : body?.mode === 'kb' ? 'kb' : 'search'
     const data = await this.answerSearchService.searchAnswer(userId, id, {
       force: !!body?.force,
       mode,
