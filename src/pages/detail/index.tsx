@@ -67,6 +67,8 @@ export default function DetailPage() {
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
   // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
   const [solutionCursor, setSolutionCursor] = useState(-1)
+  // 题目栏光标（思傅 2026-10-23：题目栏也支持数学符号输入）
+  const [qCursor, setQCursor] = useState(-1)
   // 解题过程两种模式（思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac 这类命令）：
   //   view = 渲染态，显示数学式（有内容时默认）
   //   edit = 编辑态，Textarea 里放的是**可读形式**（1/2、√3、x²、∠ABC、→a），
@@ -151,6 +153,19 @@ export default function DetailPage() {
     setSolutionEditing(next)
     if (solutionMode !== 'edit') setSolutionMode('edit')
     setSolutionCursor(marker >= 0 ? pos + marker : pos + plain.length)
+  }
+
+  /**
+   * 数学符号/模板插入题目栏（思傅 2026-10-23：题目栏也支持数学符号输入）。
+   * 题干是纯文本编辑（不转 LaTeX），符号与模板的可读片段直接插入。
+   */
+  const insertQuestionSymbol = (snippet: string) => {
+    const pos = qCursor >= 0 ? Math.min(qCursor, qContent.length) : qContent.length
+    const marker = snippet.indexOf('|')
+    const plain = snippet.replace('|', '')
+    const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
+    setQContent(next)
+    setQCursor(marker >= 0 ? pos + marker : pos + plain.length)
   }
 
   /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
@@ -506,13 +521,15 @@ export default function DetailPage() {
             </View>
           ) : null}
         </View>
+        <MathSymbolBar onInsert={insertQuestionSymbol} />
         <Card className="rounded-2xl border-border p-4 mb-4">
           <Textarea
             className="min-h-32 border-0 ring-0 focus-within:ring-0 rounded-xl"
             value={qContent}
             placeholder="题目内容"
             maxlength={3000}
-            onInput={(e) => setQContent(e.detail.value)}
+            cursor={qCursor}
+            onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
           />
         </Card>
 
