@@ -737,7 +737,8 @@ export default function DetailPage() {
 
       {/* 识别结果面板（思傅 2026-10-21）：题面图 OCR → 追加/替换进题干 */}
       {ocrResult ? (
-        <View className="z-50" style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.4)' }} onClick={() => setOcrResult('')}>
+        // ⚠️ z-index 200 压过底部「保存修改」悬浮条（zIndex:100），否则面板被盖住只能点关闭（2026-10-23 同 material-picker 一起修）
+        <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={() => setOcrResult('')}>
           <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '72vh' }} onClick={(e) => e.stopPropagation?.()}>
             <Text className="block text-sm font-semibold text-foreground mb-3">识别结果（可追加或替换题干）</Text>
             <ScrollView scrollY style={{ maxHeight: '42vh' }}>

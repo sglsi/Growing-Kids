@@ -48,8 +48,11 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
 
   return (
     <View
-      className="fixed inset-0 z-50 flex items-end justify-center"
-      style={{ backgroundColor: 'rgba(40,36,30,0.45)' }}
+      className="fixed inset-0 flex items-end justify-center"
+      // ⚠️ z-index 必须高于详情页底部「保存修改」悬浮条（inline zIndex: 100），
+      // 否则弹窗被它压住，只能点到遮罩关不掉（思傅 2026-10-23 反馈）。
+      // 用 inline style 而非 tailwind z-50：小程序里两种混用时以 inline 为准更稳妥。
+      style={{ zIndex: 200, backgroundColor: 'rgba(40,36,30,0.45)' }}
       onClick={onClose}
     >
       <View
