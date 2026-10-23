@@ -397,9 +397,10 @@ export default function DetailPage() {
 
           {/* 图片条目详情也要能编辑（思傅 2026-10-21 规则：点开图片可编辑）：
               编辑结果 attach 上传 → 原位替换该条目的 file_key（与首页一致，不新建条目）。
-              思傅 2026-10-23：图片条目删除 = 删整条（图即条目），确认后走 handleDelete。 */}
+              思傅 2026-10-23：图片条目删除 = 删整条（图即条目），确认后走 handleDelete；
+              再加「识别」——图片条目（只有图片的题目）也能 OCR 提取文字存进题干。 */}
           <View className="flex flex-row items-center justify-between mb-4">
-            <Text className="block text-xs text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清</Text>
+            <Text className="block text-xs text-muted-foreground">点图看大图 ·「编辑」裁剪/旋转/黑白/高清 ·「识别」提取文字</Text>
             <View className="flex flex-row items-center gap-2">
               <View
                 className="px-3 rounded-lg"
@@ -411,12 +412,39 @@ export default function DetailPage() {
               <View
                 className="px-3 rounded-lg"
                 style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                onClick={() => { if (!ocrBusy) void handleOcrImage(item.url || item.thumb_url || '') }}
+              >
+                <Text className="block text-xs" style={{ color: '#BE3E2D' }}>{ocrBusy ? '识别中' : '识别'}</Text>
+              </View>
+              <View
+                className="px-3 rounded-lg"
+                style={{ backgroundColor: 'rgba(190,62,45,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={handleDelete}
               >
                 <Text className="block text-xs" style={{ color: '#BE3E2D' }}>删除</Text>
               </View>
             </View>
           </View>
+
+          {/* 题干（思傅 2026-10-23）：图片条目此前没有题干区——识别出的文字无处可存。
+              这里补上题目编辑卡片（与题目条目同款：符号栏 + Textarea），
+              识别结果面板「追加/替换」写入 qContent，底部「保存修改」统一入库
+              （handleSave 早已带 question_content）。 */}
+          <View className="flex flex-row items-center justify-between mb-2">
+            <Text className="block text-sm font-semibold text-foreground">题目</Text>
+            <Text className="block text-[10px] text-muted-foreground">识别或手动输入题干</Text>
+          </View>
+          <MathSymbolBar onInsert={insertQuestionSymbol} />
+          <Card className="rounded-2xl border-border p-4 mb-4">
+            <Textarea
+              className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-xl"
+              value={qContent}
+              placeholder="题目内容（可点「识别」从图片提取）"
+              maxlength={3000}
+              cursor={qCursor}
+              onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
+            />
+          </Card>
 
           <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
             <View className="flex-1">
@@ -518,6 +546,34 @@ export default function DetailPage() {
           onCancel={() => setEditorImg('')}
           onConfirm={(p) => void handleEditorConfirm(p)}
         />
+
+        {/* 识别结果面板（思傅 2026-10-23：图片条目分支补挂——
+            此前只挂在题目分支里，图片条目「识别」后没有面板展示结果。
+            「追加/替换」写入题干 state，由底部「保存修改」统一入库。 */}
+        {ocrResult ? (
+          <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={() => setOcrResult('')}>
+            <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '72vh' }} onClick={(e) => e.stopPropagation?.()}>
+              <Text className="block text-sm font-semibold text-foreground mb-3">识别结果（可追加或替换题干）</Text>
+              <ScrollView scrollY style={{ maxHeight: '42vh' }}>
+                <Text className="block text-sm text-foreground leading-relaxed">{ocrResult}</Text>
+              </ScrollView>
+              <View className="flex flex-row items-center gap-2 mt-4">
+                <Button className="flex-1 h-11 rounded-xl" onClick={() => applyOcrResult('append')}>
+                  <Text className="block text-sm">追加到题干</Text>
+                </Button>
+                <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={() => applyOcrResult('replace')}>
+                  <Text className="block text-sm">替换题干</Text>
+                </Button>
+              </View>
+              <View className="mt-2">
+                <Button variant="outline" className="w-full h-11 rounded-xl" onClick={() => setOcrResult('')}>
+                  <Text className="block text-sm">关闭</Text>
+                </Button>
+              </View>
+            </View>
+          </View>
+        ) : null}
+
         {editorBusy ? (
           <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />
         ) : null}
