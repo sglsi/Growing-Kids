@@ -71,7 +71,7 @@ export interface QuestionContent {
   answer_attachments?: AnswerAttachment[]
   answer_source?: AnswerSource | 'mixed'
   /** 联网搜索命中的参考来源 */
-  answer_refs?: { title: string; url: string }[]
+  answer_refs?: { title: string; url?: string }[]
   answer_searched_at?: string
 }
 

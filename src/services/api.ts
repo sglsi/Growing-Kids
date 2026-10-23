@@ -497,10 +497,10 @@ export function updateQuestion(
     question_images?: string[]
     /** 答案附件全量替换（思傅 2026-10-21：图片 / 文档 / 文本） */
     answer_attachments?: AnswerAttachment[]
-    /** 答案来源：manual 手填 / search 联网搜索 / ocr / mixed */
+    /** 答案来源：manual 手填 / search 联网搜索（含 ima 知识库）/ ocr / mixed */
     answer_source?: AnswerSource | 'mixed'
-    /** 联网搜索的参考来源 */
-    answer_refs?: { title: string; url: string }[]
+    /** 参考来源；知识库条目没有外链，url 可空 */
+    answer_refs?: { title: string; url?: string }[]
     /** 最近一次联网搜答案时间 */
     answer_searched_at?: string
   },
@@ -1089,13 +1089,14 @@ export function searchSolution(question: string) {
 
 /** 联网搜答案的返回（与后端 answer-search.service 对齐） */
 export interface AnswerSearchResult {
-  /** search = 有真实检索来源；llm = 无检索、纯模型推理；none = 都不可用 */
-  source: 'search' | 'llm' | 'none'
-  /** 是否经过联网核实 */
+  /** search = 有真实网络来源；kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用 */
+  source: 'search' | 'kb' | 'llm' | 'none'
+  /** 是否经过核实（检索类=true；纯模型推理=false） */
   verified: boolean
   answer: string
   solution: string
-  refs: { title: string; url: string }[]
+  /** 参考来源；知识库条目没有外链，url 为空（不提供复制） */
+  refs: { title: string; url?: string }[]
   confidence: number
   note?: string
   cached?: boolean
@@ -1109,9 +1110,10 @@ export interface AnswerSearchResult {
  *
  * mode（思傅 2026-10-23 拆分）：
  *   'search' = 联网搜题：只做真实网络检索，直接给来源摘要+链接，不喂给 AI
+ *   'kb'     = 知识库：只检索 ima 知识库（秒级），不喂给 AI
  *   'ai'     = AI 解题：只做模型推理，不检索，明确标注未联网核实
  */
-export function searchAnswer(itemId: string, force = false, mode: 'search' | 'ai' = 'search') {
+export function searchAnswer(itemId: string, force = false, mode: 'search' | 'ai' | 'kb' = 'search') {
   return unwrap<AnswerSearchResult>(
     Network.request({
       url: `/api/answer-search/${itemId}`,
@@ -1128,7 +1130,7 @@ export function searchAnswer(itemId: string, force = false, mode: 'search' | 'ai
 /** 采纳搜到的答案：写入题目（带来源标记与参考链接） */
 export function adoptAnswer(
   itemId: string,
-  payload: { answer: string; solution?: string; refs?: { title: string; url: string }[]; source: AnswerSource | 'mixed' },
+  payload: { answer: string; solution?: string; refs?: { title: string; url?: string }[]; source: AnswerSource | 'mixed' },
 ) {
   return updateQuestion(itemId, {
     answer_content: payload.answer,
@@ -1163,7 +1165,7 @@ export function saveAnswer(
     solution?: string
     attachments?: AnswerAttachment[]
     source?: AnswerSource | 'mixed'
-    refs?: { title: string; url: string }[]
+    refs?: { title: string; url?: string }[]
   },
 ) {
   return updateQuestion(itemId, {
