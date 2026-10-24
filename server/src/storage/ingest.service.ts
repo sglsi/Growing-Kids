@@ -83,7 +83,10 @@ export class IngestService {
           sizeBytes: record.size_bytes ?? pre.display.buffer.length,
           width: record.width ?? pre.width,
           height: record.height ?? pre.height,
-          mimeType: 'image/webp',
+          // ⚠️ mime 必须按 blob 登记的类型回填，不能无脑写 image/webp：
+          // 非图片（PDF/Word/TXT）重复上传时会命中这里，写死 webp 会让
+          // library 条目的 mime_type 被污染 ⇒ 前端把 PDF 当图片预览、类型标签错。
+          mimeType: record.mime_type || (record.kind === 'image' ? 'image/webp' : 'application/octet-stream'),
           deduped: true,
           optimized: pre.optimized,
         }
@@ -193,7 +196,8 @@ export class IngestService {
           sizeBytes: existing.size_bytes ?? display.buffer.length,
           width: existing.width ?? pre.width,
           height: existing.height ?? pre.height,
-          mimeType: isImage ? 'image/webp' : (mimeType || 'application/octet-stream'),
+          // 与 ingest() 同修：复用已有对象时按登记类型回填 mime
+          mimeType: existing.mime_type || (isImage ? 'image/webp' : (mimeType || 'application/octet-stream')),
           deduped: true,
           optimized: isImage,
         }
