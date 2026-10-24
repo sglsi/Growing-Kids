@@ -10,7 +10,8 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "nest build && node dist/main",
     "migrate": "node scripts/migrate.mjs",
-    "migrate:dry": "node scripts/migrate.mjs --dry"
+    "migrate:dry": "node scripts/migrate.mjs --dry",
+    "check:isolation": "node scripts/check-isolation.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.958.0",

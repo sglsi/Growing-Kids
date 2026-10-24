@@ -138,6 +138,8 @@ export class AuthService {
       else seen.add(row.name)
     }
     if (dupIds.length) {
+      // check-isolation-ignore: dupIds 取自上方同一 user_id 的学科查询结果（去重残留），
+      // 按 id 删除不会越权；若将来改成跨用户清理，必须先加 user_id 条件。
       await client.from('subjects').delete().in('id', dupIds)
       this.logger.log(`[auth] 清理重复学科 ${dupIds.length} 条`)
     }

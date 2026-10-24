@@ -14,7 +14,7 @@
 // ⚠️ service_role 绕过 RLS：所有业务查询必须显式 .eq('user_id', userId)
 // ============================================================
 
-import { Injectable, NestMiddleware } from '@nestjs/common'
+import { ForbiddenException, Injectable, NestMiddleware } from '@nestjs/common'
 import type { Request, Response, NextFunction } from 'express'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
@@ -118,4 +118,32 @@ export function requireUserId(req: RequestWithUser): string {
     throw new Error('当前用户上下文缺失（UserContextMiddleware 未生效）')
   }
   return id
+}
+
+/**
+ * 全局能力（客服知识库等**全局表**的写操作）的管理员校验。
+ *
+ * 背景：knowledge_articles 没有 user_id 列、对所有用户生效，其内容直接拼进
+ * system prompt。此前四个 CRUD 端点无任何身份校验 ⇒ 任意请求可操纵所有
+ * 用户的助手人设（prompt 注入面）。
+ *
+ * 现状与边界（2026-10-24，思傅的开发/体验版阶段）：
+ *  - 配置 `CHAT_ADMIN_IDS`（逗号分隔 user id，放 `.env.secrets`）后，仅白名单可写；
+ *  - **未配置时保持放行**（不影响思傅当前的知识库管理页），但每次请求都打 warn；
+ *  - 彻底方案是给 users 加 role 列并做管理员体系，已登记 GK-OPS-18。
+ */
+export function requireAdmin(req: RequestWithUser): string {
+  const userId = requireUserId(req)
+  const allow = (process.env.CHAT_ADMIN_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!allow.length) {
+    console.warn('[requireAdmin] CHAT_ADMIN_IDS 未配置，全局写操作暂时放行；请在 .env.secrets 配置白名单收紧')
+    return userId
+  }
+  if (!allow.includes(userId)) {
+    throw new ForbiddenException('无权限：仅管理员可维护全局知识库')
+  }
+  return userId
 }

@@ -168,10 +168,13 @@ export class ChatService {
     const userRowCast = userRow as unknown as ChatMessage
 
     // 2) 取该 session 最近 20 条历史（含本次 user 消息，构造多轮）
+    //    ⚠️ 必须同时带 user_id：session_id 由客户端传入且可枚举，只按它过滤
+    //    等于把别人的会话历史读出来、还会作为多轮上下文喂给 LLM（越权读 + 数据外泄）。
     const { data: history, error: histErr } = await client
       .from(MESSAGE_TABLE)
       .select(MESSAGE_SELECT)
       .eq('session_id', sid)
+      .eq('user_id', userId)
       .order('created_at', { ascending: true })
       .limit(20)
     if (histErr) throw new Error(histErr.message)

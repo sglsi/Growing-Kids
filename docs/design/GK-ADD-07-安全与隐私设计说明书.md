@@ -38,6 +38,33 @@
   - ⚠️ 一旦实现共享，现有「`.eq('user_id')` 是唯一隔离手段」的前提即被打破 ⇒ 届时必须同步改造为「数据空间可见性」判定，并重新评估 RLS 是否启用（与第 3 章首条强耦合，改动面大，登记 OPS-18）。
 **素材**：ADD-05 第 8 章、项目记忆、SRS-01 第 2.4 节
 
+### 3.1 RLS 重新评估（2026-10-24，结论：**不启用**，改用静态门禁兜底）
+
+**现状**：`migrations/0002_fresh_schema.sql` 138~153 行预留了 4 条策略（timeline_items / subjects / library_docs / documents），**全部处于注释状态**；其余 11 张表没有策略。
+
+**为什么不启用（四条理由，逐条可验证）**：
+
+| # | 理由 |
+|---|---|
+| 1 | **生效前提不成立**：RLS 只对「anon key + 用户 JWT 走 PostgREST」的路径自动生效。本项目所有查询走后端 NestJS + service_role，而 **service_role 一律绕过 RLS** ⇒ 启用后不拦截任何现有查询，纯装饰 |
+| 2 | **策略写不出来**：策略谓词依赖 `auth.uid()`，但本项目登录体系是自定义的（微信 code2session + 内存 `login_tickets`），**没有 Supabase Auth JWT** ⇒ `auth.uid()` 恒为空，只能写出 `using (false)`（全拒）或全放 |
+| 3 | **覆盖面不增反减**：预留策略只覆盖 4/15 张表。补全需逐表写策略、新表必须同步补，漏一张就是一个洞——维护负担与代码层 `.eq('user_id')` 完全相同，却多一层"看起来安全"的错觉 |
+| 4 | **与共享模型冲突**：一旦实施共享（见上节），可见性 = 「本人数据空间 ∪ 被授权空间」，策略要 join 授权表判断，可读性与查询性能都差；把该判定放在应用层**一个收口函数**里更可控、可测试、可灰度 |
+
+**替代方案（已落地）：静态门禁 `server/scripts/check-isolation.mjs`**
+
+- 扫描 `server/src` 全部 `.from()` 调用点，检查是否带 `.eq('user_id')`；有意不带的分四类豁免：**表级白名单**（全局表 / 内容寻址 / 身份表 / 运维表）、**文件级白名单**（cron、容量统计）、**insert 链**（隔离靠 payload.user_id 后端强制写入）、**通用出口** `supabase-db.provider.ts`（where 由调用方传入）。
+- 源码级豁免用 `// check-isolation-ignore: 理由`，**理由必须写清**，防止"为了过检而关检查"。
+- 跑法：`pnpm --filter server check:isolation`（建议提交前 + CI 各跑一次；当前 93 处调用点全通过）。
+- ⚠️ 它是**启发式告警门禁**（向后看 12 行 + 常量表名还原），报出的点需人工确认；发现漏报先改脚本，不要删检查。
+
+**本次同步修掉的两个授权缺口（Explore 全量扫描发现）**：
+
+1. **越权读（已修）**：`chat.service.ts` `sendMessage` 取会话历史只按**客户端可控的 `session_id`** 过滤 ⇒ 传入他人 session_id 即可读走该会话全部历史，并作为多轮上下文注入 LLM（数据外泄面）。已补 `.eq('user_id', userId)`。
+2. **全局表零鉴权（已加固）**：`knowledge_articles` 是无 `user_id` 的全局表，其内容直接拼进 system prompt，而 `/chat/knowledge` 四个 CRUD 端点此前无任何身份校验 ⇒ 任意请求可操纵所有用户的助手人设。已加固：列表需登录；写操作走 `requireAdmin()`——配置 `CHAT_ADMIN_IDS`（`.env.secrets`，逗号分隔 user id）后仅白名单可写，未配置时放行并每次 warn。彻底方案（`users` 加 role 列 + 管理员体系）登记 **GK-OPS-18**。
+
+**仍存的根因级风险（登记 GK-OPS-18，本期不处理）**：`X-User-Id` 请求头无签名校验 ⇒ `.eq('user_id', userId)` 可被伪造 header 绕过。当前的"数据隔离"**防误操作与 IDOR，不防伪装身份**。中期二选一：① 身份头签名（HMAC + 服务端密钥，改动小）；② 全面切 Supabase Auth JWT（可与 RLS 方案合并评估）。
+
 ## 4. 密钥清单与存放
 
 **要写**：全量表（名称 / 用途 / 存放位置 / 是否入部署包 / 轮换周期 / 是否已暴露 / 责任人）。覆盖：`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`、`DATABASE_URL`、`WX_APPID`、`WX_SECRET`、LLM API Key（扣子/混元/DeepSeek）、`IMA_CLIENT_ID`、`IMA_API_KEY`、部署解密派生因子（AppID）。
