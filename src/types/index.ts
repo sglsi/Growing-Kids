@@ -168,23 +168,27 @@ export interface TimelineItem {
   answer_attachments?: (AnswerAttachment & { url?: string; thumb_url?: string })[]
 }
 
-// 资料库文档（外部 PDF / Word / TXT 等）
+// 资料库文档（外部 PDF / Word / TXT / 图片等）
 export interface LibraryDoc {
   id: string
   user_id: string
   subject_id: string | null
   name: string
   file_key: string
+  thumb_key: string | null
   mime_type: string | null
+  width: number | null
+  height: number | null
   size_bytes: number | null
   source: string | null
   tags: string[]
   created_at: string
   url?: string
+  thumb_url?: string
   subjects?: Pick<Subject, 'id' | 'name' | 'color'> | null
 }
 
-// 我的文档（汇总 Word / 合成 PDF）
+// 导出文档（汇总 Word / 合成 PDF）—— 系统生成产物，与「资料库」（用户上传）互斥
 export interface DocItem {
   id: string
   user_id: string

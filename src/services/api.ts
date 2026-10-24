@@ -137,6 +137,12 @@ export interface UploadOpts {
    */
   purpose?: 'save' | 'temp' | 'memory' | 'attach'
   /**
+   * 归档目标（思傅 2026-10-24：资料库导入图片）。仅 purpose='save' 时有意义：
+   *  - 不传    ：默认分流——图片进 timeline 收件箱、文档进 library
+   *  - 'library'：图片也归档到资料库（library 条目而非 timeline 条目）
+   */
+  archiveTo?: 'library'
+  /**
    * 原始文件名（思傅 2026-10-23 修「资料库文档中文名不显示」）：
    * 微信 uploadFile 的 multipart filename 取的是**临时文件路径名**（tmp_xxx.pdf），
    * 后端拿不到用户选文件的真实名字 ⇒ 资料库里显示一串随机名。
@@ -186,11 +192,15 @@ export async function uploadFile(
 ): Promise<{ key: string; url: string; thumb_key?: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
   // 上传前先在本机粗压（省流量）；服务端还会再精压一次
   const srcPath = await compressForUpload(filePath)
-  const url = opts.purpose === 'save' ? '/api/upload?purpose=save' : `/api/upload${opts.purpose ? `?purpose=${opts.purpose}` : ''}`
-  // purpose 同时放进 query（url）与 multipart 表单字段（formData），双保险：
+  // purpose / archive_to 同时放进 query（url）与 multipart 表单字段（formData），双保险：
   // 部分容器/中间层会丢弃 query，部分会丢弃表单字段，两端都读即可确保后端拿到。
+  const qs: string[] = []
+  if (opts.purpose) qs.push(`purpose=${opts.purpose}`)
+  if (opts.archiveTo) qs.push(`archive_to=${opts.archiveTo}`)
+  const url = `/api/upload${qs.length ? `?${qs.join('&')}` : ''}`
   const formData: Record<string, string> = {}
   if (opts.purpose) formData.purpose = opts.purpose
+  if (opts.archiveTo) formData.archive_to = opts.archiveTo
   // 原始文件名随表单上传（UTF-8 安全；见 UploadOpts.fileName 注释）
   if (opts.fileName) formData.original_name = encodeURIComponent(opts.fileName)
   const res = await Network.uploadFile({
@@ -220,6 +230,8 @@ export async function uploadFile(
   // 上传即建条目的 purpose（save/memory）要失效对应缓存域；
   // temp/attach 不建条目，无需失效。
   if (opts.purpose === 'save') {
+    // archive_to=library 的图片只建 library 条目，tl 域其实无变化，
+    // 但 tl 一并失效成本极低（下次拉取即刷新），换来的是「绝不会漏刷新」。
     invalidateDomain('tl')
     invalidateDomain('lib')
   } else if (opts.purpose === 'memory') {
@@ -757,6 +769,16 @@ export function batchDeleteLibrary(ids: string[]) {
   )
 }
 
+/** 重命名资料库条目（思傅 2026-10-24） */
+export function renameLibraryDoc(id: string, name: string) {
+  return invalidateAfter(
+    unwrap<{ id: string; name: string }>(
+      Network.request({ url: `/api/library/${id}`, method: 'PATCH', data: { name }, header: authHeaders() }),
+    ),
+    'lib',
+  )
+}
+
 // ============================================================
 // 首页概览
 // ============================================================
@@ -1246,6 +1268,16 @@ export function deleteDocument(id: string) {
   return invalidateAfter(
     unwrap<{ id: string }>(
       Network.request({ url: `/api/documents/${id}`, method: 'DELETE', header: authHeaders() }),
+    ),
+    'doc',
+  )
+}
+
+/** 重命名导出文档（思傅 2026-10-24） */
+export function renameDocument(id: string, title: string) {
+  return invalidateAfter(
+    unwrap<{ id: string; title: string }>(
+      Network.request({ url: `/api/documents/${id}`, method: 'PATCH', data: { title }, header: authHeaders() }),
     ),
     'doc',
   )

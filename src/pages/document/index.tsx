@@ -12,13 +12,14 @@ import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
-  fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument,
+  fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument, renameDocument, deleteDocument,
   type Subject, type TimelineItem, type DocItem, type Paged,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
-import { FileText, FolderOpen } from 'lucide-react-taro'
+import { FileText, FolderOpen, Ellipsis } from 'lucide-react-taro'
+import RenameDialog from '@/components/rename-dialog'
 import { INK } from '@/lib/theme'
 
 type Range = RangeValue
@@ -50,6 +51,7 @@ export default function DocumentPage() {
   const [docsLoading, setDocsLoading] = useState(true)
   const [docFilter, setDocFilter] = useState<'all' | 'docx' | 'pdf'>('all')
   const [busy, setBusy] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<DocItem | null>(null)
   const sel = useSelection()
 
   useDidShow(() => {
@@ -158,6 +160,38 @@ export default function DocumentPage() {
     openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type), d.file_key)
   }
 
+  /** 卡片「⋯」→ 重命名 / 删除（思傅 2026-10-24） */
+  const handleDocMore = (d: DocItem) => {
+    if (sel.selecting) return
+    Taro.showActionSheet({ itemList: ['重命名', '删除'] })
+      .then((res) => {
+        if (res.tapIndex === 0) setRenameTarget(d)
+        else if (res.tapIndex === 1) handleSingleDelete(d)
+      })
+      .catch(() => { /* 取消 */ })
+  }
+
+  const handleSingleDelete = async (d: DocItem) => {
+    const ok = await confirmDelete(1, '份文档')
+    if (!ok) return
+    try {
+      await deleteDocument(d.id)
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      loadDocs({ silent: true })
+    } catch (e) {
+      console.error('删除失败', e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    }
+  }
+
+  const handleRenameConfirm = async (value: string) => {
+    if (!renameTarget) return
+    await renameDocument(renameTarget.id, value)
+    setRenameTarget(null)
+    Taro.showToast({ title: '已重命名', icon: 'success' })
+    loadDocs({ silent: true })
+  }
+
   const handleDelete = async () => {
     if (sel.isEmpty) { Taro.showToast({ title: '请先选择文档', icon: 'none' }); return }
     const ok = await confirmDelete(sel.count, '份文档')
@@ -189,7 +223,7 @@ export default function DocumentPage() {
               onValueChange={setTab}
               options={[
                 { value: 'generate', label: '汇总生成' },
-                { value: 'library', label: '我的文档' },
+                { value: 'library', label: '导出文档' },
               ]}
             />
           </View>
@@ -327,6 +361,11 @@ export default function DocumentPage() {
                         </View>
                         <Text className="block text-xs text-muted-foreground mt-1">{formatTime(d.created_at)}</Text>
                       </View>
+                      {!sel.selecting && (
+                        <View className="p-2" onClick={(e) => { e.stopPropagation?.(); handleDocMore(d) }}>
+                          <Ellipsis size={16} color="#bbb" />
+                        </View>
+                      )}
                     </View>
                   ))}
                 </View>
@@ -353,6 +392,15 @@ export default function DocumentPage() {
                 />
               </View>
             </BottomActionBar>
+          )}
+
+          {renameTarget && (
+            <RenameDialog
+              title="重命名文档"
+              initialValue={renameTarget.title}
+              onCancel={() => setRenameTarget(null)}
+              onConfirm={handleRenameConfirm}
+            />
           )}
         </>
       )}

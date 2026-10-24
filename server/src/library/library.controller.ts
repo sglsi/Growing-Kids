@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Delete, Body, Param, Query, Req, HttpCode, BadRequestException,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, HttpCode, BadRequestException,
 } from '@nestjs/common'
 import { LibraryService } from './library.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
@@ -37,6 +37,14 @@ export class LibraryController {
     const doc = await this.libraryService.create(userId, dto)
     const [withUrl] = await this.libraryService.withUrls([doc])
     return { code: 200, msg: 'success', data: withUrl }
+  }
+
+  @Patch(':id')
+  @HttpCode(200)
+  async rename(@Req() req: RequestWithUser, @Param('id') id: string, @Body() body: { name?: string }) {
+    const userId = requireUserId(req)
+    const data = await this.libraryService.rename(userId, id, body?.name || '')
+    return { code: 200, msg: 'success', data }
   }
 
   @Post('batch-delete')

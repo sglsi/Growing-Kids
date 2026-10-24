@@ -61,6 +61,25 @@ export class LibraryService {
     return data as unknown as LibraryDoc
   }
 
+  /** 重命名（思傅 2026-10-24：资料库改名）。同样 user_id 隔离 + 行数校验 */
+  async rename(userId: string, id: string, name: string): Promise<{ id: string; name: string }> {
+    const trimmed = (name || '').trim()
+    if (!trimmed) throw new BadRequestException('名称不能为空')
+    if (trimmed.length > 100) throw new BadRequestException('名称过长（最多 100 个字符）')
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({ name: trimmed })
+      .eq('user_id', userId)
+      .eq('id', id)
+      .is('deleted_at', null)
+      .select('id, name')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new NotFoundException('文档不存在')
+    return data as { id: string; name: string }
+  }
+
   async remove(userId: string, id: string): Promise<{ id: string }> {
     const client = getSupabaseClient()
     const { data, error } = await client

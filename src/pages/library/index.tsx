@@ -1,24 +1,46 @@
-import { View, Text, ScrollView } from '@tarojs/components'
+import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { FileText, Trash2, Upload } from 'lucide-react-taro'
+import { FileText, Trash2, Upload, Ellipsis } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
 import { Input } from '@/components/ui/input'
 import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
+import RenameDialog from '@/components/rename-dialog'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
-  fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile,
+  fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc,
   type LibraryDoc, type Subject, type Paged,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 import { INK } from '@/lib/theme'
 
+/** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
+function getTypeLabel(mime: string | null, name: string): string {
+  const m = (mime || '').toLowerCase()
+  if (m.startsWith('image/')) return '图片'
+  if (isPdfFile(m || name)) return 'PDF'
+  if (m.includes('word') || /\.docx?$/i.test(name)) return 'Word'
+  if (m.includes('text') || /\.txt$/i.test(name)) return 'TXT'
+  return '文档'
+}
+
+function isImageDoc(mime: string | null): boolean {
+  return (mime || '').toLowerCase().startsWith('image/')
+}
+
+/** 生成图片默认名（chooseImage 不返回原始文件名，微信只给临时路径） */
+function genImageName(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `图片_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
 /**
- * 资料库：外部 PDF / Word / TXT 等文档
+ * 资料库：外部 PDF / Word / TXT / 图片
  * v4 新增页面，对应后端 GET /api/library
  */
 export default function LibraryPage() {
@@ -27,6 +49,7 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true)
   const [keyword, setKeyword] = useState('')
   const [busy, setBusy] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<LibraryDoc | null>(null)
   const sel = useSelection()
 
   /**
@@ -79,6 +102,11 @@ export default function LibraryPage() {
 
   const handleOpen = (d: LibraryDoc) => {
     if (sel.selecting) { sel.toggle(d.id); return }
+    // 图片不经过 openStorageFile 的 PDF/文档逻辑，直接预览
+    if (isImageDoc(d.mime_type)) {
+      Taro.previewMedia({ sources: [{ url: d.url || '', type: 'image' }] })
+      return
+    }
     openStorageFile(d.url || '', isPdfFile(d.mime_type || d.name), d.file_key)
   }
 
@@ -113,7 +141,24 @@ export default function LibraryPage() {
     }
   }
 
-  const handleUpload = async () => {
+  const doUpload = async (filePath: string, fileName: string) => {
+    Taro.showLoading({ title: '上传中…' })
+    try {
+      // 后端 /api/upload purpose=save + archive_to=library：图片也归档到资料库
+      // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
+      //    表现为「提示已归档，但资料库里没有」。
+      await uploadFile(filePath, { purpose: 'save', archiveTo: 'library', fileName })
+      Taro.hideLoading()
+      Taro.showToast({ title: '已归档到资料库', icon: 'success' })
+      load({ silent: true })
+    } catch (e) {
+      Taro.hideLoading()
+      console.error('上传失败', e)
+      Taro.showToast({ title: '上传失败，请重试', icon: 'none' })
+    }
+  }
+
+  const handleChooseDoc = async () => {
     try {
       const res = await Taro.chooseMessageFile({
         count: 1,
@@ -121,18 +166,54 @@ export default function LibraryPage() {
         extension: ['pdf', 'doc', 'docx', 'txt'],
       })
       const f = res.tempFiles[0]
-      Taro.showLoading({ title: '上传中…' })
-      // 后端 /api/upload 检测为非图片时自动归档到 library，并回传 library_id
-      // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
-      //    表现为「提示已归档，但资料库里没有」。
-      await uploadFile(f.path, { purpose: 'save', fileName: f.name })
-      Taro.hideLoading()
-      Taro.showToast({ title: '已归档到资料库', icon: 'success' })
-      load({ silent: true })
+      await doUpload(f.path, f.name)
     } catch (e) {
-      Taro.hideLoading()
-      Taro.showToast({ title: '请在小程序中从聊天/文件选择文档', icon: 'none' })
+      // 用户取消选择不打扰
+      const msg = (e as Error)?.message || ''
+      if (!/cancel/i.test(msg)) Taro.showToast({ title: '请在小程序中从聊天/文件选择文档', icon: 'none' })
     }
+  }
+
+  const handleChooseImage = async () => {
+    try {
+      const res = await Taro.chooseImage({ count: 1, sourceType: ['album', 'camera'] })
+      const f = res.tempFiles[0]
+      // chooseImage 不返回原始文件名（只给临时路径）⇒ 生成时间戳名
+      await doUpload(f.path, genImageName())
+    } catch (e) {
+      const msg = (e as Error)?.message || ''
+      if (!/cancel/i.test(msg)) Taro.showToast({ title: '选择图片失败', icon: 'none' })
+    }
+  }
+
+  const handleUpload = () => {
+    Taro.showActionSheet({
+      itemList: ['选择文档（PDF / Word / TXT）', '选择图片'],
+    })
+      .then((res) => {
+        if (res.tapIndex === 0) handleChooseDoc()
+        else if (res.tapIndex === 1) handleChooseImage()
+      })
+      .catch(() => { /* 取消 */ })
+  }
+
+  /** 卡片「⋯」→ 重命名 / 删除 */
+  const handleMore = (d: LibraryDoc) => {
+    if (sel.selecting) return
+    Taro.showActionSheet({ itemList: ['重命名', '删除'] })
+      .then((res) => {
+        if (res.tapIndex === 0) setRenameTarget(d)
+        else if (res.tapIndex === 1) handleSingleDelete(d)
+      })
+      .catch(() => { /* 取消 */ })
+  }
+
+  const handleRenameConfirm = async (value: string) => {
+    if (!renameTarget) return
+    await renameLibraryDoc(renameTarget.id, value)
+    setRenameTarget(null)
+    Taro.showToast({ title: '已重命名', icon: 'success' })
+    load({ silent: true })
   }
 
   const getSubjectDot = (id: string | null) => {
@@ -190,6 +271,7 @@ export default function LibraryPage() {
             <View className="space-y-2">
               {docs.map((d) => {
                 const checked = sel.selected.has(d.id)
+                const isImg = isImageDoc(d.mime_type)
                 return (
                   <Card
                     key={d.id}
@@ -200,8 +282,16 @@ export default function LibraryPage() {
                     {sel.selecting && (
                       <CheckDot checked={checked} size={20} />
                     )}
-                    <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                      <FileText size={20} color={INK} />
+                    <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted overflow-hidden">
+                      {isImg && (d.thumb_url || d.url) ? (
+                        <Image
+                          src={d.thumb_url || d.url || ''}
+                          mode="aspectFill"
+                          className="w-11 h-11"
+                        />
+                      ) : (
+                        <FileText size={20} color={INK} />
+                      )}
                     </View>
                     <View className="flex-1 min-w-0">
                       <View className="flex flex-row items-center gap-2">
@@ -211,13 +301,13 @@ export default function LibraryPage() {
                         <Text className="block text-sm font-medium text-foreground truncate">{d.name}</Text>
                       </View>
                       <Text className="block text-xs text-muted-foreground mt-1">
-                        {isPdfFile(d.mime_type || d.name) ? 'PDF' : '文档'}
+                        {getTypeLabel(d.mime_type, d.name)}
                         {getSubjectName(d.subject_id) ? ` · ${getSubjectName(d.subject_id)}` : ''} · {formatTime(d.created_at)}
                       </Text>
                     </View>
                     {!sel.selecting && (
-                      <View className="p-2" onClick={(e) => { e.stopPropagation?.(); handleSingleDelete(d) }}>
-                        <Trash2 size={16} color="#bbb" />
+                      <View className="p-2" onClick={(e) => { e.stopPropagation?.(); handleMore(d) }}>
+                        <Ellipsis size={16} color="#bbb" />
                       </View>
                     )}
                   </Card>
@@ -227,8 +317,8 @@ export default function LibraryPage() {
           ) : (
             <EmptyCard
               title="资料库还是空的"
-              hint="导入 PDF / Word / TXT，或在识别页导入文档，会自动归档到这里"
-              actionLabel="导入文档"
+              hint="导入 PDF / Word / TXT / 图片，或在识别页导入文档，会自动归档到这里"
+              actionLabel="导入文件"
               onAction={handleUpload}
             />
           )}
@@ -247,6 +337,15 @@ export default function LibraryPage() {
             />
           </View>
         </BottomActionBar>
+      )}
+
+      {renameTarget && (
+        <RenameDialog
+          title="重命名资料"
+          initialValue={renameTarget.name}
+          onCancel={() => setRenameTarget(null)}
+          onConfirm={handleRenameConfirm}
+        />
       )}
     </View>
   )

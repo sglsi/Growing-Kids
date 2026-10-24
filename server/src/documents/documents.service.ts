@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
@@ -57,6 +57,25 @@ export class DocumentsService {
       })),
     )
     return { total: count || 0, list }
+  }
+
+  /** 重命名（思傅 2026-10-24：导出文档改名）。同样 user_id 隔离 + 行数校验 */
+  async rename(userId: string, id: string, title: string): Promise<{ id: string; title: string }> {
+    const trimmed = (title || '').trim()
+    if (!trimmed) throw new BadRequestException('名称不能为空')
+    if (trimmed.length > 100) throw new BadRequestException('名称过长（最多 100 个字符）')
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({ title: trimmed })
+      .eq('user_id', userId)
+      .eq('id', id)
+      .is('deleted_at', null)
+      .select('id, title')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) throw new NotFoundException('文档不存在')
+    return data as { id: string; title: string }
   }
 
   async remove(userId: string, id: string): Promise<{ id: string }> {

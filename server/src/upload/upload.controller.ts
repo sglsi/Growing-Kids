@@ -92,6 +92,15 @@ export class UploadController {
     const purpose = String(Array.isArray(purposeRaw) ? purposeRaw[0] : purposeRaw).trim()
     const archive = purpose === 'save' || purpose === '1' || purpose === 'true'
 
+    // archive_to（思傅 2026-10-24：资料库导入图片）：
+    // 默认（不传）= 图片进 timeline 收件箱、文档进 library；
+    // archive_to=library = 图片也归档到资料库（调用方显式指定目标，
+    // 不动默认分流，不影响既有收件箱上传）。
+    // 与 purpose 同样双读（query + formData），防中间层丢参数。
+    const archiveToRaw = b.archive_to ?? q.archive_to ?? ''
+    const archiveTo = String(Array.isArray(archiveToRaw) ? archiveToRaw[0] : archiveToRaw).trim()
+    const imageToLibrary = archiveTo === 'library'
+
     // 展示名（思傅 2026-10-23）：优先 formData.original_name（前端显式传的用户选中文件的
     // 真实名字，UTF-8 安全），回落 multipart filename 头（微信 uploadFile 默认给的是
     // 临时路径名 tmp_xxx.pdf，且中文会被按 latin1 读成乱码，故必须过 decodeUploadFileName）。
@@ -101,7 +110,8 @@ export class UploadController {
       || decodeUploadFileName(file.originalname)
       || ''
     // ── purpose 语义表（新增调用场景务必照此选，选错会多建/少建记录）──
-    //   save | 1 | true  → 归档：图片建 timeline(kind=image)、文档建 library 条目
+    //   save | 1 | true  → 归档：图片建 timeline(kind=image)、文档建 library 条目；
+    //                       配 archive_to=library 时图片也建 library 条目
     //   temp             → 临时：ingestTemp，ref_count=0，24h 后由孤儿 GC 回收
     //   memory           → 持久化但不建条目（成长记忆，key 由 memory_media 关联）
     //   attach 及其他值  → 持久化但不建条目：作为**附件**被别处引用，
@@ -159,7 +169,21 @@ export class UploadController {
     let libraryId = ''
 
     if (archive && !isMemory) {
-      if (isImage) {
+      if (isImage && imageToLibrary) {
+        // 图片按 archive_to=library 指定归档到资料库（与默认分流并存）
+        const doc = await this.libraryService.create(userId, {
+          name: displayName || fileName,
+          file_key: key,
+          thumb_key: ing.thumbKey,
+          mime_type: ing.mimeType,
+          width: ing.width || undefined,
+          height: ing.height || undefined,
+          size_bytes: ing.sizeBytes,
+          file_hash: fileHash,
+          source: 'upload',
+        })
+        libraryId = doc.id
+      } else if (isImage) {
         // 图片 → 统一收件箱（最近题目）
         // 写入 thumb_key / width / height，使列表能走缩略图（此前这些字段恒空 → 列表拉原图）
         const item = await this.timelineService.create(userId, {
@@ -199,6 +223,7 @@ export class UploadController {
       userId,
       key,
       purpose,
+      archiveTo: imageToLibrary ? 'library' : undefined,
       quotaMode: this.quotaService.mode,
       archive,
       timelineId,
