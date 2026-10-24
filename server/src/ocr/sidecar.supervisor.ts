@@ -8,6 +8,7 @@ import {
   getOcrTelemetry,
   getOcrAlertSink,
 } from './ocr-health'
+import { toGuiPython } from './python-gui'
 
 /**
  * OCR 侧车守护进程（lazy-start + 空闲回收 + 资源紧张回收）
@@ -99,7 +100,7 @@ function pythonUsable(python: string): boolean {
       fs.accessSync(python, fs.constants.X_OK)
       return true
     }
-    execSync('command -v ' + python, { stdio: 'ignore' })
+    execSync('command -v ' + python, { stdio: 'ignore', windowsHide: true })
     return true
   } catch {
     return false
@@ -343,9 +344,9 @@ export class SidecarSupervisor {
       }
       const stdio: ('ignore' | 'pipe' | number)[] = logFd >= 0 ? ['ignore', logFd, logFd] : ['ignore', 'pipe', 'pipe']
       const child = spawn(
-        this.cfg.python,
+        toGuiPython(this.cfg.python),
         [this.cfg.script, '--host', this.cfg.host, '--port', String(this.cfg.port)],
-        { cwd: this.cfg.engineDir, env: { ...process.env, ...this.cfg.engineEnv }, stdio },
+        { cwd: this.cfg.engineDir, env: { ...process.env, ...this.cfg.engineEnv }, stdio, windowsHide: true },
       )
       if (logFd < 0) {
         child.stdout?.on('data', (d) => console.log(`[sidecar] ${String(d).trim()}`))

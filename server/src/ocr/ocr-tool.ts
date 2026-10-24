@@ -3,6 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import zlib from 'zlib'
+import { toGuiPython } from './python-gui'
 
 /**
  * OCR 工具式调用器（进程隔离，治「侧车崩溃/卡死」）
@@ -57,7 +58,7 @@ function pythonCanImport(py: string, mod: string, timeoutMs = 8000): boolean {
   if (hit !== undefined) return hit
   let ok = false
   try {
-    execFileSync(py, ['-c', `import ${mod}`], { timeout: timeoutMs, stdio: 'ignore' })
+    execFileSync(toGuiPython(py), ['-c', `import ${mod}`], { timeout: timeoutMs, stdio: 'ignore', windowsHide: true })
     ok = true
   } catch {
     ok = false
@@ -197,10 +198,11 @@ export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOc
     //   → 3.x 的 choices 不含它 → 一样 exit 2。
     const args = [script, '--once', '--op', op, '--mode', mode]
     if (engine === 'legacy') args.push('--layout', opts.layout ?? 'auto')
-    const child = spawn(python, args, {
+    const child = spawn(toGuiPython(python), args, {
       cwd: dir || undefined,
       env: { ...process.env, OCR_ENGINE_MODE: mode },
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true, // Windows：禁掉 python 子进程的控制台窗口（用户实测被闪扰）
     })
 
     child.stdout.on('data', (d) => { out += String(d) })
@@ -405,10 +407,11 @@ class PersistentOcr {
       this.readyResolve = resolve
       let child: ChildProcessWithoutNullStreams
       try {
-        child = spawn(this.python, [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid', '--layout', 'auto'], {
+        child = spawn(toGuiPython(this.python), [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid', '--layout', 'auto'], {
           cwd: this.cwd || undefined,
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...process.env, OCR_ENGINE_MODE: 'rapid' },
+          windowsHide: true, // Windows：禁掉常驻 sidecar 的控制台窗口（用户实测被闪扰）
         })
       } catch (e) {
         console.warn(`[persistent-ocr] Spawn 失败: ${(e as Error)?.message ?? e}`)

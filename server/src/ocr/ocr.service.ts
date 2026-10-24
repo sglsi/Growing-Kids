@@ -9,6 +9,7 @@ import * as http from 'http'
 import * as https from 'https'
 import { execFileSync } from 'child_process'
 import sharp from 'sharp'
+import { toGuiPython } from './python-gui'
 import { StorageService } from '../storage/storage.service'
 import type {
   RecognizedItem,
@@ -1124,7 +1125,7 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
     const probe = getDiagnoseProbeBuffer()
     const pyVersion = (py: string): string | null => {
       try {
-        return execFileSync(py, ['--version'], { timeout: 8000 }).toString().trim().split('\n')[0] || null
+        return execFileSync(toGuiPython(py), ['--version'], { timeout: 8000, windowsHide: true }).toString().trim().split('\n')[0] || null
       } catch (e) {
         return `不可用：${String((e as Error)?.message ?? e).split('\n')[0]}`
       }

@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { Injectable } from '@nestjs/common'
+import { toGuiPython } from './python-gui'
 
 /**
  * OCR 运行环境自动恢复（沙箱重置自愈，全流程无人值守）
@@ -55,9 +56,9 @@ const REQUIRED_PKG_DIRS = [
   'uvicorn',
   'psutil',
 ]
-/** 全量自检：一次性 import 全部关键模块（paddleocr 导入较慢，约 5~15s） */
+/** 全量自检：一次性 import 全部关键模块（paddleocr 导入较慢，约 5~15s；Windows 冷盘+启动高峰可到 60s+，超时放宽到 180s） */
 const REQUIRED_MODULES = REQUIRED_PKG_DIRS.join(',')
-const FULL_CHECK_TIMEOUT_MS = 60 * 1000
+const FULL_CHECK_TIMEOUT_MS = 180 * 1000
 /** 恢复脚本硬超时（脚本内 pip 各组自带 600/900s 超时，此处兜底强杀） */
 const RECOVER_KILL_MS = 15 * 60 * 1000
 
@@ -72,6 +73,10 @@ export class EnvRecoveryService {
   private lastError: string | null = null
   /** 恢复脚本最近一次完整输出（含 pip 报错），供 /api/image/ocr-diagnose 透出排障 */
   private lastRecoverLog: string | null = null
+  /** 最近一次 import 自检是否超时（超时≠缺包，不触发重装） */
+  private lastProbeTimedOut = false
+  /** 最近一次 import 自检的失败详情（failedModule/timedOut/code） */
+  private lastProbeDetail: { ok: boolean; timedOut: boolean; failedModule?: string; code?: number | null } | null = null
 
   /** 毫秒级轻量自检：venv 解释器 + site-packages 关键包目录存在（骨架丢失场景即判缺失） */
   private lightCheck(): boolean {
@@ -107,37 +112,108 @@ export class EnvRecoveryService {
     return null
   }
 
-  /** 全量自检：venv python 实际 import 全部关键模块（覆盖"目录在但半损坏"的边角） */
-  async fullCheck(): Promise<boolean> {
-    this.lastCheckAt = Date.now()
+/** 全量自检：venv python 实际 import 全部关键模块（覆盖"目录在但半损坏"的边角） */
+async fullCheck(): Promise<boolean> {
+  this.lastCheckAt = Date.now()
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await this.probeAll()
+    if (r.ok) {
+      this.lastProbeTimedOut = false
+      this.lastProbeDetail = null
+      return true
+    }
+    this.lastProbeDetail = r
+    if (r.timedOut && attempt === 1) {
+      // 超时≠缺包（启动高峰/冷盘/CPU 竞争都会让 8 个大件的 import 拖过阈值）：
+      // 等 10s 重试一次；仍超时则标记 timedOut 交给上层决定**不触发重装**
+      // （2026-10-24 实测：60s 超时误判 → 白跑 3-6 分钟 install-ocr-env.ps1，
+      //  而同一 venv 的 persistent-ocr 预热明明成功了——重装治不了超时）
+      console.warn(`[ocr-env] import 自检第 ${attempt} 次超时（${FULL_CHECK_TIMEOUT_MS / 1000}s），10s 后重试`)
+      await new Promise((r2) => setTimeout(r2, 10_000))
+      continue
+    }
+    break
+  }
+  this.lastProbeTimedOut = this.lastProbeDetail?.timedOut ?? false
+  if (!this.lastProbeTimedOut && this.lastProbeDetail?.failedModule) {
+    console.warn(`[ocr-env] import 自检未过：模块 ${this.lastProbeDetail.failedModule} 导入失败（exit=${this.lastProbeDetail.code}）`)
+  }
+  return false
+}
+
+/**
+ * 一次性 import 全部关键模块。
+ * 返回 { ok, timedOut, failedModule?, code? }：
+ *  - timedOut：超时（不等于缺包，见 fullCheck 注释）
+ *  - failedModule：拆分逐个 import 后第一个失败的模块（真缺包/半损坏）
+ */
+private async probeAll(): Promise<{ ok: boolean; timedOut: boolean; failedModule?: string; code?: number | null }> {
+  const code = await new Promise<number>((resolve) => {
+    let child: ReturnType<typeof spawn>
     try {
-      const code = await new Promise<number>((resolve) => {
-        const child = spawn(VENV_PY, ['-c', `import ${REQUIRED_MODULES}`], {
+      child = spawn(toGuiPython(VENV_PY), ['-c', `import ${REQUIRED_MODULES}`], {
+        stdio: 'ignore',
+        env: process.env,
+        windowsHide: true,
+      })
+    } catch {
+      resolve(127)
+      return
+    }
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+      resolve(124)
+    }, FULL_CHECK_TIMEOUT_MS)
+    child.on('exit', (c) => {
+      clearTimeout(killer)
+      resolve(c ?? 1)
+    })
+    child.on('error', () => {
+      clearTimeout(killer)
+      resolve(127)
+    })
+  })
+  if (code === 0) return { ok: true, timedOut: false }
+  if (code === 124) return { ok: false, timedOut: true }
+  // 真失败（缺包/半损坏）：逐个 import 定位是哪个模块，日志与诊断才有信息量
+  for (const mod of REQUIRED_PKG_DIRS) {
+    const c = await new Promise<number>((resolve) => {
+      let child: ReturnType<typeof spawn>
+      try {
+        child = spawn(toGuiPython(VENV_PY), ['-c', `import ${mod}`], {
           stdio: 'ignore',
           env: process.env,
+          windowsHide: true,
         })
-        const killer = setTimeout(() => {
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            /* ignore */
-          }
-          resolve(124)
-        }, FULL_CHECK_TIMEOUT_MS)
-        child.on('exit', (c) => {
-          clearTimeout(killer)
-          resolve(c ?? 1)
-        })
-        child.on('error', () => {
-          clearTimeout(killer)
-          resolve(127)
-        })
+      } catch {
+        resolve(127)
+        return
+      }
+      const killer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* ignore */
+        }
+        resolve(124)
+      }, 120_000)
+      child.on('exit', (c2) => {
+        clearTimeout(killer)
+        resolve(c2 ?? 1)
       })
-      return code === 0
-    } catch {
-      return false
-    }
+      child.on('error', () => {
+        clearTimeout(killer)
+        resolve(127)
+      })
+    })
+    if (c !== 0) return { ok: false, timedOut: c === 124, failedModule: mod, code: c }
   }
+  return { ok: false, timedOut: false, code }
+}
 
   /**
    * 确保 OCR 运行环境可用；缺失时自动恢复并等待完成。
@@ -156,6 +232,14 @@ export class EnvRecoveryService {
       if (await this.fullCheck()) {
         this.markOk()
         return true
+      }
+      // 自检超时 ≠ 缺包：重装（3~6 分钟）治不了超时，只会雪上加霜。
+      // 标记等待重试、返回 false 让调用方本次显式报错，绝不启动重装。
+      if (this.lastProbeTimedOut) {
+        this.status = 'unknown'
+        this.lastError = `OCR 环境 import 自检超时（${FULL_CHECK_TIMEOUT_MS / 1000}s 内未完成，通常是启动高峰/冷盘竞争），稍后重试即可，无需重装`
+        console.warn(`[ocr-env] ${this.lastError}`)
+        return false
       }
     }
     return await this.triggerRecovery(waitMs)
@@ -209,6 +293,7 @@ export class EnvRecoveryService {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: childEnv,
             cwd: path.dirname(script),
+            windowsHide: true,
           })
         : spawn('bash', [script], {
             stdio: ['ignore', 'pipe', 'pipe'],
