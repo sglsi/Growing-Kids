@@ -19,10 +19,13 @@ import type { Request, Response, NextFunction } from 'express'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
 import { memGet, memSet } from './mem-cache'
+import { authTokenEnabled, readAuthHeader, signAuthToken, verifyAuthToken } from './auth-token'
 
 const HEADER_USER_ID = 'x-user-id'
 const HEADER_OPEN_ID = 'x-open-id'
 const HEADER_DEVICE_ID = 'x-device-id'
+/** 身份令牌回传头（服务端签发，前端后续请求带上） */
+const HEADER_TOKEN = 'x-auth-token'
 
 /**
  * 用户对象内存缓存 TTL（思傅 2026-10-21 性能优化）。
@@ -51,13 +54,42 @@ export class UserContextMiddleware implements NestMiddleware {
   constructor(private readonly usersService: UsersService) {}
 
   async use(req: RequestWithUser, res: Response, next: NextFunction) {
+    // 身份来源优先级（2026-10-24 起）：
+    //   1) X-Auth-Token  —— 服务端签发的身份令牌（防伪造，推荐）
+    //   2) X-User-Id     —— 旧版裸 id，过渡期兼容（每次打 warn）
+    //   3) X-Open-Id     —— 微信 openid（扫码登录）
+    //   4) X-Device-Id   —— 设备锚点，找/建匿名身份
+    //   5) 都没有        —— 建匿名 user
     try {
       const headerUserId = this.asString(req.headers[HEADER_USER_ID])
       const headerOpenId = this.asString(req.headers[HEADER_OPEN_ID])
       const headerDeviceId = this.asString(req.headers[HEADER_DEVICE_ID])
+      const headerToken = readAuthHeader(req.headers as Record<string, unknown>)
 
       let user: User | null = null
-      if (headerUserId) {
+
+      // 1) 令牌优先：验签通过才认，失败则忽略该头并回退（防止把用户锁死在外）
+      if (headerToken && authTokenEnabled()) {
+        const tokenUserId = verifyAuthToken(headerToken)
+        if (tokenUserId) {
+          const cacheKey = `user:${tokenUserId}`
+          let found = memGet<User>(cacheKey)
+          if (!found) {
+            found = await this.usersService.findById(tokenUserId)
+            if (found) memSet(cacheKey, found, USER_CACHE_TTL)
+          }
+          if (found && !this.isExpiredAnonymous(found)) user = found
+          else console.warn('[user-context] 令牌有效但用户不存在/已过期清理', tokenUserId)
+        } else {
+          console.warn('[user-context] X-Auth-Token 验签失败（过期或篡改），已忽略')
+        }
+      }
+
+      if (!user && headerUserId) {
+        // 裸 id 仅过渡期兼容：启用了令牌体系就说明前端应该带 token 了
+        if (authTokenEnabled()) {
+          console.warn('[user-context] 请求仍使用未签名的 X-User-Id，请前端升级带上 X-Auth-Token', headerUserId)
+        }
         const cacheKey = `user:${headerUserId}`
         let found = memGet<User>(cacheKey)
         if (!found) {
@@ -84,6 +116,11 @@ export class UserContextMiddleware implements NestMiddleware {
         req.deviceId = headerDeviceId
         // 回传身份，匿名用户下次请求带上即可续用
         res.setHeader(HEADER_USER_ID, user.id)
+        // 滑动续签：每次响应都带回新令牌，前端覆盖本地（30 天不过期）
+        if (authTokenEnabled()) {
+          const token = signAuthToken(user.id)
+          if (token) res.setHeader(HEADER_TOKEN, token)
+        }
       } else {
         req.deviceId = headerDeviceId
       }

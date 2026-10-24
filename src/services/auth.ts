@@ -12,7 +12,7 @@
 
 import Taro from '@tarojs/taro'
 import { Network } from '@/network'
-import { buildHeaders, captureUserId, getUserId, setUserId } from '@/services/net'
+import { buildHeaders, captureUserId, getUserId, setAuthToken, setUserId } from '@/services/net'
 import { clearAllCache } from '@/services/cache'
 import type {
   ApiEnvelope,
@@ -79,7 +79,6 @@ export function applyLoginUser(user: AuthUser): void {
   // 与 login() 同一动作：身份切换后旧缓存作废（详见 cache.ts 的 userId 隔离设计）
   clearAllCache()
 }
-
 // ------------------------------------------------------------
 // wx.login 封装（Promise 化）
 // ------------------------------------------------------------
@@ -137,6 +136,8 @@ export async function login(profile?: UpdateProfilePayload): Promise<LoginResult
 
   // 关键：把身份切换到正式用户，后续所有请求都用它
   setUserId(res.user.id)
+  // 身份令牌（服务端签发）：存本地，后续请求带 X-Auth-Token 防伪造身份头
+  if (res.auth_token) setAuthToken(res.auth_token)
   saveAuthState(toAuthState(res.user))
   // 匿名 → 正式：userId 变了，旧匿名身份下的本地缓存全部作废（数据虽已迁移，
   // 缓存 key 按 userId 隔离，不清会残留一段无人认领的缓存；顺带防切换账号串数据）
@@ -180,7 +181,10 @@ export async function logout(): Promise<void> {
   }
   saveAuthState(null)
   try {
+    // 身份与令牌一起清：token 不清的话，登出后请求仍带旧令牌，
+    // 后端验签通过会把你当仍登录（思傅 2026-10-24 令牌方案的必要一步）
     Taro.removeStorageSync('gk_user_id')
+    Taro.removeStorageSync('gk_auth_token')
   } catch {
     /* ignore */
   }

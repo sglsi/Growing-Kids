@@ -23,8 +23,8 @@
 **要写**（逐条按格式登记，每条给判据命令与缓解手段）：
 - `R-技术-01` **Supabase IP 间歇封锁**：CF 层封锁导致全站 500；现状缓解=`supabase-dns-pin.ts`（33 个候选 IP TLS 探测优选 + 5min 自愈重探）；静态 IP 池方案已证伪，勿回退
 - `R-技术-02` **RLS 未启用**：隔离完全依赖代码层 `.eq('user_id')`，单点疏漏即越权。**2026-10-24 已重新评估（ADD-07 3.1）：结论=不启用 RLS**（service_role 绕过、无 Supabase JWT、覆盖面不增、与共享模型冲突），改用**静态门禁** `server/scripts/check-isolation.mjs`（`pnpm --filter server check:isolation`，93 处调用点全通过）。剩余风险转移至 `R-技术-09`（身份头可伪造）
-- `R-技术-08` **全局表零鉴权**（2026-10-24 新增，已加固待彻底修）：`knowledge_articles` 为全局表且内容进 system prompt，CRUD 端点已加 `requireAdmin` + `CHAT_ADMIN_IDS` 白名单（未配置时放行+warn）；彻底方案=`users` 加 role 列做管理员体系，待思傅决策
-- `R-技术-09` **身份头可伪造**（2026-10-24 新增，根因级）：`X-User-Id` 无签名校验 ⇒ `.eq('user_id')` 可被伪造 header 绕过，现有隔离**防误操作/IDOR，不防伪装身份**。中期二选一：① 身份头 HMAC 签名（改动小，推荐）；② 全面切 Supabase Auth JWT（可与 RLS 合并评估）。触发条件=上线前必须处置
+- `R-技术-08` **全局表零鉴权**（2026-10-24 新增，**已加固**）：`knowledge_articles` 为全局表且内容进 system prompt，CRUD 端点已加 `requireAdmin` + `CHAT_ADMIN_IDS` 白名单（思傅账号 `cc6d7b10-…`，非白名单实测 403）；彻底方案=users 加 role 列做管理员体系，待思傅决策
+- `R-技术-09` **身份头可伪造**（2026-10-24 新增，**已实施令牌方案，剩收尾**）：`X-User-Id` 无签名 ⇒ `.eq('user_id')` 可被伪造 header 绕过。已落地 `shared/auth-token.ts`（HMAC 票据 + 30 天 TTL + 滑动续签，见 ADD-07 3.1），中间件优先级「令牌 > 裸 id（兼容期 warn）」；非白名单写知识库实测 403。**剩余**：前端全量带上令牌后禁用裸 `X-User-Id`；更彻底方案（Supabase Auth JWT）与 RLS 合并评估
 - `R-技术-03` **ima 日配额（220021）**：按调用计数、零命中也扣、不可退避；缓解=先导探针式检索压缩调用次数、专属文案提示
 - `R-技术-04` **LLM 供应商可用性**：扣子在平台外不可用（SDK 只认运行时 JWT），已改 OpenAPI；缓解=降级链 coze → deepseek → hunyuan
 - `R-技术-05` **无 CI/CD 与自动化门禁**：回归靠人工；缓解=见 QA-15 的最小门禁建议

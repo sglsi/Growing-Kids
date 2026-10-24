@@ -63,7 +63,15 @@
 1. **越权读（已修）**：`chat.service.ts` `sendMessage` 取会话历史只按**客户端可控的 `session_id`** 过滤 ⇒ 传入他人 session_id 即可读走该会话全部历史，并作为多轮上下文注入 LLM（数据外泄面）。已补 `.eq('user_id', userId)`。
 2. **全局表零鉴权（已加固）**：`knowledge_articles` 是无 `user_id` 的全局表，其内容直接拼进 system prompt，而 `/chat/knowledge` 四个 CRUD 端点此前无任何身份校验 ⇒ 任意请求可操纵所有用户的助手人设。已加固：列表需登录；写操作走 `requireAdmin()`——配置 `CHAT_ADMIN_IDS`（`.env.secrets`，逗号分隔 user id）后仅白名单可写，未配置时放行并每次 warn。彻底方案（`users` 加 role 列 + 管理员体系）登记 **GK-OPS-18**。
 
-**仍存的根因级风险（登记 GK-OPS-18，本期不处理）**：`X-User-Id` 请求头无签名校验 ⇒ `.eq('user_id', userId)` 可被伪造 header 绕过。当前的"数据隔离"**防误操作与 IDOR，不防伪装身份**。中期二选一：① 身份头签名（HMAC + 服务端密钥，改动小）；② 全面切 Supabase Auth JWT（可与 RLS 方案合并评估）。
+**身份头伪造的处置（2026-10-24 落地，思傅选方案 A：服务端签发票据）**
+
+`X-User-Id` 无签名 ⇒ `.eq('user_id')` 可被伪造 header 绕过，「数据隔离」此前只防误操作/IDOR、不防伪装身份。小程序前端不能持有签名密钥（JS 可被提取），所以采用**服务端签发票据**而非前端 HMAC：
+
+- 新模块 `server/src/shared/auth-token.ts`：格式 `v1.<userId>.<exp>.<sig>`，`sig = HMAC-SHA256(payload, AUTH_TOKEN_SECRET)` 前 40 位，TTL 30 天，定长比较防时序侧信道；
+- `UserContextMiddleware` 身份优先级：`X-Auth-Token`（验签通过才认）> `X-User-Id`（**过渡期兼容**，每次 warn）> `X-Open-Id` > `X-Device-Id` > 匿名建号；每个响应都回传续签后的令牌，前端覆盖本地 ⇒ 滑动不过期；
+- 登录/扫码授权接口在返回体带 `auth_token`；前端 `buildHeaders` 带 `X-Auth-Token`，登出时**令牌与 uid 一起清**（不清会"登出不成功"）；
+- **过渡策略**：`AUTH_TOKEN_SECRET` 未配置 ⇒ 不签不验，行为与改造前一致（已配置并生效）；待前端全量带上令牌后，再禁用裸 `X-User-Id`（剩余工作登记 GK-OPS-18）；
+- ⚠️ 边界：令牌防"伪造他人身份"，不防"自己的令牌被拿走"（设备丢失场景）；更彻底的方案是 Supabase Auth JWT，与 RLS 议题合并评估。
 
 ## 4. 密钥清单与存放
 

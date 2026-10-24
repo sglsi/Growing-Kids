@@ -27,6 +27,8 @@ export interface MigratedCount {
 export interface LoginResult {
   user: AuthUser
   migrated: MigratedCount
+  /** 服务端签发的身份令牌（HMAC，30 天）；带上后后端优先验令牌，防伪造身份头 */
+  auth_token?: string
 }
 
 export interface UpdateProfilePayload {

@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Patch, Post, Query, Req } from '@nestj
 import { AuthService } from './auth.service'
 import { QrLoginService } from './qr-login.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
+import { signAuthToken } from '../shared/auth-token'
 import type { LoginDto, QrAuthorizeDto, UpdateProfileDto } from './auth.types'
 
 @Controller('auth')
@@ -27,7 +28,9 @@ export class AuthController {
       nickname: dto.nickname,
       avatar_url: dto.avatar_url,
     }, req.deviceId)
-    return { code: 200, msg: 'success', data }
+    // 一并签发身份令牌：前端存下来，后续请求带 X-Auth-Token（防伪造身份头）
+    const token = signAuthToken(data.user.id)
+    return { code: 200, msg: 'success', data: token ? { ...data, auth_token: token } : data }
   }
 
   /** 当前用户（前端启动时可用 X-User-Id 校验身份是否有效） */
@@ -82,6 +85,7 @@ export class AuthController {
   @HttpCode(200)
   async authorizeQrTicket(@Body() dto: QrAuthorizeDto, @Req() req: RequestWithUser) {
     const data = await this.qrLoginService.authorize(dto.token, dto.code, dto.anonymous_id, req.deviceId)
-    return { code: 200, msg: 'success', data }
+    const token = data?.user?.id ? signAuthToken(data.user.id) : ''
+    return { code: 200, msg: 'success', data: token ? { ...data, auth_token: token } : data }
   }
 }

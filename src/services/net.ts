@@ -7,12 +7,31 @@ import { Network } from '@/network'
 
 export const USER_ID_KEY = 'gk_user_id'
 export const DEVICE_ID_KEY = 'gk_device_id'
+/** 身份令牌（服务端 HMAC 签发，30 天，后端每次响应滑动续签） */
+export const AUTH_TOKEN_KEY = 'gk_auth_token'
 
 export function getUserId(): string {
   try {
     return Taro.getStorageSync(USER_ID_KEY) || ''
   } catch {
     return ''
+  }
+}
+
+export function getAuthToken(): string {
+  try {
+    return Taro.getStorageSync(AUTH_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setAuthToken(token?: string) {
+  if (!token) return
+  try {
+    if (getAuthToken() !== token) Taro.setStorageSync(AUTH_TOKEN_KEY, token)
+  } catch {
+    /* ignore */
   }
 }
 
@@ -47,18 +66,26 @@ export function getDeviceId(): string {
 export function buildHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const uid = getUserId()
   const did = getDeviceId()
+  const token = getAuthToken()
   const headers: Record<string, string> = { ...extra }
   if (uid) headers['X-User-Id'] = uid
   if (did) headers['X-Device-Id'] = did
+  // 令牌优先：后端验签通过才认 uid，防伪造身份头（2026-10-24，思傅方案 A）
+  if (token) headers['X-Auth-Token'] = token
   return headers
 }
 
-/** 从响应中捕获匿名身份回传头 */
+/**
+ * 从响应中捕获身份回传头：X-User-Id（匿名建号回传）与 X-Auth-Token（滑动续签）。
+ * 两个都存本地，后者每次被后端刷新，覆盖即可保持 30 天不过期。
+ */
 export function captureUserId(res: { header?: Record<string, string> }) {
   try {
     const headers = res?.header || {}
     const uid = headers['X-User-Id'] || headers['x-user-id']
     if (uid) setUserId(uid)
+    const token = headers['X-Auth-Token'] || headers['x-auth-token']
+    if (token) setAuthToken(token)
   } catch {
     /* ignore */
   }
