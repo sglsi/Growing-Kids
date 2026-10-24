@@ -14,6 +14,7 @@ import Taro from '@tarojs/taro'
 import { Network } from '@/network'
 import { buildHeaders, captureUserId, getUserId, setAuthToken, setUserId } from '@/services/net'
 import { clearAllCache } from '@/services/cache'
+import { resetWakeState } from '@/services/wake'
 import type {
   ApiEnvelope,
 } from '@/types'
@@ -190,6 +191,8 @@ export async function logout(): Promise<void> {
   }
   // 本地读缓存（SWR）按 userId 隔离，登出即整体清空，防止下次登录看到上账号数据
   clearAllCache()
+  // 唤醒状态一并重置：防止「上一个环境已确认就绪」的 30s 缓存挡住新环境的唤醒判定
+  resetWakeState()
 }
 
 /**

@@ -1,4 +1,5 @@
 import Taro from '@tarojs/taro'
+import { ensureBackendAwake, isConnError } from '@/services/wake'
 
 /**
  * 网络请求模块
@@ -7,6 +8,9 @@ import Taro from '@tarojs/taro'
  *
  * IMPORTANT: 项目已经全局注入 PROJECT_DOMAIN
  * IMPORTANT: 除非你需要添加全局参数，如给所有请求加上 header，否则不能修改此文件
+ *
+ * 2026-10-24 全局能力（经思傅确认）：request 遇连接类错误（后端挂了/电脑重启）
+ * 时自动唤醒后端并重放一次——替代已取消的看门狗机制。详见 services/wake.ts。
  */
 export namespace Network {
     const createUrl = (url: string): string => {
@@ -21,10 +25,39 @@ export namespace Network {
     }
 
     export const request: typeof Taro.request = option => {
-        return Taro.request({
-            ...option,
-            url: createUrl(option.url),
-        })
+        let retried = false
+        // 跑一次原请求（保留 option.success/fail 回调语义，同时 promise 化）
+        const run = () =>
+            new Promise<Taro.request.SuccessCallbackResult>((resolve, reject) => {
+                Taro.request({
+                    ...option,
+                    url: createUrl(option.url),
+                    success: (res) => {
+                        option.success?.(res)
+                        resolve(res)
+                    },
+                    fail: (err) => {
+                        option.fail?.(err)
+                        reject(err)
+                    },
+                })
+            })
+        // 类型说明：Taro.request 的 RequestTask<T> 泛型在包装场景无法精确保持，
+        // 此处收敛为 any（调用方均按 Promise<Taro.request.SuccessCallbackResult> 使用，
+        // 无人使用 task.abort()——已全仓确认）。
+        return (async () => {
+            try {
+                return await run()
+            } catch (err) {
+                // 仅连接类错误触发「唤醒→重放」；业务错误（4xx/5xx）与域名校验问题不碰
+                if (retried || !isConnError(err)) throw err
+                retried = true
+                console.warn('[network] 连接失败，尝试唤醒后端', String((err as { errMsg?: string })?.errMsg || err))
+                const ok = await ensureBackendAwake()
+                if (!ok) throw err
+                return run()
+            }
+        })() as any
     }
 
     export const uploadFile: typeof Taro.uploadFile = option => {
