@@ -30,7 +30,16 @@ const PAN_FILE = 'https://pan.baidu.com/rest/2.0/xpan/file'
 const PAN_MULTIMEDIA = 'https://pan.baidu.com/rest/2.0/xpan/multimedia'
 const PCS_SUPERFILE = 'https://d.pcs.baidu.com/rest/2.0/pcs/superfile2'
 
-const DEFAULT_ROOT = '/学生/GrowingKids资料库'
+/**
+ * ⚠️⚠️ 2026-06-03 起百度网盘开放平台的新规（官方文档明示，防第三方应用误操作）：
+ *   在该日期**之后创建的应用**，以下接口**仅允许访问 `/apps/{appname}/` 目录下的文件**：
+ *     download / multimedia?method=listall / filemanager / **precreate（上传第一步）** / meta / move
+ *   appname = 你在控制台填的「应用名称」。所以根目录**必须**写成 `/apps/{你的应用名}/...`，
+ *   写 `/学生/...` 会被接口直接拒绝（errno≠0，日志里表现为"precreate 失败 errno=xxx"）。
+ *   旧应用（2026-06-03 前创建）不受此限，可自由指定目录。
+ *   想落到 `/学生/...` 又不走 API ⇒ 改用「本机客户端同步空间」方案（见操作指引文档方案 B）。
+ */
+const DEFAULT_ROOT = '/apps/GrowingKids/GrowingKids资料库'
 const REQ_TIMEOUT_MS = Number(process.env.BAIDU_TIMEOUT_MS || 30000)
 const UPLOAD_TIMEOUT_MS = Number(process.env.BAIDU_UPLOAD_TIMEOUT_MS || 120000)
 

@@ -37,8 +37,12 @@ const SECRETS = path.join(SERVER_ROOT, '.env.secrets')
 
 const OAUTH_AUTHORIZE = 'https://openapi.baidu.com/oauth/2.0/authorize'
 const OAUTH_TOKEN = 'https://openapi.baidu.com/oauth/2.0/token'
-/** 资料库在网盘里的根目录（思傅 2026-10-24 指定：百度网盘 /学生 下） */
-const DEFAULT_ROOT = '/学生/GrowingKids资料库'
+/**
+ * 资料库在网盘里的根目录。
+ * ⚠️ 2026-06-03 之后新建的应用：上传/下载/管理等接口**只能访问 `/apps/{应用名}/` 下**，
+ *    所以这里必须是 `/apps/{你在控制台填的应用名}/...`（写 /学生/... 会被接口拒绝）。
+ */
+const DEFAULT_ROOT = '/apps/GrowingKids/GrowingKids资料库'
 
 /** 极简 .env 解析（不覆盖已有环境变量） */
 function loadEnv() {
