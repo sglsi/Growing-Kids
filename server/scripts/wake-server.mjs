@@ -32,7 +32,7 @@
  *       touch server/logs/.wake-server-disabled 后杀进程。
  */
 import { createServer } from 'node:http'
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
@@ -43,6 +43,8 @@ const SERVER_DIR = path.resolve(HERE, '..')
 const LOGS_DIR = path.join(SERVER_DIR, 'logs')
 const LOG_FILE = path.join(LOGS_DIR, 'wake-server.log')
 const PID_FILE = path.join(LOGS_DIR, '.wake-server.pid')
+/** 后端 pid 登记（{ pid, startedAt }）——替代「用 powershell 查端口/进程」的旧做法 */
+const BACKEND_PID_FILE = path.join(LOGS_DIR, '.backend.pid')
 const DISABLED_FLAG = path.join(LOGS_DIR, '.wake-server-disabled')
 const BACKEND_LOG = () => path.join(LOGS_DIR, `backend-${new Date().toISOString().slice(0, 10)}.log`)
 
@@ -79,54 +81,59 @@ function log(msg) {
   console.log(line)
 }
 
-/** PowerShell 查询（无窗口；唤醒服务自身无控制台时必须加 windowsHide） */
-function ps(script) {
-  return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    encoding: 'utf8',
-    timeout: 15000,
-    windowsHide: true,
-    env: { ...process.env, ...TEMP_ENV },
-  })
+/**
+ * ⚠️⚠️ 2026-10-24 弹窗真凶（实测）：原先用 execFileSync('powershell.exe', …) 去查
+ * 「3001 端口的 pid / dist/main 进程 / 进程启动时间」。powershell.exe 是控制台程序，
+ * 从一个无控制台的守护进程里派生它 ⇒ **每次查询都闪一个 powershell 窗口 + conhost**
+ * （探针实锤：powershell pid=29688 parent=node(46252)，life≈2s 后消失）。
+ * 旧代码里 /status、/wake、以及 daemon 每 60s 的定时刷新都会触发 ⇒ 后台不停弹窗。
+ *
+ * 现在全部改为**纯 Node、零子进程**：进程存活用 process.kill(pid, 0)，
+ * 「在不在跑」用 TCP 探测（portListening），启动时间从自己写的 pidfile 里读。
+ */
+
+/** 进程是否存活（signal 0 = 只探测不发送信号；跨进程可见，零子进程） */
+function alive(pid) {
+  if (!pid || !Number.isFinite(Number(pid)) || Number(pid) <= 0) return false
+  try {
+    process.kill(Number(pid), 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
-/** 3001 监听进程 pid（没监听返回 null） */
-function getBackendPid() {
+function readBackendPidFile() {
   try {
-    const out = ps(
-      `(Get-NetTCPConnection -LocalPort ${BACKEND_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess)`,
-    )
-    const pid = Number(String(out).trim())
-    return Number.isFinite(pid) && pid > 0 ? pid : null
+    const j = JSON.parse(fs.readFileSync(BACKEND_PID_FILE, 'utf8').trim())
+    return { pid: Number(j.pid), startedAt: j.startedAt || null }
   } catch {
     return null
   }
 }
 
-/** 所有 dist/main 进程 pid 列表（拉起前查重用） */
-function findBackendProcs() {
+function writeBackendPidFile(pid) {
   try {
-    const out = ps(
-      `(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*dist\\main*' } | ForEach-Object { $_.ProcessId }) -join ','`,
-    )
-    return String(out)
-      .split(',')
-      .map((s) => Number(s.trim()))
-      .filter((n) => Number.isFinite(n) && n > 0)
-  } catch {
-    return []
+    fs.writeFileSync(BACKEND_PID_FILE, JSON.stringify({ pid, startedAt: new Date().toISOString() }))
+  } catch (e) {
+    log(`WARN: 写后端 pidfile 失败 ${e?.message || e}`)
   }
 }
 
-function procStart(pid) {
-  try {
-    const out = ps(
-      `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToString('yyyy-MM-ddTHH:mm:ss') }`,
-    )
-    const s = String(out).trim()
-    return s ? new Date(s) : null
-  } catch {
-    return null
+/**
+ * 后端 pid：优先内存记录 → pidfile（均需进程存活）；
+ * 两者都没有、但端口在听 ⇒ 返回 -1（外部启动的后端，如手动 nest start），
+ * 用途是「别重复拉起」，调用方不要把 -1 当成可操作的 pid。
+ */
+async function resolveBackendPid() {
+  if (alive(backendPid)) return backendPid
+  const f = readBackendPidFile()
+  if (f && alive(f.pid)) {
+    backendPid = f.pid
+    return f.pid
   }
+  if (await portListening(BACKEND_PORT)) return -1
+  return null
 }
 
 function portListening(port) {
@@ -177,6 +184,7 @@ function spawnBackend() {
     /* ignore */
   }
   backendPid = child.pid
+  writeBackendPidFile(child.pid)
   log(`SPAWN: 已拉起后端 pid=${child.pid}（端口 ${BACKEND_PORT}，OCR 三件套就位，无窗口）`)
   return child.pid
 }
@@ -186,17 +194,22 @@ function spawnBackend() {
  * 并发保护：inFlight 期间后来的 /wake 直接复用同一个结果。
  */
 async function wake() {
-  const pid = getBackendPid()
-  if (pid) {
-    backendPid = pid
-    return { status: 'already-running', pid }
-  }
-  const procs = findBackendProcs()
-  if (procs.length > 0) {
+  // ① pidfile/内存里有活着的后端进程？
+  const f = readBackendPidFile()
+  if (f && alive(f.pid)) {
+    backendPid = f.pid
+    if (await portListening(BACKEND_PORT)) return { status: 'already-running', pid: f.pid }
     // 启动中（进程在、端口未起）：等它就绪，不重复拉
-    log(`WAIT: 发现启动中的后端进程 [${procs.join(', ')}]，等待就绪而非重复拉起`)
+    log(`WAIT: 后端进程 pid=${f.pid} 在但端口未起（启动中），等待就绪而非重复拉起`)
     const ready = await waitReady(60_000)
-    return ready ? { status: 'already-running', pid: procs[0] } : { status: 'starting-timeout', pid: procs[0] }
+    return ready
+      ? { status: 'already-running', pid: f.pid }
+      : { status: 'starting-timeout', pid: f.pid }
+  }
+  // ② 没有登记进程，但端口在听 ⇒ 外部启动的后端，别重复拉
+  if (await portListening(BACKEND_PORT)) {
+    log('NOTE: 端口已在监听但无 pidfile 登记（外部启动的后端），不重复拉起')
+    return { status: 'already-running', pid: null, external: true }
   }
   if (!inFlight) {
     if (Date.now() - lastSpawnAt < WAKE_COOLDOWN_MS) {
@@ -215,14 +228,16 @@ async function wake() {
   return inFlight
 }
 
-function status() {
-  const pid = getBackendPid()
-  if (pid) backendPid = pid
-  return {
-    running: !!pid,
-    pid: pid ?? null,
-    startedAt: pid ? procStart(pid)?.toISOString() ?? null : null,
+async function status() {
+  const f = readBackendPidFile()
+  if (f && alive(f.pid)) {
+    backendPid = f.pid
+    const running = await portListening(BACKEND_PORT)
+    return { running, pid: f.pid, startedAt: f.startedAt ?? null }
   }
+  const listening = await portListening(BACKEND_PORT)
+  // 端口在听但没登记 ⇒ 外部启动的后端（手动 nest start 等），pid 未知
+  return { running: listening, pid: null, startedAt: null, external: listening || undefined }
 }
 
 // ── HTTP 服务 ──────────────────────────────────────────────────────────────
@@ -241,7 +256,7 @@ const server = createServer((req, res) => {
   if (req.method === 'OPTIONS') return json(204, {})
 
   if (req.method === 'GET' && url.pathname === '/status') {
-    return json(200, status())
+    return status().then((s) => json(200, s))
   }
   if (req.method === 'GET' && url.pathname === '/wait-ready') {
     const timeoutMs = Math.min(Number(url.searchParams.get('timeout') || 25), 30) * 1000
@@ -260,10 +275,19 @@ const server = createServer((req, res) => {
   json(404, { error: 'not found' })
 })
 
-server.listen(PORT, '0.0.0.0', () => {
-  const st = status()
-  log(`wake-server 启动于 0.0.0.0:${PORT}（后端 ${st.running ? `运行中 pid=${st.pid}` : '未运行'}）`)
-})
+/**
+ * ⚠️ 只有 daemon 才监听 3002（2026-10-24 修）：
+ *    原代码在模块顶层无条件 listen ⇒ **启动器自己也会占用 3002**，
+ *    于是它第一步 `portListening(PORT)` 永远探测到自己 → 立即 exit(0)，
+ *    既不拉 daemon 也不写日志（表现为「计划任务/启动项都跑了，唤醒服务就是没起来」）。
+ */
+if (process.argv.includes('--daemon')) {
+  server.listen(PORT, '0.0.0.0', () => {
+    status().then((st) => {
+      log(`wake-server 启动于 0.0.0.0:${PORT}（后端 ${st.running ? `运行中 pid=${st.pid ?? '(外部)'}` : '未运行'}）`)
+    })
+  })
+}
 
 // ── 角色分发 ──────────────────────────────────────────────────────────────
 const isDaemon = process.argv.includes('--daemon')
@@ -276,8 +300,7 @@ async function runLauncher() {
   try {
     const old = Number(fs.readFileSync(PID_FILE, 'utf8').trim())
     if (old > 0 && old !== process.pid) {
-      const alive = ps(`if (Get-Process -Id ${old} -ErrorAction SilentlyContinue) { '1' } else { '0' }`).trim()
-      if (alive === '1') {
+      if (alive(old)) {
         // 进程在但端口不通：等 2s 让它 listen 完，再退
         await new Promise((r) => setTimeout(r, 2000))
         if (await portListening(PORT)) process.exit(0)
@@ -303,9 +326,11 @@ if (!isDaemon) runLauncher()
 // daemon 模式：写 pidfile 供启动器校验；定时刷新 backendPid（不拉，拉只由 /wake 触发）
 else {
   fs.writeFileSync(PID_FILE, String(process.pid))
+  // 定时刷新只做「pidfile 里的进程还活着吗」——纯 signal 0 探测，零子进程零窗口
+  // （旧版这里用 powershell 查端口 ⇒ 每分钟闪一次窗口，是「后台不停弹窗」的主因）
   setInterval(() => {
-    const pid = getBackendPid()
-    if (pid) backendPid = pid
+    const f = readBackendPidFile()
+    if (f && alive(f.pid)) backendPid = f.pid
   }, 60_000).unref()
   // 异常兜底：唤醒服务是前端唯一的自救入口，不能因未捕获异常静默死掉
   process.on('uncaughtException', (e) => log(`UNCAUGHT: ${e?.stack || e}（服务继续运行）`))
