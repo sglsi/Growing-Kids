@@ -75,8 +75,10 @@ export class EnvRecoveryService {
   private lastRecoverLog: string | null = null
   /** 最近一次 import 自检是否超时（超时≠缺包，不触发重装） */
   private lastProbeTimedOut = false
-  /** 最近一次 import 自检的失败详情（failedModule/timedOut/code） */
-  private lastProbeDetail: { ok: boolean; timedOut: boolean; failedModule?: string; code?: number | null } | null = null
+  /** 最近一次 import 自检的失败详情（failedModule/timedOut/code/modulesOk） */
+  private lastProbeDetail:
+    | { ok: boolean; timedOut: boolean; failedModule?: string; code?: number | null; modulesOk?: boolean }
+    | null = null
 
   /** 毫秒级轻量自检：venv 解释器 + site-packages 关键包目录存在（骨架丢失场景即判缺失） */
   private lightCheck(): boolean {
@@ -138,6 +140,12 @@ async fullCheck(): Promise<boolean> {
   if (!this.lastProbeTimedOut && this.lastProbeDetail?.failedModule) {
     console.warn(`[ocr-env] import 自检未过：模块 ${this.lastProbeDetail.failedModule} 导入失败（exit=${this.lastProbeDetail.code}）`)
   }
+  if (this.lastProbeDetail?.modulesOk) {
+    console.warn(
+      `[ocr-env] 一次性 import 未通过（exit=${this.lastProbeDetail.code}），但逐个 import 全部成功 ` +
+        `⇒ 包是齐的，判定为启动高峰资源竞争（与 persistent-ocr 预热并发），**不触发重装**`,
+    )
+  }
   return false
 }
 
@@ -147,7 +155,19 @@ async fullCheck(): Promise<boolean> {
  *  - timedOut：超时（不等于缺包，见 fullCheck 注释）
  *  - failedModule：拆分逐个 import 后第一个失败的模块（真缺包/半损坏）
  */
-private async probeAll(): Promise<{ ok: boolean; timedOut: boolean; failedModule?: string; code?: number | null }> {
+/**
+ * @param modulesOk 「一次性 import 失败、但逐个 import 全部通过」——
+ *   2026-10-24 实测：启动瞬间与 persistent-ocr 预热并发时，8 个大件一起导入会
+ *   把内存峰值打满被系统杀（exit≠0），而单独 import 每个都正常 ⇒ 环境其实是好的，
+ *   这种情况**绝不能触发重装**（重装 3~6 分钟治不了资源竞争，还会弹窗口）。
+ */
+private async probeAll(): Promise<{
+  ok: boolean
+  timedOut: boolean
+  failedModule?: string
+  code?: number | null
+  modulesOk?: boolean
+}> {
   const code = await new Promise<number>((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
@@ -212,7 +232,8 @@ private async probeAll(): Promise<{ ok: boolean; timedOut: boolean; failedModule
     })
     if (c !== 0) return { ok: false, timedOut: c === 124, failedModule: mod, code: c }
   }
-  return { ok: false, timedOut: false, code }
+  // 逐个都能 import ⇒ 包是齐的；一次性导入的失败属于资源竞争（见函数注释）
+  return { ok: false, timedOut: false, code, modulesOk: true }
 }
 
   /**
@@ -233,11 +254,15 @@ private async probeAll(): Promise<{ ok: boolean; timedOut: boolean; failedModule
         this.markOk()
         return true
       }
-      // 自检超时 ≠ 缺包：重装（3~6 分钟）治不了超时，只会雪上加霜。
-      // 标记等待重试、返回 false 让调用方本次显式报错，绝不启动重装。
-      if (this.lastProbeTimedOut) {
+      // 下面两种情况都**不是缺包**，重装（3~6 分钟，还要拉起安装脚本）治不了，只会雪上加霜：
+      //   ① 超时（启动高峰/冷盘竞争，8 个大件 import 超 180s）；
+      //   ② 一次性 import 被系统杀（内存峰值）但逐个 import 全过。
+      // 统一处理：标记 unknown、返回 false 让调用方本次显式报错，绝不启动重装。
+      if (this.lastProbeTimedOut || this.lastProbeDetail?.modulesOk) {
         this.status = 'unknown'
-        this.lastError = `OCR 环境 import 自检超时（${FULL_CHECK_TIMEOUT_MS / 1000}s 内未完成，通常是启动高峰/冷盘竞争），稍后重试即可，无需重装`
+        this.lastError = this.lastProbeTimedOut
+          ? `OCR 环境 import 自检超时（${FULL_CHECK_TIMEOUT_MS / 1000}s 内未完成，通常是启动高峰/冷盘竞争），稍后重试即可，无需重装`
+          : `OCR 环境一次性 import 未通过（exit=${this.lastProbeDetail?.code}），但逐包自检全部通过 —— 判定为启动高峰资源竞争，稍后重试即可，无需重装`
         console.warn(`[ocr-env] ${this.lastError}`)
         return false
       }
@@ -282,14 +307,20 @@ private async probeAll(): Promise<{ ok: boolean; timedOut: boolean; failedModule
       return false
     }
     const isWin = process.platform === 'win32'
-    const cmd = isWin ? `powershell -ExecutionPolicy Bypass -File "${script}"` : `bash ${script}`
+    const cmd = isWin ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"` : `bash ${script}`
     console.warn(
       `[ocr-env] 检测到 OCR venv 缺失/损坏（${VENV_PY}），开始自动恢复：${cmd}（约 3~6 分钟，含 paddlepaddle 下载）`,
     )
     const exitCode = await new Promise<number>((resolve) => {
       const childEnv = { ...process.env, OCR_VENV_DIR: VENV_DIR }
+      // ⚠️ 2026-10-24 修（弹窗真凶之一）：原来写成
+      //     spawn(ComSpec, ['-ExecutionPolicy','Bypass','-File', script])
+      //     ComSpec 在 Windows 是 **cmd.exe**，把 powershell 的参数喂给 cmd.exe ⇒
+      //     cmd 不认这些参数、直接进交互模式（日志里那几行 "Microsoft Windows [版本…]" banner
+      //     就是它的输出）⇒ 脚本根本没执行，白等 3~6 分钟，还弹出一个 cmd 窗口一闪。
+      //     必须直接 spawn powershell 本身（windowsHide 才管得住它这一层）。
       const child = isWin
-        ? spawn(process.env.ComSpec ?? 'powershell', ['-ExecutionPolicy', 'Bypass', '-File', script], {
+        ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: childEnv,
             cwd: path.dirname(script),

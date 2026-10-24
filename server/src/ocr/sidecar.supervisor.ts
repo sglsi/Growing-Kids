@@ -92,6 +92,26 @@ function parseBaseUrl(raw: string): { host: string; port: number } {
  *     会被误判成裸命令走 command -v，在 cmd.exe 下必然失败。）
  *  - 裸命令（python3/python）：走 PATH 查找。
  */
+/** 在 PATH 里找命令（纯文件扫描，不派生任何子进程）
+ *  ⚠️ 2026-10-24 修：原来 windows 上也跑 `execSync('command -v python')`——
+ *     command 是 Unix 命令，Windows 下必然失败，还白白派生一个 cmd.exe（弹窗嫌疑）。
+ */
+function findOnPath(cmd: string): boolean {
+  const exts =
+    process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : ['']
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue
+    for (const ext of exts) {
+      try {
+        if (fs.statSync(path.join(dir, cmd + ext)).isFile()) return true
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return false
+}
+
 function pythonUsable(python: string): boolean {
   try {
     if (path.isAbsolute(python)) {
@@ -100,8 +120,7 @@ function pythonUsable(python: string): boolean {
       fs.accessSync(python, fs.constants.X_OK)
       return true
     }
-    execSync('command -v ' + python, { stdio: 'ignore', windowsHide: true })
-    return true
+    return findOnPath(python)
   } catch {
     return false
   }
