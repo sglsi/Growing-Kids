@@ -208,7 +208,7 @@ export default function ProfilePage() {
             <View className="flex flex-row items-center gap-3">
               <View
                 className="rounded-xl flex items-center justify-center"
-                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}
               >
                 <Bot size={20} color={INK} />
               </View>

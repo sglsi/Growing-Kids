@@ -125,7 +125,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         {onTogglePreview ? (
           <View
             className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
-            style={{ backgroundColor: preview ? BRAND : 'rgba(190,62,45,0.08)' }}
+            style={{ backgroundColor: preview ? BRAND : 'rgba(46, 111, 78,0.08)' }}
             onClick={onTogglePreview}
           >
             <Text className="block text-xs" style={{ color: preview ? '#fff' : BRAND }}>
@@ -136,7 +136,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
 
         <View
           className="flex flex-row items-center gap-1 px-2.5 h-8 rounded-lg"
-          style={{ backgroundColor: open ? BRAND : 'rgba(190,62,45,0.08)' }}
+          style={{ backgroundColor: open ? BRAND : 'rgba(46, 111, 78,0.08)' }}
           onClick={() => setOpen((v) => !v)}
         >
           <Text className="block text-xs" style={{ color: open ? '#fff' : BRAND }}>

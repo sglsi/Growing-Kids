@@ -245,7 +245,7 @@ export default function ReviewItemCard({
             <View className="mt-1 flex flex-row">
               <View
                 className="px-2 py-1 rounded-lg border"
-                style={{ borderColor: 'rgba(190, 62, 45, 0.25)', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}
+                style={{ borderColor: 'rgba(46, 111, 78, 0.25)', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}
                 onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
               >
                 <Text className="block text-xs" style={{ color: BRAND }}>＋ 填答案</Text>

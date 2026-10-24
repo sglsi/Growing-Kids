@@ -393,7 +393,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
 
       {/* 搜到的候选答案：必须「采纳」才入库 */}
       {candidate && candidate.source !== 'none' ? (
-        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(190, 62, 45, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(190, 62, 45, 0.08)' : 'rgba(232,163,61,0.08)' }}>
+        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(46, 111, 78, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(46, 111, 78, 0.08)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
             <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND }}>
               {candidate.source === 'search'

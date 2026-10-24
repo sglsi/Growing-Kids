@@ -1645,7 +1645,7 @@ export default function ImageEditor({
                       top: h.dy * crop.h * imgH - 9,
                       borderRadius: 4,
                       borderWidth: 3, borderStyle: 'solid', borderColor: '#ffffff',
-                      backgroundColor: 'rgba(190,62,45,0.9)',
+                      backgroundColor: 'rgba(46, 111, 78,0.9)',
                     }}
                   />
                 ))}
@@ -1935,12 +1935,12 @@ export default function ImageEditor({
           <View
             className="flex flex-row items-center justify-center mb-2"
             style={{
-              backgroundColor: 'rgba(190, 62, 45, 0.25)',
+              backgroundColor: 'rgba(46, 111, 78, 0.25)',
               borderRadius: 999,
               paddingTop: 6,
               paddingBottom: 6,
               borderWidth: 1,
-              borderColor: 'rgba(190, 62, 45, 0.25)',
+              borderColor: 'rgba(46, 111, 78, 0.25)',
             }}
           >
             <Text className="block text-xs" style={{ color: '#FFD9CF' }}>
@@ -2224,7 +2224,7 @@ function QuadOverlay({
               top: p.y - (active ? 14 : 11),
               borderRadius: 999,
               borderWidth: 3, borderStyle: 'solid', borderColor: '#ffffff',
-              backgroundColor: active ? '#3b82f6' : 'rgba(190,62,45,0.92)',
+              backgroundColor: active ? '#3b82f6' : 'rgba(46, 111, 78,0.92)',
               boxShadow: '0 1px 4px rgba(0,0,0,0.5)',
             }}
           />

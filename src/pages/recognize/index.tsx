@@ -1283,7 +1283,7 @@ export default function RecognizePage() {
                             </View>
                           ) : null}
                           {p.ocr === 'error' ? (
-                            <View style={{ position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(190,62,45,0.75)', alignItems: 'center' }}>
+                            <View style={{ position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(46, 111, 78,0.75)', alignItems: 'center' }}>
                               <Text style={{ fontSize: 8, color: '#fff' }}>识别失败</Text>
                             </View>
                           ) : null}
@@ -1324,9 +1324,9 @@ export default function RecognizePage() {
                   <View
                     className="flex-row items-center justify-center mt-2 py-2 px-3 rounded-lg"
                     style={{
-                      backgroundColor: 'rgba(190,62,45,0.08)',
+                      backgroundColor: 'rgba(46, 111, 78,0.08)',
                       borderWidth: 1,
-                      borderColor: 'rgba(190, 62, 45, 0.25)',
+                      borderColor: 'rgba(46, 111, 78, 0.25)',
                     }}
                     onClick={() => { if (!diagLoading) void handleDiagnose() }}
                   >
@@ -1404,7 +1404,7 @@ export default function RecognizePage() {
                         className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                         style={{
                           backgroundColor: '#FFF7F0',
-                          border: '1px solid rgba(190, 62, 45, 0.25)',
+                          border: '1px solid rgba(46, 111, 78, 0.25)',
                           opacity: e.ocr === 'busy' ? 0.5 : 1,
                         }}
                         onClick={() => {
@@ -1477,7 +1477,7 @@ export default function RecognizePage() {
                       className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                       style={{
                         backgroundColor: '#FFF7F0',
-                        border: '1px solid rgba(190, 62, 45, 0.25)',
+                        border: '1px solid rgba(46, 111, 78, 0.25)',
                         opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
                       }}
                       onClick={() => {
@@ -1657,7 +1657,7 @@ export default function RecognizePage() {
                   <Text className="block text-xs text-muted-foreground mb-2 line-through">原错答：{d.wrong_answer}</Text>
                 ) : null}
 
-                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(190,62,45,0.25)', backgroundColor: 'rgba(190, 62, 45, 0.08)' }}>
+                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(46, 111, 78,0.25)', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}>
                   <Textarea
                     className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.answer_content}

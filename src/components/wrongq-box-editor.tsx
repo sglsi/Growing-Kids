@@ -297,7 +297,7 @@ export default function WrongqBoxEditor(props: Props) {
         拖动移动 · 角点缩放 · 长按删除/添加 · 空白处画新框（松手自动重新识别）
       </Text>
       {busy ? (
-        <View className="rounded-xl px-3 py-1 mb-2" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
+        <View className="rounded-xl px-3 py-1 mb-2" style={{ backgroundColor: 'rgba(46, 111, 78,0.08)' }}>
           <Text className="block text-xs" style={{ color: BRAND }}>正在按新框重新识别…</Text>
         </View>
       ) : null}
@@ -323,7 +323,7 @@ export default function WrongqBoxEditor(props: Props) {
                   borderStyle: 'solid',
                   borderColor: colorOf(it),
                   borderRadius: 3,
-                  backgroundColor: sel ? 'rgba(190, 62, 45, 0.08)' : 'transparent',
+                  backgroundColor: sel ? 'rgba(46, 111, 78, 0.08)' : 'transparent',
                   opacity: it.active ? 1 : 0.55,
                 }}
               >

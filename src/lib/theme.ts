@@ -15,10 +15,15 @@
  * 规范见 `docs/design/视觉美学设计方案.md` 3.1。
  */
 
-/** 【朱】唯一强调色 —— 对应 CSS 变量 --brand */
-export const BRAND = '#BE3E2D'
+/**
+ * 【松】唯一强调色 —— 对应 CSS 变量 --brand
+ * 思傅 2026-10-24 方案 B：朱砂 #BE3E2D → 松绿 #2E6F4E。
+ * 依据：红色在认知/督导场景中提升生理唤醒、关联威胁；松绿为低唤醒舒缓色，
+ * 且契合 Growing-Kids「生长」语义。白字对比度 6.03:1。
+ */
+export const BRAND = '#2E6F4E'
 
-/** 【朱】朱砂底上的文字（主操作按钮）—— 对应 --brand-foreground */
+/** 【松】松绿底上的文字（主操作按钮）—— 对应 --brand-foreground */
 export const BRAND_FOREGROUND = '#FFFFFF'
 
 /** 【墨】主文字 —— 对应 --foreground */

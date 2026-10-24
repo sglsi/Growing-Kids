@@ -472,14 +472,14 @@ export default function IndexPage() {
           >
             <View
               style={{
-                backgroundColor: 'rgba(190,62,45,0.08)',
+                backgroundColor: 'rgba(46, 111, 78,0.08)',
                 borderRadius: 999,
                 paddingLeft: 10,
                 paddingRight: 10,
                 paddingTop: 3,
                 paddingBottom: 3,
                 borderWidth: 1,
-                borderColor: 'rgba(190, 62, 45, 0.25)',
+                borderColor: 'rgba(46, 111, 78, 0.25)',
               }}
             >
               <Text className="block text-xs" style={{ color: BRAND }}>

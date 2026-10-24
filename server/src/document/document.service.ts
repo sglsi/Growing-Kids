@@ -100,7 +100,7 @@ export class DocumentService {
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: { after: 360 },
-        border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: 'BE3E2D' } },
+        border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: '2E6F4E' } },
         children: [
           new TextRun({
             text: `共 ${rows.length} 题 · 生成于 ${new Date().toLocaleDateString('zh-CN')}`,
@@ -116,7 +116,7 @@ export class DocumentService {
         new Paragraph({
           heading: HeadingLevel.HEADING_1,
           spacing: { before: 240, after: 160 },
-          children: [new TextRun({ text: group.name, bold: true, size: 30, color: 'BE3E2D', font: '黑体' })],
+          children: [new TextRun({ text: group.name, bold: true, size: 30, color: '2E6F4E', font: '黑体' })],
         }),
       )
 
@@ -139,7 +139,7 @@ export class DocumentService {
         }
 
         children.push(
-          new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '正确答案：', bold: true, size: 22, color: 'BE3E2D', font: '宋体' })] }),
+          new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '正确答案：', bold: true, size: 22, color: '2E6F4E', font: '宋体' })] }),
         )
         children.push(...this.textParagraphs(c.answer || '（暂无答案，待补充）', { size: 22 }))
 
@@ -155,7 +155,7 @@ export class DocumentService {
           children.push(
             new Paragraph({
               spacing: { before: 40, after: 20 },
-              children: [new TextRun({ text: `错因分析：${c.error_analysis.label}`, bold: true, size: 20, color: 'BE3E2D', font: '宋体' })],
+              children: [new TextRun({ text: `错因分析：${c.error_analysis.label}`, bold: true, size: 20, color: '2E6F4E', font: '宋体' })],
             }),
           )
           if (c.error_analysis.reason) {
