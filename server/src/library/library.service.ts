@@ -1,17 +1,27 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
+import { BaiduNetdiskService } from '../storage/baidu-netdisk.service'
 import type { LibraryDoc, CreateLibraryDocDto, LibraryQuery } from './library.types'
 
 const TABLE = 'library_docs'
 
+/** 网盘文件名非法字符（百度网盘不接受，且 Windows 端同步时也会炸） */
+function sanitizeFileName(name: string): string {
+  const base = (name || '').replace(/[\\/:*?"<>|\r\n\t]/g, '_').trim()
+  return (base || '未命名资料').slice(0, 100)
+}
+
 /** 资料库：外部文档（上传的 PDF/Word/TXT 等） */
 @Injectable()
 export class LibraryService {
+  private readonly logger = new Logger(LibraryService.name)
+
   constructor(
     private readonly storageService: StorageService,
     private readonly blobService: BlobService,
+    private readonly netdisk: BaiduNetdiskService,
   ) {}
 
   async list(userId: string, query: LibraryQuery): Promise<{ list: LibraryDoc[]; total: number; page: number; page_size: number }> {
@@ -58,7 +68,51 @@ export class LibraryService {
       .select('*, subjects:subject_id(id, name, color)')
       .single()
     if (error) throw new Error(error.message)
-    return data as unknown as LibraryDoc
+    const doc = data as unknown as LibraryDoc
+
+    // 网盘归档（思傅 2026-10-24：资料库归到百度网盘 /学生/GrowingKids资料库）
+    // best-effort + 不 await：网盘慢/不可用绝不拖慢「保存资料」的响应，更不许让保存失败。
+    void this.syncToNetdisk(userId, doc.id, dto.file_key, doc.name)
+
+    return doc
+  }
+
+  /**
+   * 把资料库文件同步一份到百度网盘（异步、best-effort）。
+   *
+   * ⚠️ 只写副本：主存储仍是本地/Supabase（file_key 不变），网盘只做归档，
+   *    原因见 migrations/0015_library_netdisk_path.sql 的表注释（网盘读取要换 dlink、限速、8h 有效期）。
+   * ⚠️ 任何一步失败都必须 console.error 打全错（best-effort 的 catch 静默吞错是本项目反复踩过的坑）。
+   */
+  private async syncToNetdisk(
+    userId: string,
+    id: string,
+    fileKey: string,
+    name: string,
+  ): Promise<void> {
+    try {
+      if ((process.env.LIBRARY_NETDISK_SYNC || 'false') !== 'true') return
+      if (!this.netdisk.enabled()) {
+        this.logger.debug(`[library] 网盘同步未启用（缺 ${this.netdisk.missingKeys().join(' / ')}）`)
+        return
+      }
+      if (!fileKey) return
+      const buf = await this.storageService.readObject(fileKey)
+      if (!buf || buf.length === 0) {
+        console.error('[library] 网盘同步跳过：读取源对象为空', { id, fileKey })
+        return
+      }
+      const path = await this.netdisk.upload(sanitizeFileName(name), buf)
+      const { error } = await getSupabaseClient()
+        .from(TABLE)
+        .update({ netdisk_path: path })
+        .eq('user_id', userId)
+        .eq('id', id)
+      if (error) throw new Error(error.message)
+      this.logger.log(`[library] 已归档到网盘：${path}`)
+    } catch (e) {
+      console.error('[library] 网盘归档失败（不影响资料库本身）', { id, fileKey }, e)
+    }
   }
 
   /**
@@ -135,7 +189,7 @@ export class LibraryService {
 
     const { data: pending } = await client
       .from(TABLE)
-      .select('id, file_hash')
+      .select('id, file_hash, netdisk_path')
       .eq('user_id', userId)
       .in('id', ids)
       .is('deleted_at', null)
@@ -156,6 +210,16 @@ export class LibraryService {
       await this.blobService.release(h).catch((e) =>
         console.warn('[library] 释放 blob 引用失败', h, e),
       )
+    }
+
+    // 网盘副本联动删除（默认关：误删代价比残留大，需显式开 LIBRARY_NETDISK_DELETE_ON_REMOVE=true）
+    if ((process.env.LIBRARY_NETDISK_DELETE_ON_REMOVE || 'false') === 'true') {
+      const paths = ((pending || []) as { netdisk_path?: string | null }[])
+        .map((r) => r.netdisk_path)
+        .filter(Boolean) as string[]
+      for (const p of paths) {
+        await this.netdisk.remove(p).catch((e) => console.error('[library] 删除网盘副本失败', p, e))
+      }
     }
     return { removed: (data || []).length }
   }
