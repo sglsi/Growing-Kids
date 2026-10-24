@@ -21,7 +21,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
-import { BRAND } from '@/lib/theme'
+import { DANGER, INK } from '@/lib/theme'
 
 const PAGE_SIZE = 20
 
@@ -522,13 +522,14 @@ export default function SubjectPage() {
               icon={<FileSearch size={16} color="#fff" />}
               label="合成PDF/WORD"
               compact
+              primary
               disabled={sel.isEmpty || busy}
               onClick={handleCombine}
             />
           </View>
           <View style={{ flex: 1 }}>
             <ActionBtn
-              icon={<FolderMinus size={16} color="#fff" />}
+              icon={<FolderMinus size={16} color={INK} />}
               label="移出复习本"
               disabled={sel.isEmpty || busy}
               onClick={handleRemoveFromReview}
@@ -570,7 +571,7 @@ export default function SubjectPage() {
       {moreItem && (
         <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={closeMore}>
           <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '80vh' }} onClick={(e) => e.stopPropagation?.()}>
-            <Text className="block text-sm font-semibold text-foreground mb-3">
+            <Text className="block text-base font-semibold text-foreground mb-3">
               {moreItem.kind === 'image' ? '编辑这张图片' : '更多操作'}
             </Text>
 
@@ -583,7 +584,7 @@ export default function SubjectPage() {
                     style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
                     onClick={() => { openEditor(moreItem, action); closeMore() }}
                   >
-                    <Icon size={20} color={BRAND} />
+                    <Icon size={20} color={INK} />
                     <Text className="block text-xs text-foreground mt-1">{label}</Text>
                   </View>
                 ))}
@@ -591,22 +592,22 @@ export default function SubjectPage() {
             )}
 
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
-              <Crop size={18} color={BRAND} />
+              <Crop size={18} color={INK} />
               <Text className="block text-sm text-foreground">
                 {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
               </Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
-              <Tag size={18} color={BRAND} />
+              <Tag size={18} color={INK} />
               <Text className="block text-sm text-foreground">修改分类</Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
-              <BookmarkMinus size={18} color={BRAND} />
+              <BookmarkMinus size={18} color={INK} />
               <Text className="block text-sm text-foreground">移出复习本</Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
-              <Trash2 size={18} color={BRAND} />
-              <Text className="block text-sm text-foreground">删除</Text>
+              <Trash2 size={18} color={DANGER} />
+              <Text className="block text-sm text-destructive">删除</Text>
             </View>
             <View className="mt-2">
               <Button variant="outline" className="w-full h-11 rounded-xl" onClick={closeMore}>
@@ -621,7 +622,7 @@ export default function SubjectPage() {
       {pickerItem && (
         <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 200, background: 'rgba(0,0,0,0.4)' }} onClick={closePicker}>
           <View className="bg-background rounded-t-2xl p-4" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '70vh' }} onClick={(e) => e.stopPropagation?.()}>
-            <Text className="block text-sm font-semibold text-foreground mb-3">选择分类</Text>
+            <Text className="block text-base font-semibold text-foreground mb-3">选择分类</Text>
             <View className="overflow-y-auto">
               {subjects.map((s) => (
                 <View key={s.id} className="mb-2">

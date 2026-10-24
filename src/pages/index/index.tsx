@@ -21,7 +21,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
 import { BUILD_META } from '@/build-meta'
-import { BRAND } from '@/lib/theme'
+import { BRAND, DANGER, INK } from '@/lib/theme'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -491,17 +491,17 @@ export default function IndexPage() {
           {/* 识别与导入主操作区（主操作独立，3 个次操作合并为一行） */}
           <Card className="rounded-2xl border-border p-4 mb-4">
             <View
-              className="flex flex-row items-center gap-3 rounded-xl bg-primary mb-3 px-2 py-2"
+              className="flex flex-row items-center gap-3 rounded-xl bg-brand mb-3 px-2 py-2"
               onClick={goRecognize}
             >
-              <View className="flex flex-row items-center justify-center w-9 h-9 rounded-full bg-primary-foreground">
-                <Camera size={18} color={BRAND} />
+              <View className="flex flex-row items-center justify-center w-9 h-9 rounded-full bg-background">
+                <Camera size={18} color={INK} />
               </View>
               <View className="flex-1">
-                <Text className="block text-sm font-medium text-primary-foreground">拍照 / 相册识别</Text>
-                <Text className="block text-xs text-primary-foreground opacity-70">拍下一道错题，自动整理到收件箱</Text>
+                <Text className="block text-sm font-medium text-brand-foreground">拍照 / 相册识别</Text>
+                <Text className="block text-xs text-brand-foreground opacity-70">拍下一道错题，自动整理到收件箱</Text>
               </View>
-              <Text className="block text-primary-foreground opacity-70 text-xl">›</Text>
+              <Text className="block text-brand-foreground opacity-70 text-xl">›</Text>
             </View>
             <View className="flex flex-row gap-2">
               <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goSplit}>
@@ -672,7 +672,7 @@ export default function IndexPage() {
                     style={{ width: '22%', paddingTop: 10, paddingBottom: 10 }}
                     onClick={() => openEditor(moreItem, action)}
                   >
-                    <Icon size={20} color={BRAND} />
+                    <Icon size={20} color={INK} />
                     <Text className="block text-xs text-foreground mt-1">{label}</Text>
                   </View>
                 ))}
@@ -682,28 +682,28 @@ export default function IndexPage() {
             {/* 「编辑」：打开该条目的图片（可裁剪/旋转/灰度/高清/去手写）。
                 思傅 2026-10-21：此前的编辑入口在重构中丢失，需保留。 */}
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreEdit}>
-              <Crop size={18} color={BRAND} />
+              <Crop size={18} color={INK} />
               <Text className="block text-sm text-foreground">
                 {moreItem.kind === 'image' ? '编辑这张图片' : '编辑题面图'}
               </Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
-              <Tag size={18} color={BRAND} />
+              <Tag size={18} color={INK} />
               <Text className="block text-sm text-foreground">修改分类</Text>
             </View>
             {moreItem.in_review_book ? (
               <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
-                <BookmarkMinus size={18} color={BRAND} />
+                <BookmarkMinus size={18} color={INK} />
                 <Text className="block text-sm text-foreground">移出复习本</Text>
               </View>
             ) : (
               <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreReview}>
-                <BookmarkPlus size={18} color={BRAND} />
+                <BookmarkPlus size={18} color={INK} />
                 <Text className="block text-sm text-foreground">加入复习本</Text>
               </View>
             )}
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreDelete}>
-              <Trash2 size={18} color={BRAND} />
+              <Trash2 size={18} color={DANGER} />
               <Text className="block text-sm text-foreground">删除</Text>
             </View>
             <View className="mt-2">
@@ -743,12 +743,12 @@ export default function IndexPage() {
 
 function StatCard({ label, value, highlight, onTap }: { label: string; value: number; highlight?: boolean; onTap?: () => void }) {
   return (
-    <Card className={`flex-1 rounded-2xl border-border p-4 ${highlight ? 'bg-primary' : ''}`} onClick={onTap}>
+    <Card className={`flex-1 rounded-2xl border-border p-4 ${highlight ? 'bg-brand' : ''}`} onClick={onTap}>
       {/* 字阶 D1/D5：数字 24px 拉开视觉重量，标签 12px 弱化——靠尺寸而非颜色建立层级 */}
-      <Text className={`block text-2xl font-bold leading-tight ${highlight ? 'text-primary-foreground' : 'text-foreground'}`}>
+      <Text className={`block text-2xl font-bold leading-tight ${highlight ? 'text-brand-foreground' : 'text-foreground'}`}>
         {value}
       </Text>
-      <Text className={`block text-xs mt-1 ${highlight ? 'text-primary-foreground opacity-80' : 'text-muted-foreground'}`}>
+      <Text className={`block text-xs mt-1 ${highlight ? 'text-brand-foreground opacity-80' : 'text-muted-foreground'}`}>
         {label}
       </Text>
     </Card>

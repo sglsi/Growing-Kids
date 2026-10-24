@@ -137,7 +137,7 @@ export default function ReviewItemCard({
                     )
                   )}
                   {item.in_review_book && (
-                    <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
+                    <Badge className="bg-brand-soft text-brand border border-brand-line rounded-full px-2 py-0 text-xs">
                       复习本
                     </Badge>
                   )}
@@ -200,7 +200,7 @@ export default function ReviewItemCard({
                 </Badge>
               )}
               {item.in_review_book && timeField === 'created_at' && (
-                <Badge className="bg-primary text-primary-foreground border border-primary rounded-full px-2 py-0 text-xs">
+                <Badge className="bg-brand-soft text-brand border border-brand-line rounded-full px-2 py-0 text-xs">
                   复习本
                 </Badge>
               )}

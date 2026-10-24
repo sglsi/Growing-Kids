@@ -18,7 +18,7 @@ import {
   fetchSubjects, uploadFile,
 } from '@/services/api'
 import type { Subject } from '@/types'
-import { BRAND } from '@/lib/theme'
+import { INK } from '@/lib/theme'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -456,10 +456,10 @@ export default function MemoryEditPage() {
             return (
               <View
                 key={c.value}
-                className={`rounded-full border px-4 py-2 ${active ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+                className={`rounded-full border px-4 py-2 ${active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                 onClick={() => setCategory(c.value)}
               >
-                <Text className={`block text-sm ${active ? 'text-primary-foreground' : 'text-foreground'}`}>{c.label}</Text>
+                <Text className={`block text-sm ${active ? 'text-brand' : 'text-foreground'}`}>{c.label}</Text>
               </View>
             )
           })}
@@ -472,11 +472,11 @@ export default function MemoryEditPage() {
             return (
               <View
                 key={m.value}
-                className={`flex flex-row items-center gap-1 rounded-full border px-3 py-2 ${active ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+                className={`flex flex-row items-center gap-1 rounded-full border px-3 py-2 ${active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                 onClick={() => setMood(active ? '' : m.value)}
               >
                 <Text className="block text-base">{m.emoji}</Text>
-                <Text className={`block text-xs ${active ? 'text-primary-foreground' : 'text-muted-foreground'}`}>{m.label}</Text>
+                <Text className={`block text-xs ${active ? 'text-brand' : 'text-muted-foreground'}`}>{m.label}</Text>
               </View>
             )
           })}
@@ -487,20 +487,20 @@ export default function MemoryEditPage() {
             <Text className="block text-xs text-muted-foreground mb-1 mt-3">学科</Text>
             <View className="flex flex-row gap-2 flex-wrap">
               <View
-                className={`rounded-full border px-4 py-2 ${!subjectId ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+                className={`rounded-full border px-4 py-2 ${!subjectId ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                 onClick={() => setSubjectId('')}
               >
-                <Text className={`block text-sm ${!subjectId ? 'text-primary-foreground' : 'text-foreground'}`}>不限</Text>
+                <Text className={`block text-sm ${!subjectId ? 'text-brand' : 'text-foreground'}`}>不限</Text>
               </View>
               {subjects.map((s) => {
                 const a = subjectId === s.id
                 return (
                   <View
                     key={s.id}
-                    className={`rounded-full border px-4 py-2 ${a ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+                    className={`rounded-full border px-4 py-2 ${a ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                     onClick={() => setSubjectId(s.id)}
                   >
-                    <Text className={`block text-sm ${a ? 'text-primary-foreground' : 'text-foreground'}`}>{s.name}</Text>
+                    <Text className={`block text-sm ${a ? 'text-brand' : 'text-foreground'}`}>{s.name}</Text>
                   </View>
                 )
               })}
@@ -569,7 +569,7 @@ export default function MemoryEditPage() {
         <View className="flex flex-row gap-2 mt-3 flex-wrap">
           {canPickImage && (
             <Button variant="outline" className="rounded-xl h-10" onClick={onPickImages}>
-              <Camera size={16} color={BRAND} />
+              <Camera size={16} color={INK} />
               <Text className="block text-sm text-foreground ml-1">图片 ({imageCount}/9)</Text>
             </Button>
           )}
@@ -579,7 +579,7 @@ export default function MemoryEditPage() {
               className={`rounded-xl h-10 ${recording ? 'border-primary' : ''}`}
               onClick={recording ? onStopRecord : onStartRecord}
             >
-              <Music size={16} color={BRAND} />
+              <Music size={16} color={INK} />
               <Text className="block text-sm text-foreground ml-1">
                 {recording ? `录音中 ${recordSec}s 点击停止` : `录音 (${audioMedia.length}/5)`}
               </Text>
@@ -587,7 +587,7 @@ export default function MemoryEditPage() {
           )}
           {canPickVideo && (
             <Button variant="outline" className="rounded-xl h-10" onClick={onPickVideo}>
-              <Film size={16} color={BRAND} />
+              <Film size={16} color={INK} />
               <Text className="block text-sm text-foreground ml-1">视频 ({videoMedia.length}/3)</Text>
             </Button>
           )}
@@ -599,9 +599,9 @@ export default function MemoryEditPage() {
         <Text className="block text-xs text-muted-foreground mb-2">标签</Text>
         <View className="flex flex-row gap-2 flex-wrap mb-2">
           {tags.map((t) => (
-            <View key={t} className="flex flex-row items-center gap-1 rounded-full bg-primary px-3 py-1" onClick={() => removeTag(t)}>
-              <Text className="block text-xs text-primary-foreground">#{t}</Text>
-              <XIcon size={12} color="#fff" />
+            <View key={t} className="flex flex-row items-center gap-1 rounded-full bg-muted px-3 py-1" onClick={() => removeTag(t)}>
+              <Text className="block text-xs text-foreground">#{t}</Text>
+              <XIcon size={12} color={INK} />
             </View>
           ))}
         </View>
@@ -623,12 +623,12 @@ export default function MemoryEditPage() {
       {/* 底部保存按钮 */}
       <View style={{ padding: '12px 16px', paddingBottom: '24px' }}>
         <Button
-          className="w-full h-12 rounded-xl bg-primary"
+          className="w-full h-12 rounded-xl bg-brand"
           onClick={onSave}
           disabled={saving || uploading > 0}
         >
           <Check size={16} color="#fff" />
-          <Text className="block text-sm text-primary-foreground ml-2">
+          <Text className="block text-sm text-brand-foreground ml-2">
             {saving ? '保存中…' : uploading > 0 ? `上传中 ${uploading}…` : '保存'}
           </Text>
         </Button>

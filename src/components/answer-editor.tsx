@@ -10,7 +10,7 @@ import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
-import { BRAND } from '@/lib/theme'
+import { BRAND, DANGER, INK } from '@/lib/theme'
 
 /**
  * 题目答案编辑区（思傅 2026-10-21）
@@ -329,7 +329,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                     </View>
                   ) : (
                     <View className="w-full h-full flex flex-col items-center justify-center bg-muted">
-                      <FileText size={18} color={BRAND} />
+                      <FileText size={18} color={INK} />
                       <Text className="block text-xs mt-1 px-1 text-center" numberOfLines={1}>
                         {a.name || '文档'}
                       </Text>
@@ -341,7 +341,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                   style={{ right: -4, top: -4 }}
                   onClick={() => void removeAttachment(a.id)}
                 >
-                  <Trash2 size={14} color={BRAND} />
+                  <Trash2 size={14} color={DANGER} />
                 </View>
               </View>
             )
@@ -352,31 +352,31 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       {/* 操作按钮 */}
       <View className="flex flex-row flex-wrap gap-2 mt-2">
         <View className={btn} onClick={() => void pickImage()}>
-          <Plus size={12} color={BRAND} />
+          <Plus size={12} color={INK} />
           <Text className="block text-xs">图片</Text>
           <Crop size={10} color="#9A948A" />
         </View>
         <View className={btn} onClick={() => void pickDoc()}>
-          <Plus size={12} color={BRAND} />
+          <Plus size={12} color={INK} />
           <Text className="block text-xs">文档</Text>
         </View>
         <View className={btn} onClick={() => setPickerOpen(true)}>
-          <FileText size={12} color={BRAND} />
+          <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
         {/* 联网搜题：只做真实网络检索，不喂给 AI */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
-          <Globe size={12} color={BRAND} />
+          <Globe size={12} color={INK} />
           <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
         </View>
         {/* 知识库：只检索 ima 知识库（秒级），不喂给 AI */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
-          <BookOpen size={12} color={BRAND} />
+          <BookOpen size={12} color={INK} />
           <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '知识库'}</Text>
         </View>
         {/* AI 解题：只做模型推理，不检索 */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
-          <Bot size={12} color={BRAND} />
+          <Bot size={12} color={INK} />
           <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
         </View>
         {/* 保存：仅编辑态需要（预览态内容即已入库内容；附件操作都是即时保存） */}

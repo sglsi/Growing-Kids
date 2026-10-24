@@ -33,10 +33,10 @@ export default function SubjectBadge({
   if (active) {
     return (
       <View
-        className={`flex flex-row items-center gap-2 rounded-full border bg-primary border-primary ${paddingClass}`}
+        className={`flex flex-row items-center gap-2 rounded-full border bg-brand-soft border-brand-line ${paddingClass}`}
         onClick={onClick}
       >
-        <Text className={`block ${textClass} text-primary-foreground`}>{name}</Text>
+        <Text className={`block ${textClass} text-brand`}>{name}</Text>
         {trailing}
       </View>
     )

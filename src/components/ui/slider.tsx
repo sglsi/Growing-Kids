@@ -179,14 +179,14 @@ const Slider = React.forwardRef<
         )}
       >
         <View
-          className={cn("absolute bg-primary", orientation === "horizontal" ? "h-full" : "w-full bottom-0", rangeClassName)}
+          className={cn("absolute bg-brand", orientation === "horizontal" ? "h-full" : "w-full bottom-0", rangeClassName)}
           style={orientation === "horizontal" ? { width: `${percentage}%` } : { height: `${percentage}%` }}
         />
       </View>
       <View
         className={cn(
-            "absolute block h-3 w-3 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors disabled:pointer-events-none disabled:opacity-50",
-            isDragging && "ring-4 ring-primary ring-opacity-30",
+            "absolute block h-3 w-3 rounded-full border-2 border-brand bg-background ring-offset-background transition-colors disabled:pointer-events-none disabled:opacity-50",
+            isDragging && "ring-4 ring-brand ring-opacity-30",
             disabled && "opacity-50",
             thumbClassName
         )}

@@ -232,7 +232,7 @@ const H5ErrorOverlayHost = () => {
                         <View className="flex flex-wrap items-center gap-2">
                           <Badge
                             variant="destructive"
-                            className="border-none bg-red-500 px-3 py-1 text-xs font-medium text-white"
+                            className="border-none bg-destructive px-3 py-1 text-xs font-medium text-destructive-foreground"
                           >
                             Runtime Error
                           </Badge>

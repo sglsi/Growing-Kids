@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { Plus } from 'lucide-react-taro'
+import { Plus, Trash2 } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import MemoryCard from '@/components/memory-card'
@@ -187,11 +187,11 @@ export default function MemoryHomePage() {
         </View>
         {!sel.selecting && (
           <Button
-            className="h-9 px-3 rounded-xl bg-primary"
+            className="h-9 px-3 rounded-xl"
             onClick={onCreate}
           >
             <Plus size={16} color="#fff" />
-            <Text className="block text-sm text-primary-foreground ml-1">新增</Text>
+            <Text className="block text-sm ml-1">新增</Text>
           </Button>
         )}
       </View>
@@ -230,8 +230,8 @@ export default function MemoryHomePage() {
       ) : errorMsg ? (
         <View className="px-4 pt-8 flex flex-col items-center">
           <Text className="block text-sm text-muted-foreground">加载失败：{errorMsg}</Text>
-          <Button className="mt-4 rounded-xl bg-primary" onClick={() => void load()}>
-            <Text className="block text-sm text-primary-foreground">重试</Text>
+          <Button className="mt-4 rounded-xl" onClick={() => void load()}>
+            <Text className="block text-sm">重试</Text>
           </Button>
         </View>
       ) : list.length === 0 ? (
@@ -240,9 +240,9 @@ export default function MemoryHomePage() {
           <Text className="block text-sm text-muted-foreground text-center">
             把成长路上的随想、心得、照片、声音都留下来{'\n'}让记忆成为可翻阅的「成长手记」
           </Text>
-          <Button className="mt-2 rounded-xl bg-primary" onClick={onCreate}>
+          <Button className="mt-2 rounded-xl" onClick={onCreate}>
             <Plus size={16} color="#fff" />
-            <Text className="block text-sm text-primary-foreground ml-1">记录第一段</Text>
+            <Text className="block text-sm ml-1">记录第一段</Text>
           </Button>
         </View>
       ) : (
@@ -275,10 +275,11 @@ export default function MemoryHomePage() {
         }}
         >
           <View
-            className="flex-1 h-11 rounded-xl bg-red-600 flex items-center justify-center"
+            className="flex-1 h-11 rounded-xl bg-destructive flex items-center justify-center"
             onClick={onBatchDelete}
           >
-            <Text className="block text-sm text-white">删除 ({sel.count})</Text>
+            <Trash2 size={16} color="#fff" />
+            <Text className="block text-sm text-destructive-foreground ml-1">删除 ({sel.count})</Text>
           </View>
           <View
             className="flex-1 h-11 rounded-xl bg-muted flex items-center justify-center"

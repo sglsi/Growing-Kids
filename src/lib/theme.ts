@@ -18,6 +18,9 @@
 /** 【朱】唯一强调色 —— 对应 CSS 变量 --brand */
 export const BRAND = '#BE3E2D'
 
+/** 【朱】朱砂底上的文字（主操作按钮）—— 对应 --brand-foreground */
+export const BRAND_FOREGROUND = '#FFFFFF'
+
 /** 【墨】主文字 —— 对应 --foreground */
 export const INK = '#2A2825'
 

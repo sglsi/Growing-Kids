@@ -468,7 +468,7 @@ export default function DetailPage() {
               }}
             >
               <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
-                <Text className="block text-sm text-primary">
+                <Text className="block text-sm text-brand">
                   {subjects.find((s) => s.id === subjectId)?.name || '选择学科'}
                 </Text>
               </View>
@@ -601,7 +601,7 @@ export default function DetailPage() {
                 onChange={(e) => setSubjectId(subjects[Number(e.detail.value)]?.id || subjectId)}
               >
                 <View className="px-3 py-1 rounded-full" style={{ backgroundColor: 'rgba(190,62,45,0.08)' }}>
-                  <Text className="block text-xs text-primary">切换学科</Text>
+                  <Text className="block text-xs text-brand">切换学科</Text>
                 </View>
               </Picker>
             </View>

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
+import { BRAND } from '@/lib/theme'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
@@ -1740,7 +1741,7 @@ export default function ImageEditor({
             <View className="flex flex-col items-center" onClick={framing ? handleConfirmCrop : enterFraming}>
               <View
                 className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                  framing ? 'bg-primary' : 'bg-white bg-opacity-15'
+                  framing ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
                 <Crop size={20} color="#ffffff" />
@@ -1757,7 +1758,7 @@ export default function ImageEditor({
           >
             <View
               className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                cornerMode === 'quad' ? 'bg-primary' : 'bg-white bg-opacity-15'
+                cornerMode === 'quad' ? 'bg-brand' : 'bg-white bg-opacity-15'
               }`}
             >
               <Maximize2 size={20} color="#ffffff" />
@@ -1778,7 +1779,7 @@ export default function ImageEditor({
         {!cropOnly && (
           <View className="flex flex-row items-center justify-center mb-4" onClick={() => setColorPenMode((v) => !v)}>
             <View
-              className={`w-10 h-5 rounded-full mr-2 relative ${colorPenMode ? 'bg-primary' : 'bg-white bg-opacity-15'}`}
+              className={`w-10 h-5 rounded-full mr-2 relative ${colorPenMode ? 'bg-brand' : 'bg-white bg-opacity-15'}`}
             >
               <View
                 className={`w-4 h-4 rounded-full bg-white absolute top-0 ${colorPenMode ? 'right-0' : 'left-0'}`}
@@ -1874,7 +1875,7 @@ export default function ImageEditor({
             <View className="flex flex-col items-center" onClick={toggleEraseMode}>
               <View
                 className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                  eraseMode ? 'bg-primary' : 'bg-white bg-opacity-15'
+                  eraseMode ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
                 <Crop size={20} color="#ffffff" />
@@ -1888,7 +1889,7 @@ export default function ImageEditor({
             <View className="flex flex-col items-center" onClick={toggleCompare}>
               <View
                 className={`w-11 h-11 rounded-full flex items-center justify-center mb-1 ${
-                  compareMode ? 'bg-primary' : 'bg-white bg-opacity-15'
+                  compareMode ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
                 <Wand size={20} color="#ffffff" />
@@ -1919,7 +1920,7 @@ export default function ImageEditor({
             </Button>
             <Button
               className="flex-1 h-10 rounded-xl"
-              style={{ backgroundColor: '#ef4444' }}
+              style={{ backgroundColor: BRAND }}
               disabled={busy || aiBusy}
               onClick={applyEraseRegions}
             >
@@ -1954,7 +1955,7 @@ export default function ImageEditor({
         className="absolute left-0 right-0 z-[205] px-4 pt-2"
         style={{ bottom: 0, backgroundColor: '#000', paddingBottom: 12 }}
       >
-        <Button className="w-full h-11 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={handleConfirm}>
+        <Button className="w-full h-11 rounded-xl" disabled={busy || aiBusy} onClick={handleConfirm}>
           <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
         </Button>
       </View>
@@ -2129,7 +2130,7 @@ export default function ImageEditor({
               >
                 <Text className="block text-sm text-white">取消</Text>
               </Button>
-              <Button className="flex-1 h-10 rounded-xl bg-primary" disabled={busy || aiBusy} onClick={onConfirmEnhance}>
+              <Button className="flex-1 h-10 rounded-xl" disabled={busy || aiBusy} onClick={onConfirmEnhance}>
                 <Text className="block text-sm text-white">确定</Text>
               </Button>
             </View>

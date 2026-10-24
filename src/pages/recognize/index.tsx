@@ -20,7 +20,7 @@ import {
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
-import { BRAND } from '@/lib/theme'
+import { BRAND, INK } from '@/lib/theme'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -1220,7 +1220,7 @@ export default function RecognizePage() {
               <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
             </Button>
             <View className="flex flex-row items-center justify-center mt-3">
-              <View onClick={() => handleSaveImageDirect()}>
+              <View onClick={() => handleSaveImageDirect()} className="self-center rounded-lg border border-border px-3 py-1">
                 <Text className="block text-xs text-primary">以图片形式直接保存到最近题目</Text>
               </View>
             </View>
@@ -1303,18 +1303,20 @@ export default function RecognizePage() {
                   <View className="flex flex-row items-center justify-between mt-2">
                     <Text className="block text-xs text-muted-foreground">点图片可编辑 · 共 {boardPages.length} 页</Text>
                     <View className="flex flex-row items-center gap-3">
-                      <Text
-                        className="block text-xs text-primary"
+                      <View
+                        className="rounded-lg border border-border px-2 py-1"
                         onClick={() => Taro.previewImage({ urls: boardPages.map((p) => p.url), current: curPage.url })}
                       >
-                        看大图
-                      </Text>
+                        <Text className="block text-xs text-primary">看大图</Text>
+                      </View>
                       {curPage.ocr === 'error' ? (
                         <Text className="block text-xs" style={{ color: BRAND }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
                         </Text>
                       ) : null}
-                      <Text className="block text-xs text-primary" onClick={() => void addBoardPages()}>添加图片</Text>
+                      <View className="rounded-lg border border-border px-2 py-1" onClick={() => void addBoardPages()}>
+                        <Text className="block text-xs text-primary">添加图片</Text>
+                      </View>
                     </View>
                   </View>
 
@@ -1553,7 +1555,7 @@ export default function RecognizePage() {
               </Button>
             </View>
             <View className="flex items-center justify-center mt-3" onClick={() => setPicker(true)}>
-              <Text className="block text-xs text-primary">从资料库选择文档</Text>
+              <Text className="block text-xs text-primary rounded-lg border border-border px-3 py-1">从资料库选择文档</Text>
             </View>
           </Card>
         )}
@@ -1605,7 +1607,9 @@ export default function RecognizePage() {
             <View className="mb-3 flex flex-row items-center justify-between">
               <Text className="block text-sm font-semibold text-foreground">识别结果（{drafts.length} 题，可修改）</Text>
               {mode === 'split' && !showEditor && (questionUrl || questionImage) ? (
-                <Text className="block text-xs text-primary" onClick={() => setShowEditor(true)}>校对圈定范围</Text>
+                <View className="rounded-lg border border-border px-2 py-1" onClick={() => setShowEditor(true)}>
+                  <Text className="block text-xs text-primary">校对圈定范围</Text>
+                </View>
               ) : null}
             </View>
             <Text className="block text-xs text-muted-foreground mb-2">
@@ -1631,7 +1635,9 @@ export default function RecognizePage() {
                       value={subjectIndex(d.subject_id)}
                       onChange={(e) => updateDraft(idx, { subject_id: subjects[Number(e.detail.value)]?.id || d.subject_id })}
                     >
-                      <Text className="block text-xs text-primary">{subjectName(d.subject_id)}</Text>
+                      <View className="rounded-lg border border-border px-2 py-1">
+                        <Text className="block text-xs text-primary">{subjectName(d.subject_id)}</Text>
+                      </View>
                     </Picker>
                     <Text className="block text-xs text-muted-foreground" onClick={() => removeDraft(idx)}>删除</Text>
                   </View>
@@ -1823,7 +1829,7 @@ export default function RecognizePage() {
 function ImgActionBtn({ icon: Icon, label, onClick }: { icon?: any; label: string; onClick: () => void }) {
   return (
     <View className="flex-1 flex flex-row items-center justify-center gap-1 bg-muted rounded-lg py-2" onClick={onClick}>
-      {Icon ? <Icon size={14} color={BRAND} /> : null}
+      {Icon ? <Icon size={14} color={INK} /> : null}
       <Text className="block text-xs text-primary">{label}</Text>
     </View>
   )

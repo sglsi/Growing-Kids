@@ -12,7 +12,7 @@ export function CheckDot({ checked, size = 20 }: CheckDotProps) {
   return (
     <View
       className={`flex-shrink-0 rounded-full border flex items-center justify-center ${
-        checked ? 'bg-primary border-primary' : 'border-muted-foreground'
+        checked ? 'bg-brand border-brand' : 'border-muted-foreground'
       }`}
       style={{ width: `${size}px`, height: `${size}px` }}
     >
@@ -45,7 +45,7 @@ export default function SelectionBar({
 }: SelectionBarProps) {
   if (!selection.selecting) {
     return (
-      <Text className="block text-sm text-primary" onClick={selection.enter}>{enterLabel}</Text>
+      <Text className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.enter}>{enterLabel}</Text>
     )
   }
   return (
@@ -57,7 +57,7 @@ export default function SelectionBar({
       {selection.count > 0 ? (
         <Text className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</Text>
       ) : null}
-      <Text className="block text-sm text-primary" onClick={selection.exit}>取消</Text>
+      <Text className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.exit}>取消</Text>
     </View>
   )
 }

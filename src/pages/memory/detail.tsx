@@ -10,7 +10,7 @@ import {
 } from '@/services/memory'
 import { cacheGet, cacheSet } from '@/services/cache'
 import { getSubjectColor, formatDate } from '@/types'
-import { BRAND } from '@/lib/theme'
+import { BRAND, DANGER } from '@/lib/theme'
 
 export default function MemoryDetailPage() {
   const [params] = useState(() => Taro.getCurrentInstance().router?.params || {})
@@ -180,7 +180,7 @@ export default function MemoryDetailPage() {
                   ) : m.kind === 'audio' ? (
                     <View className="flex flex-row items-center gap-3 bg-muted rounded-xl px-4 py-3">
                       <View
-                        className="w-10 h-10 rounded-full bg-primary flex items-center justify-center"
+                        className="w-10 h-10 rounded-full bg-brand flex items-center justify-center"
                         onClick={() => setCurrentAudio(m)}
                       >
                         <PlayIcon size={18} color="#fff" />
@@ -255,11 +255,11 @@ export default function MemoryDetailPage() {
       <View style={{ padding: '12px 16px', paddingBottom: '32px' }}>
         <Button
           variant="outline"
-          className="w-full h-12 rounded-xl border-red-200"
+          className="w-full h-12 rounded-xl border-destructive"
           onClick={onDelete}
         >
-          <Trash2 size={16} color={BRAND} />
-          <Text className="block text-sm text-primary ml-2">删除记忆</Text>
+          <Trash2 size={16} color={DANGER} />
+          <Text className="block text-sm text-destructive ml-2">删除记忆</Text>
         </Button>
       </View>
     </ScrollView>

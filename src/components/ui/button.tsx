@@ -9,7 +9,11 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary hover:bg-opacity-90",
+        // shadcn 语义：default = 页面主操作。按视觉美学设计方案 3.1.3 的 R1，
+        // 主操作必须是朱砂（唯一强调色）；次级操作显式用 outline/secondary/ghost。
+        default: "bg-brand text-brand-foreground hover:bg-brand hover:bg-opacity-90",
+        // 墨色实心块：仅用于确需中性重量的场景（默认不再产出，保留供显式选用）
+        ink: "bg-primary text-primary-foreground hover:bg-primary hover:bg-opacity-90",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive hover:bg-opacity-90",
         outline:

@@ -19,7 +19,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import { FileText, FolderOpen } from 'lucide-react-taro'
-import { BRAND } from '@/lib/theme'
+import { INK } from '@/lib/theme'
 
 type Range = RangeValue
 type Tab = 'generate' | 'library'
@@ -197,7 +197,7 @@ export default function DocumentPage() {
             className="flex flex-row items-center gap-1 rounded-xl border border-border bg-background px-3 h-9"
             onClick={goLibrary}
           >
-            <FolderOpen size={14} color={BRAND} />
+            <FolderOpen size={14} color={INK} />
             <Text className="block text-sm text-foreground whitespace-nowrap">资料库</Text>
           </View>
         </View>
@@ -206,7 +206,7 @@ export default function DocumentPage() {
       {tab === 'generate' ? (
         <ScrollView scrollY style={{ height: '100vh', paddingTop: 60 }}>
           <View className="px-4 pt-4 pb-32">
-            <Text className="block text-sm font-semibold text-foreground mb-2">汇总时间段</Text>
+            <Text className="block text-base font-semibold text-foreground mb-2">汇总时间段</Text>
             <View className="mb-4">
               <RangePicker
                 value={range}
@@ -218,7 +218,7 @@ export default function DocumentPage() {
             </View>
 
             <View className="mb-2">
-              <Text className="block text-sm font-semibold text-foreground">选择学科（不选为全部学科）</Text>
+              <Text className="block text-base font-semibold text-foreground">选择学科（不选为全部学科）</Text>
             </View>
             <View className="flex flex-row flex-wrap gap-2 mb-5">
               <SubjectBadge name="全部" active={activeSubject === ''} onClick={() => setActiveSubject('')} />
@@ -306,7 +306,7 @@ export default function DocumentPage() {
                   {filteredDocs.map((d) => (
                     <View
                       key={d.id}
-                      className={`flex flex-row items-center gap-3 rounded-xl border p-3 ${sel.selected.has(d.id) ? 'border-primary bg-muted' : 'border-border bg-card'}`}
+                      className={`flex flex-row items-center gap-3 rounded-2xl border p-4 ${sel.selected.has(d.id) ? 'border-brand-line bg-brand-soft' : 'border-border bg-card'}`}
                       onClick={() => handleItemOpen(d)}
                       onLongPress={() => sel.longPress(d.id)}
                     >
@@ -314,12 +314,12 @@ export default function DocumentPage() {
                         <CheckDot checked={sel.selected.has(d.id)} size={20} />
                       )}
                       <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                        <FileText size={20} color={BRAND} />
+                        <FileText size={20} color={INK} />
                       </View>
                       <View className="flex-1 min-w-0">
                         <View className="flex flex-row items-center gap-2">
                           <View className="rounded px-2 py-1 flex-shrink-0 bg-muted">
-                            <Text className={`block text-xs font-medium ${d.type === 'pdf' ? 'text-red-600' : 'text-blue-600'}`}>
+                            <Text className="block text-xs font-medium text-foreground">
                               {d.type === 'pdf' ? 'PDF' : 'Word'}
                             </Text>
                           </View>

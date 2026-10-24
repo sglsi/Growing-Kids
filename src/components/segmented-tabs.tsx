@@ -35,7 +35,7 @@ export default function SegmentedTabs<V extends string = string>({
             className={`flex-1 flex items-center justify-center h-9 rounded-lg ${active ? 'bg-background shadow-sm' : ''}`}
             onClick={() => onValueChange(o.value)}
           >
-            <Text className={`block text-sm whitespace-nowrap ${active ? 'text-primary font-medium' : 'text-muted-foreground'}`}>
+            <Text className={`block text-sm whitespace-nowrap ${active ? 'text-brand font-medium' : 'text-muted-foreground'}`}>
               {o.label}
             </Text>
           </View>

@@ -55,8 +55,8 @@ interface Props {
 
 /**
  * 时间段筛选器（横向滚动 chip 行）。
- * 视觉沿用学科胶囊样式：未选用 bg-background + border-border + 圆点色（无），
- * 选用 bg-primary + border-primary + 白字。
+ * 视觉沿用学科胶囊样式：未选用 bg-background + border-border，
+ * 选用 bg-brand-soft + border-brand-line + 朱砂文字（R3，选中态用淡底不抢主操作）。
  */
 export default function RangePicker({ value, onChange }: Props) {
   return (
@@ -68,13 +68,13 @@ export default function RangePicker({ value, onChange }: Props) {
             <View
               key={o.value}
               className={`flex flex-row items-center rounded-full border px-3 py-1 ${
-                active ? 'bg-primary border-primary' : 'bg-background border-border'
+                active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'
               }`}
               onClick={() => onChange(o.value)}
             >
               <Text
                 className={`block text-xs whitespace-nowrap ${
-                  active ? 'text-primary-foreground' : 'text-foreground'
+                  active ? 'text-brand' : 'text-foreground'
                 }`}
               >
                 {o.label}

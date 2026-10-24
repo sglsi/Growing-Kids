@@ -84,12 +84,12 @@ export function SubjectPill({ active, label, color, onClick }: { active: boolean
   return (
     <View
       className={`flex flex-row items-center gap-2 rounded-full px-4 py-2 border ${
-        active ? 'bg-primary border-primary' : 'bg-background border-border'
+        active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'
       }`}
       onClick={onClick}
     >
       {color && !active && <View className={`w-2 h-2 rounded-full ${color}`} />}
-      <Text className={`block text-sm whitespace-nowrap ${active ? 'text-primary-foreground' : 'text-foreground'}`}>{label}</Text>
+      <Text className={`block text-sm whitespace-nowrap ${active ? 'text-brand' : 'text-foreground'}`}>{label}</Text>
     </View>
   )
 }
@@ -101,18 +101,18 @@ export function TagFilterBar({ tags, active, onChange }: { tags: string[]; activ
     <ScrollView scrollX className="whitespace-nowrap" enhanced showScrollbar={false}>
       <View className="flex flex-row gap-2">
         <View
-          className={`rounded-full border px-3 py-1 ${active === '' ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+          className={`rounded-full border px-3 py-1 ${active === '' ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
           onClick={() => onChange('')}
         >
-          <Text className={`block text-xs ${active === '' ? 'text-primary-foreground' : 'text-muted-foreground'}`}>全部标签</Text>
+          <Text className={`block text-xs ${active === '' ? 'text-brand' : 'text-muted-foreground'}`}>全部标签</Text>
         </View>
         {tags.map((t) => (
           <View
             key={t}
-            className={`rounded-full border px-3 py-1 ${active === t ? 'bg-primary border-primary' : 'bg-background border-border'}`}
+            className={`rounded-full border px-3 py-1 ${active === t ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
             onClick={() => onChange(t)}
           >
-            <Text className={`block text-xs ${active === t ? 'text-primary-foreground' : 'text-muted-foreground'}`}>#{t}</Text>
+            <Text className={`block text-xs ${active === t ? 'text-brand' : 'text-muted-foreground'}`}>#{t}</Text>
           </View>
         ))}
       </View>
@@ -127,8 +127,8 @@ export function EmptyCard({ title, hint, actionLabel, onAction }: { title: strin
       <Text className="block text-sm text-muted-foreground text-center">{title}</Text>
       {hint ? <Text className="block text-xs text-muted-foreground text-center mt-2">{hint}</Text> : null}
       {actionLabel && onAction ? (
-        <View className="rounded-lg bg-primary px-4 py-2 mt-4" onClick={onAction}>
-          <Text className="block text-xs text-primary-foreground">{actionLabel}</Text>
+        <View className="rounded-lg bg-brand px-4 py-2 mt-4" onClick={onAction}>
+          <Text className="block text-xs text-brand-foreground">{actionLabel}</Text>
         </View>
       ) : null}
     </Card>
@@ -151,20 +151,23 @@ export function BottomActionBar({ children }: { children?: React.ReactNode }) {
 
 /**
  * 底部操作按钮（合成PDF/WORD / 删除 / 移出复习本）。
+ * 配色遵循视觉美学设计方案 3.1.3 的收敛规则：
+ *   primary=页面主操作 → 朱砂（R1）；danger=删除 → destructive（R5）；其余 → 中性米底（R2）。
  * `compact`：标签较长（如「合成PDF/WORD」）时收窄字号与间距，避免在三等分栏里折行。
  */
 export function ActionBtn({ icon, label, danger, primary, disabled, onClick, compact }: {
   icon: React.ReactNode; label: string; danger?: boolean; primary?: boolean; disabled?: boolean; onClick: () => void
   compact?: boolean
 }) {
-  const bg = danger ? 'bg-red-600' : primary ? 'bg-primary' : 'bg-primary'
+  const bg = danger ? 'bg-destructive' : primary ? 'bg-brand' : 'bg-muted'
+  const fg = danger ? 'text-destructive-foreground' : primary ? 'text-brand-foreground' : 'text-foreground'
   return (
     <View
-      className={`flex flex-row items-center justify-center h-11 rounded-xl px-1 ${compact ? 'gap-1' : 'gap-2'} ${disabled ? 'opacity-50' : ''} ${bg}`}
+      className={`flex flex-row items-center justify-center h-11 rounded-xl px-1 ${compact ? 'gap-1' : 'gap-2'} ${disabled ? 'opacity-50' : ''} ${bg} ${fg}`}
       onClick={() => { if (!disabled) onClick() }}
     >
       {icon}
-      <Text className={`block ${compact ? 'text-xs' : 'text-sm'} text-primary-foreground`}>{label}</Text>
+      <Text className={`block ${compact ? 'text-xs' : 'text-sm'} ${fg}`}>{label}</Text>
     </View>
   )
 }

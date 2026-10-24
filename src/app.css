@@ -34,6 +34,7 @@ root-portal {
      0.25/0.3/0.35/0.45/0.75/0.9/0.92 …）。新增用法必须从这三档里选： */
   --brand-soft: rgba(190, 62, 45, 0.08); /* 淡底：芯片、标签背景、选中态 */
   --brand-line: rgba(190, 62, 45, 0.25); /* 描边：强调态边框 */
+  --brand-foreground: #ffffff; /* 朱砂底上的文字（主操作按钮），对比度 5.33:1 */
   /* 【危】删除/错误。原 #C04A3A 与强调色几乎同色相，无法区分；
      下潜到 #A8321F（相对亮度 0.107 vs 0.147）拉开明度差 */
   --destructive: #a8321f;
@@ -115,6 +116,7 @@ root-portal {
   --color-brand: var(--brand);
   --color-brand-soft: var(--brand-soft);
   --color-brand-line: var(--brand-line);
+  --color-brand-foreground: var(--brand-foreground);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);

@@ -15,7 +15,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
-import { BRAND } from '@/lib/theme'
+import { INK } from '@/lib/theme'
 
 /**
  * 资料库：外部 PDF / Word / TXT 等文档
@@ -152,11 +152,11 @@ export default function LibraryPage() {
             <SelectionBar selection={sel} enterLabel="批量选择" />
             {!sel.selecting && (
               <View
-                className="flex flex-row items-center gap-1 rounded-xl bg-primary px-3 h-8"
+                className="flex flex-row items-center gap-1 rounded-xl bg-brand px-3 h-8"
                 onClick={handleUpload}
               >
                 <Upload size={14} color="#fff" />
-                <Text className="block text-sm text-primary-foreground">导入</Text>
+                <Text className="block text-sm text-brand-foreground">导入</Text>
               </View>
             )}
           </View>
@@ -193,7 +193,7 @@ export default function LibraryPage() {
                 return (
                   <Card
                     key={d.id}
-                    className={`flex flex-row items-center gap-3 rounded-xl border p-3 ${checked ? 'border-primary bg-muted' : 'border-border'}`}
+                    className={`flex flex-row items-center gap-3 rounded-2xl border p-4 ${checked ? 'border-brand-line bg-brand-soft' : 'border-border'}`}
                     onClick={() => handleOpen(d)}
                     onLongPress={() => sel.longPress(d.id)}
                   >
@@ -201,7 +201,7 @@ export default function LibraryPage() {
                       <CheckDot checked={checked} size={20} />
                     )}
                     <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                      <FileText size={20} color={BRAND} />
+                      <FileText size={20} color={INK} />
                     </View>
                     <View className="flex-1 min-w-0">
                       <View className="flex flex-row items-center gap-2">

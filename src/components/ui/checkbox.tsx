@@ -36,8 +36,8 @@ const Checkbox = React.forwardRef<
     <View
       ref={ref}
       className={cn(
-        "h-4 w-4 shrink-0 rounded-sm border-2 border-primary ring-offset-background flex items-center justify-center focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
-        checked ? "bg-primary text-primary-foreground" : "bg-transparent",
+        "h-4 w-4 shrink-0 rounded-sm border-2 border-input ring-offset-background flex items-center justify-center focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
+        checked ? "bg-brand border-brand text-brand-foreground" : "bg-transparent",
         className
       )}
       {...({ tabIndex } as any)}

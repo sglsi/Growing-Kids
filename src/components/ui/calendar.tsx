@@ -356,13 +356,13 @@ function CalendarDayButton({
   const outsideClass = outside ? "text-muted-foreground" : ""
   const todayClass = today ? "bg-accent text-accent-foreground" : ""
   const selectedSingleClass = selectedSingle
-    ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+    ? "bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground"
     : ""
   const rangeStartClass = rangeStart
-    ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+    ? "bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground"
     : ""
   const rangeEndClass = rangeEnd
-    ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+    ? "bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground"
     : ""
   const rangeMiddleClass = rangeMiddle
     ? "bg-accent text-accent-foreground rounded-none"

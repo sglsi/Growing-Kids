@@ -22,7 +22,7 @@ import {
   deleteKnowledgeArticle,
   type KnowledgeArticle,
 } from '@/services/api'
-import { BRAND } from '@/lib/theme'
+import { BRAND, DANGER } from '@/lib/theme'
 
 interface FormState {
   id?: string
@@ -272,7 +272,7 @@ export default function ChatAdminPage() {
                       className="flex flex-row items-center gap-1"
                       style={{ padding: '4px 0' }}
                     >
-                      <Trash2 size={14} color={BRAND} />
+                      <Trash2 size={14} color={DANGER} />
                       <Text className="block text-xs" style={{ color: BRAND }}>
                         删除
                       </Text>

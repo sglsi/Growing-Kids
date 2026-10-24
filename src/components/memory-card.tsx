@@ -63,7 +63,7 @@ export default function MemoryCard({
 
   return (
     <Card
-      className={`rounded-2xl border-border ${checked ? 'border-primary' : ''}`}
+      className={`rounded-2xl border-border ${checked ? 'border-brand-line' : ''}`}
       onClick={() => onClick?.(memory)}
       onLongPress={() => onLongPress?.(memory)}
     >
@@ -73,11 +73,11 @@ export default function MemoryCard({
             <CheckDot checked={!!checked} size={20} />
           </View>
         )}
-        {/* 学习类记忆显示学科色条 */}
+        {/* 学习类记忆显示学科色条；其余用边线色中性条（不抢层级） */}
         {memory.category === 'study' && subjectName ? (
           <View className={`w-2 self-stretch ${subjectColor.bar}`} />
         ) : (
-          <View className="w-2 self-stretch bg-primary opacity-50" />
+          <View className="w-2 self-stretch bg-border" />
         )}
         <View className="flex-1 p-4">
           {/* 第一行：日期 + 分类 + 心情 + 更多 */}
