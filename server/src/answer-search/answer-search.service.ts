@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { createHash } from 'crypto'
 import { LLMClient } from '../ai/llm-provider'
 import { memGet, memSet } from '../shared/mem-cache'
+import { getSupabaseClient } from '../storage/database/supabase-client'
 import { TimelineService } from '../timeline/timeline.service'
 import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
@@ -33,6 +34,16 @@ const CACHE_PREFIX = 'ans:srch:'
 const QUOTA_PREFIX = 'ans:q:'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
+
+/**
+ * 持久化答案缓存（思傅 2026-10-24 定，为省 ima 日配额）：
+ *   - 成功结果默认**永久**（ANSWER_CACHE_TTL_DAYS=0 表示不过期；设正数=保留 N 天）；
+ *   - 失败/零命中结果按 ANSWER_CACHE_NEG_TTL_HOURS（默认 12h）短期记忆——
+ *     防同一道搜不到的题反复白扣配额，同时不把「配额耗尽」状态永久固化。
+ *   - key 含题面 hash ⇒ 题面改了自动换 key，不存在陈旧结果问题。
+ */
+const CACHE_PERSIST_DAYS = Number(process.env.ANSWER_CACHE_TTL_DAYS || 0)
+const NEG_TTL_HOURS = Number(process.env.ANSWER_CACHE_NEG_TTL_HOURS || 12)
 
 /** 题干显著片段（长度≥4 的连续切片），用于相关性判定，无需分词库 */
 function significantPhrases(q: string, len = 4, max = 40): string[] {
@@ -86,6 +97,92 @@ export class AnswerSearchService {
     return { ok: true, used: used + 1, limit }
   }
 
+  /**
+   * 持久化缓存读取（answer_cache 表）。
+   *
+   * 命中即省下一次外部调用（ima 日配额 / 联网检索 83s / LLM token），
+   * 这是「同一道题永不重复消耗配额」的唯一保障——内存缓存重启即丢，撑不住日配额。
+   *
+   * ⚠️ RLS 全注释 + service_role ⇒ 必须显式 .eq('user_id')，否则会读到别人的缓存。
+   */
+  private async cacheRead(
+    userId: string,
+    qHash: string,
+    mode: string,
+  ): Promise<AnswerSearchResult | null> {
+    try {
+      const client = getSupabaseClient()
+      const { data, error } = await client
+        .from('answer_cache')
+        .select('result, created_at, hit_count')
+        .eq('user_id', userId)
+        .eq('q_hash', qHash)
+        .eq('mode', mode)
+        .maybeSingle()
+      if (error || !data) return null
+
+      const result = data.result as AnswerSearchResult | null
+      if (!result || typeof result !== 'object') return null
+
+      // 成功结果按 CACHE_PERSIST_DAYS（0=永久）；零命中/失败按 NEG_TTL_HOURS 短期记忆
+      const ok = result.source !== 'none'
+      const ttlMs = ok
+        ? CACHE_PERSIST_DAYS > 0
+          ? CACHE_PERSIST_DAYS * 24 * 60 * 60 * 1000
+          : Number.POSITIVE_INFINITY
+        : NEG_TTL_HOURS * 60 * 60 * 1000
+      const age = Date.now() - new Date(String(data.created_at)).getTime()
+      if (age > ttlMs) return null
+
+      // 命中计数（best-effort：失败不影响主流程，但必须打全错）
+      void client
+        .from('answer_cache')
+        .update({
+          hit_count: Number(data.hit_count || 0) + 1,
+          last_hit_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId)
+        .eq('q_hash', qHash)
+        .eq('mode', mode)
+        .then(
+          () => undefined,
+          (e) => console.error('[answer-search] 缓存命中计数失败', e),
+        )
+
+      return result
+    } catch (e) {
+      // 缓存层任何异常都不能拖垮搜题主流程（降级为未命中）
+      console.error('[answer-search] 持久化缓存读取失败', e)
+      return null
+    }
+  }
+
+  /** 持久化缓存写入（upsert：同一 user+q_hash+mode 覆盖，不动 created_at） */
+  private async cacheWrite(
+    userId: string,
+    qHash: string,
+    mode: string,
+    result: AnswerSearchResult,
+  ): Promise<void> {
+    try {
+      const client = getSupabaseClient()
+      const { error } = await client.from('answer_cache').upsert(
+        {
+          user_id: userId,
+          q_hash: qHash,
+          mode,
+          result: result as unknown as Record<string, unknown>,
+          last_hit_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id,q_hash,mode' },
+      )
+      if (error) throw new Error(error.message)
+    } catch (e) {
+      // best-effort：写缓存失败只损失「下次省配额」，不能让本次结果丢失
+      console.error('[answer-search] 持久化缓存写入失败', e)
+    }
+  }
+
   async searchAnswer(
     userId: string,
     itemId: string,
@@ -131,13 +228,23 @@ export class AnswerSearchService {
       }
     }
 
-    // ③ 缓存（24h，按题干内容哈希；⚠️ key 必须带 mode——检索结果与推理结果不能混用，
+    // ③ 缓存（按题干内容哈希；⚠️ key 必须带 mode——检索结果与推理结果不能混用，
     //    否则先调过联网搜题再点 AI 解题，会拿到检索缓存冒充 AI 结果）
+    //    两级：进程内存（24h，扛同一会话内的重复点击）→ 数据库（默认永久，扛重启与跨天）
     const qHash = createHash('sha256').update(question).digest('hex').slice(0, 32)
     const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`
     if (!opts.force) {
       const cached = memGet<AnswerSearchResult>(cacheKey)
       if (cached) return { ...cached, cached: true }
+
+      const persisted = await this.cacheRead(userId, qHash, mode)
+      if (persisted) {
+        memSet(cacheKey, persisted, CACHE_TTL_MS)
+        this.logger.log(
+          `[answer-search] 持久化缓存命中（mode=${mode}）→ 省 1 次外部调用（ima 日配额很紧，命中即赚）`,
+        )
+        return { ...persisted, cached: true }
+      }
     }
 
     // ④ 配额
@@ -242,7 +349,9 @@ export class AnswerSearchService {
       }
     }
 
-    if (result.source !== 'none') memSet(cacheKey, result, CACHE_TTL_MS)
+    // 结果入两级缓存（含 source=none：短期记忆，避免同一道搜不到的题反复白扣 ima 配额）
+    memSet(cacheKey, result, CACHE_TTL_MS)
+    await this.cacheWrite(userId, qHash, mode, result)
     return result
   }
 

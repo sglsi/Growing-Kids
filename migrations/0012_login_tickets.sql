@@ -10,10 +10,13 @@
 --
 -- 执行方式（与 0011 相同）：Supabase Dashboard → SQL Editor → 粘贴运行。幂等可重跑。
 
+-- ⚠️ user_id 必须是 varchar(36)，与 users.id 同型（2026-10-24 修）。
+--    原写 uuid，迁移器执行报 42804「foreign key constraint cannot be implemented」——
+--    本库 users.id 是 character varying(36)，外键两侧类型必须一致。
 CREATE TABLE IF NOT EXISTS public.login_tickets (
   token       text PRIMARY KEY,
   status      text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'authorized', 'expired')),
-  user_id     uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  user_id     varchar(36) REFERENCES public.users(id) ON DELETE SET NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
   expires_at  timestamptz NOT NULL DEFAULT now() + interval '5 minutes'
 );

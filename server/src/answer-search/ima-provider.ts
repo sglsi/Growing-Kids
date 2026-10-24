@@ -47,6 +47,19 @@ const IMA_KB_GAP_MS = Number(process.env.IMA_KB_GAP_MS || 250)
 const IMA_ROUND_GAP_MS = Number(process.env.IMA_ROUND_GAP_MS || 600)
 const IMA_RETRY_BACKOFF_MS = Number(process.env.IMA_RETRY_BACKOFF_MS || 900)
 
+/**
+ * 单题调用预算（思傅 2026-10-24：日配额太紧，从「最坏 10+ 次/题」压到「最坏 4 次/题」）
+ *
+ *   IMA_PROBE_MAX      —— 先导探针最多试几级查询（默认 2：关键词串 → 前 4 词）
+ *   IMA_FALLBACK_KB_MAX—— 兜底一轮最多查几个库（默认 2，原为全部 6 个）
+ *
+ * 配额账（默认档）：单题典型 1~2 次、最坏 4 次 ⇒ 500 次/天 ≈ 125~500 题，
+ * 叠加持久化答案缓存后（同题不重复消耗），日常使用基本不会再撞 220021。
+ * 想更省就把两个值都设成 1（最坏 2 次/题，命中率会降一些）。
+ */
+const IMA_PROBE_MAX = Math.max(1, Number(process.env.IMA_PROBE_MAX || 2))
+const IMA_FALLBACK_KB_MAX = Math.max(1, Number(process.env.IMA_FALLBACK_KB_MAX || 2))
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -282,14 +295,20 @@ export class ImaKnowledgeProvider {
   }
 
   /**
-   * 全库串行检索一轮（兜底路径用）：库间 250ms 间隔压 QPS，
+   * 多库串行检索一轮（兜底路径用）：库间 250ms 间隔压 QPS，
    * 撞日配额（220021）立即中断剩余库并上抛专用错误。
+   *
+   * ⚠️ 只查前 IMA_FALLBACK_KB_MAX 个库（默认 2，2026-10-24 前是全查 6 个）——
+   *    ima 按调用计数扣日配额，兜底一轮 6 次调用太贵；前 2 个库已是命中主力。
    *
    * 部分库失败（无权限/超时/限流重试仍失败）不拖垮整体：有成功就返回成功的，
    * 全部失败才抛错（上层转成 source=none + 明确说明）。
    */
-  private async searchAllKbs(query: string, count: number): Promise<WebItem[]> {
-    const kbIds = this.kbIds()
+  private async searchKbs(
+    query: string,
+    count: number,
+    kbIds: string[] = this.kbIds().slice(0, IMA_FALLBACK_KB_MAX),
+  ): Promise<WebItem[]> {
     const errors: string[] = []
     const perKb: WebItem[][] = []
     for (let i = 0; i < kbIds.length; i++) {
@@ -314,16 +333,16 @@ export class ImaKnowledgeProvider {
   }
 
   /**
-   * 对外入口：**先导探针式**检索（2026-10-23 为省日配额重构）。
+   * 对外入口：**先导探针式**检索（2026-10-23 为省日配额重构，2026-10-24 再压缩一次）。
    *
    * 背景：ima 按调用计数扣日配额（零命中也扣，220021），每题必须抠着花。
    * 旧版「降级链 × 6 库并行」最坏 54 次/题，真实用户点两次就打爆全天配额。
    *
    * 策略（详见 buildQueryFallbacks）：
-   *   ① 只用**主库**（配置里的第一个）逐级试探查询链——每题典型 2~4 次调用；
+   *   ① 只用**主库**（配置里的第一个）逐级试探查询链，**最多 IMA_PROBE_MAX 级**（默认 2）；
    *   ② 主库任一级命中即返回（主库是思傅选定的最相关库，命中即最相关）；
-   *   ③ 主库全级零命中（典型：文科题撞上数学主库）→ 全库串行兜底一轮
-   *      （6 次调用，交错合并）——至此最坏 4+6=10 次/题。
+   *   ③ 主库全级零命中（典型：文科题撞上数学主库）→ 串行兜底一轮，
+   *      **只查前 IMA_FALLBACK_KB_MAX 个库**（默认 2）——至此最坏 2+2=4 次/题。
    */
   async search(query: string, count: number): Promise<WebItem[]> {
     const kbIds = this.kbIds()
@@ -334,7 +353,7 @@ export class ImaKnowledgeProvider {
       throw new Error('ima 凭据不完整（缺 IMA_KB_ID）')
     }
 
-    const stages = buildQueryFallbacks(query)
+    const stages = buildQueryFallbacks(query).slice(0, IMA_PROBE_MAX)
     const primary = kbIds[0]
     let probeCalls = 0
     let probeErr = ''
@@ -358,14 +377,15 @@ export class ImaKnowledgeProvider {
       }
     }
 
-    // ③ 全库兜底一轮：用链中第一个「≤8 字的无空格单词」= 最强主题词
+    // ③ 兜底一轮（限前 IMA_FALLBACK_KB_MAX 个库）：用链中第一个「≤8 字的无空格单词」= 最强主题词
     //    （关键词串/整句都带空格或超长，AND 语义下不如单词；
     //      ≤8 字排除「《出师表》中先帝不以臣卑鄙的古义是」这类去停用整串）
     const tail =
       stages.find((q) => !q.includes(' ') && q.length <= 8) || stages[stages.length - 1] || query
-    const items = await this.searchAllKbs(tail, count)
+    const fallbackKbs = kbIds.slice(0, IMA_FALLBACK_KB_MAX)
+    const items = await this.searchKbs(tail, count, fallbackKbs)
     this.logger.log(
-      `[answer-search] ima 全库兜底命中 ${items.length} 条（探针 ${probeCalls} 次零命中/报错）：「${tail.slice(0, 40)}」`,
+      `[answer-search] ima 兜底命中 ${items.length} 条（${fallbackKbs.length} 库，探针 ${probeCalls} 次零命中/报错）：「${tail.slice(0, 40)}」`,
     )
     return items
   }
