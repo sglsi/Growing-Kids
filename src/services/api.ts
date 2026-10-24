@@ -779,6 +779,19 @@ export function renameLibraryDoc(id: string, name: string) {
   )
 }
 
+/**
+ * 更新资料库条目（思傅 2026-10-24：重命名 + 归属学科二合一）。
+ * subject_id 传 null = 未分类；只传需要改的字段即可。
+ */
+export function updateLibraryDoc(id: string, patch: { name?: string; subject_id?: string | null }) {
+  return invalidateAfter(
+    unwrap<{ id: string; name: string; subject_id: string | null }>(
+      Network.request({ url: `/api/library/${id}`, method: 'PATCH', data: patch, header: authHeaders() }),
+    ),
+    'lib',
+  )
+}
+
 // ============================================================
 // 首页概览
 // ============================================================

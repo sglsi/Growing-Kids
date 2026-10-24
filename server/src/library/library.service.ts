@@ -61,23 +61,57 @@ export class LibraryService {
     return data as unknown as LibraryDoc
   }
 
-  /** 重命名（思傅 2026-10-24：资料库改名）。同样 user_id 隔离 + 行数校验 */
-  async rename(userId: string, id: string, name: string): Promise<{ id: string; name: string }> {
-    const trimmed = (name || '').trim()
-    if (!trimmed) throw new BadRequestException('名称不能为空')
-    if (trimmed.length > 100) throw new BadRequestException('名称过长（最多 100 个字符）')
+  /**
+   * 更新资料库条目（重命名 + 归属学科，思傅 2026-10-24）。
+   * 同样 user_id 隔离 + 行数校验；subject_id 传 null/'' = 未分类，
+   * 传 id 时校验该学科存在且属于本人（防越权绑定到别人学科）。
+   */
+  async update(
+    userId: string,
+    id: string,
+    patch: { name?: string; subject_id?: string | null },
+  ): Promise<{ id: string; name: string; subject_id: string | null }> {
     const client = getSupabaseClient()
+    const upd: Record<string, unknown> = {}
+    if (patch.name !== undefined) {
+      const trimmed = (patch.name || '').trim()
+      if (!trimmed) throw new BadRequestException('名称不能为空')
+      if (trimmed.length > 100) throw new BadRequestException('名称过长（最多 100 个字符）')
+      upd.name = trimmed
+    }
+    if (patch.subject_id !== undefined) {
+      const sid = patch.subject_id === '' ? null : patch.subject_id
+      if (sid !== null) {
+        const { data: subj, error: se } = await client
+          .from('subjects')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('id', sid)
+          .maybeSingle()
+        if (se) throw new Error(se.message)
+        if (!subj) throw new BadRequestException('学科不存在或不属于本人')
+      }
+      upd.subject_id = sid
+    }
+    if (Object.keys(upd).length === 0) throw new BadRequestException('没有需要更新的字段')
+
     const { data, error } = await client
       .from(TABLE)
-      .update({ name: trimmed })
+      .update(upd)
       .eq('user_id', userId)
       .eq('id', id)
       .is('deleted_at', null)
-      .select('id, name')
+      .select('id, name, subject_id')
       .maybeSingle()
     if (error) throw new Error(error.message)
     if (!data) throw new NotFoundException('文档不存在')
-    return data as { id: string; name: string }
+    return data as { id: string; name: string; subject_id: string | null }
+  }
+
+  /** 重命名（兼容旧调用；等价于 update({ name })） */
+  async rename(userId: string, id: string, name: string): Promise<{ id: string; name: string }> {
+    const r = await this.update(userId, id, { name })
+    return { id: r.id, name: r.name }
   }
 
   async remove(userId: string, id: string): Promise<{ id: string }> {

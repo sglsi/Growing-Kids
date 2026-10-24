@@ -11,7 +11,7 @@ import { confirmDelete, useSelection } from '@/lib/use-selection'
 import RenameDialog from '@/components/rename-dialog'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
-  fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc,
+  fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc, updateLibraryDoc,
   type LibraryDoc, type Subject, type Paged,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
@@ -197,15 +197,48 @@ export default function LibraryPage() {
       .catch(() => { /* 取消 */ })
   }
 
-  /** 卡片「⋯」→ 重命名 / 删除 */
+  /** 卡片「⋯」→ 重命名 / 归属学科 / 删除 */
   const handleMore = (d: LibraryDoc) => {
     if (sel.selecting) return
-    Taro.showActionSheet({ itemList: ['重命名', '删除'] })
+    Taro.showActionSheet({ itemList: ['重命名', '归属学科', '删除'] })
       .then((res) => {
         if (res.tapIndex === 0) setRenameTarget(d)
-        else if (res.tapIndex === 1) handleSingleDelete(d)
+        else if (res.tapIndex === 1) handleAssignSubject(d)
+        else if (res.tapIndex === 2) handleSingleDelete(d)
       })
       .catch(() => { /* 取消 */ })
+  }
+
+  /**
+   * 归属学科（思傅 2026-10-24）：图片/文档入库后可改归学科。
+   * 原生 action sheet（与 ⋮ 菜单一致的手感），「未分类」置顶，当前项标注。
+   * 学科未分类哨兵 subject_id=null，对应后端 update 的 null 语义。
+   */
+  const handleAssignSubject = (d: LibraryDoc) => {
+    if (!subjects.length) {
+      Taro.showToast({ title: '还没有学科，请先到「学科」页创建', icon: 'none' })
+      return
+    }
+    const curName = subjects.find((s) => s.id === d.subject_id)?.name
+    Taro.showActionSheet({
+      itemList: ['未分类', ...subjects.map((s) => (s.id === d.subject_id ? `${s.name}（当前）` : s.name))],
+    })
+      .then(async (res) => {
+        const subjectId = res.tapIndex === 0 ? null : subjects[res.tapIndex - 1]?.id ?? null
+        try {
+          await updateLibraryDoc(d.id, { subject_id: subjectId })
+          Taro.showToast({
+            title: subjectId ? `已归入「${subjects.find((s) => s.id === subjectId)?.name || ''}」` : '已移出学科',
+            icon: 'success',
+          })
+          load({ silent: true })
+        } catch (e) {
+          console.error('设置归属学科失败', e)
+          Taro.showToast({ title: '设置失败，请重试', icon: 'none' })
+        }
+      })
+      .catch(() => { /* 取消 */ })
+    void curName // 预留：后续若做自定义弹层可高亮当前项
   }
 
   const handleRenameConfirm = async (value: string) => {

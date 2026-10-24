@@ -41,9 +41,16 @@ export class LibraryController {
 
   @Patch(':id')
   @HttpCode(200)
-  async rename(@Req() req: RequestWithUser, @Param('id') id: string, @Body() body: { name?: string }) {
+  async update(
+    @Req() req: RequestWithUser,
+    @Param('id') id: string,
+    @Body() body: { name?: string; subject_id?: string | null },
+  ) {
     const userId = requireUserId(req)
-    const data = await this.libraryService.rename(userId, id, body?.name || '')
+    const data = await this.libraryService.update(userId, id, {
+      name: body?.name,
+      subject_id: body?.subject_id,
+    })
     return { code: 200, msg: 'success', data }
   }
 
