@@ -10,8 +10,9 @@
  *
  * 自查逻辑（每轮）：
  *   1. 3001 无监听 → 带 OCR 三件套环境变量拉起 node dist/main -p 3001（windowsHide 隐藏）
- *   2. 3001 在监听，但进程启动早于 dist/main.js 最后修改时间、且距构建已过宽限期
+ *   2. 3001 在监听，但进程启动早于 **dist 整树最大 mtime**、且距构建已过宽限期
  *      → 判定在跑旧构建 → 杀掉同轮重拉（宽限期默认 60s：构建后先留时间给手动重启）
+ *      ⚠️ 判据必须是整树而非单个 main.js——tsc 增量构建下 main.js mtime 可能不变
  *   3. 端口在监听且代码新鲜 → 静默
  *
  * 为什么要有守护进程：直接让计划任务每分钟跑 node，会每分钟弹一次
@@ -130,6 +131,39 @@ function getProcStart(pid) {
   }
 }
 
+/**
+ * dist 目录树的最大 mtime（毫秒）。
+ *
+ * ⚠️ 不能用单个 dist/main.js 的 mtime 判断「是否在跑旧构建」——tsc 增量构建
+ * 只重编译变化文件，改了 controller 后 main.js 的 mtime 不变，进程启动时间
+ * 晚于它 ⇒ 被误判为「代码新鲜」，后端永远跑旧代码（2026-10-24 实测：
+ * 改 documents.controller 后 20 分钟没重启，根因就在这）。
+ * 扫全树几千个文件 <10ms，60s 一轮的成本可忽略。
+ */
+function distTreeMtimeMs() {
+  let latest = 0;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      try {
+        if (e.isDirectory()) walk(p);
+        else {
+          const m = fs.statSync(p).mtimeMs;
+          if (m > latest) latest = m;
+        }
+      } catch { /* 文件在读的过程中被删/换，跳过 */ }
+    }
+  };
+  walk(path.join(SERVER_DIR, 'dist'));
+  return latest;
+}
+
 /** 所有命令行含指定关键字的 node 进程 PID */
 function findNodeProcs(keyword) {
   try {
@@ -244,23 +278,20 @@ async function runOnce() {
   const pid = getPortPid();
   if (!pid) return;
   const start = getProcStart(pid);
-  let distMtime = null;
-  try {
-    distMtime = fs.statSync(DIST_MAIN).mtime;
-  } catch {
-    return; // dist 都读不到，不管
-  }
   if (!start) return;
+  // dist 整树最大 mtime（增量构建下 main.js 单独看不出来，见 distTreeMtimeMs 注释）
+  const distMtimeMs = distTreeMtimeMs();
+  if (!distMtimeMs) return; // dist 读不到，不管
   const now = Date.now();
-  if (start.getTime() >= distMtime.getTime()) return; // 进程启动晚于最后构建，代码新鲜
-  if (now - distMtime.getTime() <= STALE_GRACE_MS) return; // 构建后宽限期内，留时间给手动重启
+  if (start.getTime() >= distMtimeMs) return; // 进程启动晚于最后构建，代码新鲜
+  if (now - distMtimeMs <= STALE_GRACE_MS) return; // 构建后宽限期内，留时间给手动重启
 
   const procs = findBackendProcs();
   if (procs.length > 1) {
     log(`WARN: 同时存在多个 dist/main 进程 [${procs.join(', ')}]，不自动清理，请人工确认`);
     return;
   }
-  log(`STALE: 后端 pid=${pid} 启动于 ${start.toLocaleString('zh-CN')}，早于最后构建 ${distMtime.toLocaleString('zh-CN')}，且距构建已超过宽限期 ${STALE_GRACE_MS / 1000}s，判定在跑旧构建，重启`);
+  log(`STALE: 后端 pid=${pid} 启动于 ${start.toLocaleString('zh-CN')}，早于最后构建 ${new Date(distMtimeMs).toLocaleString('zh-CN')}，且距构建已超过宽限期 ${STALE_GRACE_MS / 1000}s，判定在跑旧构建，重启`);
   try {
     process.kill(pid);
   } catch (e) {
