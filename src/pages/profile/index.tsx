@@ -15,7 +15,7 @@ import {
   fetchOverview, fetchStorageUsage, formatBytes,
   type Overview, type StorageUsage,
 } from '@/services/api'
-import { INK } from '@/lib/theme'
+import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -193,7 +193,7 @@ export default function ProfilePage() {
                   当前为匿名状态，本机数据保留 30 天。登录后现有内容会自动迁移到你的微信账号，长期保存、多端同步。
                 </Text>
                 <Button className="w-full h-11 rounded-xl" disabled={busy} onClick={handleLogin}>
-                  <LogIn size={16} color="#fff" />
+                  <LogIn size={16} color={BRAND_FOREGROUND} />
                   <Text className="block text-sm ml-2 text-primary-foreground">微信一键登录</Text>
                 </Button>
               </>
@@ -208,7 +208,7 @@ export default function ProfilePage() {
             <View className="flex flex-row items-center gap-3">
               <View
                 className="rounded-xl flex items-center justify-center"
-                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
               >
                 <Bot size={20} color={INK} />
               </View>

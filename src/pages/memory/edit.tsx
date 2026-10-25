@@ -18,7 +18,7 @@ import {
   fetchSubjects, uploadFile,
 } from '@/services/api'
 import type { Subject } from '@/types'
-import { INK } from '@/lib/theme'
+import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -459,7 +459,7 @@ export default function MemoryEditPage() {
                 className={`rounded-full border px-4 py-2 ${active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                 onClick={() => setCategory(c.value)}
               >
-                <Text className={`block text-sm ${active ? 'text-brand' : 'text-foreground'}`}>{c.label}</Text>
+                <Text className={`block text-sm ${active ? 'text-brand-text' : 'text-foreground'}`}>{c.label}</Text>
               </View>
             )
           })}
@@ -476,7 +476,7 @@ export default function MemoryEditPage() {
                 onClick={() => setMood(active ? '' : m.value)}
               >
                 <Text className="block text-base">{m.emoji}</Text>
-                <Text className={`block text-xs ${active ? 'text-brand' : 'text-muted-foreground'}`}>{m.label}</Text>
+                <Text className={`block text-xs ${active ? 'text-brand-text' : 'text-muted-foreground'}`}>{m.label}</Text>
               </View>
             )
           })}
@@ -490,7 +490,7 @@ export default function MemoryEditPage() {
                 className={`rounded-full border px-4 py-2 ${!subjectId ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                 onClick={() => setSubjectId('')}
               >
-                <Text className={`block text-sm ${!subjectId ? 'text-brand' : 'text-foreground'}`}>不限</Text>
+                <Text className={`block text-sm ${!subjectId ? 'text-brand-text' : 'text-foreground'}`}>不限</Text>
               </View>
               {subjects.map((s) => {
                 const a = subjectId === s.id
@@ -500,7 +500,7 @@ export default function MemoryEditPage() {
                     className={`rounded-full border px-4 py-2 ${a ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
                     onClick={() => setSubjectId(s.id)}
                   >
-                    <Text className={`block text-sm ${a ? 'text-brand' : 'text-foreground'}`}>{s.name}</Text>
+                    <Text className={`block text-sm ${a ? 'text-brand-text' : 'text-foreground'}`}>{s.name}</Text>
                   </View>
                 )
               })}
@@ -627,7 +627,7 @@ export default function MemoryEditPage() {
           onClick={onSave}
           disabled={saving || uploading > 0}
         >
-          <Check size={16} color="#fff" />
+          <Check size={16} color={BRAND_FOREGROUND} />
           <Text className="block text-sm text-brand-foreground ml-2">
             {saving ? '保存中…' : uploading > 0 ? `上传中 ${uploading}…` : '保存'}
           </Text>

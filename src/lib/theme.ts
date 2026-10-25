@@ -16,15 +16,18 @@
  */
 
 /**
- * 【松】唯一强调色 —— 对应 CSS 变量 --brand
- * 思傅 2026-10-24 方案 B：朱砂 #BE3E2D → 松绿 #2E6F4E。
- * 依据：红色在认知/督导场景中提升生理唤醒、关联威胁；松绿为低唤醒舒缓色，
- * 且契合 Growing-Kids「生长」语义。白字对比度 6.03:1。
+ * 【翡】唯一强调色（填充面）—— 对应 CSS 变量 --brand
+ * 思傅 2026-10-25：松绿 #2E6F4E → 翡翠玻璃绿 #10B981（原松绿偏深偏灰）。
+ * ⚠️ 白字仅 2.5:1 不达标 ⇒ 品牌填充面上的文字/图标必须用 BRAND_FOREGROUND；
+ *    纸面/白底上的品牌文字/图标用 BRAND_TEXT。三令牌规则见 src/app.css。
  */
-export const BRAND = '#2E6F4E'
+export const BRAND = '#10B981'
 
-/** 【松】松绿底上的文字（主操作按钮）—— 对应 --brand-foreground */
-export const BRAND_FOREGROUND = '#FFFFFF'
+/** 【翡】品牌填充面上的文字/图标（主操作按钮）—— 对应 --brand-foreground，深墨绿 4.8:1 */
+export const BRAND_FOREGROUND = '#0B3D2E'
+
+/** 【翡】纸面/白底上的品牌文字/图标 —— 对应 --brand-text，深翡翠 5.0:1 */
+export const BRAND_TEXT = '#0B7A55'
 
 /** 【墨】主文字 —— 对应 --foreground */
 export const INK = '#2A2825'

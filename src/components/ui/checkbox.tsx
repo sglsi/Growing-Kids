@@ -3,6 +3,7 @@ import { View } from "@tarojs/components"
 import { Check } from "lucide-react-taro"
 
 import { cn } from "@/lib/utils"
+import { BRAND_FOREGROUND } from "@/lib/theme"
 
 const Checkbox = React.forwardRef<
   React.ElementRef<typeof View>,
@@ -49,7 +50,7 @@ const Checkbox = React.forwardRef<
       onClick={handleClick}
       {...props}
     >
-      {checked && <Check color="#fff" size={12} strokeWidth={3} className="text-current" />}
+      {checked && <Check color={BRAND_FOREGROUND} size={12} strokeWidth={3} className="text-current" />}
     </View>
   )
 })

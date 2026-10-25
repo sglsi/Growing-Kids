@@ -13,7 +13,7 @@ import {
   type Memory, type MemoryCategory, MEMORY_CATEGORIES,
 } from '@/services/memory'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
-import { BRAND } from '@/lib/theme'
+import { BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
 type CatValue = MemoryCategory | 'all'
 
@@ -110,7 +110,7 @@ export default function MemoryHomePage() {
             title: '确认删除',
             content: `确定删除「${m.title || m.content?.slice(0, 20) || '该记忆'}」吗？`,
             confirmText: '删除',
-            confirmColor: BRAND,
+            confirmColor: BRAND_TEXT,
             success: async (rs) => {
               if (rs.confirm) {
                 try {
@@ -135,7 +135,7 @@ export default function MemoryHomePage() {
       title: '批量删除',
       content: `确定删除选中的 ${ids.length} 条记忆？`,
       confirmText: '删除',
-      confirmColor: BRAND,
+      confirmColor: BRAND_TEXT,
       success: async (rs) => {
         if (rs.confirm) {
           try {
@@ -190,7 +190,7 @@ export default function MemoryHomePage() {
             className="h-9 px-3 rounded-xl"
             onClick={onCreate}
           >
-            <Plus size={16} color="#fff" />
+            <Plus size={16} color={BRAND_FOREGROUND} />
             <Text className="block text-sm ml-1">新增</Text>
           </Button>
         )}
@@ -241,7 +241,7 @@ export default function MemoryHomePage() {
             把成长路上的随想、心得、照片、声音都留下来{'\n'}让记忆成为可翻阅的「成长手记」
           </Text>
           <Button className="mt-2 rounded-xl" onClick={onCreate}>
-            <Plus size={16} color="#fff" />
+            <Plus size={16} color={BRAND_FOREGROUND} />
             <Text className="block text-sm ml-1">记录第一段</Text>
           </Button>
         </View>

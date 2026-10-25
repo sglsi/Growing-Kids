@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
 import type { TimelineItem, ErrorAnalysis } from '@/types'
-import { BRAND } from '@/lib/theme'
+import { BRAND_TEXT } from '@/lib/theme'
 
 /**
  * 错因类型 → 角标配色（与详情页红橙色系呼应，但按错因语义分色，便于列表一眼分拣）
@@ -137,7 +137,7 @@ export default function ReviewItemCard({
                     )
                   )}
                   {item.in_review_book && (
-                    <Badge className="bg-brand-soft text-brand border border-brand-line rounded-full px-2 py-0 text-xs">
+                    <Badge className="bg-brand-soft text-brand-text border border-brand-line rounded-full px-2 py-0 text-xs">
                       复习本
                     </Badge>
                   )}
@@ -200,7 +200,7 @@ export default function ReviewItemCard({
                 </Badge>
               )}
               {item.in_review_book && timeField === 'created_at' && (
-                <Badge className="bg-brand-soft text-brand border border-brand-line rounded-full px-2 py-0 text-xs">
+                <Badge className="bg-brand-soft text-brand-text border border-brand-line rounded-full px-2 py-0 text-xs">
                   复习本
                 </Badge>
               )}
@@ -211,7 +211,7 @@ export default function ReviewItemCard({
               )}
               {/* P3：规范题号标签（节·小类 题号）——复习本/错题库列表唯一指认题目 */}
               {c.question_label ? (
-                <Badge className="border border-brand-line bg-brand-soft text-brand rounded-full px-2 py-0 text-xs">
+                <Badge className="border border-brand-line bg-brand-soft text-brand-text rounded-full px-2 py-0 text-xs">
                   {c.question_label}
                 </Badge>
               ) : null}
@@ -228,8 +228,8 @@ export default function ReviewItemCard({
 
           {c.answer ? (
             <View className="flex flex-row items-start gap-2 bg-muted bg-opacity-60 rounded-lg p-2">
-              <Text className="block text-xs font-medium shrink-0 pt-1 text-brand">正确答案</Text>
-              <Text className="block flex-1 text-xs leading-relaxed text-brand">
+              <Text className="block text-xs font-medium shrink-0 pt-1 text-brand-text">正确答案</Text>
+              <Text className="block flex-1 text-xs leading-relaxed text-brand-text">
                 {truncate(c.answer, 60)}
               </Text>
               {onAnswer && !selecting ? (
@@ -237,7 +237,7 @@ export default function ReviewItemCard({
                   className="shrink-0 px-2 py-1 rounded-lg bg-brand-soft"
                   onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
                 >
-                  <Text className="block text-xs" style={{ color: BRAND }}>改答案</Text>
+                  <Text className="block text-xs" style={{ color: BRAND_TEXT }}>改答案</Text>
                 </View>
               ) : null}
             </View>
@@ -245,10 +245,10 @@ export default function ReviewItemCard({
             <View className="mt-1 flex flex-row">
               <View
                 className="px-2 py-1 rounded-lg border"
-                style={{ borderColor: 'rgba(46, 111, 78, 0.25)', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}
+                style={{ borderColor: 'rgba(16, 185, 129, 0.25)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
                 onClick={(e) => { e.stopPropagation?.(); onAnswer(item) }}
               >
-                <Text className="block text-xs" style={{ color: BRAND }}>＋ 填答案</Text>
+                <Text className="block text-xs" style={{ color: BRAND_TEXT }}>＋ 填答案</Text>
               </View>
             </View>
           ) : null}

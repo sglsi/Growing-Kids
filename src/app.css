@@ -27,26 +27,29 @@ root-portal {
   --muted-foreground: #6f685c;
   --accent: #f1ede4;
   --accent-foreground: #2a2825;
-  /* 【松】唯一强调色（思傅 2026-10-24 方案 B：朱砂 #BE3E2D → 松绿 #2E6F4E）。
+  /* 【翡】唯一强调色（思傅 2026-10-25：松绿 #2E6F4E → 翡翠玻璃绿 #10B981）。
      原命名 --correct（"正确"）名不副实：它实际承担主操作/TabBar 选中/关键标记等
      强调职责，故正名为 --brand。
-     换色依据：红色在成就/认知场景中是威胁线索（激活回避动机、损害任务表现），
-     且直接提升生理唤醒；家长督导孩子学习时本身易焦虑，大片红色会叠加焦虑感。
-     低饱和松绿是舒缓证据最强的方向（自然恢复效应），且与「生长」语义契合。
-     色值约束：白字对比度 6.03:1（>AA 4.5:1）；纸底上 5.67:1。 */
-  --brand: #2e6f4e;
+     换色依据：松绿低唤醒舒缓但偏深偏灰；翡翠玻璃绿更透亮、与纸底更清爽，
+     且保留「生长」语义。
+     ⚠️ 三令牌规则（白字于 #10B981 仅 2.5:1，不达标）：
+       --brand            填充面（按钮/选中态/图标底）；
+       --brand-foreground 填充面上的文字/图标（深墨绿 #0B3D2E，4.8:1）；
+       --brand-text       纸面/白底上的品牌文字/图标（深翡翠 #0B7A55，5.0:1）。 */
+  --brand: #10b981;
   /* 强调色仅允许三档派生，杜绝散落的透明度（实测原有 15 种：0.04/0.06/0.08/0.1/0.18/
      0.25/0.3/0.35/0.45/0.75/0.9/0.92 …）。新增用法必须从这三档里选： */
-  --brand-soft: rgba(46, 111, 78, 0.08); /* 淡底：芯片、标签背景、选中态 */
-  --brand-line: rgba(46, 111, 78, 0.25); /* 描边：强调态边框 */
-  --brand-foreground: #ffffff; /* 松绿底上的文字（主操作按钮），对比度 6.03:1 */
+  --brand-soft: rgba(16, 185, 129, 0.08); /* 淡底：芯片、标签背景、选中态 */
+  --brand-line: rgba(16, 185, 129, 0.25); /* 描边：强调态边框 */
+  --brand-foreground: #0b3d2e; /* 翡翠绿底上的文字/图标（主操作按钮），对比度 4.8:1 */
+  --brand-text: #0b7a55; /* 纸面/白底上的品牌文字/图标，对比度 5.0:1 */
   /* 【危】删除/错误。原 #C04A3A 与强调色几乎同色相，无法区分；
      下潜到 #A8321F（相对亮度 0.107 vs 0.147）拉开明度差 */
   --destructive: #a8321f;
   --destructive-foreground: #faf8f3;
   --border: #e4ded1;
   --input: #e4ded1;
-  --ring: #2e6f4e;
+  --ring: #10b981;
   --sidebar: lab(98.26% 0 0);
   --sidebar-foreground: lab(2.75381% 0 0);
   --sidebar-primary: lab(7.78201% -0.0000149012 0);
@@ -122,6 +125,7 @@ root-portal {
   --color-brand-soft: var(--brand-soft);
   --color-brand-line: var(--brand-line);
   --color-brand-foreground: var(--brand-foreground);
+  --color-brand-text: var(--brand-text);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);

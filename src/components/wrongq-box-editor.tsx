@@ -1,7 +1,7 @@
 import { View, Text, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState, useRef, useEffect } from 'react'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT } from '@/lib/theme'
 
 /**
  * P2（#130 / 设计文档 §4.7）：错题圈定结果页的「原图 + 系统圈框叠加」编辑器。
@@ -160,7 +160,7 @@ export default function WrongqBoxEditor(props: Props) {
           title: '删除这道题？',
           content: '框选与识别结果都会被移除，之后可在空白处重新画框补捞',
           confirmText: '删除',
-          confirmColor: BRAND,
+          confirmColor: BRAND_TEXT,
           success: (r) => { if (r.confirm) props.onDelete(id) },
         })
       } else {
@@ -297,8 +297,8 @@ export default function WrongqBoxEditor(props: Props) {
         拖动移动 · 角点缩放 · 长按删除/添加 · 空白处画新框（松手自动重新识别）
       </Text>
       {busy ? (
-        <View className="rounded-xl px-3 py-1 mb-2" style={{ backgroundColor: 'rgba(46, 111, 78,0.08)' }}>
-          <Text className="block text-xs" style={{ color: BRAND }}>正在按新框重新识别…</Text>
+        <View className="rounded-xl px-3 py-1 mb-2" style={{ backgroundColor: 'rgba(16, 185, 129,0.08)' }}>
+          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>正在按新框重新识别…</Text>
         </View>
       ) : null}
 
@@ -323,7 +323,7 @@ export default function WrongqBoxEditor(props: Props) {
                   borderStyle: 'solid',
                   borderColor: colorOf(it),
                   borderRadius: 3,
-                  backgroundColor: sel ? 'rgba(46, 111, 78, 0.08)' : 'transparent',
+                  backgroundColor: sel ? 'rgba(16, 185, 129, 0.08)' : 'transparent',
                   opacity: it.active ? 1 : 0.55,
                 }}
               >
@@ -334,7 +334,7 @@ export default function WrongqBoxEditor(props: Props) {
                   paddingLeft: 4, paddingRight: 4, maxWidth: 160,
                 }}
                 >
-                  <Text className="block text-white" style={{ fontSize: 9, lineHeight: '14px' }}>
+                  <Text className="block text-brand-foreground" style={{ fontSize: 9, lineHeight: '14px' }}>
                     {(it.question_label || `题块 #${it.id}`).slice(0, 14)}{it.active ? '' : ' ·未收录'}
                   </Text>
                 </View>

@@ -22,7 +22,7 @@ import {
   deleteKnowledgeArticle,
   type KnowledgeArticle,
 } from '@/services/api'
-import { BRAND, DANGER } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
 
 interface FormState {
   id?: string
@@ -196,8 +196,8 @@ export default function ChatAdminPage() {
             gap: '4px',
           }}
         >
-          <Plus size={14} color="#fff" />
-          <Text className="block text-xs" style={{ color: '#fff' }}>
+          <Plus size={14} color={BRAND_FOREGROUND} />
+          <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>
             新增
           </Text>
         </View>
@@ -273,7 +273,7 @@ export default function ChatAdminPage() {
                       style={{ padding: '4px 0' }}
                     >
                       <Trash2 size={14} color={DANGER} />
-                      <Text className="block text-xs" style={{ color: BRAND }}>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
                         删除
                       </Text>
                     </View>

@@ -21,7 +21,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
 import { BUILD_META } from '@/build-meta'
-import { BRAND, DANGER, INK } from '@/lib/theme'
+import { BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -456,7 +456,7 @@ export default function IndexPage() {
               {isLoggedIn() && auth?.avatarUrl ? (
                 <Image src={auth.avatarUrl} className="rounded-full" style={{ width: '24px', height: '24px' }} mode="aspectFill" />
               ) : (
-                <CircleUser size={20} color={isLoggedIn() ? BRAND : '#9A948A'} />
+                <CircleUser size={20} color={isLoggedIn() ? BRAND_TEXT : '#9A948A'} />
               )}
               <Text className="block text-xs text-foreground">
                 {isLoggedIn() ? (auth?.nickname || '我的') : '登录'}
@@ -472,17 +472,17 @@ export default function IndexPage() {
           >
             <View
               style={{
-                backgroundColor: 'rgba(46, 111, 78,0.08)',
+                backgroundColor: 'rgba(16, 185, 129,0.08)',
                 borderRadius: 999,
                 paddingLeft: 10,
                 paddingRight: 10,
                 paddingTop: 3,
                 paddingBottom: 3,
                 borderWidth: 1,
-                borderColor: 'rgba(46, 111, 78, 0.25)',
+                borderColor: 'rgba(16, 185, 129, 0.25)',
               }}
             >
-              <Text className="block text-xs" style={{ color: BRAND }}>
+              <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
                 📦 包版本 {BUILD_META.label} · 点我查看后端域名
               </Text>
             </View>
@@ -568,7 +568,7 @@ export default function IndexPage() {
               {/* 学科筛选提示条（点「✕ 显示全部」或上面的「全部」清除） */}
               {subjectFilter ? (
                 <View className="flex flex-row items-center gap-2 mb-2">
-                  <Text className="block text-xs" style={{ color: BRAND }}>
+                  <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
                     只看「{subjects.find((s) => s.id === subjectFilter)?.name
                       || overview?.subject_stats?.find((s) => s.subject_id === subjectFilter)?.name
                       || '该学科'}」
@@ -612,7 +612,7 @@ export default function IndexPage() {
         <BottomActionBar>
           <View style={{ flex: 1 }}>
             <ActionBtn
-              icon={<BookmarkPlus size={16} color="#fff" />}
+              icon={<BookmarkPlus size={16} color={BRAND_FOREGROUND} />}
               label="加入复习本"
               primary
               disabled={sel.isEmpty || busy}

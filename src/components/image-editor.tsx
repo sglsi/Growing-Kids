@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
 interface ImageEditorProps {
@@ -1645,7 +1645,7 @@ export default function ImageEditor({
                       top: h.dy * crop.h * imgH - 9,
                       borderRadius: 4,
                       borderWidth: 3, borderStyle: 'solid', borderColor: '#ffffff',
-                      backgroundColor: 'rgba(46, 111, 78,0.9)',
+                      backgroundColor: 'rgba(16, 185, 129,0.9)',
                     }}
                   />
                 ))}
@@ -1744,7 +1744,7 @@ export default function ImageEditor({
                   framing ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
-                <Crop size={20} color="#ffffff" />
+                <Crop size={20} color={framing ? BRAND_FOREGROUND : '#ffffff'} />
               </View>
               <Text className="block text-white text-opacity-80 text-xs">{framing ? '确定裁剪' : '裁剪'}</Text>
             </View>
@@ -1761,7 +1761,7 @@ export default function ImageEditor({
                 cornerMode === 'quad' ? 'bg-brand' : 'bg-white bg-opacity-15'
               }`}
             >
-              <Maximize2 size={20} color="#ffffff" />
+              <Maximize2 size={20} color={cornerMode === 'quad' ? BRAND_FOREGROUND : '#ffffff'} />
             </View>
             <Text className="block text-white text-opacity-80 text-xs">
               {cornerMode === 'quad' ? '确认四角' : '四角拉框'}
@@ -1878,7 +1878,7 @@ export default function ImageEditor({
                   eraseMode ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
-                <Crop size={20} color="#ffffff" />
+                <Crop size={20} color={eraseMode ? BRAND_FOREGROUND : '#ffffff'} />
               </View>
               <Text className="block text-white text-opacity-80 text-xs">框选补擦</Text>
             </View>
@@ -1892,7 +1892,7 @@ export default function ImageEditor({
                   compareMode ? 'bg-brand' : 'bg-white bg-opacity-15'
                 }`}
               >
-                <Wand size={20} color="#ffffff" />
+                <Wand size={20} color={compareMode ? BRAND_FOREGROUND : '#ffffff'} />
               </View>
               <Text className="block text-white text-opacity-80 text-xs">对比</Text>
             </View>
@@ -1924,7 +1924,7 @@ export default function ImageEditor({
               disabled={busy || aiBusy}
               onClick={applyEraseRegions}
             >
-              <Text className="block text-sm text-white">
+              <Text className="block text-sm text-brand-foreground">
                 {aiBusy ? '处理中…' : `应用去手写${eraseRects.length ? `(${eraseRects.length})` : ''}`}
               </Text>
             </Button>
@@ -1935,12 +1935,12 @@ export default function ImageEditor({
           <View
             className="flex flex-row items-center justify-center mb-2"
             style={{
-              backgroundColor: 'rgba(46, 111, 78, 0.25)',
+              backgroundColor: 'rgba(16, 185, 129, 0.25)',
               borderRadius: 999,
               paddingTop: 6,
               paddingBottom: 6,
               borderWidth: 1,
-              borderColor: 'rgba(46, 111, 78, 0.25)',
+              borderColor: 'rgba(16, 185, 129, 0.25)',
             }}
           >
             <Text className="block text-xs" style={{ color: '#FFD9CF' }}>
@@ -1956,7 +1956,7 @@ export default function ImageEditor({
         style={{ bottom: 0, backgroundColor: '#000', paddingBottom: 12 }}
       >
         <Button className="w-full h-11 rounded-xl" disabled={busy || aiBusy} onClick={handleConfirm}>
-          <Text className="block text-sm text-white">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
+          <Text className="block text-sm text-brand-foreground">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
         </Button>
       </View>
 
@@ -2131,7 +2131,7 @@ export default function ImageEditor({
                 <Text className="block text-sm text-white">取消</Text>
               </Button>
               <Button className="flex-1 h-10 rounded-xl" disabled={busy || aiBusy} onClick={onConfirmEnhance}>
-                <Text className="block text-sm text-white">确定</Text>
+                <Text className="block text-sm text-brand-foreground">确定</Text>
               </Button>
             </View>
           </View>
@@ -2224,7 +2224,7 @@ function QuadOverlay({
               top: p.y - (active ? 14 : 11),
               borderRadius: 999,
               borderWidth: 3, borderStyle: 'solid', borderColor: '#ffffff',
-              backgroundColor: active ? '#3b82f6' : 'rgba(46, 111, 78,0.92)',
+              backgroundColor: active ? '#3b82f6' : 'rgba(16, 185, 129,0.92)',
               boxShadow: '0 1px 4px rgba(0,0,0,0.5)',
             }}
           />

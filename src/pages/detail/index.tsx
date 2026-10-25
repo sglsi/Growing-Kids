@@ -19,7 +19,7 @@ import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
 /** P2-18 艾宾浩斯间隔（与后端 timeline/review.ts 保持一致） */
 const EBBINGHAUS_INTERVALS = [1, 2, 4, 7, 15, 30]
@@ -405,24 +405,24 @@ export default function DetailPage() {
             <View className="flex flex-row items-center gap-2">
               <View
                 className="px-3 rounded-lg"
-                style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={() => handleEditImage(item.url || item.thumb_url || '')}
               >
-                <Text className="block text-xs" style={{ color: BRAND }}>编辑</Text>
+                <Text className="block text-xs" style={{ color: BRAND_TEXT }}>编辑</Text>
               </View>
               <View
                 className="px-3 rounded-lg"
-                style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={() => { if (!ocrBusy) void handleOcrImage(item.url || item.thumb_url || '') }}
               >
-                <Text className="block text-xs" style={{ color: BRAND }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{ocrBusy ? '识别中' : '识别'}</Text>
               </View>
               <View
                 className="px-3 rounded-lg"
-                style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 6, paddingBottom: 6 }}
+                style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 6, paddingBottom: 6 }}
                 onClick={handleDelete}
               >
-                <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
+                <Text className="block text-xs" style={{ color: BRAND_TEXT }}>删除</Text>
               </View>
             </View>
           </View>
@@ -467,8 +467,8 @@ export default function DetailPage() {
                 }
               }}
             >
-              <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: 'rgba(46, 111, 78,0.08)' }}>
-                <Text className="block text-sm text-brand">
+              <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: 'rgba(16, 185, 129,0.08)' }}>
+                <Text className="block text-sm text-brand-text">
                   {subjects.find((s) => s.id === subjectId)?.name || '选择学科'}
                 </Text>
               </View>
@@ -480,7 +480,7 @@ export default function DetailPage() {
               <Text className="block text-sm">{item.in_review_book ? '移出复习本' : '加入复习本'}</Text>
             </Button>
             <Button variant="outline" className="flex-1 h-11 rounded-xl" onClick={handleDelete}>
-              <Text className="block text-sm" style={{ color: BRAND }}>删除</Text>
+              <Text className="block text-sm" style={{ color: BRAND_TEXT }}>删除</Text>
             </Button>
           </View>
 
@@ -600,8 +600,8 @@ export default function DetailPage() {
                 value={Math.max(0, subjects.findIndex((s) => s.id === subjectId))}
                 onChange={(e) => setSubjectId(subjects[Number(e.detail.value)]?.id || subjectId)}
               >
-                <View className="px-3 py-1 rounded-full" style={{ backgroundColor: 'rgba(46, 111, 78,0.08)' }}>
-                  <Text className="block text-xs text-brand">切换学科</Text>
+                <View className="px-3 py-1 rounded-full" style={{ backgroundColor: 'rgba(16, 185, 129,0.08)' }}>
+                  <Text className="block text-xs text-brand-text">切换学科</Text>
                 </View>
               </Picker>
             </View>
@@ -625,8 +625,8 @@ export default function DetailPage() {
         <View className="flex flex-row items-center justify-between mb-2">
           <Text className="block text-sm font-semibold text-foreground">题目</Text>
           {item?.content?.question_label ? (
-            <View style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', borderRadius: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 2, paddingBottom: 2 }}>
-              <Text className="block text-xs" style={{ color: BRAND }}>{item.content.question_label}</Text>
+            <View style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', borderRadius: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 2, paddingBottom: 2 }}>
+              <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{item.content.question_label}</Text>
             </View>
           ) : null}
         </View>
@@ -662,24 +662,24 @@ export default function DetailPage() {
                   <View className="flex flex-row items-center flex-wrap justify-center gap-1 mt-1">
                     <View
                       className="px-1.5 rounded"
-                      style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => handleEditImage(u)}
                     >
-                      <Text className="block text-xs" style={{ color: BRAND }}>编辑</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>编辑</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
-                      style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
                     >
-                      <Text className="block text-xs" style={{ color: BRAND }}>{ocrBusy ? '识别中' : '识别'}</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{ocrBusy ? '识别中' : '识别'}</Text>
                     </View>
                     <View
                       className="px-1.5 rounded"
-                      style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                      style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => void handleDeleteImage('question', u)}
                     >
-                      <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>删除</Text>
                     </View>
                   </View>
                 </View>
@@ -707,10 +707,10 @@ export default function DetailPage() {
                   </View>
                   <View
                     className="px-1.5 rounded mt-1"
-                    style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                    style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('answer', u)}
                   >
-                    <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: BRAND_TEXT }}>删除</Text>
                   </View>
                 </View>
               ))}
@@ -737,10 +737,10 @@ export default function DetailPage() {
                   </View>
                   <View
                     className="px-1.5 rounded mt-1"
-                    style={{ backgroundColor: 'rgba(46, 111, 78,0.08)', paddingTop: 2, paddingBottom: 2 }}
+                    style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('legacy', u)}
                   >
-                    <Text className="block text-xs" style={{ color: BRAND }}>删除</Text>
+                    <Text className="block text-xs" style={{ color: BRAND_TEXT }}>删除</Text>
                   </View>
                 </View>
               ))}
@@ -750,8 +750,8 @@ export default function DetailPage() {
 
         {/* P2-16 错因分析 */}
         {item?.content?.error_analysis?.label && (
-          <Card className="rounded-2xl border p-4 mb-4" style={{ borderColor: 'rgba(46, 111, 78,0.25)', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}>
-            <Text className="block text-sm font-semibold mb-1" style={{ color: BRAND }}>错因分析</Text>
+          <Card className="rounded-2xl border p-4 mb-4" style={{ borderColor: 'rgba(16, 185, 129,0.25)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}>
+            <Text className="block text-sm font-semibold mb-1" style={{ color: BRAND_TEXT }}>错因分析</Text>
             <Text className="block text-sm font-medium text-foreground mb-1">{item.content.error_analysis.label}</Text>
             {item.content.error_analysis.reason && (
               <Text className="block text-xs text-muted-foreground mb-1">{item.content.error_analysis.reason}</Text>
@@ -776,7 +776,7 @@ export default function DetailPage() {
                     className={`w-6 h-6 rounded-full flex items-center justify-center ${s.done ? 'border-0' : 'bg-muted border border-border'}`}
                     style={s.done ? { backgroundColor: BRAND } : undefined}
                   >
-                    <Text className={`text-xs ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: '#fff' } : undefined}>
+                    <Text className={`text-xs ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: BRAND_FOREGROUND } : undefined}>
                       {s.done ? '✓' : s.stage}
                     </Text>
                   </View>
@@ -813,7 +813,7 @@ export default function DetailPage() {
                     <View className="flex flex-row items-center justify-between">
                       <View className="flex flex-row gap-1 flex-wrap">
                         {s.shared_tags.map((t) => (
-                          <Text key={t} className="block text-xs" style={{ color: BRAND, backgroundColor: 'rgba(46, 111, 78, 0.08)' }}>
+                          <Text key={t} className="block text-xs" style={{ color: BRAND_TEXT, backgroundColor: 'rgba(16, 185, 129, 0.08)' }}>
                             {t}
                           </Text>
                         ))}
@@ -874,7 +874,7 @@ export default function DetailPage() {
         </Card>
 
         <View className="mt-6">
-          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND }}>
+          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND_TEXT }}>
             删除这条记录
           </Text>
         </View>

@@ -21,7 +21,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
-import { DANGER, INK } from '@/lib/theme'
+import { DANGER, INK, BRAND_FOREGROUND } from '@/lib/theme'
 
 const PAGE_SIZE = 20
 
@@ -519,7 +519,7 @@ export default function SubjectPage() {
         <BottomActionBar>
           <View style={{ flex: 1 }}>
             <ActionBtn
-              icon={<FileSearch size={16} color="#fff" />}
+              icon={<FileSearch size={16} color={BRAND_FOREGROUND} />}
               label="合成PDF/WORD"
               compact
               primary

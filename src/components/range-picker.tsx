@@ -74,7 +74,7 @@ export default function RangePicker({ value, onChange }: Props) {
             >
               <Text
                 className={`block text-xs whitespace-nowrap ${
-                  active ? 'text-brand' : 'text-foreground'
+                  active ? 'text-brand-text' : 'text-foreground'
                 }`}
               >
                 {o.label}

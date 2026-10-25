@@ -89,7 +89,7 @@ export function SubjectPill({ active, label, color, onClick }: { active: boolean
       onClick={onClick}
     >
       {color && !active && <View className={`w-2 h-2 rounded-full ${color}`} />}
-      <Text className={`block text-sm whitespace-nowrap ${active ? 'text-brand' : 'text-foreground'}`}>{label}</Text>
+      <Text className={`block text-sm whitespace-nowrap ${active ? 'text-brand-text' : 'text-foreground'}`}>{label}</Text>
     </View>
   )
 }
@@ -104,7 +104,7 @@ export function TagFilterBar({ tags, active, onChange }: { tags: string[]; activ
           className={`rounded-full border px-3 py-1 ${active === '' ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
           onClick={() => onChange('')}
         >
-          <Text className={`block text-xs ${active === '' ? 'text-brand' : 'text-muted-foreground'}`}>全部标签</Text>
+          <Text className={`block text-xs ${active === '' ? 'text-brand-text' : 'text-muted-foreground'}`}>全部标签</Text>
         </View>
         {tags.map((t) => (
           <View
@@ -112,7 +112,7 @@ export function TagFilterBar({ tags, active, onChange }: { tags: string[]; activ
             className={`rounded-full border px-3 py-1 ${active === t ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
             onClick={() => onChange(t)}
           >
-            <Text className={`block text-xs ${active === t ? 'text-brand' : 'text-muted-foreground'}`}>#{t}</Text>
+            <Text className={`block text-xs ${active === t ? 'text-brand-text' : 'text-muted-foreground'}`}>#{t}</Text>
           </View>
         ))}
       </View>

@@ -2,7 +2,7 @@ import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState } from 'react'
 import type { PageTextSegment } from '@/services/api'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
 /**
  * #150 人工辅助错题整理：图片右侧的「OCR 文本栏」。
@@ -122,7 +122,7 @@ export default function WrongqOcrPanel({
                       : '尚未识别 · 点下方「快速/精准」开始，也可直接手动输入'}
                 </Text>
                 {error && !busy ? (
-                  <Text className="block text-xs mt-2 text-center" style={{ color: BRAND }}>
+                  <Text className="block text-xs mt-2 text-center" style={{ color: BRAND_TEXT }}>
                     修复后重试，或改用另一种识别模式
                   </Text>
                 ) : null}
@@ -147,7 +147,7 @@ export default function WrongqOcrPanel({
                       }}
                       onClick={() => toggle(i)}
                     >
-                      {on ? <Text style={{ fontSize: 9, lineHeight: '12px', color: '#fff' }}>✓</Text> : null}
+                      {on ? <Text style={{ fontSize: 9, lineHeight: '12px', color: BRAND_FOREGROUND }}>✓</Text> : null}
                     </View>
                     {/* 文本（View 承载点击：见文件顶部说明） */}
                     <View
@@ -165,7 +165,7 @@ export default function WrongqOcrPanel({
                     {/* 单段复制 */}
                       <View
                         className="block text-xs shrink-0"
-                        style={{ color: BRAND, marginTop: 2 }}
+                        style={{ color: BRAND_TEXT, marginTop: 2 }}
                         onClick={() => copyOne(seg.text)}
                       >
                       复制
@@ -188,7 +188,7 @@ export default function WrongqOcrPanel({
             {n > 0 && onPasteToEntry ? (
               <View
                 className="block text-xs mr-2"
-                style={{ color: BRAND, fontWeight: '500' }}
+                style={{ color: BRAND_TEXT, fontWeight: '500' }}
                 onClick={() => {
                   const text = segments
                     .map((s, i) => ({ s, i }))
@@ -203,7 +203,7 @@ export default function WrongqOcrPanel({
               </View>
             ) : null}
             {n > 0 ? (
-              <View className="block text-xs" style={{ color: BRAND }} onClick={copySelected}>
+              <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={copySelected}>
                 复制所选（{n}）
               </View>
             ) : (

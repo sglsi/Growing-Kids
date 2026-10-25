@@ -20,7 +20,7 @@ import {
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
-import { BRAND, INK } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, INK } from '@/lib/theme'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -1283,8 +1283,8 @@ export default function RecognizePage() {
                             </View>
                           ) : null}
                           {p.ocr === 'error' ? (
-                            <View style={{ position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(46, 111, 78,0.75)', alignItems: 'center' }}>
-                              <Text style={{ fontSize: 8, color: '#fff' }}>识别失败</Text>
+                            <View style={{ position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(16, 185, 129,0.75)', alignItems: 'center' }}>
+                              <Text style={{ fontSize: 8, color: BRAND_FOREGROUND }}>识别失败</Text>
                             </View>
                           ) : null}
                         </View>
@@ -1310,7 +1310,7 @@ export default function RecognizePage() {
                         <Text className="block text-xs text-primary">看大图</Text>
                       </View>
                       {curPage.ocr === 'error' ? (
-                        <Text className="block text-xs" style={{ color: BRAND }} onClick={() => void retryPageOcr(activePage)}>
+                        <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
                         </Text>
                       ) : null}
@@ -1324,15 +1324,15 @@ export default function RecognizePage() {
                   <View
                     className="flex-row items-center justify-center mt-2 py-2 px-3 rounded-lg"
                     style={{
-                      backgroundColor: 'rgba(46, 111, 78,0.08)',
+                      backgroundColor: 'rgba(16, 185, 129,0.08)',
                       borderWidth: 1,
-                      borderColor: 'rgba(46, 111, 78, 0.25)',
+                      borderColor: 'rgba(16, 185, 129, 0.25)',
                     }}
                     onClick={() => { if (!diagLoading) void handleDiagnose() }}
                   >
                     <Text
                       className="block text-xs"
-                      style={{ color: diagLoading ? '#B08D84' : BRAND, fontWeight: '500' }}
+                      style={{ color: diagLoading ? '#B08D84' : BRAND_TEXT, fontWeight: '500' }}
                     >
                       {diagLoading ? '诊断中…（约 30 秒）' : 'OCR 识别异常？点此「一键诊断」'}
                     </Text>
@@ -1354,15 +1354,15 @@ export default function RecognizePage() {
                     <View className="flex flex-row items-center gap-2">
                       <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
                       {cropEditor?.entryIdx === idx ? (
-                        <Text className="block text-xs" style={{ color: BRAND }}>裁剪中…</Text>
+                        <Text className="block text-xs" style={{ color: BRAND_TEXT }}>裁剪中…</Text>
                       ) : e.ocr === 'busy' ? (
-                        <Text className="block text-xs" style={{ color: BRAND }}>识别中…</Text>
+                        <Text className="block text-xs" style={{ color: BRAND_TEXT }}>识别中…</Text>
                       ) : null}
                     </View>
                     <View className="flex flex-row items-center gap-3">
                       <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
                       <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
-                      <Text className="block text-xs" style={{ color: BRAND }} onClick={() => removeEntry(idx)}>删除</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => removeEntry(idx)}>删除</Text>
                     </View>
                   </View>
 
@@ -1392,8 +1392,8 @@ export default function RecognizePage() {
                       className="flex flex-col items-center justify-center"
                       style={{ width: 64, height: 64, borderRadius: 8, border: '1px dashed #C9C2B8' }}
                     >
-                      <Text style={{ fontSize: 14, color: BRAND, lineHeight: '16px' }}>＋</Text>
-                      <Text className="block text-xs" style={{ color: BRAND }}>裁剪题目</Text>
+                      <Text style={{ fontSize: 14, color: BRAND_TEXT, lineHeight: '16px' }}>＋</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>裁剪题目</Text>
                     </View>
                   </View>
 
@@ -1404,7 +1404,7 @@ export default function RecognizePage() {
                         className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                         style={{
                           backgroundColor: '#FFF7F0',
-                          border: '1px solid rgba(46, 111, 78, 0.25)',
+                          border: '1px solid rgba(16, 185, 129, 0.25)',
                           opacity: e.ocr === 'busy' ? 0.5 : 1,
                         }}
                         onClick={() => {
@@ -1412,7 +1412,7 @@ export default function RecognizePage() {
                           void runEntryOcr(idx, 'fast')
                         }}
                       >
-                        <Text className="block text-xs font-medium" style={{ color: BRAND }}>
+                        <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>
                           {e.ocr === 'busy' && e.lastMode === 'fast' ? '识别中…' : '识别本题（快速）'}
                         </Text>
                       </View>
@@ -1424,7 +1424,7 @@ export default function RecognizePage() {
                           void runEntryOcr(idx, 'precise')
                         }}
                       >
-                        <Text className="block text-xs font-medium text-white">
+                        <Text className="block text-xs font-medium text-brand-foreground">
                           {e.ocr === 'busy' && e.lastMode !== 'fast' ? '识别中…' : '识别本题（精准）'}
                         </Text>
                       </View>
@@ -1477,7 +1477,7 @@ export default function RecognizePage() {
                       className="flex-1 rounded-xl flex flex-col items-center justify-center py-2"
                       style={{
                         backgroundColor: '#FFF7F0',
-                        border: '1px solid rgba(46, 111, 78, 0.25)',
+                        border: '1px solid rgba(16, 185, 129, 0.25)',
                         opacity: boardBusy || curPage.ocr === 'busy' ? 0.5 : 1,
                       }}
                       onClick={() => {
@@ -1485,7 +1485,7 @@ export default function RecognizePage() {
                         void runPageOcr(curPage, 'fast')
                       }}
                     >
-                      <Text className="block text-xs font-medium" style={{ color: BRAND }}>
+                      <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>
                         {curPage.ocr === 'busy' && curPage.lastMode === 'fast' ? '整页快速识别中…' : '整页快速识别'}
                       </Text>
                     </View>
@@ -1500,7 +1500,7 @@ export default function RecognizePage() {
                         void runPageOcr(curPage, 'precise')
                       }}
                     >
-                      <Text className="block text-xs font-medium text-white">
+                      <Text className="block text-xs font-medium text-brand-foreground">
                         {curPage.ocr === 'busy' && curPage.lastMode !== 'fast' ? '整页精准识别中…' : '整页精准识别'}
                       </Text>
                     </View>
@@ -1621,10 +1621,10 @@ export default function RecognizePage() {
                   <View className="flex flex-row items-center gap-2">
                     <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
                     {d.question_label ? (
-                      <Text className="block text-xs" style={{ color: BRAND }}>{d.question_label}</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{d.question_label}</Text>
                     ) : null}
                     {d.level === 2 ? (
-                      <Text className="block text-xs" style={{ color: BRAND }}>小题（已含大题题干）</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>小题（已含大题题干）</Text>
                     ) : null}
                   </View>
                   <View className="flex flex-row gap-3">
@@ -1657,7 +1657,7 @@ export default function RecognizePage() {
                   <Text className="block text-xs text-muted-foreground mb-2 line-through">原错答：{d.wrong_answer}</Text>
                 ) : null}
 
-                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(46, 111, 78,0.25)', backgroundColor: 'rgba(46, 111, 78, 0.08)' }}>
+                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(16, 185, 129,0.25)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}>
                   <Textarea
                     className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.answer_content}
@@ -1754,7 +1754,7 @@ export default function RecognizePage() {
             </View>
             <ScrollView scrollY style={{ padding: 16, fontSize: 12, lineHeight: '1.7' }}>
               {diagError ? (
-                <Text style={{ color: BRAND }}>{diagError}</Text>
+                <Text style={{ color: BRAND_TEXT }}>{diagError}</Text>
               ) : (
                 <Text style={{ whiteSpace: 'pre-wrap', color: '#333', fontSize: 12 }}>{diagText}</Text>
               )}

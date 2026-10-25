@@ -8,7 +8,7 @@ import {
   fetchChatHistory,
   type ChatMessage,
 } from '@/services/api'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 
 const SESSION_KEY = 'chat:session_id'
 const WELCOME_TEXT =
@@ -240,7 +240,7 @@ export default function ChatPage() {
             justifyContent: 'center',
           }}
         >
-          <Send size={16} color="#fff" />
+          <Send size={16} color={canSend ? BRAND_FOREGROUND : '#fff'} />
         </View>
       </View>
     </View>
@@ -261,7 +261,7 @@ function Bubble({
           className="rounded-full flex items-center justify-center flex-shrink-0"
           style={{ width: '32px', height: '32px', backgroundColor: BRAND }}
         >
-          <Bot size={18} color="#fff" />
+          <Bot size={18} color={BRAND_FOREGROUND} />
         </View>
         <View className="flex-1">
           <View
@@ -295,7 +295,7 @@ function Bubble({
       >
         <Text
           className="block text-sm"
-          style={{ color: '#fff', whiteSpace: 'pre-wrap' }}
+          style={{ color: BRAND_FOREGROUND, whiteSpace: 'pre-wrap' }}
         >
           {content}
         </Text>

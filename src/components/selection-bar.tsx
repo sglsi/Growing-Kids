@@ -1,6 +1,7 @@
 import { View, Text } from '@tarojs/components'
 import { Check } from 'lucide-react-taro'
 import type { Selection } from '@/lib/use-selection'
+import { BRAND_FOREGROUND } from '@/lib/theme'
 
 interface CheckDotProps {
   checked: boolean
@@ -16,7 +17,7 @@ export function CheckDot({ checked, size = 20 }: CheckDotProps) {
       }`}
       style={{ width: `${size}px`, height: `${size}px` }}
     >
-      {checked ? <Check size={Math.round(size * 0.65)} color="#fff" /> : null}
+      {checked ? <Check size={Math.round(size * 0.65)} color={BRAND_FOREGROUND} /> : null}
     </View>
   )
 }

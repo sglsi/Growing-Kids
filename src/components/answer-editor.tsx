@@ -10,7 +10,7 @@ import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
-import { BRAND, DANGER, INK } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
 /**
  * 题目答案编辑区（思傅 2026-10-21）
@@ -271,7 +271,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       {/* 目标锚：常驻提示，防止把答案加错题 */}
       <View className="flex flex-row items-center justify-between mb-2">
         <Text className="block text-xs text-muted-foreground">正确答案</Text>
-        <Text className="block text-xs" style={{ color: BRAND }}>
+        <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
           答案将存入：{label}
         </Text>
       </View>
@@ -386,16 +386,16 @@ export default function AnswerEditor({ item, onSaved }: Props) {
             style={{ backgroundColor: saving ? '#E8E2D9' : BRAND }}
             onClick={() => { if (!saving) saveText() }}
           >
-            <Text className="block text-xs" style={{ color: '#fff' }}>{saving ? '保存中' : '保存'}</Text>
+            <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>{saving ? '保存中' : '保存'}</Text>
           </View>
         ) : null}
       </View>
 
       {/* 搜到的候选答案：必须「采纳」才入库 */}
       {candidate && candidate.source !== 'none' ? (
-        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(46, 111, 78, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(46, 111, 78, 0.08)' : 'rgba(232,163,61,0.08)' }}>
+        <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(16, 185, 129, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(16, 185, 129, 0.08)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
-            <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND }}>
+            <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND_TEXT }}>
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
                 : candidate.source === 'kb'
@@ -434,8 +434,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
                     Taro.showToast({ title: '链接已复制', icon: 'none' })
                   }}
                 >
-                  <Text className="block text-xs mr-1" style={{ color: BRAND }}>{i + 1}.</Text>
-                  <Text className="flex-1 block text-xs" style={{ color: BRAND }} numberOfLines={1}>
+                  <Text className="block text-xs mr-1" style={{ color: BRAND_TEXT }}>{i + 1}.</Text>
+                  <Text className="flex-1 block text-xs" style={{ color: BRAND_TEXT }} numberOfLines={1}>
                     {r.title || r.url}
                   </Text>
                 </View>
@@ -451,8 +451,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
               style={{ backgroundColor: BRAND }}
               onClick={() => void handleAdopt()}
             >
-              <Check size={12} color="#fff" />
-              <Text className="block text-xs" style={{ color: '#fff' }}>采纳</Text>
+              <Check size={12} color={BRAND_FOREGROUND} />
+              <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>采纳</Text>
             </View>
             <View
               className="px-3 py-1 rounded-lg border border-border"

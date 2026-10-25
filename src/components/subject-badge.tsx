@@ -36,7 +36,7 @@ export default function SubjectBadge({
         className={`flex flex-row items-center gap-2 rounded-full border bg-brand-soft border-brand-line ${paddingClass}`}
         onClick={onClick}
       >
-        <Text className={`block ${textClass} text-brand`}>{name}</Text>
+        <Text className={`block ${textClass} text-brand-text`}>{name}</Text>
         {trailing}
       </View>
     )

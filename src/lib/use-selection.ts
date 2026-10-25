@@ -4,7 +4,7 @@
 // ============================================================
 import { useCallback, useMemo, useState } from 'react'
 import Taro from '@tarojs/taro'
-import { BRAND } from '@/lib/theme'
+import { BRAND_TEXT } from '@/lib/theme'
 
 export interface Selection {
   selecting: boolean
@@ -75,7 +75,7 @@ export function confirmDelete(count: number, noun = '条'): Promise<boolean> {
     Taro.showModal({
       title: '确认删除',
       content: `确定删除选中的 ${count} ${noun}吗？删除后无法恢复。`,
-      confirmColor: BRAND,
+      confirmColor: BRAND_TEXT,
       success: (r) => resolve(!!r.confirm),
       fail: () => resolve(false),
     })

@@ -10,7 +10,7 @@ import {
 } from '@/services/memory'
 import { cacheGet, cacheSet } from '@/services/cache'
 import { getSubjectColor, formatDate } from '@/types'
-import { BRAND, DANGER } from '@/lib/theme'
+import { BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
 
 export default function MemoryDetailPage() {
   const [params] = useState(() => Taro.getCurrentInstance().router?.params || {})
@@ -56,7 +56,7 @@ export default function MemoryDetailPage() {
       title: '删除记忆',
       content: '确定要删除这条记忆吗？此操作无法撤销。',
       confirmText: '删除',
-      confirmColor: BRAND,
+      confirmColor: BRAND_TEXT,
       success: async (r) => {
         if (r.confirm) {
           try {
@@ -76,7 +76,7 @@ export default function MemoryDetailPage() {
       title: '删除媒体',
       content: '从记忆中删除此媒体？',
       confirmText: '删除',
-      confirmColor: BRAND,
+      confirmColor: BRAND_TEXT,
       success: async (r) => {
         if (r.confirm) {
           try {
@@ -183,7 +183,7 @@ export default function MemoryDetailPage() {
                         className="w-10 h-10 rounded-full bg-brand flex items-center justify-center"
                         onClick={() => setCurrentAudio(m)}
                       >
-                        <PlayIcon size={18} color="#fff" />
+                        <PlayIcon size={18} color={BRAND_FOREGROUND} />
                       </View>
                       <View className="flex-1">
                         <View className="flex flex-row items-center gap-2">

@@ -1,6 +1,6 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import { useState } from 'react'
-import { BRAND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
 /**
  * 数学符号快捷输入栏（思傅 2026-10-22：答案/解题过程/题目栏对数学支持不友好，
@@ -125,10 +125,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         {onTogglePreview ? (
           <View
             className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
-            style={{ backgroundColor: preview ? BRAND : 'rgba(46, 111, 78,0.08)' }}
+            style={{ backgroundColor: preview ? BRAND : 'rgba(16, 185, 129,0.08)' }}
             onClick={onTogglePreview}
           >
-            <Text className="block text-xs" style={{ color: preview ? '#fff' : BRAND }}>
+            <Text className="block text-xs" style={{ color: preview ? BRAND_FOREGROUND : BRAND_TEXT }}>
               {preview ? '编辑' : '完成'}
             </Text>
           </View>
@@ -136,10 +136,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
 
         <View
           className="flex flex-row items-center gap-1 px-2.5 h-8 rounded-lg"
-          style={{ backgroundColor: open ? BRAND : 'rgba(46, 111, 78,0.08)' }}
+          style={{ backgroundColor: open ? BRAND : 'rgba(16, 185, 129,0.08)' }}
           onClick={() => setOpen((v) => !v)}
         >
-          <Text className="block text-xs" style={{ color: open ? '#fff' : BRAND }}>
+          <Text className="block text-xs" style={{ color: open ? BRAND_FOREGROUND : BRAND_TEXT }}>
             {open ? '收起符号面板' : 'Ω 数学符号'}
           </Text>
         </View>
@@ -162,7 +162,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
                   }}
                   onClick={() => setPage(i)}
                 >
-                  <Text className="block text-xs" style={{ color: i === page ? '#fff' : '#8a7f72' }}>
+                  <Text className="block text-xs" style={{ color: i === page ? BRAND_FOREGROUND : '#8a7f72' }}>
                     {g.label}
                   </Text>
                 </View>
