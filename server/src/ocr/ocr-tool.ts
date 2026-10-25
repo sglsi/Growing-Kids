@@ -80,6 +80,11 @@ function pickUsablePython(
   return null
 }
 
+/** 清空 python 导入探测缓存（自愈重启时重探，避开启动期并发/超时造成的误判缓存）。 */
+export function resetPythonProbeCache(): void {
+  importProbeCache.clear()
+}
+
 /**
  * 3.x 引擎的 python：优先项目内持久化 venv（.venv-py，沙箱重置不丢）→ 旧 /opt venv → 系统 python3。
  * Windows 本机：项目根 .venv-py\Scripts\python.exe（与 install-ocr-env.ps1 / ppsv3.client 对齐）。
@@ -121,7 +126,13 @@ export function resolvePython(engine: ToolEngine): string {
     ...(process.platform === 'win32' ? winVenv : ['/workspace/projects/.venv-py/bin/python', '/opt/pocr3-venv/bin/python']),
     process.platform === 'win32' ? 'python' : 'python3',
   ].filter(Boolean) as string[]
-  return pickUsablePython(legacyCandidates, ['rapidocr_onnxruntime']) ?? (process.platform === 'win32' ? 'python' : 'python3')
+  // rapidocr import 暖 ~0.9s，但后端启动期与 ppsv3 的 paddle 重探测并发/磁盘竞争时可慢数倍——
+  // 8s 默认值曾把「能用的 venv」误判成不可用（结果进缓存），随后快速识别全走无包系统
+  // python，常驻进程起不来（真机表现「快速识别失效」）。放宽到 30s（有缓存只慢一次）。
+  return (
+    pickUsablePython(legacyCandidates, ['rapidocr_onnxruntime'], 30_000) ??
+    (process.platform === 'win32' ? 'python' : 'python3')
+  )
 }
 
 export type ToolOcrOp = 'recognize' | 'orient' | 'ppsv3' | 'rectify'
@@ -342,6 +353,13 @@ class PersistentOcr {
   warmup(): void {
     if (this.alive || this.child || this.starting) return
     void this.startChild()
+  }
+
+  /** 启动（如未起）并等待就绪；失败/超时返回 false（自愈重试路径用）。 */
+  ensureReady(): Promise<boolean> {
+    if (this.alive) return Promise.resolve(true)
+    if (this.starting || this.child) return this.startPromise ?? Promise.resolve(false)
+    return this.startChild()
   }
 
   /** 用常驻进程识别一张图（fast 路径）。串行处理，单请求超时则强杀重 Spawn。 */
@@ -580,6 +598,23 @@ export function warmupFastOcr(): void {
 export function shutdownFastOcr(): void {
   persistent?.shutdown()
   persistent = null
+}
+
+/**
+ * 快速引擎自愈（思傅 2026-10-25 要求：「引擎没在运行状态，就应当启动该引擎并进行识别，
+ * 而不是返回错误信息」）：杀常驻进程 → 清 python 导入探测缓存 → 按当前环境重解析
+ * python → 重启并等待就绪。
+ *
+ * 治本场景：后端启动期探测被并发/磁盘竞争拖垮，把「无包的宿主 python」误判为可用并
+ * 缓存——之后常驻进程每次 Spawn 即 ModuleNotFound 退出，快速识别持续失效。
+ * 重启时清缓存重探（热路径）会命中含 rapidocr/fastapi 的 OCR venv。
+ */
+export async function restartFastOcr(): Promise<boolean> {
+  shutdownFastOcr()
+  resetPythonProbeCache()
+  const p = getPersistent()
+  if (!p) return false
+  return p.ensureReady()
 }
 
 /** 快速识别（legacy + recognize + rapid）：走常驻预热进程，冷加载成本仅付一次。 */

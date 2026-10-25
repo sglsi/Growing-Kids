@@ -27,7 +27,7 @@ import {
   type Ppsv3Result,
   type Ppsv3TextRegion,
 } from './ppsv3.client'
-import { toolOcr, resolvePython, warmupFastOcr, shutdownFastOcr } from './ocr-tool'
+import { toolOcr, resolvePython, warmupFastOcr, shutdownFastOcr, restartFastOcr } from './ocr-tool'
 import { EnvRecoveryService } from './env-recovery.service'
 import { getDiagnoseProbeBuffer } from './diagnose-probe'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
@@ -1041,16 +1041,39 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
       )
     }
     const { ocrBuf, sx, sy } = await this.shrinkForOcr(buf)
-    const r = await toolOcr(ocrBuf, {
-      op: 'recognize',
-      engine: 'legacy',
-      mode: 'rapid',
-      timeoutMs: Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000),
-    })
+    const fastTimeout = Number(process.env.OCR_TOOL_TIMEOUT_MS ?? 120_000)
+    const runFast = (timeoutMs: number) =>
+      toolOcr(ocrBuf, {
+        op: 'recognize',
+        engine: 'legacy',
+        mode: 'rapid',
+        timeoutMs,
+      })
+    let r = await runFast(fastTimeout)
+    if (!r.ok || !r.data) {
+      // 思傅 2026-10-25：「引擎未在运行状态，应该启动该引擎并进行识别，而不是返回错误信息」。
+      // 「引擎没起来」类失败（脚本缺失/spawn 失败/首启即退出/超时）→ 自愈一次：
+      // 清 python 探测缓存重解析 + 重启常驻进程，然后再试；仍失败才抛错（文案注明已自愈过）。
+      const healable =
+        r.reason === 'no-script' ||
+        r.reason === 'spawn-error' ||
+        r.reason === 'nonzero-exit' ||
+        r.reason === 'timeout'
+      if (healable) {
+        console.warn(
+          `[recognizePageFast] 快速引擎未就绪（reason=${r.reason}）→ 自愈重启后重试`,
+          r.stderr ?? '',
+        )
+        if (await restartFastOcr()) {
+          // 自愈重试压到 60s 上限：总耗时要留在微信 request 180s 预算内
+          r = await runFast(Math.min(fastTimeout, 60_000))
+        }
+      }
+    }
     if (!r.ok || !r.data) {
       const detail = r.stderr ? `：${r.stderr}` : ''
       if (r.reason === 'no-script' || r.reason === 'spawn-error') {
-        throw new Error(`快速识别引擎不可用（${r.reason}）：RapidOCR 侧车（main.py）未部署？${detail}`)
+        throw new Error(`快速识别引擎不可用（${r.reason}，已尝试自动启动仍未成功）：RapidOCR 侧车（main.py）未部署或 python 缺包？${detail}`)
       }
       throw new Error(
         `快速识别引擎执行失败（${r.reason ?? 'unknown'}，${r.ms}ms）${detail}——请查看后端日志或改用精准识别`,
