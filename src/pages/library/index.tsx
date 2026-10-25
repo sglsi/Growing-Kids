@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import RenameDialog from '@/components/rename-dialog'
+import SubjectPickerSheet from '@/components/subject-picker-sheet'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
   fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc, updateLibraryDoc,
@@ -16,7 +17,7 @@ import {
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
-import { INK } from '@/lib/theme'
+import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 
 /** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
 function getTypeLabel(mime: string | null, name: string): string {
@@ -50,6 +51,7 @@ export default function LibraryPage() {
   const [keyword, setKeyword] = useState('')
   const [busy, setBusy] = useState(false)
   const [renameTarget, setRenameTarget] = useState<LibraryDoc | null>(null)
+  const [assignTarget, setAssignTarget] = useState<LibraryDoc | null>(null)
   const sel = useSelection()
 
   /**
@@ -203,42 +205,33 @@ export default function LibraryPage() {
     Taro.showActionSheet({ itemList: ['重命名', '归属学科', '删除'] })
       .then((res) => {
         if (res.tapIndex === 0) setRenameTarget(d)
-        else if (res.tapIndex === 1) handleAssignSubject(d)
+        else if (res.tapIndex === 1) setAssignTarget(d)
         else if (res.tapIndex === 2) handleSingleDelete(d)
       })
       .catch(() => { /* 取消 */ })
   }
 
   /**
-   * 归属学科（思傅 2026-10-24）：图片/文档入库后可改归学科。
-   * 原生 action sheet（与 ⋮ 菜单一致的手感），「未分类」置顶，当前项标注。
-   * 学科未分类哨兵 subject_id=null，对应后端 update 的 null 语义。
+   * 归属学科（思傅 2026-10-24 增加，2026-10-25 修「点击无反应」）。
+   * ⚠️ 旧实现在一级 action sheet 的回调里紧接着弹第二个原生 sheet，
+   * 真机上二级会被微信吞掉（一级未退场）⇒ 改为页内自定义弹层
+   * SubjectPickerSheet（见该组件注释）。学科未分类哨兵 subject_id=null。
    */
-  const handleAssignSubject = (d: LibraryDoc) => {
-    if (!subjects.length) {
-      Taro.showToast({ title: '还没有学科，请先到「学科」页创建', icon: 'none' })
-      return
-    }
-    const curName = subjects.find((s) => s.id === d.subject_id)?.name
-    Taro.showActionSheet({
-      itemList: ['未分类', ...subjects.map((s) => (s.id === d.subject_id ? `${s.name}（当前）` : s.name))],
-    })
-      .then(async (res) => {
-        const subjectId = res.tapIndex === 0 ? null : subjects[res.tapIndex - 1]?.id ?? null
-        try {
-          await updateLibraryDoc(d.id, { subject_id: subjectId })
-          Taro.showToast({
-            title: subjectId ? `已归入「${subjects.find((s) => s.id === subjectId)?.name || ''}」` : '已移出学科',
-            icon: 'success',
-          })
-          load({ silent: true })
-        } catch (e) {
-          console.error('设置归属学科失败', e)
-          Taro.showToast({ title: '设置失败，请重试', icon: 'none' })
-        }
+  const handleSubjectPicked = async (subjectId: string | null) => {
+    const d = assignTarget
+    setAssignTarget(null)
+    if (!d) return
+    try {
+      await updateLibraryDoc(d.id, { subject_id: subjectId })
+      Taro.showToast({
+        title: subjectId ? `已归入「${subjects.find((s) => s.id === subjectId)?.name || ''}」` : '已移出学科',
+        icon: 'success',
       })
-      .catch(() => { /* 取消 */ })
-    void curName // 预留：后续若做自定义弹层可高亮当前项
+      load({ silent: true })
+    } catch (e) {
+      console.error('设置归属学科失败', e)
+      Taro.showToast({ title: '设置失败，请重试', icon: 'none' })
+    }
   }
 
   const handleRenameConfirm = async (value: string) => {
@@ -269,7 +262,7 @@ export default function LibraryPage() {
                 className="flex flex-row items-center gap-1 rounded-xl bg-brand px-3 h-8"
                 onClick={handleUpload}
               >
-                <Upload size={14} color="#fff" />
+                <Upload size={14} color={BRAND_FOREGROUND} />
                 <Text className="block text-sm text-brand-foreground">导入</Text>
               </View>
             )}
@@ -380,6 +373,14 @@ export default function LibraryPage() {
           onConfirm={handleRenameConfirm}
         />
       )}
+
+      <SubjectPickerSheet
+        visible={!!assignTarget}
+        subjects={subjects}
+        currentId={assignTarget?.subject_id ?? null}
+        onCancel={() => setAssignTarget(null)}
+        onSelect={handleSubjectPicked}
+      />
     </View>
   )
 }
