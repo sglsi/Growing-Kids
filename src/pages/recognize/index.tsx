@@ -149,24 +149,30 @@ export default function RecognizePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
 
-  // #150 人工整理入库需要学科：进入 split 模式即预拉学科列表（原流程不落库故未拉）
+  // #111 doc 模式的「默认归类学科」Picker 也依赖 subjects：改为挂载即拉（原来只在
+  // split 模式拉，doc 用户先点 Picker 时 subjects 恒为空数组 → 弹出空白页）
   useEffect(() => {
-    if (mode === 'split' && subjects.length === 0) void ensureSubjects()
+    if (subjects.length > 0) return
+    void ensureSubjects()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode])
+  }, [])
 
   useEffect(() => {
     Taro.removeStorageSync('recog_mode')
   }, [])
 
-  const ensureSubjects = async () => {
-    if (subjects.length === 0) {
+  /** 确保学科列表已加载（#111：失败不抛、返回空数组，由调用方做 sid 守卫） */
+  const ensureSubjects = async (): Promise<Subject[]> => {
+    if (subjects.length > 0) return subjects
+    try {
       const list = await fetchSubjects()
       setSubjects(list)
-      setDefaultSubject(list[1]?.id || list[0]?.id || '')
+      setDefaultSubject((prev) => prev || list[1]?.id || list[0]?.id || '')
       return list
+    } catch (e) {
+      console.error('拉取学科列表失败', e)
+      return []
     }
-    return subjects
   }
 
   const chooseImage = async (slot: 'paper' | 'question' | 'answer') => {
@@ -206,6 +212,10 @@ export default function RecognizePage() {
     }
     const subs = await ensureSubjects()
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    if (!sid) {
+      Taro.showToast({ title: '学科列表未就绪，请确认后端已启动后重试', icon: 'none' })
+      return
+    }
     setLoading(true)
     setDrafts([])
     setSeqInput('')
@@ -354,6 +364,10 @@ export default function RecognizePage() {
     }
     const subs = await ensureSubjects()
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
+    if (!sid) {
+      Taro.showToast({ title: '学科列表未就绪，请确认后端已启动后重试', icon: 'none' })
+      return
+    }
     setLoading(true)
     setDrafts([])
     setSeqInput('')
@@ -1645,6 +1659,12 @@ export default function RecognizePage() {
                 <Text className="block text-sm">{loading ? '识别中…' : '识别题目'}</Text>
               </Button>
             </View>
+            {/* #112 置灰原因动态提示：原来「识别题目」灰着没有任何说明，用户找不到入口 */}
+            {!docUrl ? (
+              <Text className="block text-xs text-muted-foreground mt-2 text-center">
+                {docFile ? '已选择文件：请先点「导入」上传，再点「识别题目」' : '请先选择文档文件（或从资料库选择），点「导入」后再识别题目'}
+              </Text>
+            ) : null}
             <View className="flex items-center justify-center mt-3" onClick={() => setPicker(true)}>
               <Text className="block text-xs text-primary rounded-lg border border-border px-3 py-1">从资料库选择文档</Text>
             </View>
