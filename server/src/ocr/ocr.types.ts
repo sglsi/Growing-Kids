@@ -95,23 +95,31 @@ export interface ExportDocxItem {
   level?: number
 }
 
+/**
+ * force=true ⇒ 忽略已有缓存、强制重跑识别并覆盖写入（#121 手动「重新识别」）。
+ * 用于「上次识别结果不对，我想重来一次」——默认 false。
+ */
 export interface RecognizeExamDto {
   subject_id: string
   image_keys: string[]
+  force?: boolean
 }
 
 export interface RecognizeExamUrlDto {
   subject_id: string
   urls: string[]
+  force?: boolean
 }
 
 export interface RecognizePairDto {
   question_image_keys: string[]
   answer_image_keys: string[]
+  force?: boolean
 }
 
 export interface RecognizeDocDto {
   file_url: string
+  force?: boolean
 }
 
 // ---------- 本地 OCR 侧车（PaddleOCR + RapidOCR 融合）响应契约 ----------

@@ -28,21 +28,21 @@ export class OcrController {
   @Post('recognize-exam')
   @HttpCode(200)
   async recognizeExam(@Body() dto: RecognizeExamDto) {
-    const data = await this.ocrService.recognizeExam(dto.subject_id, dto.image_keys)
+    const data = await this.ocrService.recognizeExam(dto.subject_id, dto.image_keys, dto.force)
     return { code: 200, msg: 'success', data }
   }
 
   @Post('recognize-exam-url')
   @HttpCode(200)
   async recognizeExamByUrl(@Body() dto: RecognizeExamUrlDto) {
-    const data = await this.ocrService.recognizeExamByUrls(dto.subject_id, dto.urls)
+    const data = await this.ocrService.recognizeExamByUrls(dto.subject_id, dto.urls, dto.force)
     return { code: 200, msg: 'success', data }
   }
 
   @Post('recognize-pair')
   @HttpCode(200)
   async recognizePair(@Body() dto: RecognizePairDto) {
-    const result = await this.ocrService.recognizePair(dto.question_image_keys, dto.answer_image_keys)
+    const result = await this.ocrService.recognizePair(dto.question_image_keys, dto.answer_image_keys, dto.force)
     // 答案图 keys 原样回传：前端保存时挂到 answer_images，与 question_images 区分存储
     return { code: 200, msg: 'success', data: { items: result.items, answer_image_keys: dto.answer_image_keys } }
   }
@@ -50,7 +50,7 @@ export class OcrController {
   @Post('recognize-doc')
   @HttpCode(200)
   async recognizeDoc(@Body() dto: RecognizeDocDto) {
-    const data = await this.ocrService.recognizeDoc(dto.file_url)
+    const data = await this.ocrService.recognizeDoc(dto.file_url, dto.force)
     return { code: 200, msg: 'success', data }
   }
 

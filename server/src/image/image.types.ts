@@ -100,6 +100,11 @@ export interface OcrPageDto {
    *    不但无收益，还可能把小图二次透视/塌缩（历史上 37×39 裂图即由此而来）。
    */
   rectify?: boolean
+  /**
+   * #121：true = 忽略缓存强制重跑识别（结果不对时手动「重新识别」）。
+   * 不影响缓存写入 — 重跑结果会覆盖旧条目，下次仍是新的。
+   */
+  force?: boolean
 }
 
 export interface OcrPageResult {

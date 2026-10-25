@@ -10,6 +10,7 @@ import * as https from 'https'
 import { execFileSync } from 'child_process'
 import sharp from 'sharp'
 import { toGuiPython } from './python-gui'
+import { OcrCacheService, contentHashFromRef, type OcrCacheRef, type OcrCacheKind } from './ocr-cache.service'
 import { StorageService } from '../storage/storage.service'
 import type {
   RecognizedItem,
@@ -136,6 +137,7 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
   constructor(
     private readonly storageService: StorageService,
     private readonly envRecovery: EnvRecoveryService,
+    private readonly ocrCache: OcrCacheService,
   ) {
     // 3.x 侧车：失败静默返回 null（见 Ppsv3Client），由下方 VLM 降级接管。
     // 注入共享单例 telemetry/alertSink（与 SidecarSupervisor 共用同一份），并启动主动健康探针——
@@ -426,8 +428,24 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
   }
 
   // ---------------- 对外接口（保持原签名，供 controller 调用） ----------------
-  async recognizeDoc(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
+  async recognizeDoc(
+    fileUrl: string,
+    force = false,
+  ): Promise<{ items: RecognizedItem[]; rawText: string }> {
     if (!fileUrl) throw new BadRequestException('file_url 不能为空')
+    // #121：文档是「整份」产物（多页提取 + 逐页 OCR + 切题/可能的 VLM），
+    // 比图片识别贵一个量级，缓存收益最大；以整份文件指纹为键。
+    const ref = this.refsFor('doc', [fileUrl])
+    if (ref) {
+      const hit = await this.ocrCache.get<{ items: RecognizedItem[]; rawText: string }>(ref, { force })
+      if (hit) return hit
+    }
+    const out = await this.recognizeDocInner(fileUrl)
+    if (ref) await this.ocrCache.set(ref, out)
+    return out
+  }
+
+  private async recognizeDocInner(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
     const path = fileUrl.split('?')[0]
     const isTextLike = /\.(txt|text|md|csv|log)$/i.test(path)
     const isImage = /\.(png|jpe?g|webp|bmp)$/i.test(path)
@@ -601,17 +619,57 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
     }
   }
 
-  async recognizeExam(subjectId: string, imageKeys: string[]): Promise<{ items: RecognizedItem[] }> {
-    if (!imageKeys?.length) throw new BadRequestException('image_keys 不能为空')
-    const urls = await Promise.all(imageKeys.map((k) => this.storageService.getPublicUrl(k)))
-    void subjectId
-    return this.recognizeImages(urls, EXAM_TASK)
+  /**
+   * #121：把识别输入（storage key 或公网 URL）转成可缓存引用。
+   *
+   * 这些输入的路径里**自带内容 sha256**（`.../blobs/<2位>/<64位hash>/<变体>`），
+   * 所以无需前端额外传指纹；解析不出（例如外链图片、非本系统 URL）一律按
+   * 「本次不缓存」处理——宁可多算一次，也绝不回放疑似错配的结果。
+   */
+  private refsFor(
+    kind: OcrCacheKind,
+    inputs: string[],
+    opts: { mode?: string; extra?: string } = {},
+  ): OcrCacheRef | null {
+    if (!inputs.length) return null
+    const hashes = inputs.map((s) => contentHashFromRef(s))
+    if (hashes.some((h) => !h)) return null
+    return { contentHashes: hashes as string[], kind, mode: opts.mode, extra: opts.extra }
   }
 
-  async recognizeExamByUrls(subjectId: string, urls: string[]): Promise<{ items: RecognizedItem[] }> {
+  async recognizeExam(
+    subjectId: string,
+    imageKeys: string[],
+    force = false,
+  ): Promise<{ items: RecognizedItem[] }> {
+    if (!imageKeys?.length) throw new BadRequestException('image_keys 不能为空')
+    const ref = this.refsFor('exam', imageKeys)
+    if (ref) {
+      const hit = await this.ocrCache.get<{ items: RecognizedItem[] }>(ref, { force })
+      if (hit) return hit
+    }
+    const urls = await Promise.all(imageKeys.map((k) => this.storageService.getPublicUrl(k)))
+    void subjectId
+    const out = await this.recognizeImages(urls, EXAM_TASK)
+    if (ref) await this.ocrCache.set(ref, out)
+    return out
+  }
+
+  async recognizeExamByUrls(
+    subjectId: string,
+    urls: string[],
+    force = false,
+  ): Promise<{ items: RecognizedItem[] }> {
     if (!urls?.length) throw new BadRequestException('urls 不能为空')
     void subjectId
-    return this.recognizeImages(urls, EXAM_TASK)
+    const ref = this.refsFor('exam', urls)
+    if (ref) {
+      const hit = await this.ocrCache.get<{ items: RecognizedItem[] }>(ref, { force })
+      if (hit) return hit
+    }
+    const out = await this.recognizeImages(urls, EXAM_TASK)
+    if (ref) await this.ocrCache.set(ref, out)
+    return out
   }
 
   /**
@@ -624,7 +682,24 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
    *  ③ 无答案图 / VLM 禁用 / 全失败 → 本地结构化多题（仅题目图文字）。
    * 每题 question_image_keys 统一设为题目图 keys；答案图 keys 由 controller 透传回前端单独存储。
    */
-  async recognizePair(questionKeys: string[], answerKeys: string[]): Promise<{ items: RecognizedItem[] }> {
+  async recognizePair(
+    questionKeys: string[],
+    answerKeys: string[],
+    force = false,
+  ): Promise<{ items: RecognizedItem[] }> {
+    // #121：题目图 + 答案图的内容指纹一起入键；回放时 items.question_image_keys
+    // 是上次那份（内容寻址下同文件内容 ⇒ 同 key），与本次请求等价，安全。
+    const ref = this.refsFor('pair', [...questionKeys, ...(answerKeys || [])])
+    if (ref) {
+      const hit = await this.ocrCache.get<{ items: RecognizedItem[] }>(ref, { force })
+      if (hit) return hit
+    }
+    const out = await this.recognizePairInner(questionKeys, answerKeys)
+    if (ref) await this.ocrCache.set(ref, out)
+    return out
+  }
+
+  private async recognizePairInner(questionKeys: string[], answerKeys: string[]): Promise<{ items: RecognizedItem[] }> {
     if (!questionKeys?.length) throw new BadRequestException('question_image_keys 不能为空')
 
     const qUrls = await Promise.all(questionKeys.map((k) => this.storageService.getPublicUrl(k)))

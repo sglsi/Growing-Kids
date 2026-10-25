@@ -35,6 +35,7 @@ import { detectMonoSource, type EnhancePreset, type MonoSourceResult } from './i
 import { compareRecognized, OCR_CONSISTENCY_THRESHOLD, type OcrConsistency } from './image-quality'
 import { classifySr, srGate, srUserQuota, srGateEnabled } from './sr-gate'
 import { OcrService } from '../ocr/ocr.service'
+import { OcrCacheService, contentHashFromRef } from '../ocr/ocr-cache.service'
 import { extractWrongQuestions } from './wrongq'
 import { buildLayoutContext, type LayoutContext } from './wrongq-layout'
 import { renderBlockAssets } from './wrongq-render'
@@ -247,6 +248,7 @@ export class ImageService {
     private readonly timelineService: TimelineService,
     private readonly ocrService: OcrService,
     private readonly quotaService: QuotaService,
+    private readonly ocrCache: OcrCacheService,
   ) {}
 
   /**
@@ -929,7 +931,35 @@ export class ImageService {
    * 服务不可用（侧车未启动/引擎未部署）显式抛 BadRequest，前端提示重试或手动输入；
    * 侧车可达但本次无文字 → 返回空文本栏（正常）。
    */
+  /**
+   * #121：同一份页面图重复识别（用户在编辑器里反复触发/再次打开）不必重跑引擎 ——
+   * precise 全链路单页 ~17s(dewarp)+~50s(PP-StructureV3)，fast 也 1~3s，缓存收益明显。
+   * 键 = 图内容指纹 + mode + rectify（rectify 会改输入并影响结果，必须进键）。
+   * 命中时**连摆正图的暂存都省掉**（不再 ingest 一份重复对象）。
+   */
   async ocrPage(
+    dto: OcrPageDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<OcrPageResult> {
+    const hash = contentHashFromRef(dto.image_url || '')
+    const ref: Parameters<OcrCacheService['get']>[0] | null = hash
+      ? {
+          contentHashes: [hash],
+          kind: 'page',
+          mode: dto.mode === 'fast' ? 'fast' : 'precise',
+          extra: dto.rectify === false ? 'no-rectify' : 'rectify',
+        }
+      : null
+    if (ref) {
+      const hit = await this.ocrCache.get<OcrPageResult>(ref, { force: dto.force })
+      if (hit) return hit
+    }
+    const out = await this.ocrPageInner(dto, forwardHeaders)
+    if (ref) await this.ocrCache.set(ref, out)
+    return out
+  }
+
+  private async ocrPageInner(
     dto: OcrPageDto,
     forwardHeaders: Record<string, string>,
   ): Promise<OcrPageResult> {
