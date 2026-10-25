@@ -149,9 +149,16 @@ export default function LibraryPage() {
       // 后端 /api/upload purpose=save + archive_to=library：图片也归档到资料库
       // ⚠️ 必须带 purpose=save：不带 purpose 后端只返回 URL、不落库、也不计入引用计数，
       //    表现为「提示已归档，但资料库里没有」。
-      await uploadFile(filePath, { purpose: 'save', archiveTo: 'library', fileName })
+      // #121：后端若发现同指纹内容已在本用户资料库里，会复用旧条目而非新建
+      // （物理层早已去重，这里是业务条目层）⇒ 提示文案必须区分「新增」与「已存在」，
+      // 否则用户会以为没存进去、反复上传。
+      const up = await uploadFile(filePath, { purpose: 'save', archiveTo: 'library', fileName })
       Taro.hideLoading()
-      Taro.showToast({ title: '已归档到资料库', icon: 'success' })
+      if (up?.duplicated) {
+        Taro.showToast({ title: up.restored ? '已存过，已为你恢复' : '这份已存过，无需重复归档', icon: 'none' })
+      } else {
+        Taro.showToast({ title: '已归档到资料库', icon: 'success' })
+      }
       load({ silent: true })
     } catch (e) {
       Taro.hideLoading()

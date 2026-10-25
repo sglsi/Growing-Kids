@@ -217,7 +217,20 @@ export async function uploadFile(
   console.log('[Upload Response]', res.statusCode, res.data)
   const body = typeof res.data === 'string'
     ? JSON.parse(res.data)
-    : (res.data as ApiEnvelope<{ key: string; url: string; thumb_key?: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }>)
+    : (res.data as ApiEnvelope<{
+        key: string
+        url: string
+        thumb_key?: string
+        thumb_url?: string
+        type: 'image' | 'document'
+        timeline_id?: string
+        library_id?: string
+        deduped?: boolean
+        /** #121 业务层去重：命中已有条目，本次未新建（不要当成"新增成功"来提示） */
+        duplicated?: boolean
+        /** 命中的那份原本在回收站，已被恢复回列表 */
+        restored?: boolean
+      }>)
   if (res.statusCode < 200 || res.statusCode >= 300) {
     // 配额超限（413）时把 code 带出去，便于 UI 区分「空间满」与「张数满」并引导清理/升级
     const err = new Error(body?.msg || '上传失败') as Error & { quotaCode?: string; quota?: unknown }
