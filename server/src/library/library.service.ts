@@ -46,6 +46,50 @@ export class LibraryService {
     return { list: (data || []) as unknown as LibraryDoc[], total: count || 0, page, page_size: pageSize }
   }
 
+  /**
+   * #121：按内容指纹查该用户**已存在**的文档条目（同文件去重）。
+   * 语义与 timeline.findByHash 一致，见其注释；查重失败同样 best-effort 退化为「没存过」。
+   */
+  async findByHash(
+    userId: string,
+    fileHash: string,
+  ): Promise<{ item: LibraryDoc; inTrash: boolean } | null> {
+    if (!fileHash) return null
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .select('*, subjects:subject_id(id, name, color)')
+      .eq('user_id', userId)
+      .eq('file_hash', fileHash)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      console.error('[library] 按指纹查重失败（按未存过处理）:', fileHash.slice(0, 12), error.message)
+      return null
+    }
+    if (!data) return null
+    const raw = data as unknown as { deleted_at?: string | null }
+    return { item: data as unknown as LibraryDoc, inTrash: !!raw.deleted_at }
+  }
+
+  /** #121：恢复回收站里的文档条目（deleted_at → null），语义同 timeline.restore */
+  async restore(userId: string, id: string): Promise<LibraryDoc | null> {
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({ deleted_at: null, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('user_id', userId) // ⚠️ RLS 全注释 ⇒ 必须显式带 user_id，防越权恢复他人条目
+      .select('*, subjects:subject_id(id, name, color)')
+      .maybeSingle()
+    if (error) {
+      console.error('[library] 恢复失败:', id, error.message)
+      return null
+    }
+    return (data as unknown as LibraryDoc) || null
+  }
+
   async create(userId: string, dto: CreateLibraryDocDto): Promise<LibraryDoc> {
     if (!dto.file_key) throw new BadRequestException('文档缺少 file_key')
     const client = getSupabaseClient()

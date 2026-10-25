@@ -243,6 +243,63 @@ export class TimelineService {
   }
 
   // ---------- 新增（图片归档 / 题目） ----------
+  /**
+   * #121：按内容指纹查该用户**已存在**的条目（同文件去重）。
+   *
+   * 物理层早已去重（blob_objects 引用计数），但业务条目此前照建不误 ——
+   * 同一份文件反复上传时，用户在列表里看到的是「同一张图好几行」。
+   * 这里给出「是否已经存过这份内容」的判据，由上传入口决定是复用还是新建。
+   *
+   * @param includeDeleted true = 连回收站条目也一并返回（调用方可据此"恢复"而非新建）
+   */
+  async findByHash(
+    userId: string,
+    fileHash: string,
+  ): Promise<{ item: TimelineItem; inTrash: boolean } | null> {
+    if (!fileHash) return null
+    const client = getSupabaseClient()
+    // SELECT_COLS 含 '*' ⇒ deleted_at 已在结果里，无需额外指定
+    const { data, error } = await client
+      .from(TABLE)
+      .select(SELECT_COLS)
+      .eq('user_id', userId)
+      .eq('file_hash', fileHash)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      // best-effort：查重失败不能阻断上传 —— 退化为「当作没存过」，照常新建
+      console.error('[timeline] 按指纹查重失败（按未存过处理）:', fileHash.slice(0, 12), error.message)
+      return null
+    }
+    if (!data) return null
+    // TimelineItem 类型未声明 deleted_at（对外不暴露），这里局部断言读取即可
+    const raw = data as unknown as { deleted_at?: string | null }
+    return { item: data as unknown as TimelineItem, inTrash: !!raw.deleted_at }
+  }
+
+  /**
+   * #121：把回收站里的条目收回列表（deleted_at → null）。
+   *
+   * 同文件重复上传时，若命中「已存在但被软删」的条目，正确动作是恢复它
+   * ——再建一条会让用户看到两份同样内容，且旧那份还在回收站里越积越多。
+   */
+  async restore(userId: string, id: string): Promise<TimelineItem | null> {
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({ deleted_at: null, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('user_id', userId) // ⚠️ RLS 全注释 ⇒ 必须显式带 user_id，防越权恢复他人条目
+      .select(SELECT_COLS)
+      .maybeSingle()
+    if (error) {
+      console.error('[timeline] 恢复失败:', id, error.message)
+      return null
+    }
+    return (data as unknown as TimelineItem) || null
+  }
+
   async create(userId: string, dto: CreateTimelineDto): Promise<TimelineItem> {
     if (dto.kind !== 'image' && dto.kind !== 'question') {
       throw new BadRequestException('kind 仅支持 image / question')

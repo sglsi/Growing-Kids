@@ -6,6 +6,7 @@ import { FileInterceptor } from '@nestjs/platform-express'
 import { memoryStorage } from 'multer'
 import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
+import { sha256 } from '../storage/image-pipeline'
 import { TimelineService } from '../timeline/timeline.service'
 import { LibraryService } from '../library/library.service'
 import { QuotaService } from '../quota/quota.service'
@@ -159,6 +160,72 @@ export class UploadController {
     // memory 上传（成长记忆：图片 / 音频 / 视频）走正式存储但不归档到 timeline / library，
     // 仅返回 key/url，由 memory 模块在 addMedia 时把 key 关联到 memory_media。
     const isMemory = purpose === 'memory'
+
+    // ===== #121：同文件去重（业务条目层）=====
+    // 物理层早已去重（blob_objects 内容寻址 + 引用计数），但业务条目此前照建不误 ——
+    // 同一份文件反复上传时，用户看到的是「同一张图在列表里好几行」。
+    //
+    // ⚠️ 必须在 ingest **之前**拦截两个原因：
+    //   ① 省一次对象存储写入/查询；
+    //   ② 更要命的是引用计数：ingest 内部 acquire() 已把 ref_count +1，若本次不建条目，
+    //      这次引用就没人认领 ⇒ 计数虚高 ⇒ 全站再没人删这张图时它永远回收不掉。
+    //      放在 ingest 之前拦截，压根不会 acquire，计数天然干净。
+    // hash 口径与 IngestService 一致：都对**原始字节**算 sha256 ⇒ 同文件恒定同值。
+    const contentHash = sha256(buffer)
+    if (archive && !isMemory && contentHash) {
+      // 图片默认进收件箱；archive_to=library 的图片与文档进资料库（与下方建条目口径一致）
+      const target: 'timeline' | 'library' = isImage && !imageToLibrary ? 'timeline' : 'library'
+      const hit =
+        target === 'timeline'
+          ? await this.timelineService.findByHash(userId, contentHash)
+          : await this.libraryService.findByHash(userId, contentHash)
+      if (hit) {
+        // 命中回收站条目 ⇒ 恢复它，而不是再建一条（否则旧的还在回收站里越积越多）
+        const restoredItem = hit.inTrash
+          ? target === 'timeline'
+            ? await this.timelineService.restore(userId, hit.item.id)
+            : await this.libraryService.restore(userId, hit.item.id)
+          : hit.item
+        const item = restoredItem ?? hit.item
+        const dup = item as unknown as {
+          id: string
+          file_key?: string
+          thumb_key?: string
+          size_bytes?: number
+          width?: number
+          height?: number
+        }
+        const dupKey = dup.file_key || ''
+        const dupThumb = dup.thumb_key || dupKey
+        console.log('[upload] 命中同文件去重，复用已有条目', {
+          userId,
+          target,
+          itemId: dup.id,
+          restored: hit.inTrash,
+          hash: contentHash.slice(0, 12),
+        })
+        return {
+          code: 200,
+          msg: 'success',
+          data: {
+            key: dupKey,
+            url: dupKey ? await this.storageService.getPublicUrl(dupKey) : '',
+            thumb_key: dupThumb,
+            thumb_url: dupThumb ? await this.storageService.getPublicUrl(dupThumb) : '',
+            type: isImage ? 'image' : 'document',
+            timeline_id: target === 'timeline' ? dup.id : '',
+            library_id: target === 'library' ? dup.id : '',
+            size_bytes: dup.size_bytes || 0,
+            width: dup.width || undefined,
+            height: dup.height || undefined,
+            deduped: true, // 物理层：引用同一份对象
+            duplicated: true, // 业务层：命中已有条目，本次未新建
+            restored: hit.inTrash, // 是否把回收站里的那一份恢复出来
+          },
+        }
+      }
+    }
+
     const ing = isTemp
       ? await this.ingestService.ingestTemp(buffer, contentType)
       : await this.ingestService.ingest(buffer, contentType)
