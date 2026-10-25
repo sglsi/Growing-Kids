@@ -404,12 +404,20 @@ export default function SubjectPage() {
 
   /**
    * 合成导出：PDF = 多图拼页省纸，Word = 顺排可编辑（方便家长加批注再打印）。
-   * 两者共用同一批选中的图片素材，由用户在弹层里选目标格式。
+   * 两者共用同一批选中的素材，由用户在弹层里选目标格式。
+   *
+   * 思傅 2026-10-26 修 #119：合成对象从「仅图片条目」放宽为
+   * 「图片条目 + 带题面图的题目条目」——复习本里批量选题再合成是主用法，
+   * 旧逻辑 kind==='image' 一刀切把题目全滤掉，必然误报「请选择图片资料」。
+   * 题目条目的题面图由后端展开（pdf.service fetchImages），此处只传 id 并保持列表序。
    */
   const handleCombine = async () => {
-    const imageIds = items.filter((it) => sel.selected.has(it.id) && it.kind === 'image').map((it) => it.id)
-    if (!imageIds.length) {
-      Taro.showToast({ title: '请选择图片资料', icon: 'none' })
+    const ids = items
+      .filter((it) => sel.selected.has(it.id))
+      .filter((it) => it.kind === 'image' || (it.kind === 'question' && (it.question_image_urls || []).length > 0))
+      .map((it) => it.id)
+    if (!ids.length) {
+      Taro.showToast({ title: '请选择图片资料或含图片的题目', icon: 'none' })
       return
     }
     Taro.showActionSheet({
@@ -419,13 +427,13 @@ export default function SubjectPage() {
         setBusy(true)
         Taro.showLoading({ title: '合成中…' })
         try {
-          const res = await combineToPdf(imageIds, format)
+          const res = await combineToPdf(ids, format)
           Taro.hideLoading()
           openStorageFile(res.url, format === 'pdf', res.key)
         } catch (e) {
           Taro.hideLoading()
           console.error('合成失败', format, e)
-          Taro.showToast({ title: '合成失败，请确认所选为图片', icon: 'none' })
+          Taro.showToast({ title: '合成失败，请确认所选包含图片', icon: 'none' })
         } finally {
           setBusy(false)
         }

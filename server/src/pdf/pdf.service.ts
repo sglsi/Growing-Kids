@@ -10,7 +10,6 @@ import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
 import { TimelineService } from '../timeline/timeline.service'
 import { DocumentsService } from '../documents/documents.service'
-import type { TimelineItem } from '../timeline/timeline.types'
 import { packPages, type PackInput } from './pdf-layout'
 
 const A4_PT = { width: 595.28, height: 841.89 }
@@ -105,17 +104,38 @@ export class PdfService {
     { id: string; buffer: Buffer; isPng: boolean; width: number; height: number }[]
   > {
     if (!ids || !ids.length) throw new BadRequestException('请选择要合成的素材')
-    const items: (TimelineItem & { url?: string })[] = await this.timelineService.listByIdsWithUrls(userId, ids)
-    if (!items.length) throw new BadRequestException('未找到所选素材')
+    const fetched = await this.timelineService.listByIdsWithUrls(userId, ids)
+    if (!fetched.length) throw new BadRequestException('未找到所选素材')
+
+    // 保序：Supabase `.in()` 不保证返回顺序，而 docx 承诺「按选择顺序顺排」——
+    // 不修就会出现「Word 里图片顺序和列表选择顺序不一致」的偶发错乱。
+    const order = new Map(ids.map((id, i) => [id, i]))
+    const items = [...fetched].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+
+    // 展开「合成单元」（思傅 2026-10-26 修 #119）：
+    //   · kind=image  → 条目自身主图（1 张）
+    //   · kind=question → 题面图逐张入列（content.question_images → question_image_urls）
+    // 复习本里「批量选题 → 合成」是主用法：旧逻辑 kind!=='image' 全跳过，
+    // 前端误报「请选择图片资料」、后端就算收到也只会抛「没有可合成的图片」。
+    const units: { id: string; url: string }[] = []
+    for (const it of items) {
+      if (it.kind === 'image' && it.url) {
+        units.push({ id: it.id, url: it.url })
+      } else if (it.kind === 'question') {
+        (it.question_image_urls || []).forEach((u, i) => {
+          if (u) units.push({ id: `${it.id}#q${i}`, url: u })
+        })
+      }
+    }
+    if (!units.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const out: { id: string; buffer: Buffer; isPng: boolean; width: number; height: number }[] = []
-    for (const it of items) {
-      if (it.kind !== 'image' || !it.url) continue
+    for (const u of units) {
       let buffer: Buffer
       try {
-        buffer = await this.download(it.url)
+        buffer = await this.download(u.url)
       } catch (e) {
-        console.error('[combine] 素材下载失败，跳过', it.id, e)
+        console.error('[combine] 素材下载失败，跳过', u.id, e)
         continue
       }
 
@@ -136,22 +156,22 @@ export class PdfService {
             ? await sharp(buffer).png({ compressionLevel: 6 }).toBuffer()
             : await sharp(buffer).jpeg({ quality: 92, mozjpeg: true }).toBuffer()
           isPng = !!meta.hasAlpha
-          console.log(`[combine] 素材 ${it.id} 原格式 ${meta.format} 不支持，已转为 ${isPng ? 'png' : 'jpeg'}`)
+          console.log(`[combine] 素材 ${u.id} 原格式 ${meta.format} 不支持，已转为 ${isPng ? 'png' : 'jpeg'}`)
         }
       } catch (e) {
         // sharp 不可用/解码失败 → 回退头部解析，行为与改造前一致
-        console.warn('[combine] sharp 解析失败，回退头部解析', it.id, (e as Error)?.message)
+        console.warn('[combine] sharp 解析失败，回退头部解析', u.id, (e as Error)?.message)
       }
       if (!width || !height) {
         const size = readImageSize(buffer)
-        width = size.width || it.width || 0
-        height = size.height || it.height || 0
+        width = size.width || 0
+        height = size.height || 0
       }
       if (!width || !height) {
-        console.error('[combine] 无法解析图片尺寸，跳过', it.id)
+        console.error('[combine] 无法解析图片尺寸，跳过', u.id)
         continue
       }
-      out.push({ id: it.id, buffer, isPng, width, height })
+      out.push({ id: u.id, buffer, isPng, width, height })
     }
     return out
   }
@@ -167,7 +187,8 @@ export class PdfService {
   }
 
   /**
-   * 把选中的图片（timeline_items kind=image）合成标准 A4 PDF。
+   * 把选中的素材合成标准 A4 PDF。
+   * 素材 = 图片条目自身主图 + 题目条目的题面图（#119 起，见 fetchImages 展开逻辑）。
    *
    * 排版策略（Guillotine-BSSF 智能拼页，替代原「每图一页」）：
    *  1. 逐张下载并解码，拿到各自宽高比例；

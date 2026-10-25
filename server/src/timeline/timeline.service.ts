@@ -506,7 +506,9 @@ export class TimelineService {
   }
 
   // ---------- 按 id 批量取（含签名 URL，供 PDF 合成用） ----------
-  async listByIdsWithUrls(userId: string, ids: string[]): Promise<(TimelineItem & { url?: string })[]> {
+  // ⚠️ 返回 TimelineItemWithUrl（而非 TimelineItem & { url }）：合成链路要读
+  //    question_image_urls（#119 复习本选题合成 = 题目条目的题面图逐张入列）。
+  async listByIdsWithUrls(userId: string, ids: string[]): Promise<TimelineItemWithUrl[]> {
     if (!ids.length) return []
     const client = getSupabaseClient()
     const { data, error } = await client
@@ -518,7 +520,7 @@ export class TimelineService {
     if (error) throw new Error(error.message)
     const items = (data || []) as unknown as TimelineItem[]
     const enriched = await this.withUrls(items)
-    return enriched as (TimelineItem & { url?: string })[]
+    return enriched as TimelineItemWithUrl[]
   }
 
   // ---------- 加入 / 移出复习本 ----------
