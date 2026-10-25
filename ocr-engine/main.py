@@ -41,8 +41,36 @@ from typing import Any, Dict, List, Optional, Tuple
 os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
 os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+# Web 框架依赖（fastapi/pydantic）惰性化：--once/--loop 工具模式不依赖 web 栈，
+# 缺包时用占位兜底——即使 Node 端把 python 误选到无 web 依赖的解释器，工具式调用与
+# 常驻循环也不会一启动就 ModuleNotFound 退出（服务模式另行显式报错，见 main()）。
+try:
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    _WEB_DEPS_OK = True
+except ImportError:
+    _WEB_DEPS_OK = False
+
+    class BaseModel:  # type: ignore[no-redef]
+        """占位：接受任意 kwargs 挂为属性（工具模式不做校验），类级默认值仍可读。"""
+
+        def __init__(self, **kwargs: Any) -> None:
+            for _k, _v in kwargs.items():
+                setattr(self, _k, _v)
+
+    class HTTPException(Exception):  # type: ignore[no-redef]
+        """占位：工具模式走不到 web 路由，仅为 import 期不炸。"""
+
+    class _NoopApp:
+        """占位：路由注册退化为恒等装饰器。"""
+
+        def _noop(self, *_args: Any, **_kw: Any):
+            return lambda fn: fn
+
+        get = post = _noop  # type: ignore[assignment]
+
+    def FastAPI(**_kw: Any) -> "_NoopApp":  # type: ignore[no-redef]
+        return _NoopApp()
 
 # ⚠️【事故根因】RapidOCR / PaddleOCR 的 ONNX 推理实例**不是线程安全的**。
 # FastAPI 对同步 `def` 路由（如 /recognize）用线程池并发执行，多个请求会同时调用
@@ -61,15 +89,20 @@ OCR_LOW_CONF_THRESHOLD = float(os.getenv("OCR_LOW_CONF_THRESHOLD", "0.6"))
 DRY_RUN = os.getenv("OCR_DRY_RUN", "0") == "1"
 # det 检测边长上限。#124 实测：拍照试卷摆正后 ~1440x1920，用引擎默认值
 # （rapid 736 / paddle 960）会把图缩到 960 以下，嵌入长句的小题号行
-# （如 "got 11. their hands ... Even 12."）整行漏检；提到 1920（1440 宽不缩放）
-# 后 11/12/13 全部召回。CPU 耗时 16s→20s，可接受。
+# （如 "got 11. their hands ... Even 12."）整行漏检；提到 1920 后 11/12/13 全部召回。
+# ⚠️ 2026-10-25 补充实测：rapidocr 包内 limit_type 默认是 **'min'**（短边放大到限长），
+# 配 1920 会把小图放大近 20 倍——400x100 探针 → 1920x7680，DB 后处理在该尺度
+# **零输出**（0 区域、耗时 23s）；裁剪题图/缩略图同样中招。故 _rapid_kwargs()
+# 必须显式传 det_limit_type='max'（仅长边超限才缩小，小图原样跑）。
+# A/B 实测（1440x1920 模拟试卷）：min/1920=15 区域 vs max/1920=13 区域，
+# 文字内容全部召回、差异仅是行合并粒度，无召回回归。
 OCR_DET_LIMIT = int(os.getenv("OCR_DET_LIMIT", "1920"))
 # 分栏识别：文本区域 x 投影间隙 ≥ 图宽此比例（或 20px 兜底）即判为栏间空白。
 OCR_COLUMN_GAP = float(os.getenv("OCR_COLUMN_GAP", "0.04"))
 # 分栏处理总开关：auto=检测到多栏时自动切分逐栏识别；off=关闭（单栏平铺，旧行为）。
 OCR_LAYOUT = os.getenv("OCR_LAYOUT", "auto")
 
-app = FastAPI(title="OCR Engine Sidecar", version="1.0.0")
+app = FastAPI(title="OCR Engine Sidecar", version="1.0.0") if _WEB_DEPS_OK else None
 
 # 引擎实例缓存（延迟初始化）
 _ENGINES: Dict[str, Any] = {}
@@ -148,6 +181,11 @@ def _rapid_kwargs() -> dict:
     规避：连 `det_model_path` / `cls_model_path` / `rec_model_path` 一起传
     （取值与包内 config.yaml 的默认模型一致），让那行判断拿到真值。
     解析失败时返回空 dict，退回「不带参数构造」（用包内默认配置，功能不受影响）。
+
+    ⚠️ 2026-10-25 还必须显式传 `det_limit_type='max'`：包内默认 'min' 是
+    「短边放大到限长」，配 OCR_DET_LIMIT=1920 会把小图放大近 20 倍，
+    DB 后处理在极端尺度零输出（小图/裁剪题图 0 区域）。'max' 仅长边超限
+    才缩小，小图原样跑；A/B 实测试卷大图召回无回归（见 OCR_DET_LIMIT 注释）。
     """
     try:
         import yaml
@@ -160,6 +198,7 @@ def _rapid_kwargs() -> dict:
             "cls_model_path": str(root / cfg["Cls"]["model_path"]),
             "rec_model_path": str(root / cfg["Rec"]["model_path"]),
             "det_limit_side_len": OCR_DET_LIMIT,
+            "det_limit_type": "max",
         }
     except Exception as e:
         print(f"[ocr] RapidOCR 参数解析失败，退回默认配置: {e}", file=sys.stderr, flush=True)
@@ -802,9 +841,17 @@ def main():
         sys.exit(run_loop(args.op, args.mode))
     if args.once:
         sys.exit(run_once(args.op, args.mode))
+    if not _WEB_DEPS_OK:
+        # 服务模式显式失败并给出原因：缺 fastapi/pydantic 时该 python 起不了 web 服务。
+        # （Node 端 resolvePython 会探测并选择含依赖的 OCR venv；工具模式不受影响。）
+        sys.stderr.write(
+            "[main.py] 缺少 Web 依赖（fastapi/pydantic），无法以服务模式运行。\n"
+            "          工具模式（--once/--loop）不受影响；请改用含依赖的 OCR venv 跑服务。\n"
+        )
+        return 2
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
