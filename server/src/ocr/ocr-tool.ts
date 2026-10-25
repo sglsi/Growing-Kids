@@ -3,7 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import zlib from 'zlib'
-import { toGuiPython } from './python-gui'
+import { toGuiPython, pythonEnv, decodeEngineChunk } from './python-gui'
 
 /**
  * OCR 工具式调用器（进程隔离，治「侧车崩溃/卡死」）
@@ -211,13 +211,13 @@ export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOc
     if (engine === 'legacy') args.push('--layout', opts.layout ?? 'auto')
     const child = spawn(toGuiPython(python), args, {
       cwd: dir || undefined,
-      env: { ...process.env, OCR_ENGINE_MODE: mode },
+      env: pythonEnv({ OCR_ENGINE_MODE: mode }),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true, // Windows：禁掉 python 子进程的控制台窗口（用户实测被闪扰）
     })
 
-    child.stdout.on('data', (d) => { out += String(d) })
-    child.stderr.on('data', (d) => { err += String(d) })
+    child.stdout.on('data', (d) => { out += decodeEngineChunk(d) })
+    child.stderr.on('data', (d) => { err += decodeEngineChunk(d) })
     // stdin 写入失败（子进程已退出）不应崩溃：吞掉 EPIPE
     child.stdin.on('error', () => { /* ignore */ })
 
@@ -428,7 +428,7 @@ class PersistentOcr {
         child = spawn(toGuiPython(this.python), [this.script, '--loop', '--op', 'recognize', '--mode', 'rapid', '--layout', 'auto'], {
           cwd: this.cwd || undefined,
           stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, OCR_ENGINE_MODE: 'rapid' },
+          env: pythonEnv({ OCR_ENGINE_MODE: 'rapid' }),
           windowsHide: true, // Windows：禁掉常驻 sidecar 的控制台窗口（用户实测被闪扰）
         })
       } catch (e) {
@@ -441,7 +441,7 @@ class PersistentOcr {
       this.child = child
       this.buf = ''
       this.alive = false
-      child.stdout.on('data', (d: Buffer) => this.onStdout(d.toString('utf8')))
+      child.stdout.on('data', (d: Buffer) => this.onStdout(decodeEngineChunk(d)))
       child.stderr.on('data', () => { /* 引擎日志忽略 */ })
       child.on('error', (e) => console.warn(`[persistent-ocr] 子进程错误: ${(e as Error)?.message ?? e}`))
       child.on('exit', (code) => {

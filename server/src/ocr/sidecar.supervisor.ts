@@ -8,7 +8,7 @@ import {
   getOcrTelemetry,
   getOcrAlertSink,
 } from './ocr-health'
-import { toGuiPython } from './python-gui'
+import { toGuiPython, pythonEnv, decodeEngineChunk } from './python-gui'
 
 /**
  * OCR 侧车守护进程（lazy-start + 空闲回收 + 资源紧张回收）
@@ -365,11 +365,13 @@ export class SidecarSupervisor {
       const child = spawn(
         toGuiPython(this.cfg.python),
         [this.cfg.script, '--host', this.cfg.host, '--port', String(this.cfg.port)],
-        { cwd: this.cfg.engineDir, env: { ...process.env, ...this.cfg.engineEnv }, stdio, windowsHide: true },
+        // pythonEnv：强制 PYTHONUTF8，避免无 LANG 环境（服务经 PowerShell/计划任务启动）下
+        // 侧车 HTTP 响应体/日志回落 GBK（#117）。engineEnv 仍可覆盖其余变量。
+        { cwd: this.cfg.engineDir, env: pythonEnv(this.cfg.engineEnv), stdio, windowsHide: true },
       )
       if (logFd < 0) {
-        child.stdout?.on('data', (d) => console.log(`[sidecar] ${String(d).trim()}`))
-        child.stderr?.on('data', (d) => console.warn(`[sidecar] ${String(d).trim()}`))
+        child.stdout?.on('data', (d) => console.log(`[sidecar] ${decodeEngineChunk(d).trim()}`))
+        child.stderr?.on('data', (d) => console.warn(`[sidecar] ${decodeEngineChunk(d).trim()}`))
       } else {
         console.log(`[sidecar] 子进程日志：${logPath}`)
       }
