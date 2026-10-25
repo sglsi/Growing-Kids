@@ -997,12 +997,17 @@ export async function recropWrongBlock(params: {
 export async function recognizeDocument(filePath: string, subjectId: string) {
   const { url } = await uploadFile(filePath)
   const data = await unwrapResponse<{ items: RecognizeResult[] }>(
-    Network.request({
-      url: '/api/ocr/recognize-doc',
-      method: 'POST',
-      data: { subject_id: subjectId, file_url: url },
-      header: authHeaders(),
-    }),
+    withTimeout(
+      Network.request({
+        url: '/api/ocr/recognize-doc',
+        method: 'POST',
+        data: { subject_id: subjectId, file_url: url },
+        header: authHeaders(),
+      }),
+      // #118：多页 PDF（文字层提取 + 扫描页逐页 OCR）远超微信默认 60s，显式放宽到 240s
+      240000,
+      '文档识别超时（240s），请减少页数或改用图片识别',
+    ),
   )
   const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) {
@@ -1029,12 +1034,17 @@ export async function recognizePaperByUrl(url: string, subjectId: string) {
 // 直接用对象存储 URL 走文档识别
 export async function recognizeDocumentByUrl(url: string, subjectId: string) {
   const data = await unwrapResponse<{ items: RecognizeResult[] }>(
-    Network.request({
-      url: '/api/ocr/recognize-doc',
-      method: 'POST',
-      data: { subject_id: subjectId, file_url: url },
-      header: authHeaders(),
-    }),
+    withTimeout(
+      Network.request({
+        url: '/api/ocr/recognize-doc',
+        method: 'POST',
+        data: { subject_id: subjectId, file_url: url },
+        header: authHeaders(),
+      }),
+      // #118：同上——多页 PDF 识别可能耗时数分钟，微信默认 60s 必被掐断
+      240000,
+      '文档识别超时（240s），请减少页数或改用图片识别',
+    ),
   )
   const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) throw new Error('未识别到题目，请确认文档内容为文字')

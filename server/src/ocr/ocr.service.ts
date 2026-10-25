@@ -28,6 +28,7 @@ import {
   type Ppsv3TextRegion,
 } from './ppsv3.client'
 import { toolOcr, resolvePython, warmupFastOcr, shutdownFastOcr, restartFastOcr } from './ocr-tool'
+import { extractDocContent } from './pdf-tool'
 import { EnvRecoveryService } from './env-recovery.service'
 import { getDiagnoseProbeBuffer } from './diagnose-probe'
 import { inferHierarchy as inferHierarchyRules, linkHierarchy } from './ocr-hierarchy'
@@ -37,6 +38,23 @@ import {
 } from 'docx'
 
 const MODEL = 'doubao-seed-2-0-pro-260215'
+
+/**
+ * 整篇文本作为一道题（#118 安全网）：无题号文档 / VLM 双失败时的保底产物，
+ * 前端可编辑、可拆分——好过把空 items 抛回去弹「未识别到题目」。
+ * question_content 截断到 2 万字符：单题正文过长会拖垮小程序渲染。
+ */
+function wholeTextItem(text: string): RecognizedItem {
+  return {
+    question_content: text.slice(0, 20_000),
+    wrong_answer: '',
+    answer_content: '',
+    solution: '',
+    source: '',
+    status: 'pending',
+    question_image_keys: [],
+  }
+}
 
 // ---------- 3.x 引擎适配层（PP-StructureV3 → LocalOcrResult 契约） ----------
 
@@ -300,10 +318,13 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
     return this.extractJson(response.content)
   }
 
-  /** 文字文档直接结构化（recognize-doc 文本类路径）。 */
   /**
    * 纯文本文档结构化：本地规则为主，VLM 仅在其质量不达标时兜底。
    * （此前无论文本多规整都要跑一次大模型，纯属浪费 —— 按题号切题是确定性规则题。）
+   *
+   * #118 安全网（2026-10-25 思傅报障后加）：无论本地零切分还是 VLM 失败/返空，
+   * 只要有文本就返回「整篇一道题」（前端可编辑、可拆分），绝不再把空 items
+   * 抛给前端弹「未识别到题目」——无题号的纯文本文档是合法输入。
    */
   private async structureTextDoc(rawText: string): Promise<{ items: RecognizedItem[] }> {
     const { vlmMode, allowVlm, minAvgLen } = this.vlmPolicy()
@@ -313,25 +334,34 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
         `[ocr/doc] 本地结构化 ${struct.quality.count} 题，平均 ${struct.quality.avgLen.toFixed(1)} 字，` +
           `层级 ${struct.quality.inferred} 条 → ${struct.quality.ok ? '达标' : '不达标（' + struct.quality.reason + '）'}`,
       )
-      if (struct.quality.ok || !allowVlm) return { items: struct.items }
+      if (struct.quality.ok || !allowVlm) {
+        return { items: struct.items.length ? struct.items : [wholeTextItem(rawText)] }
+      }
     }
-    const response = await this.getVlm().invoke(
-      [
-        { role: 'system', content: this.buildJsonSystem(DOC_TASK) },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `以下是从文档提取的原始内容，请识别其中的全部题目、学生错误作答与正确答案，按题目出现顺序输出。\n\n${rawText}`,
-            },
-          ],
-        },
-      ],
-      { model: MODEL, temperature: 0.1 },
-    )
-    console.log('[ocr/doc] 模型原始返回:', response.content)
-    return this.extractJson(response.content)
+    try {
+      const response = await this.getVlm().invoke(
+        [
+          { role: 'system', content: this.buildJsonSystem(DOC_TASK) },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `以下是从文档提取的原始内容，请识别其中的全部题目、学生错误作答与正确答案，按题目出现顺序输出。\n\n${rawText}`,
+              },
+            ],
+          },
+        ],
+        { model: MODEL, temperature: 0.1 },
+      )
+      console.log('[ocr/doc] 模型原始返回:', response.content)
+      const r = this.extractJson(response.content)
+      if (r.items.length) return r
+      console.warn('[ocr/doc] VLM 返回空 items，降级为整篇单题（前端可编辑）')
+    } catch (e) {
+      console.warn('[ocr/doc] VLM 结构化失败，降级为整篇单题（前端可编辑）:', String(e))
+    }
+    return { items: [wholeTextItem(rawText)] }
   }
 
   // ---------------- 统一图片识别流程：本地结构化（主） → VLM 切分（备） → VLM 看图（备） → 纯文字退化 ----------------
@@ -412,8 +442,90 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
       const result = await this.recognizeImages([fileUrl], DOC_TASK)
       return { items: result.items, rawText: result.rawText ?? '' }
     }
-    // 其他文档（如富文本/扫描件）：FetchClient 取文本再结构化
+    // #118：PDF / DOCX 走专用提取（pypdfium2 / zip+XML），不再把二进制喂 FetchClient
+    // （旧路径实测：PDF 二进制解出 10 万字符乱码 → 中文占比 0% → 「未识别到题目」）。
+    if (/\.pdf$/i.test(path)) return this.recognizePdfDoc(fileUrl)
+    if (/\.docx$/i.test(path)) return this.recognizeDocxDoc(fileUrl)
+    if (/\.doc$/i.test(path)) {
+      throw new BadRequestException('旧版 .doc 格式暂不支持，请用 Word 另存为 .docx 或导出 PDF 后识别')
+    }
+    // 其他文档（如 HTML/富文本）：FetchClient 取文本再结构化
     const rawText = await this.extractDocumentText(fileUrl)
+    const result = await this.structureTextDoc(rawText)
+    return { items: result.items, rawText }
+  }
+
+  /**
+   * PDF 文档识别（#118，2026-10-25 思傅报障后新增）：
+   *  1. pdf_tool（pypdfium2）逐页取文字层；无文字层的扫描页渲染成 PNG（base64）；
+   *  2. 文字层页 → structureTextDoc（本地切题为主，VLM 仅兜底）；
+   *  3. 扫描页 → 渲染图上传得公网 URL → recognizeImages（本地 OCR 为主，VLM 仅兜底）；
+   *  4. 两类结果合并返回，顺序为先文字页后扫描页。
+   *
+   * 页数上限（环境变量可调）：文字页默认 50（防 VLM prompt 爆炸）、
+   * 扫描页默认 8（侧车单页 ~19s，受前端 240s 超时约束，8 页 ≈ 152s 留有余量）。
+   */
+  private async recognizePdfDoc(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
+    const extracted = await extractDocContent({ kind: 'pdf', url: fileUrl })
+    if (!extracted.ok || !extracted.data) {
+      throw new BadRequestException(
+        `PDF 解析失败：${extracted.detail || '未知错误'}。请确认文件未损坏，或另存为图片后识别`,
+      )
+    }
+    const { pages, page_count } = extracted.data
+    const maxTextPages = Number(process.env.OCR_PDF_MAX_TEXT_PAGES ?? 50)
+    const maxScannedPages = Number(process.env.OCR_PDF_MAX_SCANNED_PAGES ?? 8)
+
+    const textPages = pages.filter((p) => (p.text || '').trim().length > 0)
+    const scannedPages = pages.filter((p) => !(p.text || '').trim() && p.image_base64)
+    const useText = textPages.slice(0, maxTextPages)
+    const useScanned = scannedPages.slice(0, maxScannedPages)
+    if (textPages.length > useText.length || scannedPages.length > useScanned.length) {
+      console.warn(
+        `[ocr/pdf] 页数超限已截断：共 ${page_count} 页（文字 ${textPages.length} / 扫描 ${scannedPages.length}），` +
+          `本次处理 文字 ${useText.length} / 扫描 ${useScanned.length}（OCR_PDF_MAX_*_PAGES 可调）`,
+      )
+    }
+    if (!useText.length && !useScanned.length) {
+      throw new BadRequestException('未能从该 PDF 提取到任何内容，请确认文件未损坏或内容清晰')
+    }
+
+    const items: RecognizedItem[] = []
+    const rawText = useText.map((p) => p.text.trim()).join('\n\n')
+    if (rawText) {
+      const r = await this.structureTextDoc(rawText)
+      items.push(...r.items)
+    }
+    if (useScanned.length) {
+      // 扫描页：base64 渲染图 → 上传得公网 URL → 既有图片识别链（零新链路）
+      const urls: string[] = []
+      for (const p of useScanned) {
+        const buf = Buffer.from(p.image_base64 as string, 'base64')
+        const key = await this.storageService.uploadBuffer(buf, `pdf-page-${Date.now()}-${p.index}.png`, 'image/png')
+        urls.push(await this.storageService.getPublicUrl(key))
+      }
+      const r = await this.recognizeImages(urls, DOC_TASK)
+      items.push(...r.items)
+    }
+    console.log(`[ocr/pdf] ${page_count} 页 → 文字层 ${useText.length} 页 + 扫描 ${useScanned.length} 页 → ${items.length} 题`)
+    if (!items.length) {
+      throw new BadRequestException('未能从该 PDF 识别出题目，请确认内容为题目，或换用更清晰的文件')
+    }
+    return { items, rawText }
+  }
+
+  /** DOCX 文档识别（#118）：zip 剥 XML 得全文 → structureTextDoc。 */
+  private async recognizeDocxDoc(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
+    const extracted = await extractDocContent({ kind: 'docx', url: fileUrl })
+    if (!extracted.ok || !extracted.data) {
+      throw new BadRequestException(
+        `Word 文档解析失败：${extracted.detail || '未知错误'}。请确认是 .docx（.doc 旧格式请先另存）`,
+      )
+    }
+    const rawText = (extracted.data.pages[0]?.text || '').trim()
+    if (!rawText) {
+      throw new BadRequestException('未能从该 Word 文档提取到文字，请确认内容非空')
+    }
     const result = await this.structureTextDoc(rawText)
     return { items: result.items, rawText }
   }
