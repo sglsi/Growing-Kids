@@ -1,4 +1,4 @@
-import { View, Text, ScrollView, Image as TaroImage, Picker } from '@tarojs/components'
+import { View, Text, ScrollView, Input, Image as TaroImage, Picker } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState, useEffect, useRef } from 'react'
 import { Crop, Wand, Sparkles, Eraser } from 'lucide-react-taro'
@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea'
 import SegmentedTabs from '@/components/segmented-tabs'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
+import { CheckDot } from '@/components/selection-bar'
 import WrongqBoxEditor, { type BoxEditorItem, type PageBox } from '@/components/wrongq-box-editor'
 import WrongqTextPanel, { type TextPanelDraft } from '@/components/wrongq-text-panel'
 import WrongqOcrPanel from '@/components/wrongq-ocr-panel'
@@ -34,6 +35,8 @@ interface Draft extends RecognizeResult {
   block_id?: number
   /** P2：系统原框（用户改框基线，回传 IoU 用） */
   system_box?: PageBox
+  /** #109：是否勾选「存入错题库」（undefined 视为选中——识别结果默认全选） */
+  selected?: boolean
 }
 
 // ---------- #150 人工辅助错题整理（替代 split 自动识别的主流程） ----------
@@ -100,6 +103,8 @@ export default function RecognizePage() {
   const [unmatched, setUnmatched] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // #109 部分序号识别：序号输入框（如 "3,5,8-12"）+ 勾选态存 Draft.selected
+  const [seqInput, setSeqInput] = useState('')
 
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
@@ -203,6 +208,7 @@ export default function RecognizePage() {
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
     setLoading(true)
     setDrafts([])
+    setSeqInput('')
     setUnmatched([])
     try {
       const result = await recognizePaper(paperImage, sid)
@@ -278,6 +284,7 @@ export default function RecognizePage() {
     setDocName(d.name)
     setDocUrl(d.url || '')
     setDrafts([])
+    setSeqInput('')
     setUnmatched([])
     if (!d.url) {
       Taro.showToast({ title: '该文档暂无可用文件链接', icon: 'none' })
@@ -308,6 +315,7 @@ export default function RecognizePage() {
       setDocName(name || path)
       setDocUrl('')
       setDrafts([])
+      setSeqInput('')
       setUnmatched([])
     })
   }
@@ -348,6 +356,7 @@ export default function RecognizePage() {
     const sid = defaultSubject || subs[1]?.id || subs[0]?.id
     setLoading(true)
     setDrafts([])
+    setSeqInput('')
     setUnmatched([])
     try {
       const result = await recognizeDocumentByUrl(docUrl, sid)
@@ -369,8 +378,69 @@ export default function RecognizePage() {
   }
 
   const removeDraft = (idx: number) => {
-    setDrafts((prev) => prev.filter((_, i) => i !== idx))
+    setDrafts((prev) => {
+      const next = prev.filter((_, i) => i !== idx)
+      // #109：parent_index 是「同批次数组下标」——删除后下标错位，必须重映射：
+      //   指向被删父题的子题升为顶层（题干已随 stem 携带，数据自洽）；下标大于被删项的递减
+      return next.map((d) => {
+        if (d.parent_index == null) return d
+        if (d.parent_index === idx) return { ...d, parent_index: null, level: 1 }
+        return d.parent_index > idx ? { ...d, parent_index: d.parent_index - 1 } : d
+      })
+    })
   }
+
+  // ---- #109：按序号部分识别（只勾选要入库的题；导出 Word 仍全量） ----
+
+  /** 勾选态读取：undefined 视为选中（识别结果默认全选） */
+  const isDraftSelected = (d: Draft) => d.selected !== false
+
+  /** 序号串 → 1-based 序号集合。支持 "3,5,8-12"（容忍全角逗号/空格/重复）；非法或越界返回 null */
+  function parseSeqInput(raw: string, total: number): Set<number> | null {
+    const s = raw.replace(/，/g, ',').replace(/\s+/g, '')
+    if (!s) return null
+    const out = new Set<number>()
+    for (const part of s.split(',')) {
+      const m = /^(\d+)(?:-(\d+))?$/.exec(part)
+      if (!m) return null
+      const a = Number(m[1])
+      const b = m[2] ? Number(m[2]) : a
+      if (a < 1 || b > total || a > b) return null
+      for (let i = a; i <= b; i++) out.add(i)
+    }
+    return out
+  }
+
+  /** 勾选/取消某题；父题（level=1）联动全部子题（parent_index 指向它），避免子题成「无本之木」 */
+  const toggleDraftSelected = (idx: number) => {
+    setDrafts((prev) => {
+      const next = prev.map((d, i) => (i === idx ? { ...d, selected: !isDraftSelected(d) } : d))
+      const want = next[idx].selected === true
+      if (next[idx].level === 1) {
+        for (let i = 0; i < next.length; i++) {
+          if (i !== idx && next[i].parent_index === idx) next[i] = { ...next[i], selected: want }
+        }
+      }
+      return next
+    })
+  }
+
+  /** 应用序号输入：只改勾选态，不碰题目内容 */
+  const applySeqSelection = () => {
+    const picked = parseSeqInput(seqInput, drafts.length)
+    if (!picked) {
+      Taro.showToast({ title: '序号格式有误或超出范围（如 3,5,8-12）', icon: 'none' })
+      return
+    }
+    setDrafts((prev) => prev.map((d, i) => ({ ...d, selected: picked.has(i + 1) })))
+    Taro.showToast({ title: `已选 ${picked.size} 题`, icon: 'success' })
+  }
+
+  const selectAllDrafts = () => setDrafts((prev) => prev.map((d) => ({ ...d, selected: true })))
+  const clearDraftSelection = () => setDrafts((prev) => prev.map((d) => ({ ...d, selected: false })))
+  const invertDraftSelection = () =>
+    setDrafts((prev) => prev.map((d) => ({ ...d, selected: !isDraftSelected(d) }))
+    )
 
   // ---- P2：叠加视图改框 ----
 
@@ -446,7 +516,17 @@ export default function RecognizePage() {
 
   /** 长按删除：移除草稿（系统块仍在叠加视图显示为「未收录」，可再次长按添加） */
   const handleBoxDelete = (id: number) => {
-    setDrafts((prev) => prev.filter((d) => d.block_id !== id))
+    setDrafts((prev) => {
+      const idx = prev.findIndex((d) => d.block_id === id)
+      const next = prev.filter((d) => d.block_id !== id)
+      if (idx < 0) return next
+      // #109：与 removeDraft 同款 parent_index 重映射（删除使数组下标错位）
+      return next.map((d) => {
+        if (d.parent_index == null) return d
+        if (d.parent_index === idx) return { ...d, parent_index: null, level: 1 }
+        return d.parent_index > idx ? { ...d, parent_index: d.parent_index - 1 } : d
+      })
+    })
     Taro.showToast({ title: '已删除，可长按原框重新添加', icon: 'none' })
   }
 
@@ -1085,11 +1165,22 @@ export default function RecognizePage() {
   ]
 
   const handleSave = async () => {
-    if (!drafts.length) return
+    // #109：只存勾选题（默认全选）。一张卷子只录有错题的题——序号/勾选两种入口都汇到这里
+    const picked = drafts.filter((d) => isDraftSelected(d))
+    if (!picked.length) {
+      Taro.showToast({ title: '请先勾选要存入错题库的题目', icon: 'none' })
+      return
+    }
     setSaving(true)
     try {
+      // parent_index 是「同批次内的数组下标」——部分保存时按选中子集重映射，
+      // 父题未勾选的子题升为顶层（题干已随 stem 携带，落库数据自洽）
+      const remap = new Map<number, number>()
+      drafts.forEach((d, i) => {
+        if (isDraftSelected(d)) remap.set(i, picked.indexOf(d))
+      })
       // 一次提取多道题 → 批量落库（POST /api/timeline/batch），不再循环单条请求
-      const payloads = drafts.map((d) => ({
+      const payloads = picked.map((d) => ({
         kind: 'question' as const,
         subject_id: d.subject_id,
         source: d.source,
@@ -1104,14 +1195,14 @@ export default function RecognizePage() {
           question_images: d.question_image_keys || [],
           answer_images: d.answer_image_keys || [],
           level: typeof d.level === 'number' ? d.level : undefined,
-          parent_index: d.parent_index ?? null,
+          parent_index: d.parent_index != null && remap.has(d.parent_index) ? remap.get(d.parent_index)! : null,
           stem: d.stem || '',
           // P3：规范题号标签随保存落库（错题库唯一指认「节·小类 题号」）
           question_label: d.question_label,
         },
       }))
       await createTimelineBatch(payloads)
-      Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
+      Taro.showToast({ title: `已保存 ${picked.length} 题到最近题目`, icon: 'success' })
       nudgeLoginIfAnonymous()
       setTimeout(() => Taro.navigateBack(), 800)
     } catch (e) {
@@ -1605,7 +1696,9 @@ export default function RecognizePage() {
         {drafts.length > 0 && (
           <>
             <View className="mb-3 flex flex-row items-center justify-between">
-              <Text className="block text-sm font-semibold text-foreground">识别结果（{drafts.length} 题，可修改）</Text>
+              <Text className="block text-sm font-semibold text-foreground">
+                识别结果（{drafts.length} 题，已选 {drafts.filter(isDraftSelected).length} 题）
+              </Text>
               {mode === 'split' && !showEditor && (questionUrl || questionImage) ? (
                 <View className="rounded-lg border border-border px-2 py-1" onClick={() => setShowEditor(true)}>
                   <Text className="block text-xs text-primary">校对圈定范围</Text>
@@ -1613,12 +1706,46 @@ export default function RecognizePage() {
               ) : null}
             </View>
             <Text className="block text-xs text-muted-foreground mb-2">
-              是否存入错题库由你决定：点底部「存入错题库」归档，或只「导出 Word」不留库
+              勾选要存入错题库的题目（可只录有错题的题）；导出 Word 不受影响，仍为全部 {drafts.length} 题
             </Text>
+
+            {/* #109 序号快选：题号 = 列表显示顺序「第 N 题」，支持 3,5,8-12 */}
+            <View className="flex flex-row items-center gap-2 mb-3">
+              <View className="flex-1 h-9 rounded-xl border border-border bg-white flex flex-row items-center px-3">
+                <Input
+                  className="flex-1 text-sm"
+                  value={seqInput}
+                  placeholder="如 3,5,8-12"
+                  placeholderClass="text-muted-foreground"
+                  onInput={(e) => setSeqInput(e.detail.value)}
+                  onConfirm={() => applySeqSelection()}
+                />
+              </View>
+              <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={() => applySeqSelection()}>
+                <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>应用</Text>
+              </View>
+              <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={selectAllDrafts}>
+                <Text className="block text-xs text-primary">全选</Text>
+              </View>
+              <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={clearDraftSelection}>
+                <Text className="block text-xs text-primary">清空</Text>
+              </View>
+              <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={invertDraftSelection}>
+                <Text className="block text-xs text-primary">反选</Text>
+              </View>
+            </View>
             {drafts.map((d, idx) => (
               <Card key={idx} className="rounded-2xl border-border p-4 mb-3">
                 <View className="flex flex-row items-center justify-between mb-3">
                   <View className="flex flex-row items-center gap-2">
+                    {/* #109：勾选存入错题库（父题勾选联动子题）；负 margin 保持与原文字对齐 */}
+                    <View
+                      onClick={() => toggleDraftSelected(idx)}
+                      style={{ padding: 6, marginLeft: -6, marginTop: -6, marginBottom: -6 }}
+                      className="flex items-center justify-center"
+                    >
+                      <CheckDot checked={isDraftSelected(d)} />
+                    </View>
                     <Text className="block text-xs text-muted-foreground">第 {idx + 1} 题</Text>
                     {d.question_label ? (
                       <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{d.question_label}</Text>
@@ -1679,7 +1806,9 @@ export default function RecognizePage() {
           padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
         }}
         >
-          <Text className="block text-xs text-muted-foreground shrink-0">共 {drafts.length} 题</Text>
+          <Text className="block text-xs text-muted-foreground shrink-0">
+            已选 {drafts.filter(isDraftSelected).length}/{drafts.length} 题
+          </Text>
           <Button
             className="flex-1 h-11 rounded-xl"
             variant="outline"
@@ -1688,8 +1817,14 @@ export default function RecognizePage() {
           >
             <Text className="block text-sm">{exporting ? '生成中…' : '导出 Word'}</Text>
           </Button>
-          <Button className="flex-1 h-11 rounded-xl" disabled={saving} onClick={handleSave}>
-            <Text className="block text-sm">{saving ? '保存中…' : '存入错题库'}</Text>
+          <Button
+            className="flex-1 h-11 rounded-xl"
+            disabled={saving || !drafts.some(isDraftSelected)}
+            onClick={handleSave}
+          >
+            <Text className="block text-sm">
+              {saving ? '保存中…' : `存入错题库（${drafts.filter(isDraftSelected).length}）`}
+            </Text>
           </Button>
         </View>
       )}
