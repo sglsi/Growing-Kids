@@ -7,6 +7,7 @@ import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
+import { useCaret } from '@/utils/use-caret'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
@@ -27,6 +28,15 @@ interface Props {
   item: TimelineItem
   /** 保存成功后回调（用于刷新页面 state / 列表） */
   onSaved?: (item: TimelineItem) => void
+  /**
+   * 不渲染内置的答案输入框与符号栏（思傅 2026-10-26）：
+   * 详情页把「正确答案 + 详细解题过程」合并成一个编辑框，由页面统管（底部「保存修改」
+   * 一次写入 answer 与 solution）；本组件只留附件 / 搜题能力，避免两个框各有一套
+   * 未提交的编辑态导致「点了保存却没存上」。
+   */
+  hideTextBox?: boolean
+  /** 采纳搜题/AI 结果后回传文本，供调用方刷新自己的合并编辑框 */
+  onAdopt?: (answer: string, solution: string) => void
 }
 
 /** 答案将存入的目标锚：优先题号标签，否则题干前 16 字（item 为空时返回「本题」，绝不抛） */
@@ -42,13 +52,14 @@ function newId(): string {
   return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
-export default function AnswerEditor({ item, onSaved }: Props) {
+export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Props) {
   // ⚠️ item 可能为 null（调用方未等数据到位就挂载时会走到）——全部可选链，
   //    保证永不因空 item 崩渲染（2026-10-22 详情页打不开的直接崩溃点）。
   const [text, setText] = useState(item?.content?.answer || '')
   const [atts, setAtts] = useState<AnswerAttachment[]>(item?.content?.answer_attachments || [])
-  // 答案框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
-  const [textCursor, setTextCursor] = useState(-1)
+  // 答案框光标（思傅 2026-10-26）：位置只在 ref 里跟踪，程序化插入符号时才一次性定位，
+  // 否则每次输入都改 cursor 属性会把光标拽到末尾（详见 utils/use-caret.ts）
+  const caret = useCaret()
   // 答案区两种模式（思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac 这类命令）：
   //   view = 渲染态，显示数学式（默认，有答案时）
   //   edit = 编辑态，Textarea 里放的是**可读形式**（1/2、√3、x²、∠ABC、→a），
@@ -68,18 +79,38 @@ export default function AnswerEditor({ item, onSaved }: Props) {
 
   const label = targetLabel(item)
 
-  /** 写库：文本 / 附件 / 来源**一次调用**提交（后端按 content 字段合并，不会清掉题干） */
-  const persist = async (nextAtts: AnswerAttachment[], nextText?: string) => {
+  /**
+   * 写库：附件 / 来源**一次调用**提交（后端按 content 字段合并，不会清掉题干）。
+   *
+   * ⚠️ 只提交附件，**绝不带 answer**（思傅 2026-10-26 修「答案存不上」）：
+   * 旧实现在加/删附件时把组件里的 `text` 一起写回，而此时 `text` 还是进编辑态前的旧值
+   * ——用户刚在框里改的答案会被自己加的一张图片覆盖掉，随后「保存修改」写进去的也是旧内容。
+   */
+  const persistAtts = async (nextAtts: AnswerAttachment[]) => {
     setSaving(true)
     try {
       const updated = await saveAnswer(item.id, {
-        answer: nextText ?? text,
-        // ⚠️ 不传 solution：answer 的保存不应顺带写回 solution——父页面
-        // 「详细解题过程」框里未保存的编辑会被这里的旧值覆盖（2026-10-22
-        // 图片题接入答案区时发现的数据丢失路径）。solution 的写入只走
-        // 「采纳搜题结果」（handleAdopt 显式传）和父页面自己的保存按钮。
         attachments: nextAtts,
         source: nextAtts.length ? 'manual' : (item.content?.answer_source || 'manual'),
+        refs: item.content?.answer_refs,
+      })
+      onSaved?.(updated)
+    } catch (e) {
+      console.error('保存答案失败', e)
+      Taro.showToast({ title: '保存失败，请重试', icon: 'none' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 写库：文本（编辑态走可读形式→LaTeX；预览态直接存库存 LaTeX）。不传 solution，见上 */
+  const persistText = async (nextText: string) => {
+    setSaving(true)
+    try {
+      const updated = await saveAnswer(item.id, {
+        answer: nextText,
+        attachments: atts,
+        source: atts.length ? 'manual' : (item.content?.answer_source || 'manual'),
         refs: item.content?.answer_refs,
       })
       onSaved?.(updated)
@@ -96,14 +127,13 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     if (mode === 'edit') {
       void saveEditing()
     } else {
-      void persist(atts, text)
+      void persistText(text)
     }
   }
 
   /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
   const startEdit = () => {
     setEditing(latexToReadable(text))
-    setTextCursor(-1)
     setMode('edit')
   }
 
@@ -112,7 +142,7 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     const latex = readableToLatex(editing)
     setText(latex)
     setMode('view')
-    await persist(atts, latex)
+    await persistText(latex)
   }
 
   /**
@@ -121,25 +151,25 @@ export default function AnswerEditor({ item, onSaved }: Props) {
    */
   const insertAnswerSymbol = (snippet: string) => {
     const cur = mode === 'edit' ? editing : latexToReadable(text)
-    const pos = textCursor >= 0 ? Math.min(textCursor, cur.length) : cur.length
+    const pos = caret.position(cur.length)
     const marker = snippet.indexOf('|')
     const plain = snippet.replace('|', '')
     const next = cur.slice(0, pos) + plain + cur.slice(pos)
     setEditing(next)
     if (mode !== 'edit') setMode('edit')
-    setTextCursor(marker >= 0 ? pos + marker : pos + plain.length)
+    caret.request(marker >= 0 ? pos + marker : pos + plain.length)
   }
 
   const addAttachment = async (a: AnswerAttachment) => {
     const next = [...atts, a]
     setAtts(next)
-    await persist(next, text)
+    await persistAtts(next)
   }
 
   const removeAttachment = async (id: string) => {
     const next = atts.filter((x) => x.id !== id)
     setAtts(next)
-    await persist(next, text)
+    await persistAtts(next)
   }
 
   // ---------- 图片：拍照/相册 → 裁剪 → 上传 ----------
@@ -254,6 +284,8 @@ export default function AnswerEditor({ item, onSaved }: Props) {
       setCandidate(null)
       // 采纳后回到预览态：立刻看到渲染后的数学式
       setMode('view')
+      // 通知调用方刷新自己的编辑框（详情页把答案与解题过程合并成一个框了）
+      onAdopt?.(candidate.answer, candidate.solution || '')
       onSaved?.(updated)
       Taro.showToast({ title: '已采纳', icon: 'success' })
     } catch (e) {
@@ -270,39 +302,45 @@ export default function AnswerEditor({ item, onSaved }: Props) {
     <View className="mb-4">
       {/* 目标锚：常驻提示，防止把答案加错题 */}
       <View className="flex flex-row items-center justify-between mb-2">
-        <Text className="block text-xs text-muted-foreground">正确答案</Text>
+        <Text className="block text-xs text-muted-foreground">{hideTextBox ? '答案附件 · 搜题' : '正确答案'}</Text>
         <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
           答案将存入：{label}
         </Text>
       </View>
 
-      <MathSymbolBar
-        onInsert={insertAnswerSymbol}
-        preview={mode === 'view'}
-        onTogglePreview={() => { if (mode === 'view') startEdit(); else void saveEditing() }}
-      />
-      {mode === 'view' ? (
-        /* 预览态：把 LaTeX 渲染成数学式（不支持的语法自动回退源码）；点一下进入编辑 */
-        <View
-          className="w-full rounded-xl border border-border p-3"
-          style={{ minHeight: 72, backgroundColor: '#fff' }}
-          onClick={() => startEdit()}
-        >
-          {text.trim() ? (
-            <MathText text={text} />
+      {/* 详情页由页面统管「答案 + 解题过程」合并编辑框，这里不再重复渲染输入框 */}
+      {hideTextBox ? null : (
+        <>
+          <MathSymbolBar
+            onInsert={insertAnswerSymbol}
+            preview={mode === 'view'}
+            onTogglePreview={() => { if (mode === 'view') startEdit(); else void saveEditing() }}
+          />
+          {mode === 'view' ? (
+            /* 预览态：把 LaTeX 渲染成数学式（不支持的语法自动回退源码）；点一下进入编辑 */
+            <View
+              className="w-full rounded-xl border border-border p-3"
+              style={{ minHeight: 72, backgroundColor: '#fff' }}
+              onClick={() => startEdit()}
+            >
+              {text.trim() ? (
+                <MathText text={text} />
+              ) : (
+                <Text className="block text-sm text-muted-foreground">（暂无答案内容，点此输入）</Text>
+              )}
+            </View>
           ) : (
-            <Text className="block text-sm text-muted-foreground">（暂无答案内容，点此输入）</Text>
+            <Textarea
+              className="w-full rounded-xl border border-border p-3 text-sm"
+              style={{ minHeight: 72, backgroundColor: '#fff' }}
+              placeholder="输入正确答案（1/2、√3、x² 等写法即可，或点上方符号面板）"
+              value={editing}
+              maxlength={-1}
+              cursor={caret.cursor}
+              onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor) }}
+            />
           )}
-        </View>
-      ) : (
-        <Textarea
-          className="w-full rounded-xl border border-border p-3 text-sm"
-          style={{ minHeight: 72, backgroundColor: '#fff' }}
-          placeholder="输入正确答案（1/2、√3、x² 等写法即可，或点上方符号面板）"
-          value={editing}
-          cursor={textCursor}
-          onInput={(e) => { setEditing(e.detail.value); setTextCursor(e.detail.cursor ?? -1) }}
-        />
+        </>
       )}
 
       {/* 附件列表 */}
