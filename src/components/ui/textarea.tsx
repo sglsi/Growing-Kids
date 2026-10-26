@@ -32,6 +32,10 @@ const Textarea = React.forwardRef<
       }}
     >
       <TaroTextarea
+        // ⚠️ 默认不限长（思傅 2026-10-26）：微信 textarea 的 maxlength 默认值是 **140**，
+        //    不显式给 -1 就会静默截断——答案/解析/题干这类长文本全被砍在第 140 字。
+        //    放在 {...props} 之前：调用方显式传 maxlength 时仍以调用方为准。
+        maxlength={-1}
         className="flex-1 w-full h-full bg-transparent text-base text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm selection:bg-selection selection:text-selection-foreground"
         placeholderClass="text-muted-foreground"
         ref={ref}
