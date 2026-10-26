@@ -446,8 +446,30 @@ export default function RecognizePage() {
       Taro.showToast({ title: '序号格式有误或超出范围（如 3,5,8-12）', icon: 'none' })
       return
     }
-    setDrafts((prev) => prev.map((d, i) => ({ ...d, selected: picked.has(i + 1) })))
-    Taro.showToast({ title: `已选 ${picked.size} 题`, icon: 'success' })
+    // 思傅 2026-10-26 修「存入的内容不是输入的错题序号」：
+    // 输入的题号优先按**文档印刷题号**（question_label 里的数字，如 "预习案·Ⅱ 18" → 18）
+    // 匹配——列表显示序号 ≠ 印刷题号（识别可能漏题/并题导致错位）。
+    // 仅当输入的每个数字都能在题号里找到时才按题号选；否则回落到列表显示序号（旧行为）。
+    const byLabel = new Map<number, number[]>()
+    drafts.forEach((d, i) => {
+      const nums = (d.question_label || '').match(/\d+/g)
+      if (nums) nums.forEach((n) => {
+        const k = Number(n)
+        const list = byLabel.get(k) || []
+        list.push(i)
+        byLabel.set(k, list)
+      })
+    })
+    let idxSet: Set<number> | null = null
+    if (byLabel.size > 0) {
+      const allHit = [...picked].every((n) => byLabel.has(n))
+      if (allHit) {
+        idxSet = new Set([...picked].flatMap((n) => byLabel.get(n) || []))
+      }
+    }
+    if (!idxSet) idxSet = picked // 位置匹配（picked 是 1-based 显示序号）
+    setDrafts((prev) => prev.map((d, i) => ({ ...d, selected: idxSet!.has(i + 1) })))
+    Taro.showToast({ title: `已选 ${idxSet.size} 题`, icon: 'success' })
   }
 
   const selectAllDrafts = () => setDrafts((prev) => prev.map((d) => ({ ...d, selected: true })))
@@ -455,6 +477,57 @@ export default function RecognizePage() {
   const invertDraftSelection = () =>
     setDrafts((prev) => prev.map((d) => ({ ...d, selected: !isDraftSelected(d) }))
     )
+
+  /**
+   * 思傅 2026-10-26：把勾选的多题合并为 1 题（仅相同学科）——
+   * 题干/答案/解析按顺序拼接，题面图与答案图并入并集；合并后作为一道题存入错题库。
+   * 场景：文档把一道大题切成了多题，或用户想把一组小题归到一道题里复习。
+   */
+  const mergeSelectedDrafts = () => {
+    const idxs = drafts.map((d, i) => (isDraftSelected(d) ? i : -1)).filter((i) => i >= 0)
+    if (idxs.length < 2) {
+      Taro.showToast({ title: '请先勾选至少两道题', icon: 'none' })
+      return
+    }
+    if (new Set(idxs.map((i) => drafts[i].subject_id)).size > 1) {
+      Taro.showToast({ title: '仅支持合并相同学科的题目', icon: 'none' })
+      return
+    }
+    Taro.showModal({
+      title: `合并 ${idxs.length} 题为 1 题？`,
+      content: '题干/答案按顺序拼接，题面图与答案图全部并入，合并后不可撤销。',
+      confirmText: '合并',
+      success: (m) => {
+        if (!m.confirm) return
+        const parts = idxs.map((i) => drafts[i])
+        const first = idxs[0]
+        const join = (arr: string[]) => arr.map((p) => (p || '').trim()).filter(Boolean).join('\n\n')
+        const merged: Draft = {
+          ...parts[0],
+          question_content: join(parts.map((d) => d.question_content)),
+          answer_content: join(parts.map((d) => d.answer_content)),
+          solution: join(parts.map((d) => d.solution)),
+          wrong_answer: join(parts.map((d) => d.wrong_answer)),
+          has_answer: parts.some((d) => d.has_answer || (d.answer_content || '').trim()),
+          question_image_keys: parts.flatMap((d) => d.question_image_keys || []),
+          answer_image_keys: parts.flatMap((d) => d.answer_image_keys || []),
+          // 合并题以首题的印刷题号作锚（内容已含多题，不再唯一指认某题号）
+          question_label: parts[0].question_label,
+          level: 1,
+          parent_index: null,
+          stem: '',
+          selected: true,
+        }
+        setDrafts((prev) => {
+          const next = prev.filter((_, i) => !idxs.includes(i))
+          next.splice(Math.min(first, next.length), 0, merged)
+          return next
+        })
+        setSeqInput('')
+        Taro.showToast({ title: `已合并 ${parts.length} 题为 1 题`, icon: 'success' })
+      },
+    })
+  }
 
   // ---- P2：叠加视图改框 ----
 
@@ -1216,13 +1289,23 @@ export default function RecognizePage() {
         },
       }))
       await createTimelineBatch(payloads)
-      Taro.showToast({ title: `已保存 ${picked.length} 题到最近题目`, icon: 'success' })
       nudgeLoginIfAnonymous()
-      setTimeout(() => Taro.navigateBack(), 800)
+      setSaving(false)
+      // 思傅 2026-10-26：保存后不再直接返回——继续支持把**整篇识别内容**另存为 Word
+      // （含未勾选的全部题目）；不导出则回上一页。
+      Taro.showModal({
+        title: `已存入错题库 ${picked.length} 题`,
+        content: `可将整篇识别内容（共 ${drafts.length} 题）另存为 Word 文档`,
+        confirmText: '另存 Word',
+        cancelText: '完成',
+        success: (m) => {
+          if (m.confirm) void handleExportDocx()
+          else setTimeout(() => Taro.navigateBack(), 200)
+        },
+      })
     } catch (e) {
       console.error('保存失败', e)
       Taro.showToast({ title: '保存失败', icon: 'none' })
-    } finally {
       setSaving(false)
     }
   }
@@ -1562,7 +1645,7 @@ export default function RecognizePage() {
                       className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
                       value={e.text}
                       placeholder="点上方段落的「加入题干」自动填入，也可手动输入 / 长按粘贴"
-                      maxlength={2000}
+                      maxlength={-1}
                       onInput={(ev) => setEntryText(idx, ev.detail.value)}
                     />
                   </View>
@@ -1726,7 +1809,7 @@ export default function RecognizePage() {
               ) : null}
             </View>
             <Text className="block text-xs text-muted-foreground mb-2">
-              勾选要存入错题库的题目（可只录有错题的题）；导出 Word 不受影响，仍为全部 {drafts.length} 题
+              序号按文档印刷题号匹配（无题号时按列表顺序）；导出 Word 不受勾选影响，仍为全部 {drafts.length} 题
             </Text>
 
             {/* #109 序号快选：题号 = 列表显示顺序「第 N 题」，支持 3,5,8-12 */}
@@ -1753,6 +1836,12 @@ export default function RecognizePage() {
               <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={invertDraftSelection}>
                 <Text className="block text-xs text-primary">反选</Text>
               </View>
+              {/* 思傅 2026-10-26：勾选 ≥2 题（相同学科）可合并为一题 */}
+              {drafts.filter(isDraftSelected).length >= 2 && (
+                <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={mergeSelectedDrafts}>
+                  <Text className="block text-xs text-primary">合并</Text>
+                </View>
+              )}
             </View>
             {drafts.map((d, idx) => (
               <Card key={idx} className="rounded-2xl border-border p-4 mb-3">
@@ -1795,7 +1884,7 @@ export default function RecognizePage() {
                     className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.question_content}
                     placeholder="题目内容（可手动修改）"
-                    maxlength={2000}
+                    maxlength={-1}
                     onInput={(e) => updateDraft(idx, { question_content: e.detail.value })}
                   />
                 </View>
@@ -1809,7 +1898,7 @@ export default function RecognizePage() {
                     className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
                     value={d.answer_content}
                     placeholder="正确答案（可手动修改，无则留空后联网搜题）"
-                    maxlength={2000}
+                    maxlength={-1}
                     onInput={(e) => updateDraft(idx, { answer_content: e.detail.value, has_answer: !!e.detail.value })}
                   />
                 </View>
