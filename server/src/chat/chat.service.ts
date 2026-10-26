@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import { LLMClient } from '../ai/llm-provider'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import type { ChatMessage, ChatSendResult, KnowledgeArticle } from './chat.types'
+import { ContentCheckService } from '../security/content-check.service'
 
 const KNOWLEDGE_TABLE = 'knowledge_articles'
 const MESSAGE_TABLE = 'chat_messages'
@@ -47,6 +48,26 @@ ${articles.length === 0
 export class ChatService {
   private llm?: LLMClient
 
+  constructor(private readonly contentCheck: ContentCheckService) {}
+
+  /**
+   * UGC 准入门禁：用户提问与知识库文章在**入库前**必须先过内容安全检测。
+   *
+   * 为什么必须是这两个入口：
+   *  · `chat_messages` —— 用户提问会被拼进多轮上下文喂给 LLM，属于用户产出内容；
+   *  · `knowledge_articles` —— 全局表，内容直接进 system prompt，
+   *    是所有用户回答口径的来源（比单条提问影响面更大）。
+   * 题目/答案属用户私库、不对外展示，暂不纳入（避免拖慢录入链路）。
+   *
+   * 检测不可用时（未配凭据 / 微信接口异常）**放行**——best-effort 原则，
+   * 不能让第三方接口抖动卡死对话；但不通过时明确拒绝并给出可操作文案。
+   */
+  private async guardContent(text: string, what: string, userId?: string): Promise<void> {
+    // ⚠️ 必须带 userId：v2 接口强制要 openid，不带会被拒 40003 ⇒ 检测形同虚设
+    const r = await this.contentCheck.checkText(text, userId ? { userId } : {})
+    if (!r.allowed) throw new BadRequestException(`${what}包含不适宜的内容，请修改后再试`)
+  }
+
   private getLlm(): LLMClient {
     if (!this.llm) this.llm = new LLMClient()
     return this.llm
@@ -85,17 +106,21 @@ export class ChatService {
     knowledgeCache = null
   }
 
-  async createKnowledge(input: {
-    title: string
-    content: string
-    category?: string | null
-    tags?: string[]
-    is_active?: boolean
-    sort_order?: number
-  }): Promise<KnowledgeArticle> {
+  async createKnowledge(
+    userId: string,
+    input: {
+      title: string
+      content: string
+      category?: string | null
+      tags?: string[]
+      is_active?: boolean
+      sort_order?: number
+    },
+  ): Promise<KnowledgeArticle> {
     if (!input.title?.trim() || !input.content?.trim()) {
       throw new BadRequestException('title 和 content 必填')
     }
+    await this.guardContent(`${input.title}\n${input.content}`, '知识库文章', userId)
     const client = getSupabaseClient()
     const payload = {
       title: input.title.trim(),
@@ -116,12 +141,17 @@ export class ChatService {
   }
 
   async updateKnowledge(
+    userId: string,
     id: string,
     patch: Partial<
       Pick<KnowledgeArticle, 'title' | 'content' | 'category' | 'tags' | 'is_active' | 'sort_order'>
     >,
   ): Promise<KnowledgeArticle> {
     if (!id) throw new BadRequestException('id 必填')
+    // 标题/正文任一被改动都要重新过检（payload 会被拼进所有人的 system prompt）
+    if (patch.title !== undefined || patch.content !== undefined) {
+      await this.guardContent(`${patch.title || ''}\n${patch.content || ''}`, '知识库文章', userId)
+    }
     const client = getSupabaseClient()
     // ⚠️ updated_at 必须显式写：knowledge_articles 只有 default now()（仅覆盖 insert），
     //    update 时不会自动刷新。库级触发器见 migrations/0008_updated_at_trigger.sql（双保险）。
@@ -154,6 +184,8 @@ export class ChatService {
     content: string,
   ): Promise<ChatSendResult> {
     if (!content?.trim()) throw new BadRequestException('消息内容不能为空')
+    // UGC 内容安全：写库之前拦住（违规文本一旦入库会成为 LLM 上下文）
+    await this.guardContent(content, '提问内容', userId)
     const sid = sessionId?.trim() || randomUUID()
     const trimmed = content.trim()
     const client = getSupabaseClient()

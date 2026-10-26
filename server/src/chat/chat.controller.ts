@@ -48,7 +48,7 @@ export class ChatController {
     },
   ) {
     requireAdmin(req)
-    const data = await this.chatService.createKnowledge(body)
+    const data = await this.chatService.createKnowledge(requireUserId(req), body)
     return { code: 200, msg: 'success', data }
   }
 
@@ -68,7 +68,7 @@ export class ChatController {
     },
   ) {
     requireAdmin(req)
-    const data = await this.chatService.updateKnowledge(id, body)
+    const data = await this.chatService.updateKnowledge(requireUserId(req), id, body)
     return { code: 200, msg: 'success', data }
   }
 
