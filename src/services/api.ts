@@ -1268,6 +1268,10 @@ export interface ExportParams {
   end_date?: string
   title?: string
   include_mastered?: boolean
+  /** 指定题目 id 白名单（详情页「导出打印」只导本题）；提供时后端忽略学科/时间/掌握筛选 */
+  ids?: string[]
+  /** false = 纯题目卷（不带答案/解析）；不传 = 旧行为（含答案，汇总页沿用） */
+  include_answers?: boolean
 }
 
 export function exportDocument(params: ExportParams) {
@@ -1337,13 +1341,13 @@ export interface CombineResult {
   images: number
 }
 
-export function combineToPdf(ids: string[], format: CombineFormat = 'pdf') {
+export function combineToPdf(ids: string[], format: CombineFormat = 'pdf', includeAnswers = false) {
   return invalidateAfter(
     unwrap<CombineResult>(
       Network.request({
         url: '/api/pdf/combine',
         method: 'POST',
-        data: { ids, format },
+        data: { ids, format, include_answers: !!includeAnswers },
         header: authHeaders(),
       }),
     ),

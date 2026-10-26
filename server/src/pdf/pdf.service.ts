@@ -29,6 +29,29 @@ const DOCX_MAX_H = Math.round(((A4_TWIP.height - DOCX_MARGIN_TWIP * 2) / 20) * (
 /** 合成目标格式：pdf（图片拼页）与 docx（图片顺排入 Word） */
 export type CombineFormat = 'pdf' | 'docx'
 
+/** 纯文本块（带答案模式）：docx 走原生段落；PDF 渲染成白底位图后与图片一起拼页 */
+export interface TextBlock {
+  heading?: string
+  lines: string[]
+}
+
+interface ImageSource {
+  id: string
+  buffer: Buffer
+  isPng: boolean
+  width: number
+  height: number
+}
+
+interface TextSource {
+  id: string
+  text: TextBlock
+}
+
+type SourceUnit = ImageSource | TextSource
+
+const isTextUnit = (u: SourceUnit): u is TextSource => 'text' in u
+
 export interface CombineResult {
   url: string
   key: string
@@ -99,10 +122,8 @@ export class PdfService {
     })
   }
 
-  /** 素材 id → 已下载的图片（含二进制、格式与像素尺寸） */
-  private async fetchImages(userId: string, ids: string[]): Promise<
-    { id: string; buffer: Buffer; isPng: boolean; width: number; height: number }[]
-  > {
+  /** 素材 id → 已下载的图片（含二进制、格式与像素尺寸）；带答案模式追加文本块单元 */
+  private async fetchImages(userId: string, ids: string[], includeAnswers = false): Promise<SourceUnit[]> {
     if (!ids || !ids.length) throw new BadRequestException('请选择要合成的素材')
     const fetched = await this.timelineService.listByIdsWithUrls(userId, ids)
     if (!fetched.length) throw new BadRequestException('未找到所选素材')
@@ -115,9 +136,11 @@ export class PdfService {
     // 展开「合成单元」（思傅 2026-10-26 修 #119）：
     //   · kind=image  → 条目自身主图（1 张）
     //   · kind=question → 题面图逐张入列（content.question_images → question_image_urls）
+    //     带答案模式（思傅 2026-10-26）：题面图后紧跟本题的 答案/解析/错误作答 文本块，
+    //     缺哪块跳哪块——合成里默认只有题面图（不带答案），带答案由用户显式选择。
     // 复习本里「批量选题 → 合成」是主用法：旧逻辑 kind!=='image' 全跳过，
     // 前端误报「请选择图片资料」、后端就算收到也只会抛「没有可合成的图片」。
-    const units: { id: string; url: string }[] = []
+    const units: { id: string; url?: string; text?: TextBlock }[] = []
     for (const it of items) {
       if (it.kind === 'image' && it.url) {
         units.push({ id: it.id, url: it.url })
@@ -125,15 +148,34 @@ export class PdfService {
         (it.question_image_urls || []).forEach((u, i) => {
           if (u) units.push({ id: `${it.id}#q${i}`, url: u })
         })
+        if (includeAnswers) {
+          const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }
+          if ((c.wrong_answer || '').trim()) {
+            units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') } })
+          }
+          if ((c.answer || '').trim()) {
+            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') } })
+          }
+          if ((c.solution || '').trim()) {
+            units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') } })
+          }
+        }
       }
     }
     if (!units.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
-    const out: { id: string; buffer: Buffer; isPng: boolean; width: number; height: number }[] = []
+    const out: SourceUnit[] = []
     for (const u of units) {
+      // 文本块单元：不下载，直接作为 SourceUnit 交给下游（docx 原生段落 / PDF 位图渲染）
+      if (u.text) {
+        out.push({ id: u.id, text: u.text })
+        continue
+      }
+      if (!u.url) continue
+      const url = u.url
       let buffer: Buffer
       try {
-        buffer = await this.download(u.url)
+        buffer = await this.download(url)
       } catch (e) {
         console.error('[combine] 素材下载失败，跳过', u.id, e)
         continue
@@ -181,9 +223,61 @@ export class PdfService {
    *
    * - `pdf`：Guillotine-BSSF 智能拼页，多图共用一页，省纸少留白；
    * - `docx`：图片按选择顺序顺排进 Word，家长可继续编辑、加批注后再打印。
+   *
+   * `includeAnswers`（思傅 2026-10-26）：默认 false——合成的是纯题目卷（只有题面图）；
+   * 为 true 时本题的 答案/解析/错误作答 以文本块形式跟在题面图后一并合成。
    */
-  async combine(userId: string, ids: string[], format: CombineFormat = 'pdf'): Promise<CombineResult> {
-    return format === 'docx' ? this.combineIntoDocx(userId, ids) : this.combineIntoPdf(userId, ids)
+  async combine(userId: string, ids: string[], format: CombineFormat = 'pdf', includeAnswers = false): Promise<CombineResult> {
+    return format === 'docx' ? this.combineIntoDocx(userId, ids, includeAnswers) : this.combineIntoPdf(userId, ids, includeAnswers)
+  }
+
+  /**
+   * 把文本块渲染成白底 PNG——PDF 没法直接嵌 CJK 字体（pdf-lib 标准字体不含中文），
+   * 文本块走位图：sharp 的 SVG 渲染（librsvg/Pango，本机有微软雅黑）出图后与普通图片
+   * 一样进拼页流程。渲染失败返回 null：调用方跳过该块并留痕，绝不因单个文本块让合成整体失败。
+   */
+  private async renderTextPng(block: TextBlock): Promise<{ buffer: Buffer; width: number; height: number } | null> {
+    const FS = 36 // 正文字号 px
+    const LH = Math.round(FS * 1.75)
+    const PAD = 30
+    const W = 1400 // 画布宽 px：A4 可用宽下约 40 个汉字/行
+    const charW = (ch: string) => (ch.charCodeAt(0) > 0x2e80 ? FS : Math.round(FS * 0.55))
+    const wrap = (s: string): string[] => {
+      const rows: string[] = []
+      let line = ''
+      let w = 0
+      for (const ch of s) {
+        const cw = charW(ch)
+        if (w + cw > W - PAD * 2 && line) {
+          rows.push(line)
+          line = ''
+          w = 0
+        }
+        line += ch
+        w += cw
+      }
+      if (line) rows.push(line)
+      return rows.length ? rows : [' ']
+    }
+    const visual: { text: string; bold: boolean; color: string }[] = []
+    if (block.heading) visual.push({ text: block.heading, bold: true, color: '#2E6F4E' })
+    for (const l of block.lines) wrap(l).forEach((t) => visual.push({ text: t, bold: false, color: '#1a1a1a' }))
+    const H = PAD * 2 + visual.length * LH
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const body = visual
+      .map(
+        (v, i) =>
+          `<text x="${PAD}" y="${PAD + LH * i + Math.round(FS * 0.9)}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="${FS}" font-weight="${v.bold ? 'bold' : 'normal'}" fill="${v.color}" xml:space="preserve">${esc(v.text)}</text>`,
+      )
+      .join('')
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="100%" height="100%" fill="white"/>${body}</svg>`
+    try {
+      const buffer = await sharp(Buffer.from(svg)).png().toBuffer()
+      return { buffer, width: W, height: H }
+    } catch (e) {
+      console.warn('[combine] 文本块渲染为图片失败，PDF 版跳过该答案区块:', (e as Error)?.message)
+      return null
+    }
   }
 
   /**
@@ -197,15 +291,23 @@ export class PdfService {
    *
    * 结果转存 TOS 并归档进 documents（文档页）。
    */
-  async combineIntoPdf(userId: string, ids: string[]): Promise<CombineResult> {
-    const sources = await this.fetchImages(userId, ids)
-    if (!sources.length) throw new BadRequestException('所选素材中没有可合成的图片')
+  async combineIntoPdf(userId: string, ids: string[], includeAnswers = false): Promise<CombineResult> {
+    const fetched = await this.fetchImages(userId, ids, includeAnswers)
+    if (!fetched.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const pdf = await PDFDocument.create()
 
-    // 1) 解码，收集「可排版」的图片及其原始尺寸
+    // 1) 解码，收集「可排版」的图片及其原始尺寸；文本块先渲染成白底 PNG（按序参与拼页）
     const decoded: { key: string; image: any; width: number; height: number }[] = []
-    for (const s of sources) {
+    for (const unit of fetched) {
+      let s: ImageSource
+      if (isTextUnit(unit)) {
+        const png = await this.renderTextPng(unit.text)
+        if (!png) continue
+        s = { id: unit.id, buffer: png.buffer, isPng: true, width: png.width, height: png.height }
+      } else {
+        s = unit
+      }
       let image: any
       try {
         try {
@@ -277,7 +379,7 @@ export class PdfService {
 
     const pdfBuffer = Buffer.from(await pdf.save())
     const day = new Date().toLocaleDateString('zh-CN')
-    const title = `复习资料-${day}.pdf`
+    const title = includeAnswers ? `复习资料（含答案）-${day}.pdf` : `复习资料-${day}.pdf`
     // ⚠️ 对象存储的 key 只接受 ASCII（Supabase 会拒「Invalid key」），中文只能出现在
     //    documents.title（展示名）里——此前用中文 key 上传，切到 supabase 驱动后必然失败。
     const key = await this.storageService.uploadBuffer(pdfBuffer, `review-pack-${Date.now()}.pdf`, 'application/pdf')
@@ -288,7 +390,7 @@ export class PdfService {
       file_key: key,
       mime_type: 'application/pdf',
       size_bytes: pdfBuffer.length,
-      meta: { source_ids: ids },
+      meta: { source_ids: ids, include_answers: includeAnswers },
     })
 
     const fillRatio = areaTotal > 0 ? areaSum / areaTotal : 0
@@ -306,29 +408,55 @@ export class PdfService {
    *   · 原图小于可用宽时不放大（避免插值糊图）；
    *   · 标题 + 生成信息置顶，图片居中顺排。
    */
-  async combineIntoDocx(userId: string, ids: string[]): Promise<CombineResult> {
-    const sources = await this.fetchImages(userId, ids)
-    if (!sources.length) throw new BadRequestException('所选素材中没有可合成的图片')
+  async combineIntoDocx(userId: string, ids: string[], includeAnswers = false): Promise<CombineResult> {
+    const fetched = await this.fetchImages(userId, ids, includeAnswers)
+    if (!fetched.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const day = new Date().toLocaleDateString('zh-CN')
+    const imageCount = fetched.filter((u) => !isTextUnit(u)).length
     const children: Paragraph[] = [
       new Paragraph({
         heading: HeadingLevel.TITLE,
         alignment: AlignmentType.CENTER,
         spacing: { after: 120 },
-        children: [new TextRun({ text: `复习资料 ${day}`, bold: true, size: 36, font: '黑体' })],
+        children: [new TextRun({ text: includeAnswers ? `复习资料（含答案） ${day}` : `复习资料 ${day}`, bold: true, size: 36, font: '黑体' })],
       }),
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: { after: 240 },
         children: [
-          new TextRun({ text: `共 ${sources.length} 张图片 · 生成于 ${day}`, size: 20, color: '6B655D', font: '宋体' }),
+          new TextRun({
+            text: `共 ${imageCount} 张图片${includeAnswers ? ' · 含答案与解析' : ''} · 生成于 ${day}`,
+            size: 20, color: '6B655D', font: '宋体',
+          }),
         ],
       }),
     ]
 
     let heightSum = 0
-    for (const s of sources) {
+    for (const unit of fetched) {
+      // 文本块（带答案模式）：Word 原生段落——可编辑、可批注，不走位图
+      if (isTextUnit(unit)) {
+        const b = unit.text
+        if (b.heading) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 160, after: 40 },
+              children: [new TextRun({ text: b.heading, bold: true, size: 24, color: '2E6F4E', font: '黑体' })],
+            }),
+          )
+        }
+        for (const line of b.lines) {
+          children.push(
+            new Paragraph({
+              spacing: { after: 60 },
+              children: [new TextRun({ text: line || ' ', size: 24, font: '宋体' })],
+            }),
+          )
+        }
+        continue
+      }
+      const s = unit
       // 等比缩放到正文可用区内；原图更小则保持原始尺寸（不放大）
       const scale = Math.min(1, DOCX_MAX_W / s.width, DOCX_MAX_H / s.height)
       const width = Math.max(1, Math.round(s.width * scale))
@@ -373,7 +501,7 @@ export class PdfService {
     })
 
     const docxBuffer = Buffer.from(await Packer.toBuffer(doc))
-    const title = `复习资料-${day}.docx`
+    const title = includeAnswers ? `复习资料（含答案）-${day}.docx` : `复习资料-${day}.docx`
     const mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     const key = await this.storageService.uploadBuffer(docxBuffer, `review-pack-${Date.now()}.docx`, mime)
     const url = await this.storageService.getPublicUrl(key)
@@ -383,13 +511,13 @@ export class PdfService {
       file_key: key,
       mime_type: mime,
       size_bytes: docxBuffer.length,
-      meta: { source_ids: ids },
+      meta: { source_ids: ids, include_answers: includeAnswers },
     })
 
     // docx 由 Word 排版引擎分页，这里只能按累计图高估算，仅用于前端提示文案
     const pages = Math.max(1, Math.ceil(heightSum / DOCX_MAX_H))
-    console.log(`[docx] 合成完成：${sources.length} 张图，估算 ${pages} 页`)
-    return { url, key, doc_id: docId, pages, fillRatio: 0, images: sources.length }
+    console.log(`[docx] 合成完成：${imageCount} 张图${includeAnswers ? ' + 答案文本块' : ''}，估算 ${pages} 页`)
+    return { url, key, doc_id: docId, pages, fillRatio: 0, images: imageCount }
   }
 
   /** 归档进文档页。入库失败不影响合成结果返回，但必须打全错（best-effort catch 铁律） */

@@ -410,6 +410,9 @@ export default function SubjectPage() {
    * 「图片条目 + 带题面图的题目条目」——复习本里批量选题再合成是主用法，
    * 旧逻辑 kind==='image' 一刀切把题目全滤掉，必然误报「请选择图片资料」。
    * 题目条目的题面图由后端展开（pdf.service fetchImages），此处只传 id 并保持列表序。
+   *
+   * 思傅 2026-10-26：默认不带答案与解题过程（打给孩子做的练习卷）；
+   * 「含答案」选项把本题 答案/解析/错误作答 一并合成（对答案用的版本）。
    */
   const handleCombine = async () => {
     const ids = items
@@ -421,13 +424,19 @@ export default function SubjectPage() {
       return
     }
     Taro.showActionSheet({
-      itemList: ['合成 PDF（智能拼页，省纸）', '合成 Word（可编辑后再打印）'],
+      itemList: [
+        '合成 PDF（不含答案）',
+        '合成 Word（不含答案）',
+        '合成 PDF（含答案·解析）',
+        '合成 Word（含答案·解析）',
+      ],
       success: async (r) => {
-        const format: 'pdf' | 'docx' = r.tapIndex === 1 ? 'docx' : 'pdf'
+        const format: 'pdf' | 'docx' = r.tapIndex === 1 || r.tapIndex === 3 ? 'docx' : 'pdf'
+        const withAnswers = r.tapIndex >= 2
         setBusy(true)
         Taro.showLoading({ title: '合成中…' })
         try {
-          const res = await combineToPdf(ids, format)
+          const res = await combineToPdf(ids, format, withAnswers)
           Taro.hideLoading()
           openStorageFile(res.url, format === 'pdf', res.key)
         } catch (e) {
