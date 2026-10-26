@@ -1,4 +1,11 @@
 export default defineAppConfig({
+  /**
+   * 开启隐私保护校验（必须与 mp 后台「用户隐私保护指引」配套）。
+   * 本项目调用 chooseMedia/chooseImage（相册/摄像头）属隐私接口，未声明则
+   * **体验版/正式版调用直接失败**；开发版因豁免而无感知。
+   * 实际弹窗由 components/privacy-gate.tsx + utils/privacy.ts 处理。
+   */
+  __usePrivacyCheck__: true,
   pages: [
     'pages/index/index',
     'pages/subject/index',

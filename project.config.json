@@ -21,20 +21,15 @@
   },
   "preloadBackgroundData": false,
   "compileType": "miniprogram",
-  "packOptions": {
-    "ignore": [
-      {
-        "value": "./assets",
-        "type": "folder"
-      }
-    ],
-    "include": []
-  },
   "libVersion": "3.17.4",
   "srcMiniprogramRoot": "dist/",
   "condition": {},
   "editorSetting": {
     "tabIndent": "insertSpaces",
     "tabSize": 2
+  },
+  "packOptions": {
+    "ignore": [],
+    "include": []
   }
 }
