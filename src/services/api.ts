@@ -189,7 +189,20 @@ async function compressForUpload(filePath: string): Promise<string> {
 export async function uploadFile(
   filePath: string,
   opts: UploadOpts = {},
-): Promise<{ key: string; url: string; thumb_key?: string; thumb_url?: string; type: 'image' | 'document'; timeline_id?: string; library_id?: string; deduped?: boolean }> {
+): Promise<{
+  key: string
+  url: string
+  thumb_key?: string
+  thumb_url?: string
+  type: 'image' | 'document'
+  timeline_id?: string
+  library_id?: string
+  deduped?: boolean
+  /** #121 业务条目层去重：命中已有条目，本次未新建 */
+  duplicated?: boolean
+  /** 命中的条目原本在回收站，已恢复 */
+  restored?: boolean
+}> {
   // 上传前先在本机粗压（省流量）；服务端还会再精压一次
   const srcPath = await compressForUpload(filePath)
   // purpose / archive_to 同时放进 query（url）与 multipart 表单字段（formData），双保险：

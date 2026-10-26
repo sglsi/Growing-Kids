@@ -1,6 +1,6 @@
 import { View, Text, ScrollView, Picker, Image } from '@tarojs/components'
 import Taro, { useRouter } from '@tarojs/taro'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
@@ -14,9 +14,11 @@ import {
 import { cacheGet, cacheSet } from '@/services/cache'
 import ImageEditor from '@/components/image-editor'
 import AnswerEditor from '@/components/answer-editor'
+import AnswerSolutionEditor from '@/components/answer-solution-editor'
 import MathSymbolBar from '@/components/math-symbol-bar'
-import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
+import { splitAnswerSolution, joinAnswerSolution } from '@/utils/answer-merge'
+import { useCaret } from '@/utils/use-caret'
 import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
@@ -50,8 +52,17 @@ export default function DetailPage() {
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [subjectId, setSubjectId] = useState('')
   const [qContent, setQContent] = useState('')
-  const [aContent, setAContent] = useState('')
-  const [solution, setSolution] = useState('')
+  /**
+   * 答案 + 解题过程合并后的编辑文本（可读形式，非 LaTeX）（思傅 2026-10-26）
+   *
+   * 为什么合并成一个框：
+   *   ① 家长写题解本来就是「答案写完接着写过程」，两个框各有一套预览态/保存按钮，
+   *      很容易在有未提交编辑时点底部「保存修改」，结果写进库的是旧值（存不上）；
+   *   ② 答案框原先没设 maxlength，微信 textarea 默认 140 字截断，长答案被静默吞掉。
+   * 库里仍是 content.answer / content.solution 两个字段：保存时按「解析：」小标题切回去，
+   * 导出 Word/PDF 的「正确答案」「解析」两段标题不受影响。
+   */
+  const [answerDraft, setAnswerDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [mastered, setMastered] = useState(false)
   // P2-18 复习计划
@@ -66,28 +77,23 @@ export default function DetailPage() {
   const [editorBusy, setEditorBusy] = useState(false)      // 编辑结果上传/替换中
   const [ocrBusy, setOcrBusy] = useState(false)            // 图片文字识别中
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
-  // 解题过程框光标（-1 = 未知，插入时退化为追加到末尾）；数学符号按光标位插入
-  const [solutionCursor, setSolutionCursor] = useState(-1)
-  // 题目栏光标（思傅 2026-10-23：题目栏也支持数学符号输入）
-  const [qCursor, setQCursor] = useState(-1)
-  // 解题过程两种模式（思傅 2026-10-23：源码用户看不懂也编辑不了，编辑界面不能出现 \frac 这类命令）：
-  //   view = 渲染态，显示数学式（有内容时默认）
-  //   edit = 编辑态，Textarea 里放的是**可读形式**（1/2、√3、x²、∠ABC、→a），
-  //          「完成」时再转回 LaTeX。solution 始终是库里的 LaTeX（唯一真相）。
-  const [solutionMode, setSolutionMode] = useState<'view' | 'edit'>('edit')
-  const [solutionEditing, setSolutionEditing] = useState('')
+
+  // 输入框光标庇护所（思傅 2026-10-26 修「光标跳到末尾」）：位置记在 ref 里，
+  // 只有程序化插入符号时才一次性定位，绝不逐字干预原生光标（详见 utils/use-caret.ts）
+  const qCaret = useCaret()
+  const aCaret = useCaret()
+  /** 用户是否已经动过输入框：SWR 的网络回包不得覆盖正在编辑的内容 */
+  const dirtyRef = useRef(false)
 
   /** 把一条题目数据铺进页面 state（缓存首帧与网络刷新共用） */
   const applyItem = (it: TimelineItem) => {
     setItem(it)
     setSubjectId(it.subject_id || '')
     setQContent(it.content?.question || '')
-    setAContent(it.content?.answer || '')
-    setSolution(it.content?.solution || '')
-    // 有解题过程就默认展示渲染后的数学式，空则留在编辑态方便直接输入
-    const hasSol = !!(it.content?.solution || '').trim()
-    setSolutionMode(hasSol ? 'view' : 'edit')
-    setSolutionEditing(hasSol ? '' : '')
+    setAnswerDraft(joinAnswerSolution(
+      latexToReadable(it.content?.answer || ''),
+      latexToReadable(it.content?.solution || ''),
+    ))
     setMastered(it.mastered)
     setPlan(computePlan(it.created_at, it.content?.review_count))
   }
@@ -103,7 +109,10 @@ export default function DetailPage() {
     if (cachedSubs) setSubjects(cachedSubs)
     try {
       const [it, subs] = await Promise.all([fetchTimelineDetail(id), fetchSubjects()])
-      applyItem(it)
+      // ⚠️ 用户已经开始编辑时只更新条目元数据（图片/学科/复习态），不碰正在输入的文本：
+      //    否则后台回包（或缓存→网络的第二次铺数据）会把刚敲的字和光标位置一起冲掉。
+      if (dirtyRef.current) setItem(it)
+      else applyItem(it)
       setSubjects(subs)
       cacheSet(itemKey, it)
       if (subs.length) cacheSet('subj:list', subs)
@@ -117,18 +126,40 @@ export default function DetailPage() {
     load()
   }, [])
 
+  /**
+   * 保存修改：题干 + 答案与解题过程 + 学科 + 掌握状态**一次提交**。
+   *
+   * 思傅 2026-10-26 修「答案/解题过程点了保存没存上」：旧实现读的是 aContent / solution
+   * 两个独立 state，而真正的编辑内容躺在子组件（AnswerEditor 的 editing）和
+   * solutionEditing 里，只有点它们各自的「保存/完成」才回写——直接点底部的
+   * 「保存修改」写进库的是编辑前的旧值。现在页面只有一份草案（answerDraft），
+   * 保存时按「解析：」切分回 answer / solution 两个字段，所见即所存。
+   */
   const handleSave = async () => {
     setSaving(true)
     try {
+      const parts = splitAnswerSolution(answerDraft)
+      // 没动过的那一段直接沿用库里的 LaTeX，不做「可读形式 → LaTeX」回转：
+      // 回转对分数/根号/幂是等价的，但 cases/aligned 这类结构只能近似成纯文本，
+      // 用户没改它就不该被降级（保存两次也能保持幂等）。
+      const baseAnswer = latexToReadable(item?.content?.answer || '').trim()
+      const baseSolution = latexToReadable(item?.content?.solution || '').trim()
+      const answerLatex = parts.answer === baseAnswer
+        ? (item?.content?.answer || '')
+        : readableToLatex(parts.answer)
+      const solutionLatex = parts.solution === baseSolution
+        ? (item?.content?.solution || '')
+        : readableToLatex(parts.solution)
       const updated = await updateQuestion(id, {
         subject_id: subjectId,
         question_content: qContent,
-        answer_content: aContent,
-        solution,
-        status: aContent ? 'answered' : 'pending',
+        answer_content: answerLatex,
+        solution: solutionLatex,
+        status: answerLatex || solutionLatex ? 'answered' : 'pending',
         mastered,
       })
       setItem(updated)
+      dirtyRef.current = false
       Taro.showToast({ title: '已保存', icon: 'success' })
     } catch (e) {
       console.error('保存失败', e)
@@ -142,18 +173,19 @@ export default function DetailPage() {
   // 旧的 handleSearch（直接填文本框、无来源标注）已移除，避免两套搜题入口。
 
   /**
-   * 数学符号/模板插入解题过程框：`|` 为插入后光标停留位（模板用）。
-   * 预览态点符号面板会自动进入编辑态（先把已有内容转成可读形式再插入）。
+   * 数学符号/模板插入「答案与解题过程」框：`|` 为插入后光标停留位（模板用）。
+   * 光标位置取最近一次真实输入事件（caret.position），插入后一次性定位——
+   * 不再每次输入都改 cursor 属性（那是光标跳末尾的元凶）。
    */
-  const insertSolutionSymbol = (snippet: string) => {
-    const cur = solutionMode === 'edit' ? solutionEditing : latexToReadable(solution)
-    const pos = solutionCursor >= 0 ? Math.min(solutionCursor, cur.length) : cur.length
+  const insertAnswerSymbol = (snippet: string) => {
+    const cur = answerDraft
+    const pos = aCaret.position(cur.length)
     const marker = snippet.indexOf('|')
     const plain = snippet.replace('|', '')
     const next = cur.slice(0, pos) + plain + cur.slice(pos)
-    setSolutionEditing(next)
-    if (solutionMode !== 'edit') setSolutionMode('edit')
-    setSolutionCursor(marker >= 0 ? pos + marker : pos + plain.length)
+    setAnswerDraft(next)
+    dirtyRef.current = true
+    aCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
   }
 
   /**
@@ -161,25 +193,13 @@ export default function DetailPage() {
    * 题干是纯文本编辑（不转 LaTeX），符号与模板的可读片段直接插入。
    */
   const insertQuestionSymbol = (snippet: string) => {
-    const pos = qCursor >= 0 ? Math.min(qCursor, qContent.length) : qContent.length
+    const pos = qCaret.position(qContent.length)
     const marker = snippet.indexOf('|')
     const plain = snippet.replace('|', '')
     const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
     setQContent(next)
-    setQCursor(marker >= 0 ? pos + marker : pos + plain.length)
-  }
-
-  /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
-  const startSolutionEdit = () => {
-    setSolutionEditing(latexToReadable(solution))
-    setSolutionCursor(-1)
-    setSolutionMode('edit')
-  }
-
-  /** 完成编辑：可读形式 → LaTeX（只改 state；入库由页面底部「保存修改」统一负责） */
-  const finishSolutionEdit = () => {
-    setSolution(readableToLatex(solutionEditing))
-    setSolutionMode('view')
+    dirtyRef.current = true
+    qCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
   }
 
   /**
@@ -271,7 +291,11 @@ export default function DetailPage() {
   const applyOcrResult = (mode: 'append' | 'replace') => {
     const t = ocrResult.trim()
     if (!t) return
-    setQContent((prev) => (mode === 'replace' ? t : prev.trim() ? `${prev.trim()}\n${t}` : t))
+    const next = mode === 'replace' ? t : qContent.trim() ? `${qContent.trim()}\n${t}` : t
+    setQContent(next)
+    // 整段写入后光标自然落在末尾（一次性定位；之后打字不再干预）
+    qCaret.request(next.length)
+    dirtyRef.current = true
     setOcrResult('')
     Taro.showToast({ title: mode === 'replace' ? '已替换题干' : '已追加到题干', icon: 'success' })
   }
@@ -464,8 +488,8 @@ export default function DetailPage() {
               value={qContent}
               placeholder="题目内容（可点「识别」从图片提取）"
               maxlength={-1}
-              cursor={qCursor}
-              onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
+              cursor={qCaret.cursor}
+              onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor); dirtyRef.current = true }}
             />
           </Card>
 
@@ -506,46 +530,26 @@ export default function DetailPage() {
             </Button>
           </View>
 
-          {/* 思傅 2026-10-22：图片类题目也要支持答案输入与联网搜题。
-              图片条目此前的分支只展示图片+学科，答案区完全缺失——接入 AnswerEditor
-              （文本/附件/裁剪/联网搜答案，写入按 item.id 落到本条目的 content）+
-              详细解题过程。后端 update() 对 content 做局部合并、不校验 kind，
-              答案/搜题直接可用。 */}
-          <AnswerEditor
-            item={item}
-            onSaved={(updated) => {
-              setItem(updated)
-              setAContent(updated.content?.answer || '')
-              setSolution(updated.content?.solution || '')
-            }}
+          {/* 思傅 2026-10-22 / 2026-10-26：图片类题目也要支持答案输入与联网搜题。
+              答案与解题过程合并成一个框（页面统管，底部「保存修改」一次写 answer+solution），
+              AnswerEditor 只留附件/搜题能力；后端 update() 对 content 做局部合并、不校验 kind。 */}
+          <AnswerSolutionEditor
+            value={answerDraft}
+            cursor={aCaret.cursor}
+            onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c); dirtyRef.current = true }}
+            onInsert={insertAnswerSymbol}
           />
 
-          <View className="mt-4">
-            <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
-            <MathSymbolBar
-              onInsert={insertSolutionSymbol}
-              preview={solutionMode === 'view'}
-              onTogglePreview={() => { if (solutionMode === 'view') startSolutionEdit(); else finishSolutionEdit() }}
-            />
-          </View>
-          <Card className="rounded-2xl border-border p-4 mb-2">
-            {solutionMode === 'view' ? (
-              solution.trim() ? (
-                <MathText text={solution} />
-              ) : (
-                <Text className="block text-sm text-muted-foreground">（暂无解题过程，点「编辑」输入）</Text>
-              )
-            ) : (
-              <Textarea
-                className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-                value={solutionEditing}
-                placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
-                maxlength={-1}
-                cursor={solutionCursor}
-                onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
-              />
-            )}
-          </Card>
+          <AnswerEditor
+            item={item}
+            hideTextBox
+            onSaved={(updated) => setItem(updated)}
+            onAdopt={(a, s) => {
+              // 采纳搜题/AI 结果：刷进合并编辑框（用户再点「保存修改」才真正入库）
+              setAnswerDraft(joinAnswerSolution(latexToReadable(a), latexToReadable(s)))
+              dirtyRef.current = true
+            }}
+          />
         </View>
 
         <View style={{
@@ -659,8 +663,8 @@ export default function DetailPage() {
             value={qContent}
             placeholder="题目内容"
             maxlength={-1}
-            cursor={qCursor}
-            onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
+            cursor={qCaret.cursor}
+            onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor); dirtyRef.current = true }}
           />
         </Card>
 
@@ -851,49 +855,31 @@ export default function DetailPage() {
           )}
         </View>
 
-        {/* 答案区（思傅 2026-10-21）：文本 + 图片/文档附件 + 裁剪 + 联网搜答案，
-            全部按 item.id 写入该题目记录，答案与题目一一对应。
-            onSaved 同步回 aContent/solution，避免页面底部「保存」用旧 state 覆盖。
+        {/* 答案区（思傅 2026-10-21 / 2026-10-26）：答案与解题过程合并成一个框，
+            内容由页面 state（answerDraft）统管，底部「保存修改」一次写入 answer+solution；
+            AnswerEditor 只负责附件（图片/文档/资料库）与联网搜题/AI 解题。
             ⚠️ 必须等 item 到位再挂载：AnswerEditor 的 useState 初值取 item.content，
             首帧 item=null 时渲染会 TypeError 崩整页（2026-10-22 详情页打不开根因，
             回归引入于 d3e4e98）。 */}
+        <AnswerSolutionEditor
+          value={answerDraft}
+          cursor={aCaret.cursor}
+          onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c); dirtyRef.current = true }}
+          onInsert={insertAnswerSymbol}
+        />
+
         {item && (
           <AnswerEditor
             item={item}
-            onSaved={(updated) => {
-              setItem(updated)
-              setAContent(updated.content?.answer || '')
-              setSolution(updated.content?.solution || '')
+            hideTextBox
+            onSaved={(updated) => setItem(updated)}
+            onAdopt={(a, s) => {
+              // 采纳搜题/AI 结果：刷进合并编辑框（用户再点「保存修改」才真正入库）
+              setAnswerDraft(joinAnswerSolution(latexToReadable(a), latexToReadable(s)))
+              dirtyRef.current = true
             }}
           />
         )}
-
-        <View className="mt-4">
-          <Text className="block text-xs text-muted-foreground mb-2">详细解题过程</Text>
-          <MathSymbolBar
-            onInsert={insertSolutionSymbol}
-            preview={solutionMode === 'view'}
-            onTogglePreview={() => { if (solutionMode === 'view') startSolutionEdit(); else finishSolutionEdit() }}
-          />
-        </View>
-        <Card className="rounded-2xl border-border p-4 mb-2">
-          {solutionMode === 'view' ? (
-            solution.trim() ? (
-              <MathText text={solution} />
-            ) : (
-              <Text className="block text-sm text-muted-foreground">（暂无解题过程，点「编辑」输入）</Text>
-            )
-          ) : (
-            <Textarea
-              className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
-              value={solutionEditing}
-              placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
-              maxlength={-1}
-              cursor={solutionCursor}
-              onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
-            />
-          )}
-        </Card>
 
         <View className="mt-6">
           <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND_TEXT }}>
