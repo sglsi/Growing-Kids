@@ -182,14 +182,32 @@ export default function DetailPage() {
     setSolutionMode('view')
   }
 
+  /**
+   * 「导出打印」（思傅 2026-10-26 修两点）：
+   *  ① 范围：只导出**本题**（ids 白名单）——旧实现传 subject_id 会把整科题目全导出来，
+   *     打印一道题却附赠全科内容；
+   *  ② 答案：默认不含答案/解析（打给孩子练），需要时选「含答案」。
+   */
   const handlePrint = async () => {
-    try {
-      const res = await exportDocument({ subject_id: subjectId || undefined })
-      openStorageFile(res.url, false, res.file_key)
-    } catch (e) {
-      console.error('导出失败', e)
-      Taro.showToast({ title: '导出失败', icon: 'none' })
-    }
+    if (!item) return
+    Taro.showActionSheet({
+      itemList: ['导出本题（不含答案）', '导出本题（含答案与解析）'],
+      success: async (r) => {
+        const withAnswers = r.tapIndex === 1
+        try {
+          const res = await exportDocument({
+            ids: [id],
+            include_answers: withAnswers,
+            title: `题目导出 · ${new Date().toLocaleDateString('zh-CN')}`,
+          })
+          openStorageFile(res.url, false, res.file_key)
+        } catch (e) {
+          console.error('导出失败', e)
+          Taro.showToast({ title: '导出失败', icon: 'none' })
+        }
+      },
+      fail: () => { /* 取消 */ },
+    })
   }
 
   // ---------- 题面图操作（思傅 2026-10-21） ----------
@@ -372,7 +390,11 @@ export default function DetailPage() {
     }
   }
 
-  const color = getSubjectColor(item?.subjects?.color)
+  // 思傅 2026-10-26 修「切换学科后左上角科目不变」：徽标改为跟随 subjectId 实时解析——
+  // Picker 只 setSubjectId（切换即显示），点底部「保存修改」才真正落库（updateQuestion）。
+  // subjects 未就绪时回退 item.subjects（服务端真相）。
+  const curSubject = subjects.find((s) => s.id === subjectId) || item?.subjects || null
+  const color = getSubjectColor(curSubject?.color)
 
   // 图片资料（kind=image）：只展示图片 + 归属学科，不做题目编辑
   if (item && item.kind === 'image') {
@@ -380,11 +402,11 @@ export default function DetailPage() {
       <ScrollView scrollY className="h-full bg-background">
         <View className="px-4 pt-4 pb-32">
           <View className="flex flex-row items-center gap-2 mb-4">
-            <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
-              <View className={`w-2 h-2 rounded-full ${color.dot}`} />
-              <Text className="block text-xs">{item.subjects?.name || '未分类'}</Text>
-            </View>
-            <Text className="block text-xs text-muted-foreground">{formatTime(item.created_at)}</Text>
+              <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
+                <View className={`w-2 h-2 rounded-full ${color.dot}`} />
+                <Text className="block text-xs">{curSubject?.name || '未分类'}</Text>
+              </View>
+              <Text className="block text-xs text-muted-foreground">{formatTime(item.created_at)}</Text>
           </View>
 
           <Card className="rounded-2xl border-border overflow-hidden mb-4">
@@ -441,7 +463,7 @@ export default function DetailPage() {
               className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-xl"
               value={qContent}
               placeholder="题目内容（可点「识别」从图片提取）"
-              maxlength={3000}
+              maxlength={-1}
               cursor={qCursor}
               onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
             />
@@ -518,7 +540,7 @@ export default function DetailPage() {
                 className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
                 value={solutionEditing}
                 placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
-                maxlength={3000}
+                maxlength={-1}
                 cursor={solutionCursor}
                 onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
               />
@@ -591,7 +613,7 @@ export default function DetailPage() {
             <View className="flex flex-row items-center gap-2">
               <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
                 <View className={`w-2 h-2 rounded-full ${color.dot}`} />
-                <Text className="block text-xs">{item.subjects?.name || '未分类'}</Text>
+                <Text className="block text-xs">{curSubject?.name || '未分类'}</Text>
               </View>
               <Picker
                 mode="selector"
@@ -636,7 +658,7 @@ export default function DetailPage() {
             className="min-h-32 border-0 ring-0 focus-within:ring-0 rounded-xl"
             value={qContent}
             placeholder="题目内容"
-            maxlength={3000}
+            maxlength={-1}
             cursor={qCursor}
             onInput={(e) => { setQContent(e.detail.value); setQCursor(e.detail.cursor ?? -1) }}
           />
@@ -866,7 +888,7 @@ export default function DetailPage() {
               className="min-h-28 border-0 ring-0 focus-within:ring-0 rounded-xl"
               value={solutionEditing}
               placeholder="可粘贴或输入详细解析（1/2、√3、x² 等写法即可）"
-              maxlength={3000}
+              maxlength={-1}
               cursor={solutionCursor}
               onInput={(e) => { setSolutionEditing(e.detail.value); setSolutionCursor(e.detail.cursor ?? -1) }}
             />

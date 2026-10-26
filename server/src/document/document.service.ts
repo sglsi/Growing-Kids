@@ -13,6 +13,17 @@ interface ExportParams {
   title: string
   /** 是否包含已掌握题目；默认 false（已掌握题目不进入汇总） */
   include_mastered?: boolean
+  /**
+   * 指定题目 id 白名单（详情页「导出打印」用）：只导出这几条，忽略时间/掌握筛选。
+   * 思傅 2026-10-26 修「详情页导出打印带出其他题目」——旧端点只有 subject 维度筛选，
+   * 详情页传 subject_id 会把整科题目全导出来。
+   */
+  ids?: string[]
+  /**
+   * 是否包含答案/解析/错误作答区块。
+   * undefined = 保持旧行为（含答案，汇总页沿用）；false = 纯题目卷（详情页默认）。
+   */
+  include_answers?: boolean
 }
 
 interface RawRow {
@@ -44,13 +55,19 @@ export class DocumentService {
 
     // 脏参数防御：'undefined'/'null' 这类字符串当真值过滤会静默查不到数据，
     // 喂给日期列更会让 Postgres 解析失败直接 500
+    const ids = (params.ids || []).filter((x) => typeof x === 'string' && x)
     const subjectId = cleanStr(params.subject_id)
     const startDate = cleanDate(params.start_date)
     const endDate = cleanDate(params.end_date)
-    if (subjectId) q = q.eq('subject_id', subjectId)
-    if (startDate) q = q.gte('created_at', startDate)
-    if (endDate) q = q.lte('created_at', endDate)
-    if (!params.include_mastered) q = q.eq('mastered', false)
+    if (ids.length) {
+      // 指定 id 白名单：精确导出这几条（详情页「导出打印」），不再叠加学科/时间/掌握筛选
+      q = q.in('id', ids)
+    } else {
+      if (subjectId) q = q.eq('subject_id', subjectId)
+      if (startDate) q = q.gte('created_at', startDate)
+      if (endDate) q = q.lte('created_at', endDate)
+      if (!params.include_mastered) q = q.eq('mastered', false)
+    }
     q = q.order('created_at', { ascending: true })
 
     const { data, error } = await q
@@ -131,27 +148,32 @@ export class DocumentService {
         )
         children.push(...this.textParagraphs(c.question || '', { size: 22 }))
 
-        if (c.wrong_answer) {
+        // 答案区块（思傅 2026-10-26）：include_answers === false 时输出纯题目卷（无答案/解析/错答），
+        // 其余情况保持旧行为（含答案）——汇总页不受影响
+        const withAnswers = params.include_answers !== false
+        if (withAnswers && c.wrong_answer) {
           children.push(
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '我的错误作答：', size: 20, color: '9A948A', font: '宋体' })] }),
           )
           children.push(...this.textParagraphs(c.wrong_answer, { size: 20, color: '9A948A' }))
         }
 
-        children.push(
-          new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '正确答案：', bold: true, size: 22, color: '2E6F4E', font: '宋体' })] }),
-        )
-        children.push(...this.textParagraphs(c.answer || '（暂无答案，待补充）', { size: 22 }))
-
-        if (c.solution) {
+        if (withAnswers) {
           children.push(
-            new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '解析：', bold: true, size: 22, font: '宋体' })] }),
+            new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '正确答案：', bold: true, size: 22, color: '2E6F4E', font: '宋体' })] }),
           )
-          children.push(...this.textParagraphs(c.solution, { size: 22 }))
+          children.push(...this.textParagraphs(c.answer || '（暂无答案，待补充）', { size: 22 }))
+
+          if (c.solution) {
+            children.push(
+              new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '解析：', bold: true, size: 22, font: '宋体' })] }),
+            )
+            children.push(...this.textParagraphs(c.solution, { size: 22 }))
+          }
         }
 
-        // P2-16 错因分析（本地规则引擎结论；无则跳过）
-        if (c.error_analysis?.label) {
+        // P2-16 错因分析（本地规则引擎结论；无则跳过；纯题目卷不输出）
+        if (withAnswers && c.error_analysis?.label) {
           children.push(
             new Paragraph({
               spacing: { before: 40, after: 20 },

@@ -10,6 +10,10 @@ interface ExportBody {
   end_date?: string
   title?: string
   include_mastered?: boolean
+  /** 指定题目 id 白名单（详情页「导出打印」只导本题）；提供时忽略学科/时间/掌握筛选 */
+  ids?: string[]
+  /** false = 纯题目卷；undefined = 旧行为（含答案） */
+  include_answers?: boolean
 }
 
 @Controller('document')
@@ -31,6 +35,8 @@ export class DocumentController {
       end_date: body.end_date,
       title,
       include_mastered: body.include_mastered,
+      ids: Array.isArray(body.ids) ? body.ids : undefined,
+      include_answers: body.include_answers,
     })
 
     const fileName = `${Date.now()}.docx`
