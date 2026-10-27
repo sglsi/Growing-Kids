@@ -1646,3 +1646,37 @@ export function fetchChatHistory(sessionId: string) {
     }),
   )
 }
+
+// ------------------------------------------------------------
+// 账号注销（OPS-18 R-合规-03）
+// ------------------------------------------------------------
+
+export interface PurgeResult {
+  userId: string
+  dryRun: boolean
+  blobsTotal: number
+  blobsReleased: number
+  blobsKeptForOtherUsers: number
+  legacyObjectsDeleted: number
+  rowsDeleted: Record<string, number>
+  ocrResultsKept: number
+  note: string
+}
+
+/**
+ * 注销账号：删除本人账号与全部业务数据（不可恢复）。
+ *
+ * @param dryRun true = 只统计「会删什么、留什么」，不真删（用于二次确认页展示）
+ *
+ * ⚠️ 共享内容不跟着删：同一份文件若其他账号也在引用，只减引用计数；
+ *    跨用户共享的识别缓存（ocr_results）不参与账号删除。
+ */
+export function purgeAccount(dryRun = false) {
+  return unwrap<PurgeResult>(
+    Network.request({
+      url: `/api/account${dryRun ? '?dry_run=1' : ''}`,
+      method: 'DELETE',
+      header: authHeaders(),
+    }),
+  )
+}

@@ -4,6 +4,7 @@ import { LucideTaroProvider } from 'lucide-react-taro';
 import '@/app.css';
 import { Toaster } from '@/components/ui/toast';
 import PrivacyGate from '@/components/privacy-gate';
+import PolicyConsent from '@/components/policy-consent';
 import { ensureAuthToken } from '@/services/auth-bootstrap';
 import { Preset } from './presets';
 
@@ -51,8 +52,10 @@ const App = ({ children }: PropsWithChildren) => {
     <LucideTaroProvider defaultColor="#000" defaultSize={24}>
       <Preset>{children}</Preset>
       <Toaster />
-      {/* 隐私授权弹窗：微信端触发隐私接口时由基础库回调唤起，平时不渲染 */}
+      {/* 平台级隐私授权：微信端触发隐私接口时由基础库回调唤起，平时不渲染 */}
       <PrivacyGate />
+      {/* 业务级隐私政策同意（监护人）：政策版本变化会重新征求同意 */}
+      <PolicyConsent />
     </LucideTaroProvider>
   );
 };

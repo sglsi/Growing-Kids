@@ -206,8 +206,132 @@ export class MaintenanceService {
     return Array.from(new Set(hashes))
   }
 
-  /** 收集「file_hash 为空」的旧数据对象 key —— 这些无法走引用计数，按 key 直接删 */
-  private async collectLegacyKeysWithoutHash(userIds: string[]): Promise<string[]> {
+  /**
+   * 注销账号 / 删除本人全部数据（OPS-18 `R-合规-03` 第 3 点：数据保留期与「注销即删」）。
+   *
+   * 为什么单独写一套而不是复用 `cleanupExpiredAnonymous`：匿名清理是**批量、按时间**，
+   * 注销是**单个、用户主动、且必须给回执**（用户要知道「删了什么、留了什么」）。
+   *
+   * ⚠️ 两条非重复约束（这是本方法最容易写错的地方）：
+   *  1) **文件层**：只 `blobService.release()` 减引用，绝不按 key 直接删。
+   *     同一份内容可能被别的用户引用（内容寻址去重），直接删会把别人的题图删掉。
+   *     引用归零的 blob 交给 `collectOrphanBlobs` 统一回收。
+   *  2) **识别缓存层 `ocr_results` 一律不动**：表里没有 user_id、键是
+   *     sha256(内容|类型|模式|引擎版本)，跨用户共享。用户在别的设备/别的账号
+   *     传过同一张图，删他的行就等于把那份**别人也在用**的识别结果打掉。
+   *     它只能按「引擎版本升级」或「容量治理」回收，不参与账号删除。
+   *
+   * 级联说明：subjects / timeline_items / library_docs / documents / memories /
+   * memory_media / answer_cache 都有 `on delete cascade`，删 users 行即连带删除；
+   * `chat_messages`（user_id 可空、无外键）与 `user_quota`（text 主键、无外键）
+   * 必须显式删。
+   */
+  async purgeUserData(
+    userId: string,
+    opts: { dryRun?: boolean } = {},
+  ): Promise<{
+    userId: string
+    dryRun: boolean
+    blobsTotal: number
+    blobsReleased: number
+    blobsKeptForOtherUsers: number
+    legacyObjectsDeleted: number
+    rowsDeleted: Record<string, number>
+    ocrResultsKept: number
+    note: string
+  }> {
+    const client = getSupabaseClient()
+    const dry = !!(opts.dryRun || this.dryRun)
+    const rowsDeleted: Record<string, number> = {}
+
+    // 1) 先收集引用（必须在删行之前——删完就查不到 hash 了）
+    const hashes = await this.collectFileHashes([userId])
+    const legacyKeys = await this.collectLegacyKeysWithoutHash([userId])
+
+    // 2) 显式删无级联的表（有级联的交给删 users 行）
+    for (const table of ['chat_messages', 'user_quota'] as const) {
+      if (dry) {
+        const { count } = await client
+          .from(table)
+          .select('user_id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+        rowsDeleted[table] = count || 0
+        continue
+      }
+      const { data, error } = await client.from(table).delete().eq('user_id', userId).select('user_id')
+      if (error) {
+        this.logger.error(`[purge] 删除 ${table} 失败: ${error.message}`)
+        continue
+      }
+      rowsDeleted[table] = (data || []).length
+    }
+
+    // 3) 删 users 行（级联清业务表）
+    if (!dry) {
+      const removed = await this.usersService.removeByIds([userId])
+      rowsDeleted.users = removed
+    } else {
+      rowsDeleted.users = 1
+    }
+
+    // 4) 释放 blob 引用（归零的进待回收队列，不在这里删文件）
+    let released = 0
+    let kept = 0
+    if (!dry) {
+      for (const h of hashes) {
+        try {
+          const { shouldDelete, remaining } = await this.blobService.release(h)
+          if (shouldDelete) released++
+          else if (remaining > 0) kept++
+        } catch (e) {
+          this.logger.warn(`[purge] 释放引用失败 ${h.slice(0, 12)}…: ${e}`)
+        }
+      }
+    }
+
+    // 5) 旧数据（无 hash）按 key 删——没有共享可能，安全
+    let legacyDeleted = 0
+    if (!dry) {
+      for (const key of legacyKeys) {
+        try {
+          await this.storageService.deleteObject(key)
+          legacyDeleted++
+        } catch (e) {
+          this.logger.warn(`[purge] 删除遗留对象失败 ${key}: ${e}`)
+        }
+      }
+    }
+
+    // 6) ocr_results 的留存数量（只读统计，绝不删）
+    let ocrKept = 0
+    try {
+      const { count } = await client.from('ocr_results').select('cache_key', { count: 'exact', head: true })
+      ocrKept = count || 0
+    } catch {
+      /* 统计失败不影响主流程 */
+    }
+
+    const note =
+      '账号与本人业务数据已删除；共享文件按引用计数处理（其他用户仍在引用则保留），' +
+      '识别结果缓存 ocr_results 为跨用户共享的内容寻址缓存，不随账号删除。'
+    this.logger.log(
+      `[purge] userId=${userId} dryRun=${dry} blobs=${hashes.length}(释放${released}/他人在用${kept}) ` +
+        `legacy=${legacyDeleted}/${legacyKeys.length} rows=${JSON.stringify(rowsDeleted)}`,
+    )
+    return {
+      userId,
+      dryRun: dry,
+      blobsTotal: hashes.length,
+      blobsReleased: released,
+      blobsKeptForOtherUsers: kept,
+      legacyObjectsDeleted: legacyDeleted,
+      rowsDeleted,
+      ocrResultsKept: ocrKept,
+      note,
+    }
+  }
+
+  /** 收集「file_hash 为空」的旧数据对象 key —— 这些无法走引用计数，按 key 直接删 */  private async collectLegacyKeysWithoutHash(userIds: string[]): Promise<string[]> {
     const client = getSupabaseClient()
     const keys: string[] = []
     const [timeline, library, docs] = await Promise.all([

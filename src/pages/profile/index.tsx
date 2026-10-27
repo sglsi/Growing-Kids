@@ -12,7 +12,7 @@ import {
   type AuthState,
 } from '@/services/auth'
 import {
-  fetchOverview, fetchStorageUsage, formatBytes,
+  fetchOverview, fetchStorageUsage, formatBytes, purgeAccount,
   type Overview, type StorageUsage,
 } from '@/services/api'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
@@ -30,6 +30,48 @@ export default function ProfilePage() {
   const [nickname, setNickname] = useState('')
   /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
   const [qrVisible, setQrVisible] = useState(false)
+
+  /** 打开隐私政策（R-合规-03） */
+  const openPolicy = () => Taro.navigateTo({ url: '/pages/privacy/index' })
+
+  /**
+   * 注销账号（R-合规-03）。
+   * 先 dry-run 拿「会删什么、留什么」，把代价写清楚再让用户确认——
+   * 不先展示会删多少就弹「确定删除？」是不负责任的：这是不可恢复操作。
+   */
+  const handlePurge = async () => {
+    try {
+      const plan = await purgeAccount(true)
+      const rows = plan.rowsDeleted || {}
+      const detail = Object.entries(rows)
+        .filter(([, n]) => n > 0)
+        .map(([t, n]) => `${t} ${n} 行`)
+        .join('、')
+      const r = await Taro.showModal({
+        title: '注销账号（不可恢复）',
+        content:
+          `将删除你的账号与本人数据${detail ? `（${detail}）` : ''}，图片/文档共 ${plan.blobsTotal} 个文件。` +
+          (plan.blobsKeptForOtherUsers > 0
+            ? `其中 ${plan.blobsKeptForOtherUsers} 个因其他账号也在使用而保留（内容相同，删了会影响别人）。`
+            : '') +
+          '跨用户共享的识别缓存不随账号删除。注销后无法恢复，确认继续？',
+        confirmText: '注销',
+        confirmColor: '#B3261E',
+      })
+      if (!r.confirm) return
+      await purgeAccount(false)
+      try {
+        Taro.removeStorageSync('gk_auth_token')
+        Taro.removeStorageSync('gk_user_id')
+      } catch {
+        /* ignore */
+      }
+      Taro.showToast({ title: '已注销', icon: 'success' })
+      setTimeout(() => Taro.reLaunch({ url: '/pages/index/index' }), 800)
+    } catch (e) {
+      Taro.showToast({ title: (e as Error).message || '注销失败', icon: 'none' })
+    }
+  }
 
   const load = async () => {
     setState(getAuthState())
@@ -142,7 +184,7 @@ export default function ProfilePage() {
                   {state?.nickname || (logged ? '微信用户' : '未登录')}
                 </Text>
                 {logged && (
-                  <Text className="block text-xs text-primary rounded-lg border border-border px-2 py-0.5" onClick={handleEditNickname}>
+                  <Text className="block text-xs text-primary rounded-lg border border-border px-2 py-1" onClick={handleEditNickname}>
                     编辑
                   </Text>
                 )}
@@ -259,18 +301,33 @@ export default function ProfilePage() {
             </Card>
           )}
 
-          {/* 说明 */}
-          {logged ? (
-            <Card className="rounded-2xl border-border p-4">
-              <View className="flex flex-row items-center gap-2 mb-2">
-                <Pencil size={16} color="#9A948A" />
-                <Text className="block text-sm font-semibold text-foreground">关于隐私</Text>
+          {/* 隐私与账号（R-合规-03）：政策可查、数据可删、账号可注销 */}
+          <Card className="rounded-2xl border-border p-4 mb-5">
+            <View className="flex flex-row items-center gap-2 mb-2">
+              <Pencil size={16} color="#9A948A" />
+              <Text className="block text-sm font-semibold text-foreground">隐私与账号</Text>
+            </View>
+            <Text className="block text-xs text-muted-foreground">
+              我们仅使用微信登录标识（openid）区分账号，不获取手机号、通讯录、位置等信息。学习数据属于未成年人，
+              我们只收集错题与复习所必需的内容。
+            </Text>
+            <View className="mt-3 flex flex-row gap-3">
+              <View
+                className="flex h-9 flex-1 items-center justify-center rounded-xl border border-border"
+                onClick={openPolicy}
+              >
+                <Text className="text-[13px] text-foreground">隐私政策</Text>
               </View>
-              <Text className="block text-xs text-muted-foreground">
-                我们仅使用微信登录标识（openid）区分账号，不获取你的手机号、通讯录等敏感信息。
-              </Text>
-            </Card>
-          ) : (
+              <View
+                className="flex h-9 flex-1 items-center justify-center rounded-xl border border-[#E8C4C0]"
+                onClick={handlePurge}
+              >
+                <Text className="text-[13px] text-[#B3261E]">注销账号</Text>
+              </View>
+            </View>
+          </Card>
+
+          {!logged && (
             <EmptyCard
               title="你想长期保存这些题目吗？"
               hint="登录后匿名数据自动迁移，30 天内也不会被清理"
