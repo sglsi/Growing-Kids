@@ -1,6 +1,6 @@
 # GK-QA-16 运维、发布与故障处置手册
 
-> 编号：GK-QA-16 ｜ 版本：v1.0 ｜ 日期：2026-10-27 ｜ 状态：**正文完成**
+> 编号：GK-QA-16 ｜ 版本：v1.1 ｜ 日期：2026-10-27 ｜ 状态：**正文完成 · 已补数据库备份/演练与两个计划任务**
 > 读者：运维 / 开发 ｜ 上游：ADD-04、ADD-07、DD-09 ｜ 下游：无
 > 定位：从本地到生产的路径 + **出问题时的第一本手册**（含原发布部署设计、运维手册、故障处置三份）。
 > 密钥清单与轮换方式见 ADD-07 第 4 章（**本文不写密钥值**）；交付路由方案见 GK-OPS-19。
@@ -202,6 +202,17 @@ node server/scripts/deploy-pack.mjs status     # 查看当前在架/挪出状态
 ### 7.1 阻断项（必过）
 
 - [ ] ❗ **`WX_SECRET` 已轮换**，且 `encrypt-env.mjs` 已重跑
+  ```bash
+  cd server && node scripts/rotate-wx-secret.mjs --check
+  # 期望：密文中 WX_SECRET 与明文一致 ✅
+  # 若要轮换：--secret <mp 后台重置出来的 32 位>
+  ```
+- [ ] ❗ **最近一次备份在 48 小时内，且最近一次演练通过**（见 9.5）
+  ```bash
+  tail -1 server/logs/backup-$(date +%F).log          # 期望 "ok":true
+  ls -lt server/backups/*.gkbk | head -3
+  cd server && node scripts/db-restore.mjs --verify     # 期望 18/18 表哈希一致
+  ```
 - [ ] ❗ **`project.config.json` 无 `packOptions.ignore` 命中 `./assets`**（根与 `dist/` 两份都要查）
   ```bash
   grep -n "packOptions" -A 6 project.config.json dist/project.config.json
@@ -372,7 +383,99 @@ pnpm --filter server check:isolation
 | `strictToken` | `true` | `false` 说明 `AUTH_STRICT_TOKEN=false` 还开着，**裸头可伪造，不得带上线** |
 | `uptime` | 持续增长 | 突然归零 = 进程刚重启（配合 `R-已关闭-02` 查是不是崩了） |
 
-建议：把 `health-probe --watch` 挂到计划任务（PowerShell `Register-ScheduledTask`），日志落盘后人工定期翻。**备份**（`R-技术-06` 的每日 `pg_dump`）也应挂同一套计划任务机制。
+建议：把 `health-probe --watch` 挂到计划任务（PowerShell `Register-ScheduledTask`），日志落盘后人工定期翻。数据库备份走同一套计划任务机制，见 **9.5**。
+
+### 9.5 数据库备份与恢复演练
+
+⚠️ **先说清楚为什么不是 `pg_dump`**：本机未装 PostgreSQL 客户端，`pg_dump` 在计划任务里"找不到命令"是典型的**静默失败**——任务状态显示成功、备份目录为空，等到真要用的时候才发现三个月没备份。所以备份是**纯 Node 实现**（复用后端已有的 `pg` 驱动），不依赖任何外部二进制。
+
+**一句话原理**：连库开一个 `repeatable read read only` 快照 → 逐表以 `ctid` 键集分页导出 NDJSON → gzip → AES-256-GCM 加密 → 落盘 + 传百度网盘 → **立刻读回自检**。
+
+#### 9.5.1 两个计划任务
+
+| 任务名 | 频率 | 命令 | 作用 |
+|---|---|---|---|
+| `GrowingKids-DB-Backup` | 每日 **03:30** | `node scripts/db-backup.mjs --quiet` | 备份 + 上传 + 保留策略 |
+| `GrowingKids-DB-Drill` | 每周日 **04:30** | `node scripts/db-restore.mjs --verify` | 空库恢复演练 + 内容比对 |
+
+注册（**只需一次**，脚本自带 UTF-8 BOM，缺 BOM 时 PS 5.1 会按 GBK 读中文注释并解析崩溃）：
+
+```powershell
+cd server/scripts
+powershell -ExecutionPolicy Bypass -File register-backup-task.ps1
+```
+
+脚本给出的几个关键取舍，**不要"优化"掉**：
+
+| 取舍 | 理由 |
+|---|---|
+| node 路径必须是系统安装目录（`D:\Program Files\nodejs\node.exe`） | 指向 `.workbuddy\binaries\` 会在 WorkBuddy 升级时被清理 ⇒ 任务每天"成功"但什么也不做 |
+| `-LogonType Interactive` | 本机 node/python 在用户目录下，S4U 账户跑起来找不到命令（静默失败的另一种形态） |
+| `-StartWhenAvailable` | 笔记本 03:30 可能在睡眠，醒来补跑 |
+| `-MultipleInstances IgnoreNew` | 防上次没跑完又叠一次 |
+
+#### 9.5.2 日常判读
+
+```bash
+# 最近一次备份结果（一行 JSON）
+tail -1 server/logs/backup-$(date +%F).log
+
+# 本地备份清单
+ls -lh server/backups/
+
+# 最近一次演练结果
+tail -1 server/logs/drill-$(date +%F).log
+```
+
+**退出码语义**（计划任务的 `LastTaskResult` 直接对应）：
+
+| 码 | 含义 | 要不要管 |
+|---|---|---|
+| `0` | 全链路成功 | 不用 |
+| `1` | 致命失败（连不上库 / 口令缺失 / 自检不通过） | **要管**，当天就得看 |
+| `2` | **本地备份成功，网盘上传失败** | 要管，但不紧急——本地还有一份，异地那份缺了 |
+
+#### 9.5.3 备份文件格式 `GKBK`
+
+```
+ 4B 魔数 "GKBK" │ 1B 版本 │ 16B scrypt 盐 │ 12B GCM IV │ 16B 认证标签 │ 密文
+                                                              密文 = gzip(NDJSON)
+```
+
+选 **GCM** 而非 CBC 的理由只有一句：**备份最怕的不是打不开，是能打开但内容是错的**。GCM 的认证标签会把"文件被截断/篡改/半个字节损坏"变成硬失败，而不是解出一堆看似正常的坏数据。
+
+**口令**：`BACKUP_PASSPHRASE` 在 `.env.secrets`。首次运行若无此变量，脚本会自动生成 32 字节 base64url 口令追加进去，并把明文写一份到 `server/backups/KEY-ESCROW.txt`。
+
+> 🚨 **`KEY-ESCROW.txt` 是唯一的口令明文留存**。口令丢了 = 所有备份永久打不开（不是"难恢复"，是**打不开**）。请把它另存到密码管理器或打印留存。`server/backups/` 已在 `.gitignore`。
+
+#### 9.5.4 三种恢复模式
+
+```bash
+cd server
+node scripts/db-restore.mjs --inspect                      # 只读：解密后列出表/行数，不连库
+node scripts/db-restore.mjs --verify                       # 演练：建空库→跑迁移→灌数据→逐表比对
+node scripts/db-restore.mjs --netdisk --verify             # 演练：从网盘下载那份，验证异地备份可用
+node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到生产还要 --force-prod）
+```
+
+**`--verify` 怎么做到"不碰生产"**：用 postgres 超级用户（`rolcreatedb=true`，`migrator` 无此权限）建一个**固定名**空库 `gk_rehearsal`，跑完整迁移链再灌数据，逐表比对 **行内容多重集 sha256**（把行 JSON 排序后取哈希，与插入顺序无关，只比内容）；结束在 `finally` 里 `drop schema public cascade` + `create schema public` 清空——**库名固定、schema 清空**，所以既不会越积越多，也不会残留第二份用户数据。
+
+> ⚠️ 两个已知坑：① **不要用 `drop database`**——Supabase pooler 会话滞留会让它稳定报 `is being accessed by other users`，实测重试 10 次 50 秒仍失败；② `schema_migrations` **不在 `migrations/` 里**（它是 `migrate.mjs` 自己建的记账表），空库恢复必须显式先建，改一边必须改另一边。
+
+#### 9.5.5 实测基线（2026-10-27）
+
+| 项目 | 结果 |
+|---|---|
+| 单次备份 | 18 表 / 519 行 / NDJSON 297.6 KB → 加密后 **64 KB**，**2.6s** |
+| 计划任务实跑 | `LastTaskResult = 0`，5.8s 产出并上传 |
+| 恢复演练 | 16 个迁移全过 → **18/18 表内容哈希完全一致**，8–9s |
+| 从网盘恢复 | 下载 → 解密 → 空库恢复 → 同样 **18/18 一致** |
+| 演练幂等 | 第二次显示"复用演练库 / schema 已清空"，结束 `public 表数量: 0` |
+
+#### 9.5.6 发布前必须重跑一次演练
+
+`--verify` 不只是"备份能解开"，它同时验证了**迁移链在空库上能不能跑通**（`R-工程-09`：`migrations/` 是 schema 唯一真相源）。所以每次发版前跑一次，等于顺手做了一次 schema 回归。这条已列入 7.1 阻断项。
+
 
 ---
 
@@ -452,6 +555,30 @@ pnpm --filter server check:isolation
 - **根因（历史）**：docx 的 MIME 71 字符 > `varchar(64)` ⇒ 静默入库失败。
 - **现状**：0013 已放宽至 128。若再现，检查 `mime_type` 长度。
 
+### 剧本 11：备份"每天都在跑"，但其实一直在失败
+
+- **症状**：计划任务状态 `0x0`（成功），`server/backups/` 里却是空的，或最后一份是几周前的。
+- **根因（三种，按概率排序）**：
+  1. **node 路径指向 `\.workbuddy\binaries\`** —— WorkBuddy 升级清理该目录后，任务"执行成功、什么也没做"。→ 检查任务动作里的 node 绝对路径，必须是系统安装目录。
+  2. **任务注册成了 S4U/无登录运行** —— 本机 node/python 在用户目录，找不到命令。→ `-LogonType Interactive`。
+  3. **退出码 2 被当成失败忽略** —— 2 = 本地成功、网盘失败。本地有备份，异地没有。
+- **判断**：
+  ```bash
+  tail -5 server/logs/backup-*.log          # 每个自然日一行 JSON
+  schtasks /query /tn GrowingKids-DB-Backup /v /fo LIST | grep -E "结果|上次运行"
+  ```
+- **恢复动作**：`Start-ScheduledTask -TaskName GrowingKids-DB-Backup`，5–10 秒后看日志与 `server/backups/` 是否有新 `.gkbk`。
+
+### 剧本 12：备份文件解不开
+
+- **症状**：`db-restore.mjs` 报「口令不对，或备份文件已损坏（GCM 校验不通过）」。
+- **按顺序排除**：
+  1. **口令变了**：`BACKUP_PASSPHRASE` 在 `.env.secrets`，与备份时用的不是同一个 → 对比 `server/backups/KEY-ESCROW.txt`。
+  2. **文件被截断**：对比本地文件与网盘上的 `size`（备份脚本上传后会回读 size 核对，日志里有 `uploadSize`）。不一致就重下。
+  3. **真的损坏**：换一个更早的备份（本地默认保留 14 份）。
+- ⚠️ **GCM 校验不通过就是"不要用"**，不是"试试能不能打开"。这是选 GCM 而非 CBC 的全部意义。
+- ⚠️ 如果口令确实丢了且 `KEY-ESCROW.txt` 也没了，**所有历史备份永久失效**——这种情况只能从 Supabase 控制台的数据库备份恢复（免费套餐无此能力，见 `R-技术-06`）。
+
 ---
 
 ## 11. 脚本清单
@@ -465,6 +592,13 @@ pnpm --filter server check:isolation
 | `server/scripts/decrypt-env.mjs` | 容器内还原（startCmd 调） | — |
 | `server/scripts/wake-server.mjs` | 后端保活 | `node scripts/wake-server.mjs [--daemon]` |
 | `server/scripts/health-probe.mjs` | 健康拨测 | `node scripts/health-probe.mjs [--watch N]` |
+| `server/scripts/db-backup.mjs` | **数据库备份**（快照→NDJSON→GCM→本地+网盘→自检） | `node scripts/db-backup.mjs [--no-upload] [--keep N] [--out <path>] [--quiet]` |
+| `server/scripts/db-restore.mjs` | **恢复 / 演练** | `node scripts/db-restore.mjs [--inspect\|--verify\|--apply --target <url> --yes] [--netdisk] [--force-prod]` |
+| `server/scripts/register-backup-task.ps1` | **注册两个备份计划任务**（带 UTF-8 BOM，勿删 BOM） | `powershell -ExecutionPolicy Bypass -File register-backup-task.ps1` |
+| `server/scripts/rotate-wx-secret.mjs` | **WX_SECRET 轮换助手** | `node scripts/rotate-wx-secret.mjs [--check\|--secret <32位>]` |
+| `server/scripts/lib/gk-env.mjs` | 脚本公用环境加载器（.env / .env.migrate / .env.secrets 合并） | 被上面几个引用 |
+| `server/scripts/lib/backup-format.mjs` | `GKBK` 加密格式读写与口令托管 | 被 backup/restore 引用 |
+| `server/scripts/lib/netdisk.mjs` | 百度网盘最小客户端（纯 Node，备份用） | 被 backup/restore 引用 |
 | `server/scripts/baidu-oauth.mjs` | 百度网盘授权 | 详见 `docs/百度网盘接入资料库-操作指引.md` |
 | `server/scripts/setup-migrator-role.sql` | 创建低权迁移角色 | SQL Editor 执行 |
 | `docs/install-ocr-env.ps1` / `.sh` | OCR 环境安装 | 详见脚本头部 |
@@ -481,3 +615,4 @@ pnpm --filter server check:isolation
 | v0.0 | 2026-10-24 | 建立提纲（待审） |
 | v0.1 | 2026-10-26 | 补齐第 4 章（小程序发布：三个断层与前置校验）与第 7 章（发布检查清单） |
 | v1.0 | 2026-10-27 | **正文完成**：补齐三环境配置差异、前后端构建与 dist 新鲜度校验、密钥文件分工、本地常驻（wake-server 双角色 + 前端驱动）与云托管两硬约束、部署包脚本流程、四层回滚与迁移不可逆应对、健康检查端点与埋点清单（无告警时的替代巡检）、10 个故障剧本（新增导出合成与导出记录两条）、13 个脚本登记 |
+| **v1.1** | 2026-10-27 | **补数据库备份与恢复演练整章（9.5）**（`R-技术-06` 落地）：为什么不走 `pg_dump`（计划任务里静默失败）、`GKBK` 文件格式与选 GCM 的理由、口令托管与丢失后果、两个计划任务的注册与四项不可优化的取舍、退出码 0/1/2 语义、三种恢复模式、`--verify` 如何不碰生产（固定库名 `gk_rehearsal` + `drop schema` 而非 `drop database`）、实测基线五项；**新增故障剧本 11/12**（备份天天"成功"其实一直失败 / 备份解不开）；**7.1 阻断项新增「48 小时内备份 + 演练通过」**；`WX_SECRET` 项改为单命令 `rotate-wx-secret.mjs --check`；第 11 章脚本清单补 6 条（含 `lib/` 三个）。订正 9.4 末尾已过时的 "每日 `pg_dump`" 表述 |
