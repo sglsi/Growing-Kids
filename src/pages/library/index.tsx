@@ -18,6 +18,7 @@ import {
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
+import { reportChooseFail } from '@/utils/privacy'
 
 /** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
 function getTypeLabel(mime: string | null, name: string): string {
@@ -177,9 +178,7 @@ export default function LibraryPage() {
       const f = res.tempFiles[0]
       await doUpload(f.path, f.name)
     } catch (e) {
-      // 用户取消选择不打扰
-      const msg = (e as Error)?.message || ''
-      if (!/cancel/i.test(msg)) Taro.showToast({ title: '请在小程序中从聊天/文件选择文档', icon: 'none' })
+      reportChooseFail(e, '选择文档', '请在小程序中从聊天/文件选择文档')
     }
   }
 
@@ -190,8 +189,7 @@ export default function LibraryPage() {
       // chooseImage 不返回原始文件名（只给临时路径）⇒ 生成时间戳名
       await doUpload(f.path, genImageName())
     } catch (e) {
-      const msg = (e as Error)?.message || ''
-      if (!/cancel/i.test(msg)) Taro.showToast({ title: '选择图片失败', icon: 'none' })
+      reportChooseFail(e, '选择图片', '选择图片失败')
     }
   }
 

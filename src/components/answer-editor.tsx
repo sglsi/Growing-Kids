@@ -8,6 +8,7 @@ import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
+import { reportChooseFail } from '@/utils/privacy'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import type { AnswerAttachment, TimelineItem } from '@/types'
@@ -179,8 +180,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       const res = await Taro.chooseMedia({ count: 1, mediaType: ['image'], sourceType: ['camera', 'album'] })
       const p = res.tempFiles?.[0]?.tempFilePath
       if (p) setCropSrc(p)
-    } catch {
-      /* 用户取消 */
+    } catch (e) {
+      reportChooseFail(e, '选择图片')
     }
   }
 
@@ -225,8 +226,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       })
       Taro.showToast({ title: '已加入答案', icon: 'success' })
     } catch (e) {
-      console.error('答案文档上传失败', e)
-      Taro.showToast({ title: '上传失败', icon: 'none' })
+      // 选择阶段就失败（含隐私未声明）与上传失败共用这个 catch：
+      // 取消 → 静默；隐私未声明 → 明确提示；其余 → 按上传失败提示
+      reportChooseFail(e, '选择文件', '上传失败，请重试')
     } finally {
       Taro.hideLoading()
     }

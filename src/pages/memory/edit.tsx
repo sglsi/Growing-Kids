@@ -19,6 +19,7 @@ import {
 } from '@/services/api'
 import type { Subject } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
+import { reportChooseFail } from '@/utils/privacy'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -186,8 +187,8 @@ export default function MemoryEditPage() {
         height: f.height,
       }))
       setMedia((prev) => [...prev, ...arr])
-    } catch {
-      // 用户取消
+    } catch (e) {
+      reportChooseFail(e, '选择图片')
     }
   }, [media])
 
@@ -232,8 +233,8 @@ export default function MemoryEditPage() {
         height: f.height,
         durationSec: f.duration,
       }])
-    } catch {
-      // 用户取消
+    } catch (e) {
+      reportChooseFail(e, '选择视频')
     }
   }, [])
 

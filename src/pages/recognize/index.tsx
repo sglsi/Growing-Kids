@@ -26,6 +26,7 @@ import {
 import { openStorageFile } from '@/services/net'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, INK } from '@/lib/theme'
+import { reportChooseFail } from '@/utils/privacy'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -187,8 +188,8 @@ export default function RecognizePage() {
         sourceType: ['camera', 'album'],
       })
       setEditor({ slot, src: res.tempFiles[0].tempFilePath })
-    } catch {
-      // 用户取消
+    } catch (e) {
+      reportChooseFail(e, '选择图片')
     }
   }
 
@@ -317,8 +318,8 @@ export default function RecognizePage() {
       })
       const f = res.tempFiles[0]
       cb(f.path, f.name || '')
-    } catch {
-      Taro.showToast({ title: '请在微信小程序中从聊天/文件中选择文档', icon: 'none' })
+    } catch (e) {
+      reportChooseFail(e, '选择文档', '请在微信小程序中从聊天/文件中选择文档')
     }
   }
 
@@ -675,8 +676,9 @@ export default function RecognizePage() {
     try {
       const res = await Taro.chooseMedia({ count: room, mediaType: ['image'], sourceType: ['camera', 'album'] })
       files = res.tempFiles || []
-    } catch {
-      return // 用户取消
+    } catch (e) {
+      reportChooseFail(e, '选择图片')
+      return
     }
     if (!files.length) return
     setBoardBusy(true)

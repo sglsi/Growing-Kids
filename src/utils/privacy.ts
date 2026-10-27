@@ -115,3 +115,75 @@ export function queryNeedAuthorization(): Promise<boolean | null> {
     }
   })
 }
+
+// ---------------- 隐私接口失败的统一归因（2026-10-27 新增） ----------------
+
+/**
+ * ## 为什么需要这一段
+ * 全站 6 处选图/选文件原本都是 `catch {}`（或只看 `/cancel/i`），把**所有失败**
+ * 都当成「用户取消」吞掉。于是「隐私指引没配」这种确定性故障，在真机上表现为
+ * **点了拍照按钮毫无反应、连报错都没有**——看起来像 UI 卡死，排查成本极高。
+ *
+ * 归因只有三类，处理方式完全不同：
+ *   cancel  → 用户自己点了取消，**不许弹提示**（弹了很烦）
+ *   privacy → errno 112，平台侧没声明 ⇒ 用户怎么点都没用，必须说清楚
+ *   error   → 其他（权限被系统禁、临时文件失效…）⇒ 提示 + 记全错
+ */
+
+type MiniErr = {
+  errMsg?: string
+  errno?: number
+  message?: string
+  detail?: { errMsg?: string; errno?: number }
+}
+
+function readErr(e: unknown): { msg: string; errno?: number } {
+  const o = (e ?? {}) as MiniErr
+  return {
+    msg: o.errMsg || o.message || o.detail?.errMsg || String(e ?? ''),
+    errno: typeof o.errno === 'number' ? o.errno : o.detail?.errno,
+  }
+}
+
+/** 用户主动取消（点了取消/返回）。这类「失败」不该弹任何提示。 */
+export function isUserCancel(e: unknown): boolean {
+  return /cancel/i.test(readErr(e).msg)
+}
+
+/**
+ * 隐私协议未在平台完成声明 —— 微信返回 `errno 112` /
+ * `api scope is not declared in the privacy agreement`。
+ *
+ * ⚠️ 这个错误在开发版**几乎不会出现**（`urlCheck:false` + 开发者工具豁免），
+ * 只在体验版/正式版爆发 ⇒ 一旦命中就是「平台侧没配」，与代码无关。
+ */
+export function isPrivacyNotDeclared(e: unknown): boolean {
+  const { msg, errno } = readErr(e)
+  return errno === 112 || /api scope is not declared|privacy agreement/i.test(msg)
+}
+
+export type ChooseFailKind = 'cancel' | 'privacy' | 'error'
+
+/**
+ * 选图 / 选文件失败的统一收口：归因 + 提示 + 记全错。
+ * 调用方一般只需 `catch (e) { reportChooseFail(e, '选择图片') }`。
+ *
+ * @param fallbackTitle 非取消、非隐私时的提示；不传则用「{action}失败，请重试」。
+ *        个别位置原有更具信息量的文案（如 H5 端「请在小程序中从聊天选择」），
+ *        通过它保留，避免归因改造把有效提示吞掉。
+ */
+export function reportChooseFail(
+  e: unknown,
+  action = '选择',
+  fallbackTitle?: string
+): ChooseFailKind {
+  if (isUserCancel(e)) return 'cancel'
+  // 项目约定：best-effort catch 必须把完整错误打出来
+  console.error(`[privacy] ${action}失败`, e)
+  if (isPrivacyNotDeclared(e)) {
+    Taro.showToast({ title: `隐私授权未生效，无法${action}`, icon: 'none' })
+    return 'privacy'
+  }
+  Taro.showToast({ title: fallbackTitle || `${action}失败，请重试`, icon: 'none' })
+  return 'error'
+}
