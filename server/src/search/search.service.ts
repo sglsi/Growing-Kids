@@ -20,7 +20,17 @@ export class SearchService {
     return this.searchClientInstance
   }
 
-  async solveQuestion(questionContent: string): Promise<{
+  /**
+   * 联网搜题。
+   *
+   * ⚠️ 调用前**必须**已经过 `requireAiEnabled()`（见 SearchController）——本方法会
+   *    把题目原文发往第三方检索与大模型，自身不再二次校验（校验重复会让"闸门装在
+   *    哪一层"变得模糊，出事时难以追责：闸门统一装在控制器入口）。
+   *
+   * @param userId 仅用于审计日志：出问题时能回答"哪个账号发过什么"。
+   *               ⚠️ 刻意**不记录题目正文**——那是用户内容，日志会长期留存。
+   */
+  async solveQuestion(questionContent: string, userId?: string): Promise<{
     answer_content: string
     solution: string
     references: { title: string; url: string; site_name?: string }[]
@@ -29,7 +39,7 @@ export class SearchService {
       return { answer_content: '', solution: '', references: [] }
     }
 
-    console.log('[search/solve] 检索题目:', questionContent)
+    console.log('[search/solve] 检索题目:', { userId, chars: questionContent.trim().length })
     const searchResult: SearchResponse = await this.searchClient.advancedSearch(questionContent, {
       searchType: 'web',
       count: 8,
