@@ -119,7 +119,7 @@
 | OCR 常驻（fast） | Python（venv 外置）+ RapidOCR，`--loop` 工具式调用 | 快速识别（默认路径） | — | 子进程 stdin/stdout | venv、模型缓存 |
 | OCR 侧车（precise） | Python + PaddleOCR PP-StructureV3（FastAPI） | 精准识别、版面分析、摆正 | 9301（legacy 9300） | HTTP `/healthz` `/ppsv3` | venv、`OCR_VENV_DIR` |
 | 唤醒服务 | Node ESM 脚本（`scripts/wake-server.mjs`） | 后端未运行时按需拉起；`/status` `/wake` `/wait-ready` | 3002 | HTTP | Node、OCR 环境变量 |
-| 数据库 | PostgreSQL（Supabase，Session pooler） | 15 张表（活跃 10 / 备用 1 / 空转 2 / 废弃 2） | 5432 | HTTPS PostgREST / `pg` | `SUPABASE_URL`、dns-pin |
+| 数据库 | PostgreSQL（Supabase，Session pooler） | **17 张表**（活跃 14 / 空转 2 / 废弃 1） | 5432 | HTTPS PostgREST / `pg` | `SUPABASE_URL`、dns-pin |
 | 对象存储 | Supabase Storage（public `media` 桶）/ 本地盘（回退） | 图片、文档、导出产物 | — | HTTPS / 本地文件 | `STORAGE_DRIVER` |
 | 百度网盘（可选） | OpenAPI | 资料库归档副本 | — | HTTPS | AppKey/Secret/refresh_token |
 
@@ -191,7 +191,7 @@
 
 ### 6.6 登录与身份
 
-`X-Auth-Token`（HMAC 验签，优先）→ `X-User-Id`（兼容期）→ `X-Open-Id` → `X-Device-Id` → 匿名建号（30 天 TTL，`/api/auth/*` 与 `/api/health` 免建号）。每次响应回写并续签令牌；前端登录/登出两个切换点必须清本地缓存与令牌。
+`X-Auth-Token`（HMAC 验签）为**唯一被采信的业务身份**；裸 `X-User-Id` / `X-Open-Id` / `X-Device-Id` 在**非引导路由**一律 401（2026-10-27 起，`AUTH_STRICT_TOKEN=false` 可临时回退，仅供排障）。`X-Device-Id` / `X-Open-Id` 只在引导路由（`/api/auth/login|anonymous|qr-login/authorize`）用于换第一张令牌。公开路由（`/api/health*`、`/api/auth/*`）免身份。匿名建号 30 天 TTL 滑动续期；每次响应回写并续签令牌；前端登录/登出两个切换点必须清本地缓存与令牌。
 
 ### 6.7 后端未运行时的自救
 
@@ -358,8 +358,8 @@
 - RLS 未启用，隔离靠代码层 + 静态门禁；
 - 无 CI/CD，构建与发布靠手动脚本（见 QA-16）；
 - `shared/http-exception.filter.ts` 为死代码（未被引用，生效的是 `src/filters/` 版本）；
-- `requireUserId` 抛普通 Error ⇒ 身份缺失表现为 500 而非 401；
-- `chat/knowledge` 为全局表（无 `user_id`），依赖管理员白名单，未配置时放行；
+- `requireUserId` 抛普通 Error ⇒ **若真发生**身份缺失会表现为 500 而非 401。⚠️ 2026-10-27 补充：严格令牌模式下受保护路由由中间件**先 reject 成 401**（`res.status(401).json`，不走异常过滤器），所以这条只剩"公开路由里误调 `requireUserId`"一种触发可能，影响面已大幅收窄；
+- `chat/knowledge` 为全局表（无 `user_id`）——**已闭环**：写操作走 `requireAdmin()` 读 `users.role`，非 `admin` 一律 403（fail-closed）。原"依赖白名单、未配置时放行"的口径已作废；
 - ima 依赖待替代（ADR-009）；云托管改造未启动（ADR-006）。
 
 **演进方向**：

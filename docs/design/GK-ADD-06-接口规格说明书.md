@@ -16,7 +16,7 @@
 | 端口 | `-p` > `PORT` > `SERVER_PORT` > 3000；当前本机 3001，唤醒服务 3002 |
 | Content-Type | JSON（上传除外，见第 6 章）；请求体上限 50MB（大图 base64 需要） |
 | CORS | `origin: true`，`credentials: true`，暴露 `X-User-Id` |
-| 请求头 | `X-Auth-Token`（优先，HMAC 验签）、`X-User-Id`（兼容期）、`X-Device-Id`、`X-Open-Id` |
+| 请求头 | `X-Auth-Token`（**唯一被采信的业务身份**，HMAC 验签）；`X-Device-Id` / `X-Open-Id` **仅在引导路由**用于换取第一张令牌，其余路由传了也一律 401 |
 | 响应头 | `X-User-Id`（服务端回写）、`X-Auth-Token`（每次响应滑动续签） |
 | 时间格式 | ISO 8601（UTC，如 `2026-10-24T15:27:15.032Z`） |
 | 空值 | 未设置的文本字段返回 `null`；数组默认 `[]`；布尔不省略 |
@@ -75,12 +75,20 @@
 
 ## 3. 鉴权与用户上下文
 
-**解析顺序**（`shared/user-context.ts`）：`X-Auth-Token`（验签通过才认）→ `X-User-Id`（兼容期，每次 warn）→ `X-Open-Id` → `X-Device-Id`（命中则滑动续期）→ 匿名建号（`is_anonymous=true`，TTL 30 天）。
+**身份判定分三类路由**（`shared/user-context.ts`，2026-10-27 起严格模式）：
+
+| 路由类别 | 范围 | 允许的身份来源 |
+|---|---|---|
+| 公开 | `/api/health*`、`/api/auth/login`、`/api/auth/anonymous`、`/api/auth/logout`、`/api/auth/qr-login*` | 完全匿名（**健康拨测不带令牌，绝不能纳入鉴权**） |
+| 引导 | `/api/auth/login`、`/api/auth/anonymous`、`/api/auth/qr-login/authorize` | `X-Device-Id` / `X-Open-Id` 换第一张令牌 |
+| 其余全部 | — | **仅签名令牌**；裸 `X-User-Id` / `X-Open-Id` / `X-Device-Id` 一律 **401**（`reason: TOKEN_MISSING` / `TOKEN_INVALID`），**验签失败绝不回退到裸头** |
+
+匿名建号（`is_anonymous=true`，TTL **30 天**滑动续期）；令牌 TTL 30 天、每次响应回写续签。应急回退开关 `AUTH_STRICT_TOKEN=false`（仅排障，不得带上线）。
 
 - 令牌格式 `v1.<userId>.<expSec>.<sig>`，HMAC-SHA256，TTL 30 天，`timingSafeEqual` 验签；**未配 `AUTH_TOKEN_SECRET` 时不签不验**（退回旧行为）。
 - **免建号前缀**：`/api/auth/*`、`/api/health`（避免每次登录产生垃圾账号）。
 - 用户对象内存缓存 60s，**只缓存非 null**（防"登录建号前瞬间查空"被缓存成幽灵）。
-- 管理员：`requireAdmin()` 读 `CHAT_ADMIN_IDS` 白名单；**未配置时放行并 warn**（登记风险）。
+- 管理员：`requireAdmin()` 读 `users.role`（迁移 `0017`），**非 `admin` 一律 403（fail-closed）**。提权唯一入口是 `server/scripts/promote-admin.mjs`（刻意不开放 HTTP 接口）。`CHAT_ADMIN_IDS` 已降级为迁移期兼容，命中即 warn。
 - 前端三个身份切换点（登录成功 / 应用已登录用户 / 登出）必须：清全部本地缓存（`clearAllCache`）、重置唤醒状态；登出连 `gk_auth_token` 一起清。
 
 ---

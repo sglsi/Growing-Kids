@@ -278,47 +278,101 @@ node server/scripts/deploy-pack.mjs status     # 查看当前在架/挪出状态
 | 端点 / 脚本 | 用途 |
 |---|---|
 | `GET /api/health` | 服务存活（返回含时间戳，用于确认不是旧进程应答） |
+| `GET /api/health/runtime` | **运行态自检**：`cache.backend`（memory/redis）、`ticketStore`、`tokenEnabled`、`strictToken`、`uptime`。**不含任何密钥值**，可对外 |
 | `GET /api/image/capabilities` | 图像处理能力（`straighten` / `enhance` / `erase_v2`） |
 | `GET /api/image/ocr-diagnose` | OCR 双引擎连通性诊断 |
 | `node server/scripts/health-probe.mjs` | 单次拨测，**失败 exit 1** |
 | `node server/scripts/health-probe.mjs --watch 5` | 常驻轮询（分钟，默认 5） |
 
+⚠️ **两个端点都是公开路由，不需要令牌**（`user-context.ts` 的 `PUBLIC_ROUTES`）。这是刻意的：拨测脚本不带令牌，若健康检查也要求令牌就会返回 401 ⇒ 巡检误判后端已挂 ⇒ 触发无意义重启。**改身份中间件时绝不要把健康检查纳入鉴权**。
+
 ⚠️ 拨测设计要点：**OCR 侧车空闲 900s 被回收是设计行为** ⇒ 侧车不可用只降级记 warn，**不影响退出码**（否则计划任务天天误报）；只有 health 不可用才 warn + exit 1。
+
+⚠️ `/api/health` 的返回结构**不要改**（拨测脚本按它解析）；要加运行态信息请加到 `/api/health/runtime`。
 
 ### 9.2 关键埋点清单
 
-| 类别 | 必须打日志的点 |
-|---|---|
-| 🔴 **best-effort 分支** | 网盘同步、缓存读写、命中计数、内容安全检测——**必须 `console.error` 打全错** |
-| 身份 | 登录成功（含迁移条数）、令牌验签失败、裸 `X-User-Id` 使用 |
-| 隔离 | `requireAdmin` 未配置白名单（每次 warn） |
-| 维护 | `[maintenance]` 三类任务的执行与结果 |
-| 异常 | 5xx 落盘 `server/logs/error-YYYY-MM-DD.log` |
+日志由 `server/src/shared/logger.ts` 的 `installLogTee()` **接管 `console.*`** 统一落盘（JSON 行），并叠加 `accessLog()` 中间件。因此**普通 `console.log/warn/error` 就会自动进日志文件，不需要改调用方式**。
+
+**访问日志字段**（每请求一行，`kind: "access"`）：
+
+| 字段 | 含义 | 用途 |
+|---|---|---|
+| `trace` | 请求追踪号 | 把同一次请求的后续日志串起来（`grep <trace>`） |
+| `method` / `path` / `status` | 方法、路径、状态码 | 定位 4xx/5xx 集中点 |
+| `ms` | 耗时 | 性能排查 |
+| `user` / `role` | 用户 id 与角色 | 判断是"某用户特有"还是"全局" |
+| `slow` | 慢请求标记 | 先看 `slow:true` 的行，别从头翻 |
+
+**业务埋点（必须打全错的地方）**：
+
+| 类别 | 必须打日志的点 | 为什么不能省 |
+|---|---|---|
+| 🔴 **best-effort 分支** | 网盘同步、缓存读写、命中计数、内容安全检测 | 这些分支**失败不中断主流程** ⇒ 不打日志就等于静默失效，用户只会看到"功能时好时坏" |
+| 身份 | 登录成功（含迁移条数）、令牌验签失败、裸 `X-User-Id` 被拒 | 验签失败突然变多 = 有人在试伪造令牌；裸头被拒变多 = 有老客户端没升级 |
+| 管理员 | `requireAdmin` 拒绝（403）、`CHAT_ADMIN_IDS` 兼容命中 | 前者可能是越权尝试；后者说明还有环境没迁到 `role` |
+| 隔离 | 查询漏写 `.eq('user_id')`（门禁脚本侧，非运行期） | 由 `check:isolation` 兜底，见 9.4 |
+| 维护 | `[maintenance]` 三类任务的执行与结果；**账号注销的 dry-run 与真删回执** | 注销是真删不可逆，必须有回执可查 |
+| 缓存 | 缓存后端降级（Redis 不可用回落内存）、票据存储降级（db 回落内存） | **降级必须能看见**，否则多副本时会出现"数据不一致但没人知道" |
+| 异常 | 5xx | 见 9.3 的位置 |
+
+⚠️ **刻意不记的东西：请求 body**。题图 base64 动辄数 MB，记进日志会把磁盘写炸。要排查内容问题请从 `blob_objects` 取原图。
 
 ### 9.3 日志位置与轮转
 
-| 日志 | 路径 | 轮转 |
+| 日志 | 路径 | 轮转 / 保留 |
 |---|---|---|
-| 异常 | `server/logs/error-YYYY-MM-DD.log` | 按天；单文件 >5MB 自动换号（`.2.log`） |
+| **统一应用日志**（含访问日志与全部 `console.*`） | `server/logs/app-YYYY-MM-DD.log` | **按天**；单文件 > **8MB** 自动换号（`app-YYYY-MM-DD.2.log` → `.3.log`…）；保留 **7 天**，启动时 + 每 **6 小时**清扫 |
+| 异常 | `server/logs/error-YYYY-MM-DD.log` | 按天；同上清扫 |
 | 保活 | `server/logs/wake-server.log` | 无自动轮转，定期人工清理 |
 | 拨测 | `server/logs/health-probe.log` | 无自动轮转，定期人工清理 |
-| 后端输出 | `server/logs/backend-YYYY-MM-DD.log` | 按天 |
 
-⚠️ `server/logs/` 已在 `.gitignore`。
+- 统一日志是 **JSON 行**，便于 `grep` / `jq`，不再是混排文本。
+- ⚠️ `server/logs/` 已在 `.gitignore`。
+
+**常用查询**（`jq` 可选，`grep` 已够用）：
+
+```bash
+# 今天所有 5xx
+grep '"status":5' server/logs/app-$(date +%F).log
+
+# 某用户的全部请求
+grep '"user":"<user-id>"' server/logs/app-$(date +%F).log
+
+# 慢请求（按 ms 降序看前 20）
+grep '"slow":true' server/logs/app-$(date +%F).log | tail -20
+
+# 定位一次请求的全链路
+grep '<trace-id>' server/logs/app-$(date +%F).log
+
+# 身份类异常（伪造令牌 / 裸头被拒 / 管理员拒绝）
+grep -E 'TOKEN_INVALID|拒绝未签名|requireAdmin' server/logs/app-$(date +%F).log
+```
 
 ### 9.4 无告警系统时的替代巡检
 
-当前**没有外部告警通道** ⇒ 替代方案：
+⚠️ **诚实说明：当前没有外部告警通道**。日志齐了但没人盯着看，"事后能查"不等于"出事会通知"。以下为替代动作：
 
 ```bash
 # 手动巡检（每次发布前后）
 node server/scripts/health-probe.mjs; echo "exit=$?"
+curl --noproxy '*' -s http://127.0.0.1:3001/api/health/runtime
 tail -50 server/logs/error-$(date +%F).log
+grep '"status":5' server/logs/app-$(date +%F).log | tail -20
 tail -50 server/logs/wake-server.log
 pnpm --filter server check:isolation
 ```
 
-建议：把 `health-probe --watch` 挂到计划任务（PowerShell `Register-ScheduledTask`），日志落盘后人工定期翻。
+`/api/health/runtime` 的判读：
+
+| 字段 | 正常值 | 异常含义 |
+|---|---|---|
+| `cache.backend` | `memory`（单机）/ `redis`（已扩容） | 配了 `REDIS_URL` 却显示 `memory` ⇒ Redis 连不上，已静默降级 |
+| `ticketStore` | `auto(db 优先)` | 显示降级到 memory ⇒ `login_tickets` 表不可用（未跑 0012 / 网络异常），多副本会丢票 |
+| `strictToken` | `true` | `false` 说明 `AUTH_STRICT_TOKEN=false` 还开着，**裸头可伪造，不得带上线** |
+| `uptime` | 持续增长 | 突然归零 = 进程刚重启（配合 `R-已关闭-02` 查是不是崩了） |
+
+建议：把 `health-probe --watch` 挂到计划任务（PowerShell `Register-ScheduledTask`），日志落盘后人工定期翻。**备份**（`R-技术-06` 的每日 `pg_dump`）也应挂同一套计划任务机制。
 
 ---
 

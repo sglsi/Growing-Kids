@@ -2,7 +2,7 @@
 
 > 编号：GK-ADD-05 ｜ 版本：v1.0 ｜ 日期：2026-10-27 ｜ 状态：**正文完成**
 > 读者：后端 / 运维 ｜ 上游：SRS-01、ADD-04 ｜ 下游：DD-09、DD-10、DD-11、DD-12、DD-14、QA-16
-> 定位：**17 张表**（活跃 13 + 备用 1 + 空转 2 + 废弃 1）的权威说明。**含数据字典**（原 SRS-03 的数据字典部分并入第 5 章）。
+> 定位：**17 张表**（活跃 14 + 空转 2 + 废弃 1）的权威说明。**含数据字典**（原 SRS-03 的数据字典部分并入第 5 章）。
 > ⚠️ 口径校正：v0.0 提纲记 15 张，现按 `migrations/` 实际为 **17 张**——2026-10-24 后新增 `answer_cache`（0014）与 `ocr_results`（0016）。
 > 唯一真相源：**`migrations/*.sql`**。代码里 `.from('表名')` 的静态扫描**不完整**（部分访问走 RPC / 常量变量 / raw SQL），不得作为表清单依据。
 
@@ -68,7 +68,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
    answer_cache   —— user_id + q_hash + mode 唯一（按用户隔离的持久缓存）
    ocr_results    —— **全局共享**，主键 cache_key = sha256(content_hash|kind|mode|engine_version)
    knowledge_articles —— 活跃（全局表，AI 对话的知识库，内容进 system prompt，写走 requireAdmin）
-   login_tickets  —— 备用（多副本扫码登录），当前票据走进程内存
+   login_tickets  —— 活跃（扫码登录票据，2026-10-27 起默认落库，QR_TICKET_STORE=auto）
    questions / materials —— 空转（v3 遗留，模块接线但前端不调用）
    health_check   —— 废弃待清理
 ```
@@ -79,15 +79,16 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 2. **`timeline_items` 是核心表**（统一收件箱）：`kind` 区分 `image` / `question`；"最近题目" = 全表，`复习本` = `in_review_book = true` 子集；`subjects` 是其分类维表（`on delete set null`，删除学科不删题目）。
 3. **`blob_objects` 不与业务表建外键**：靠 `file_hash` 软关联（内容寻址，见第 9 章）。这是刻意的——同一份物理内容可被任意多用户引用，外键无法表达"多对一共享 + 引用计数"。
 
-### 2.3 非活跃表清单（4 张）
+### 2.3 非活跃表清单（3 张）
 
 | 状态 | 表 | 说明 |
 |---|---|---|
-| **备用** | `login_tickets` | 已建表、当前无读写。为**多副本部署 H5 扫码登录**准备；当前单机部署票据走 `QrLoginService` 进程内存（`@nestjs/schedule` 无关，重启即失效，用户重扫即可）。多实例下内存票据不共享时才需要落库，接口形态（createTicket/getStatus/authorize）已按表结构设计，届时无需改 controller。 |
 | **空转** | `questions` / `materials` | v3 遗留。模块（`questions.service.ts` / `materials.service.ts`）已接线但**前端不调用**。 ⚠️ 这两张表的 service **完全没做用户隔离**（不写也不过滤 `user_id`），`user_id` 列允许 NULL 就是为此预留。**正常业务链路禁止读写这两张表**。 |
 | **废弃待清理** | `health_check` | 思傅 2026-10-24 确认登记为技术债（OPS-18 `R-工程-01`）。清理前须确认无外部引用（流程见 10.3）。 |
 
 > ⚠️ **口径订正（2026-10-27）**：v0.0/v1.0 曾把 `knowledge_articles` 一并列为「废弃待清理」，**实测有误**——它是 AI 对话的全局知识库，`chat.service.ts` 的 `getActiveArticles()` 会读取 `is_active = true` 的文章拼进 system prompt（`chat.service.ts:8/81/95/134/159`），CRUD 写操作受 `requireAdmin()` 保护。它属**活跃表**（状态：全局表），不是技术债。详见 OPS-18 第 1.5 节校正说明。
+
+> ⚠️ **口径订正（2026-10-27，第二次）**：`login_tickets` 由「备用」改判为**活跃**——`QR_TICKET_STORE=auto`（默认）下**优先落库**，表不可用（未跑 0012 / 网络异常）才降级为进程内存并**只告警一次**；`db` 强制模式不降级；`memory` 仅本地开发用。`authorize` 用 `.eq('status','pending')` 条件更新做并发互斥。运维可经 `/api/health/runtime` 的 `ticketStore` 判读当前后端。详见 OPS-18 `R-技术-10` 第 2 项。**因此非活跃表由 4 张减为 3 张，17 张表的分类改为「活跃 14 + 空转 2 + 废弃 1」。**
 
 ---
 
@@ -107,7 +108,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | 10 | `chat_messages` | 智能客服对话记录（`user_id` 可空，支持匿名提问） | 活跃 | `chat.service.ts` |
 | 11 | `answer_cache` | **题目答案持久缓存**（user+q_hash+mode 唯一） | 活跃 | `answer-search.service.ts` 私有方法（0014；**无独立 service 文件**） |
 | 12 | `ocr_results` | **OCR 识别结果持久缓存**（全局共享） | 活跃 | `ocr-cache.service.ts`（0016） |
-| 13 | `login_tickets` | H5 扫码登录票据 | **备用** | 无（当前走内存） |
+| 13 | `login_tickets` | H5 扫码登录票据 | **活跃** | `qr-login.service.ts`（`QR_TICKET_STORE=auto` 默认 db 优先） |
 | 14 | `questions` | v3 题目主表 | **空转** | 无（前端不调用） |
 | 15 | `materials` | v3 素材表 | **空转** | 无（前端不调用） |
 | 16 | `knowledge_articles` | AI 对话知识库（**全局表**，内容进 system prompt，后台维护） | **活跃**（全局） | 后台（走 `requireAdmin`），读：`chat.service.ts` `getActiveArticles()` |
@@ -222,7 +223,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `cache_key` | varchar(64) PK | `sha256(content_hash|kind|mode|engine_version)` |
+| `cache_key` | varchar(64) PK | `sha256(content_hash\|kind\|mode\|engine_version)` |
 | `content_hash` | varchar(64) not null | 源文件内容 sha256 |
 | `kind` | varchar(16) | `image` \| `pair` \| `doc` |
 | `mode` | varchar(16) default '' | `fast` \| `precise` \| `rapid` \| 空 |
@@ -233,9 +234,11 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 ⚠️ 本表**启用了 RLS 但故意不建任何 policy** ⇒ 客户端（anon/authenticated）完全不可访问，只有 service_role 能读写。**切勿为它建宽松 policy**。
 
-### 4.12 login_tickets（备用 · 0012）
+### 4.12 login_tickets（活跃 · 0012）
 
 `token text PK` / `status text check in (pending, authorized, expired)` / `user_id varchar(36) → users, set null` / `created_at` / `expires_at default now() + 5 minutes`。索引：`(expires_at) where status='pending'`。
+
+> **写入方（2026-10-27 起）**：`qr-login.service.ts`。`user_id` 只在 `authorize` 成功后写入，**不是隔离维度**——票据按 `token` 主键寻址，而 token 本身就是 24 字节随机凭据（`randomBytes(24).toString('base64url')`，实测如 `5HRR4E8xFxf3oc9jXCBnYtX_1JCto0ql`）。这也是隔离门禁把它列入白名单的理由（见 OPS-18 2.2 节 `R-技术-02`）。
 
 ### 4.13 questions（空转 · 0009 + 0010）
 
@@ -247,10 +250,10 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 > ⚠️ `size_bytes` 是 `integer`（非 bigint）——大文件会溢出，是这张空转表的已知问题，清理时一并处理。
 
-### 4.15 knowledge_articles / health_check（废弃）
+### 4.15 knowledge_articles（活跃·全局）/ health_check（废弃）
 
-- `knowledge_articles`：`id` / `title` / `content` / `category` / `tags text[]` / `is_active` / `sort_order` / `created_at` / `updated_at`。全局表，写操作走 `requireAdmin()`。
-- `health_check`：`id serial PK` / `updated_at`。
+- `knowledge_articles`：`id` / `title` / `content` / `category` / `tags text[]` / `is_active` / `sort_order` / `created_at` / `updated_at`。**活跃全局表**（⚠️ 不是废弃表，见 2.3 节订正），写操作走 `requireAdmin()`。
+- `health_check`：`id serial PK` / `updated_at`。**废弃**，业务代码零 `.from()` 调用。
 
 ---
 
@@ -580,3 +583,4 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | v0.0 | 2026-10-23 | 建立提纲（待审） |
 | v1.0 | 2026-10-27 | **正文完成**。按 `migrations/` 复核校正表清单为 **17 张**（新增 answer_cache / ocr_results）；补齐 12 章正文：ER 与三条结构约定、逐表字段表、`timeline_items.content` 完整 schema 与演进、索引清单与查询热路径、隔离门禁（check-isolation.mjs）豁免规则、blob 引用计数三条契约与三类定时任务、迁移演进史 15 个文件与 6 条纪律、变更流程 9 步、备份现状与待确认项 |
 | v1.1 | 2026-10-27 | **表分类订正**：`knowledge_articles` 由「废弃」改判为**活跃全局表**（实证 `chat.service.ts` 的 `getActiveArticles()` 读取 `is_active=true` 文章拼进 system prompt，写操作走 `requireAdmin`）⇒ 分类改为 **活跃 13 + 备用 1 + 空转 2 + 废弃 1**，2.3 节由「非活跃 5 张」改为「4 张」并附订正说明。与 OPS-18 `R-工程-01` 对齐 |
+| v1.2 | 2026-10-27 | **表分类第二次订正**：`login_tickets` 由「备用」改判为**活跃**（`QR_TICKET_STORE=auto` 默认优先落库，OPS-18 `R-技术-10` 第 2 项）⇒ 17 张表分类改为 **活跃 14 + 空转 2 + 废弃 1**；2.3 节由「非活跃 4 张」改为「3 张」并附订正说明；3 章表清单第 13 行状态与写入方更新；4.12 补写入方与"token 即凭据、`user_id` 非隔离维度"说明；**顺带订正 4.15 标题**（`knowledge_articles` 是活跃全局表，原与 `health_check` 并列写作「废弃」是遗留错误） |

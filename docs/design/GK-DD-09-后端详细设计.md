@@ -243,7 +243,7 @@ curl --noproxy '*' http://127.0.0.1:3001/api/health   # 验时间戳而非只验
 | 场景 | 机制 |
 |---|---|
 | 业务数据 | 代码层 `.eq('user_id')` + 静态门禁 |
-| 全局表写（知识库） | `requireAdmin()`（`CHAT_ADMIN_IDS` 白名单；未配置放行 + warn） |
+| 全局表写（知识库） | `requireAdmin()` 读 `users.role`（0017）；**非 admin 一律 403，fail-closed** |
 | 身份伪造 | `X-Auth-Token` 服务端签发 + 验签 |
 
 ### 9.3 配额模型
@@ -351,7 +351,7 @@ Windows 无 locale 环境下 Python 管道会回落 cp936，Node 按 utf-8 读 �
 | `DATABASE_URL`（`.env.migrate`） | 迁移连接串 | 🔴 | — |
 | `WX_APPID` / `WX_SECRET` | 登录与内容安全 | 🔴 | — |
 | `AUTH_TOKEN_SECRET` | 身份令牌签名（≥16 字符） | 🔴 | — |
-| `CHAT_ADMIN_IDS` | 知识库写白名单 | 否 | 空（放行） |
+| `CHAT_ADMIN_IDS` | 知识库写白名单（**迁移期兼容，已降级**） | 否 | 空（不再放行；主门禁是 `users.role`） |
 | `QUOTA_MODE` | `off`/`shadow`/`warn`/`block` | 否 | `warn` |
 | `STORAGE_GC_DRY_RUN` | GC 干跑开关 | 否 | `true` |
 | `OCR_*` | OCR 三件套 + 侧车参数 | 否 | — |

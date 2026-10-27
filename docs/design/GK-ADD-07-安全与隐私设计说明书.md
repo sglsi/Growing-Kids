@@ -29,7 +29,7 @@
 | T5 | 第三方数据传输 | 送 ima / LLM 的仅题干文本与图片；内容安全检测送微信 | 需在使用手册中明示（第 7 章） |
 | T6 | **配额滥用 / 成本攻击** | 用户级配额（双阈值 + 月流量）、SR 泳道并发闸、排队降级 | `QUOTA_MODE` 默认 `warn`（不阻断），见第 8 章 |
 | T7 | 临时用户数据滞留 | 每小时清理过期匿名用户；`temp` 文件 24h 孤儿 GC | 已覆盖 |
-| T8 | 全局表被任意篡改 | `requireAdmin()`（`CHAT_ADMIN_IDS`）保护知识库四个写端点 | 未配置白名单时**放行并 warn** |
+| T8 | 全局表被任意篡改 | `requireAdmin()` 读 `users.role`（0017）保护知识库四个写端点 | **已闭环**：非 `admin` 一律 403（fail-closed）；漏配=没人能用，不是放行 |
 
 ### 1.3 安全目标在本项目的具体含义
 
@@ -92,9 +92,10 @@ migrateAnonymousData：把 anonymous_id **以及该 device_id 名下所有历史
 
 ### 2.4 扫码登录（H5）
 
-- 票据当前走 `QrLoginService` **进程内存**（单机部署够用）：`POST /api/auth/qr-login/ticket` 出票 → H5 轮询 `GET /api/auth/qr-login/status?token=` → 手机端 `POST /api/auth/qr-login/authorize` 授权。
-- 票据一次性、5 分钟过期（`login_tickets` 表结构已按此设计：`status pending/authorized/expired`）。重启即失效 ⇒ **用户重扫即可**，不需要补偿逻辑。
-- 多副本部署时才需要落库（把 tickets Map 换成对 `login_tickets` 的 CRUD，controller 不用改）。
+- ⚠️ **2026-10-27 订正：票据已落库**（`QR_TICKET_STORE=auto` 默认 db 优先，`db` 强制不降级，`memory` 仅本地开发）。原口径「走进程内存、单机够用」已作废——理由是多副本时 `/authorize` 打 A、`/status` 轮询打 B 就查不到票，表现为"扫了没反应"而两端日志都正常，极难排查（OPS-18 `R-技术-10` 第 2 项）。
+- 流程不变：`POST /api/auth/qr-login/ticket` 出票 → H5 轮询 `GET /api/auth/qr-login/status?token=` → 手机端 `POST /api/auth/qr-login/authorize` 授权。
+- 票据一次性、5 分钟过期（`status pending/authorized/expired`）。**安全语义靠 token 本身**：24 字节随机（`randomBytes(24).toString('base64url')`），不可猜、不可枚举，所以查询按 `token` 主键寻址而非 `user_id`。
+- 运维判读：`GET /api/health/runtime` 的 `ticketStore` 显示是否已落库；显示降级到 memory 说明表不可用（未跑 0012 / 网络异常）。
 
 ### 2.5 前端身份切换纪律
 
@@ -121,7 +122,7 @@ migrateAnonymousData：把 anonymous_id **以及该 device_id 名下所有历史
 
 ### 3.2 静态门禁 `check-isolation.mjs`
 
-扫描 `server/src` 下所有 `.from()` 调用点，向后看 12 行内必须出现 `.eq('user_id'`，否则 exit 1。当前 **108 处调用点全通过**（2026-10-27 实测；`answer_cache` / `ocr_results` 两张缓存表接入后由 93 增至 108）。
+扫描 `server/src` 下所有 `.from()` 调用点，向后看 12 行内必须出现 `.eq('user_id'`，否则 exit 1。当前 **113 处调用点全通过**（2026-10-27 实测；`answer_cache` / `ocr_results` 接入后由 93 增至 108，扫码票据落库后 `login_tickets` 入白名单再增至 113）。
 
 **四类豁免（有意设计，逐条有据，不得为过检而删检查）**：
 
@@ -182,7 +183,7 @@ migrateAnonymousData：把 anonymous_id **以及该 device_id 名下所有历史
 **本次同步修掉的两个授权缺口**：
 
 1. **越权读（已修）**：`chat.service.ts` `sendMessage` 取会话历史只按**客户端可控的 `session_id`** 过滤 ⇒ 传入他人 session_id 即可读走该会话全部历史，并作为多轮上下文注入 LLM（数据外泄面）。已补 `.eq('user_id', userId)`。
-2. **全局表零鉴权（已加固）**：`knowledge_articles` 无 `user_id` 列，内容直接拼进 system prompt，而 `/chat/knowledge` 四个 CRUD 端点此前无任何身份校验 ⇒ 任意请求可操纵所有用户的助手人设。已加固：列表需登录；写操作走 `requireAdmin()`——配置 `CHAT_ADMIN_IDS`（`.env.secrets`，逗号分隔 user id）后仅白名单可写，**未配置时放行并每次 warn**。彻底方案（`users` 加 role 列 + 管理员体系）登记 **OPS-18**。
+2. **全局表零鉴权（已关闭）**：`knowledge_articles` 无 `user_id` 列，内容直接拼进 system prompt，而 `/chat/knowledge` 四个 CRUD 端点此前无任何身份校验 ⇒ 任意请求可操纵所有用户的助手人设。**2026-10-27 已彻底解决**：`users` 加 `role` 列（迁移 `0017`，`check in ('user','admin')`，默认 `user`），`requireAdmin()` 改为 **fail-closed**——非 `admin` 一律 403，**漏配不再是放行**。提权唯一入口 `server/scripts/promote-admin.mjs`（不开放 HTTP 接口，避免自提权）。`CHAT_ADMIN_IDS` 降级为迁移期兼容。详见 OPS-18 `R-技术-08`（已关闭）。
 
 **身份头伪造的处置（2026-10-24 落地，服务端签发票据方案）**
 
@@ -208,7 +209,7 @@ migrateAnonymousData：把 anonymous_id **以及该 device_id 名下所有历史
 | LLM API Key（扣子 / 混元 / DeepSeek） | AI 答案与对话 | `server/.env.secrets` | 密文 | 按供应商策略；泄露即换 | 否 |
 | `IMA_CLIENT_ID` / `IMA_API_KEY` | ima 知识库检索（有日配额） | `server/.env.secrets` | 密文 | 同上 | 否 |
 | `AUTH_TOKEN_SECRET` | 身份令牌 HMAC 签名（≥16 字符） | `server/.env.secrets` | 密文 | 轮换 ⇒ 全体用户重新登录（等效登出） | 否 |
-| `CHAT_ADMIN_IDS` | 全局知识库写白名单（逗号分隔 user id） | `server/.env.secrets` | 密文 | 人员变动时 | 否 |
+| `CHAT_ADMIN_IDS` | 全局知识库写白名单（**已降级为迁移期兼容**，主门禁改为 `users.role`） | `server/.env.secrets` | 密文 | 可下线 | 否 |
 | `BAIDU_*`（网盘 OAuth / refresh_token） | 资料库归档同步 | `.env.secrets` | 密文 | refresh_token 变更即重跑加密 | 否 |
 | 私钥 `key/private.appid.key`（如有） | 微信支付等 | 仓库外（gitignore） | **否** | — | — |
 
@@ -358,7 +359,7 @@ AES-256-GCM 加密（密钥 = scrypt(AppID | 'growing-kids/.env.secrets/v1', 随
 - [ ] mp 后台：request 合法域名已配置；**生产 `urlCheck` 打开**；`packOptions.ignore` 不含 `./assets`（TabBar 图标）
 - [ ] mp 后台「用户隐私保护指引」**已勾选相册 / 摄像头**
 - [ ] `AUTH_TOKEN_SECRET` 已配置（≥16 字符），且前端全量带 `X-Auth-Token`（日志里 `X-User-Id` warn 应趋近于 0）
-- [ ] `CHAT_ADMIN_IDS` 已配置（收紧全局知识库写权限）
+- [ ] **至少一个账号已 `role='admin'`**（`node scripts/promote-admin.mjs --list` 确认非空；空表 = 知识库不可写，属 fail-closed 的预期表现）
 - [ ] 后端不输出堆栈到客户端（全局异常过滤器已兜底，返回统一信封）
 - [ ] 存储桶权限复核（`SUPABASE_STORAGE_PUBLIC` 取值符合预期；`STORAGE_DRIVER` 与部署形态匹配）
 - [ ] 临时用户清理任务在运行（日志出现 `[maintenance]`；`STORAGE_GC_DRY_RUN` 取值符合预期）

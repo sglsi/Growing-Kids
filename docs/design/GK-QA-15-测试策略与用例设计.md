@@ -86,7 +86,7 @@ node tmp/<file>.js   # 或直接 require 后跑断言
 | 🔴 **带他人 `session_id` 查聊天历史** | 返回空（必须 `.eq('user_id')`）——历史越权读缺陷的回归 |
 | 🔴 **删除他人条目** | 返回 200 但**删 0 行**；调用方必须 `.select('id')` 校验 |
 | 伪造 `X-User-Id`（已启用令牌） | 后端 warn 并以 `X-Auth-Token` 为准 |
-| 全局知识库写（未配置 `CHAT_ADMIN_IDS`） | 放行 + warn |
+| 全局知识库写（非 `admin` 角色，含无任何 admin 的部署） | **403**（fail-closed，不再是放行 + warn） |
 
 ### 4.2 参数与缓存
 
