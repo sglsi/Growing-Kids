@@ -13,6 +13,8 @@
  *  - 文件级白名单：cron 全表扫描、容量统计（见 FILE_ALLOWLIST）；
  *  - insert 链：隔离靠 payload 里的 user_id（后端强制写入、禁止信任前端），
  *    由 code review 与 Create*Dto 不含 user_id 字段共同保证；
+ *  - upsert 链：同上，但比 insert 危险（可覆盖他人行）⇒ 还要求窗口内能看见
+ *    user_id（payload 字段或 onConflict 列），否则按缺口报出；
  *  - 通用出口 supabase-db.provider.ts：where 全由调用方传入，无法静态判定。
  *
  * ⚠️ 启发式检查（向后看 12 行 + 常量表名还原），只能当「告警门禁」用：
@@ -30,6 +32,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 's
 const TABLE_ALLOWLIST = new Set([
   'knowledge_articles', // 全局表：所有用户共享的客服知识库，写操作走 requireAdmin
   'blob_objects', // 内容寻址：按 content_hash 查，本身不属任何用户
+  'ocr_results', // 识别层缓存：表内无 user_id 列，按 cache_key 内容寻址跨用户共享（ADD-05 第 4 章 / DD-13）
   'health_check', // 运维探针
   'users', // 身份表：按 id / open_id / device_id 限定，不是按 user_id
 ])
@@ -99,6 +102,18 @@ for (const file of walk(ROOT)) {
     if (/\.eq\(\s*['"`]user_id['"`]/.test(window)) continue
     // insert 链：隔离靠 payload.user_id（后端强制写入），不走 .eq
     if (/\.insert\(/.test(window)) continue
+    // upsert 链：语义上可覆盖他人行，故除 payload 外还要求窗口内可见 user_id
+    // （payload 字段或 onConflict 列），看不见就按缺口报出，不给白名单开口子。
+    if (/\.upsert\(/.test(window)) {
+      if (/user_id/.test(window)) continue
+      violations.push({
+        file: path.relative(process.cwd(), file),
+        line: i + 1,
+        table,
+        reason: 'upsert 链内未见 user_id（payload 与 onConflict 都需带），可能覆盖他人行',
+      })
+      continue
+    }
     // 窗口内出现新的 .from( 说明这是另一条查询，不算漏
     if (/\.from\(/.test(window)) {
       violations.push({
