@@ -245,26 +245,45 @@ export class MaintenanceService {
     const rowsDeleted: Record<string, number> = {}
 
     // 1) 先收集引用（必须在删行之前——删完就查不到 hash 了）
-    const hashes = await this.collectFileHashes([userId])
-    const legacyKeys = await this.collectLegacyKeysWithoutHash([userId])
+    //
+    // ⚠️ 并行化（2026-10-27 分模块验证发现的 P2 性能问题）：
+    //   这两步各自内部已并行，但彼此之间原本是**串行**的，加上后面 3 次 count，
+    //   整条链路要串 5 轮跨境 DB 往返。Supabase 新加坡单程 ~1.5~5s ⇒ 空账号实测
+    //   26s，真实账号（有题目/图片/记忆）只会更久，逼近小程序端 60s 超时。
+    //   它们之间没有数据依赖，合并成一轮。
+    const [hashes, legacyKeys] = await Promise.all([
+      this.collectFileHashes([userId]),
+      this.collectLegacyKeysWithoutHash([userId]),
+    ])
+
+    // 6) ocr_results 的留存数量（只读统计，绝不删）
+    //    它不依赖任何前序结果，提前发出、最后回收，又省一轮往返
+    const ocrKeptPromise = Promise.resolve(
+      client.from('ocr_results').select('cache_key', { count: 'exact', head: true }),
+    )
+      .then((r) => r.count || 0)
+      .catch(() => 0)
 
     // 2) 显式删无级联的表（有级联的交给删 users 行）
-    for (const table of ['chat_messages', 'user_quota'] as const) {
+    //    同上：两张表互不依赖，并行发出，省一轮往返
+    await Promise.all(
+      (['chat_messages', 'user_quota'] as const).map(async (table) => {
       if (dry) {
         const { count } = await client
           .from(table)
           .select('user_id', { count: 'exact', head: true })
           .eq('user_id', userId)
         rowsDeleted[table] = count || 0
-        continue
+        return
       }
       const { data, error } = await client.from(table).delete().eq('user_id', userId).select('user_id')
       if (error) {
         this.logger.error(`[purge] 删除 ${table} 失败: ${error.message}`)
-        continue
+        return
       }
       rowsDeleted[table] = (data || []).length
-    }
+      }),
+    )
 
     // 3) 删 users 行（级联清业务表）
     if (!dry) {
@@ -302,14 +321,8 @@ export class MaintenanceService {
       }
     }
 
-    // 6) ocr_results 的留存数量（只读统计，绝不删）
-    let ocrKept = 0
-    try {
-      const { count } = await client.from('ocr_results').select('cache_key', { count: 'exact', head: true })
-      ocrKept = count || 0
-    } catch {
-      /* 统计失败不影响主流程 */
-    }
+    // 6) ocr_results 的留存数量（只读统计，绝不删）—— 已在开头并行发起，这里回收
+    const ocrKept = await ocrKeptPromise
 
     const note =
       '账号与本人业务数据已删除；共享文件按引用计数处理（其他用户仍在引用则保留），' +
@@ -331,7 +344,8 @@ export class MaintenanceService {
     }
   }
 
-  /** 收集「file_hash 为空」的旧数据对象 key —— 这些无法走引用计数，按 key 直接删 */  private async collectLegacyKeysWithoutHash(userIds: string[]): Promise<string[]> {
+  /** 收集「file_hash 为空」的旧数据对象 key —— 这些无法走引用计数，按 key 直接删 */
+  private async collectLegacyKeysWithoutHash(userIds: string[]): Promise<string[]> {
     const client = getSupabaseClient()
     const keys: string[] = []
     const [timeline, library, docs] = await Promise.all([
