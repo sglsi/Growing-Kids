@@ -144,6 +144,29 @@ export class UsersService {
     return (data || []) as unknown as User[]
   }
 
+  /**
+   * 读取角色（0017 `users.role`）。
+   *
+   * 为什么不并进 `SELECT_COLS`：没跑 0017 的环境里 select role 会整条查询报错，
+   * 那会把「所有接口」一起打死。这里单独取、单独失败：取不到（列不存在）就
+   * 一律按 `user` 处理（fail-closed，管理员最多暂时写不了知识库，不会越权）。
+   */
+  async findRole(id: string): Promise<'user' | 'admin'> {
+    if (!id) return 'user'
+    try {
+      const client = getSupabaseClient()
+      const { data, error } = await client.from(TABLE).select('role').eq('id', id).maybeSingle()
+      if (error) {
+        console.warn('[users] 读取 role 失败（0017 迁移可能未执行），按 user 处理：', error.message)
+        return 'user'
+      }
+      return (data as { role?: string } | null)?.role === 'admin' ? 'admin' : 'user'
+    } catch (e) {
+      console.warn('[users] 读取 role 异常，按 user 处理：', e)
+      return 'user'
+    }
+  }
+
   /** 更新昵称 / 头像 */
   async updateProfile(
     userId: string,

@@ -18,17 +18,17 @@ export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
   // -------- 知识库管理 --------
-  // ⚠️ 授权现状（2026-10-24 评估）：knowledge_articles 是**全局表**（无 user_id），
+  // ⚠️ 授权（2026-10-27 起）：knowledge_articles 是**全局表**（无 user_id），
   //    这里四个端点此前无任何身份校验 ⇒ 任意请求可增删改所有用户可见的客服知识库
   //    （内容直接拼进 system prompt，等于可操纵所有用户的助手人设）。
-  //    已加固：① 必须携带有效用户身份；② 若配置了 CHAT_ADMIN_IDS 则仅白名单可写。
-  //    仍缺「角色体系」（users 表无 role 列）⇒ 已登记 GK-OPS-18，见 ADD-07 第 3 章。
+  //    现已 **fail-closed**：必须 users.role = 'admin' 才放行（0017 迁移），
+  //    CHAT_ADMIN_IDS 白名单仅为迁移期兼容并会打 warn。见 OPS-18 R-技术-08。
+  //    提权：node server/scripts/promote-admin.mjs --device-id dev_xxx（≤60s 生效）。
   @Get('knowledge')
   @HttpCode(200)
   async listKnowledge(@Req() req: RequestWithUser) {
-    // 与写操作同一套门：未配 CHAT_ADMIN_IDS 时放行 + warn（维持现状），
-    // 配置后仅白名单可见。注意：匿名用户也会被中间件赋予身份，requireUserId 挡不住匿名。
-    requireAdmin(req)
+    // 读也走同一套门：知识库列表属后台运维视图，不对外。
+    await requireAdmin(req)
     const data = await this.chatService.listKnowledge()
     return { code: 200, msg: 'success', data }
   }
@@ -47,7 +47,7 @@ export class ChatController {
       sort_order?: number
     },
   ) {
-    requireAdmin(req)
+    await requireAdmin(req)
     const data = await this.chatService.createKnowledge(requireUserId(req), body)
     return { code: 200, msg: 'success', data }
   }
@@ -67,7 +67,7 @@ export class ChatController {
       sort_order?: number
     },
   ) {
-    requireAdmin(req)
+    await requireAdmin(req)
     const data = await this.chatService.updateKnowledge(requireUserId(req), id, body)
     return { code: 200, msg: 'success', data }
   }
@@ -75,7 +75,7 @@ export class ChatController {
   @Delete('knowledge/:id')
   @HttpCode(200)
   async removeKnowledge(@Req() req: RequestWithUser, @Param('id') id: string) {
-    requireAdmin(req)
+    await requireAdmin(req)
     const data = await this.chatService.removeKnowledge(id)
     return { code: 200, msg: 'success', data }
   }

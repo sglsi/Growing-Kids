@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Patch, Post, Query, Req } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, HttpCode, Patch, Post, Query, Req } from '@nestjs/common'
 import { AuthService } from './auth.service'
 import { QrLoginService } from './qr-login.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
@@ -31,6 +31,31 @@ export class AuthController {
     // 一并签发身份令牌：前端存下来，后续请求带 X-Auth-Token（防伪造身份头）
     const token = signAuthToken(data.user.id)
     return { code: 200, msg: 'success', data: token ? { ...data, auth_token: token } : data }
+  }
+
+  /**
+   * 匿名身份引导（2026-10-27 严格令牌化的配套入口）。
+   *
+   * 为什么需要：严格模式下业务请求只认 `X-Auth-Token`，而首次启动的小程序
+   * 手上还没有令牌。前端此时发一个请求会拿到 401 + `reason=NEED_AUTH_TOKEN`
+   * ⇒ 调本端点，用 `X-Device-Id` 换一张令牌（同一设备永远是同一匿名身份），
+   * 再重放原请求。
+   *
+   * 为什么不在中间件里「顺手建号」：那等于把鉴权缺口留在所有业务路由上；
+   * 收敛成一个显式端点后，「谁能凭空获得身份」这件事只有一处、可审计。
+   */
+  @Post('anonymous')
+  @HttpCode(200)
+  async anonymous(@Req() req: RequestWithUser) {
+    if (!req.userId) {
+      throw new BadRequestException('缺少 X-Device-Id，无法建立匿名身份')
+    }
+    const token = signAuthToken(req.userId)
+    return {
+      code: 200,
+      msg: 'success',
+      data: { user_id: req.userId, is_anonymous: !!req.isAnonymous, auth_token: token },
+    }
   }
 
   /** 当前用户（前端启动时可用 X-User-Id 校验身份是否有效） */

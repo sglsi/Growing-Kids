@@ -1,5 +1,6 @@
 import Taro from '@tarojs/taro'
 import { ensureBackendAwake, isConnError } from '@/services/wake'
+import { clearAuthToken, ensureAuthToken } from '@/services/auth-bootstrap'
 
 /**
  * 网络请求模块
@@ -11,6 +12,10 @@ import { ensureBackendAwake, isConnError } from '@/services/wake'
  *
  * 2026-10-24 全局能力（经思傅确认）：request 遇连接类错误（后端挂了/电脑重启）
  * 时自动唤醒后端并重放一次——替代已取消的看门狗机制。详见 services/wake.ts。
+ *
+ * 2026-10-27 全局能力（OPS-18 R-技术-09 严格令牌化）：后端起严格令牌模式后，
+ * 业务请求必须带 `X-Auth-Token`。首次启动无令牌 / 令牌过期会得到 401，这里
+ * 统一换令牌并重放一次——**所有调用方都不用改**（40+ 处 Network.request 无感）。
  */
 export namespace Network {
     const createUrl = (url: string): string => {
@@ -26,11 +31,13 @@ export namespace Network {
 
     export const request: typeof Taro.request = option => {
         let retried = false
+        let tokenRetried = false
         // 跑一次原请求（保留 option.success/fail 回调语义，同时 promise 化）
-        const run = () =>
+        const run = (overrideHeaders?: Record<string, string>) =>
             new Promise<Taro.request.SuccessCallbackResult>((resolve, reject) => {
                 Taro.request({
                     ...option,
+                    header: overrideHeaders ? { ...(option.header as Record<string, string>), ...overrideHeaders } : option.header,
                     url: createUrl(option.url),
                     success: (res) => {
                         option.success?.(res)
@@ -46,8 +53,9 @@ export namespace Network {
         // 此处收敛为 any（调用方均按 Promise<Taro.request.SuccessCallbackResult> 使用，
         // 无人使用 task.abort()——已全仓确认）。
         return (async () => {
+            let res: Taro.request.SuccessCallbackResult
             try {
-                return await run()
+                res = await run()
             } catch (err) {
                 // 仅连接类错误触发「唤醒→重放」；业务错误（4xx/5xx）与域名校验问题不碰
                 if (retried || !isConnError(err)) throw err
@@ -55,8 +63,21 @@ export namespace Network {
                 console.warn('[network] 连接失败，尝试唤醒后端', String((err as { errMsg?: string })?.errMsg || err))
                 const ok = await ensureBackendAwake()
                 if (!ok) throw err
-                return run()
+                res = await run()
             }
+
+            // ---- 401：换令牌后重放一次（严格令牌模式的引导） ----
+            if (res.statusCode === 401 && !tokenRetried) {
+                tokenRetried = true
+                const reason = (res.data as { data?: { reason?: string } })?.data?.reason
+                if (reason === 'TOKEN_INVALID') clearAuthToken()
+                const token = await ensureAuthToken()
+                if (token) {
+                    console.warn('[network] 401 → 已换取身份令牌，重放请求', reason || '')
+                    return run({ 'X-Auth-Token': token }) as any
+                }
+            }
+            return res as any
         })() as any
     }
 

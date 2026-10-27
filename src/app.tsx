@@ -1,9 +1,10 @@
-import { PropsWithChildren } from 'react';
+import { PropsWithChildren, useEffect } from 'react';
 import { hooks } from '@tarojs/shared';
 import { LucideTaroProvider } from 'lucide-react-taro';
 import '@/app.css';
 import { Toaster } from '@/components/ui/toast';
 import PrivacyGate from '@/components/privacy-gate';
+import { ensureAuthToken } from '@/services/auth-bootstrap';
 import { Preset } from './presets';
 
 // ============================================================
@@ -39,6 +40,13 @@ hooks.tap(
 );
 
 const App = ({ children }: PropsWithChildren) => {
+  // 启动即换身份令牌（严格令牌模式，见 OPS-18 R-技术-09）：
+  // 把「首次请求吃一个 401 再重放」的往返提前到冷启动，页面首屏少一次 RTT。
+  // 失败不阻塞（network 层还有一次 401 兜底重放）。
+  useEffect(() => {
+    void ensureAuthToken();
+  }, []);
+
   return (
     <LucideTaroProvider defaultColor="#000" defaultSize={24}>
       <Preset>{children}</Preset>
