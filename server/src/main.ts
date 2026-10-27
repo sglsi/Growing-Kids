@@ -76,8 +76,11 @@ async function bootstrap() {
   app.enableCors({
     origin: true,
     credentials: true,
-    // 允许前端读取匿名身份回传头
-    exposedHeaders: ['X-User-Id'],
+    // 允许前端读取身份回传头（跨域场景下非简单响应头必须显式暴露）：
+    //  - X-User-Id：匿名建号回传（小程序不受同源策略限制，本来就能读到）
+    //  - X-Auth-Token：每次响应滑动续签的令牌。⚠️ 曾漏配，导致 H5 扫码登录页
+    //    （浏览器环境，受 CORS 约束）读不到新令牌 ⇒ 令牌 30 天后过期且无法续期。
+    exposedHeaders: ['X-User-Id', 'X-Auth-Token'],
   });
   app.setGlobalPrefix('api');
   app.use(express.json({ limit: '50mb' }));
