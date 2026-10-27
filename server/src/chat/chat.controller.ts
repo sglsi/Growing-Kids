@@ -11,7 +11,7 @@ import {
   Req,
 } from '@nestjs/common'
 import { ChatService } from './chat.service'
-import { requireAdmin, requireUserId, type RequestWithUser } from '../shared/user-context'
+import { requireAdmin, requireAiEnabled, requireUserId, type RequestWithUser } from '../shared/user-context'
 
 @Controller('chat')
 export class ChatController {
@@ -87,7 +87,8 @@ export class ChatController {
     @Req() req: RequestWithUser,
     @Body() body: { session_id?: string; content: string },
   ) {
-    const userId = requireUserId(req)
+    // R-合规-02：未开启 AI 外发 ⇒ 仅本地模式，这条消息不得发给大模型
+    const userId = requireAiEnabled(req)
     const data = await this.chatService.sendMessage(userId, body.session_id ?? null, body.content)
     return { code: 200, msg: 'success', data }
   }
@@ -112,7 +113,8 @@ export class ChatController {
     @Req() req: RequestWithUser,
     @Body() body: { message: string; history?: { role: 'user' | 'assistant'; content: string }[] },
   ) {
-    requireUserId(req)
+    // R-合规-02：同上，通用对话是纯外发，必须过闸门
+    requireAiEnabled(req)
     const answer = await this.chatService.genericChat(body?.message, body?.history)
     return { code: 200, msg: 'success', data: { answer } }
   }

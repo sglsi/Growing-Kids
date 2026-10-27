@@ -167,6 +167,57 @@ export class UsersService {
     }
   }
 
+  /**
+   * 一次性取「角色 + AI 开关」两个标志位（OPS-18 R-技术-08 / R-合规-02）。
+   *
+   * ⚠️ 为什么不并进常规 `SELECT_COLS`：
+   *   `role` 来自 0017、`ai_enabled` 来自 0018。任何一处迁移没跑，整条用户查询都会报错，
+   *   连带登录一起挂。所以这里单独查，并且**逐级降级**：
+   *     两列都查 → 只查 role → 全默认。
+   *   降级方向是 fail-closed：取不到 role 按 `user`，取不到 ai_enabled 按 `false`（仅本地）。
+   */
+  async findFlags(id: string): Promise<{ role: 'user' | 'admin'; aiEnabled: boolean }> {
+    if (!id) return { role: 'user', aiEnabled: false }
+    const client = getSupabaseClient()
+    try {
+      const { data, error } = await client.from(TABLE).select('role, ai_enabled').eq('id', id).maybeSingle()
+      if (!error && data) {
+        const row = data as { role?: string; ai_enabled?: boolean }
+        return { role: row.role === 'admin' ? 'admin' : 'user', aiEnabled: row.ai_enabled === true }
+      }
+      if (error) console.warn('[users] 读取 role/ai_enabled 失败（0017/0018 可能未执行），降级查询：', error.message)
+    } catch (e) {
+      console.warn('[users] 读取 role/ai_enabled 异常，降级查询：', e)
+    }
+    try {
+      const { data, error } = await client.from(TABLE).select('role').eq('id', id).maybeSingle()
+      if (!error && data) {
+        return { role: (data as { role?: string }).role === 'admin' ? 'admin' : 'user', aiEnabled: false }
+      }
+    } catch {
+      /* 忽略，落到全默认 */
+    }
+    return { role: 'user', aiEnabled: false }
+  }
+
+  /** 设置 AI 开关（用户意愿，不是权限） */
+  async setAiEnabled(userId: string, enabled: boolean): Promise<boolean> {
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({ ai_enabled: enabled })
+      .eq('id', userId)
+      .select('id, ai_enabled')
+    if (error) {
+      // 0018 未执行时给出可操作的提示，而不是一句 500
+      throw new Error(
+        `保存 AI 开关失败：${error.message}（若提示列不存在，请先执行 migrations/0018_user_ai_toggle.sql）`,
+      )
+    }
+    if (!data || !data.length) throw new Error('保存 AI 开关失败：未匹配到用户')
+    return (data[0] as { ai_enabled?: boolean }).ai_enabled === true
+  }
+
   /** 更新昵称 / 头像 */
   async updateProfile(
     userId: string,

@@ -1671,6 +1671,36 @@ export interface PurgeResult {
  * ⚠️ 共享内容不跟着删：同一份文件若其他账号也在引用，只减引用计数；
  *    跨用户共享的识别缓存（ocr_results）不参与账号删除。
  */
+// ---------------- 用户设置（OPS-18 R-合规-02：AI 外发开关） ----------------
+
+export interface UserSettings {
+  /** 是否允许把题目内容发往第三方 AI（ima / 联网检索 / 大模型）。false = 仅本地 */
+  ai_enabled: boolean
+}
+
+/** 读取用户设置 */
+export function getSettings() {
+  return unwrap<UserSettings>(
+    Network.request({ url: '/api/settings', method: 'GET', header: authHeaders() }),
+  )
+}
+
+/**
+ * 设置 AI 外发开关。
+ * 关掉后后端会在 `/api/chat*` 与 `/api/answer-search/*` 直接 403（AI_DISABLED），
+ * 不是只靠前端藏按钮——前端藏按钮只是体验。
+ */
+export function setAiEnabled(enabled: boolean) {
+  return unwrap<{ ai_enabled: boolean }>(
+    Network.request({
+      url: '/api/settings/ai',
+      method: 'PUT',
+      data: { enabled },
+      header: authHeaders(),
+    }),
+  )
+}
+
 export function purgeAccount(dryRun = false) {
   return unwrap<PurgeResult>(
     Network.request({

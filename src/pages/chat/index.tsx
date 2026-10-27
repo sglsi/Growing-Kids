@@ -8,6 +8,7 @@ import {
   fetchChatHistory,
   type ChatMessage,
 } from '@/services/api'
+import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 
 const SESSION_KEY = 'chat:session_id'
@@ -87,6 +88,11 @@ export default function ChatPage() {
   const handleSend = async () => {
     const text = input.trim()
     if (!text || sending) return
+    // R-合规-02：智能客服会把消息发给大模型。未开启 AI 外发时先提示，别让用户白打一段字。
+    if (!(await ensureAiSetting())) {
+      Taro.showToast({ title: AI_DISABLED_HINT, icon: 'none' })
+      return
+    }
     setInput('')
     const tempUserId = `temp-u-${Date.now()}`
     setMessages((prev) => [...prev, { id: tempUserId, role: 'user', content: text }])

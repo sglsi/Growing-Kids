@@ -18,7 +18,7 @@ import { ForbiddenException, Injectable, NestMiddleware } from '@nestjs/common'
 import type { Request, Response, NextFunction } from 'express'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
-import { cacheGet, cacheSet } from './mem-cache'
+import { cacheDel, cacheGet, cacheSet } from './mem-cache'
 import { authTokenEnabled, readAuthHeader, signAuthToken, verifyAuthToken } from './auth-token'
 
 const HEADER_USER_ID = 'x-user-id'
@@ -75,6 +75,11 @@ export interface RequestWithUser extends Request {
   isAnonymous?: boolean
   /** 角色：仅 `admin` 可写全局表（0017 起从 users.role 读取） */
   userRole?: 'user' | 'admin'
+  /**
+   * 是否允许把内容发往第三方 AI（0018 起从 users.ai_enabled 读取）。
+   * 未设/取不到一律按 `false` 处理 = 仅本地，任何内容不出机器。
+   */
+  userAiEnabled?: boolean
   /** 请求头 X-Device-Id 原样透传（登录时用于绑定正式账号 + 迁移设备名下匿名号） */
   deviceId?: string
 }
@@ -160,7 +165,9 @@ export class UserContextMiddleware implements NestMiddleware {
       req.userId = user.id
       req.isAnonymous = user.is_anonymous
       req.deviceId = headerDeviceId
-      req.userRole = await this.resolveRole(user)
+      const flags = await this.resolveFlags(user)
+      req.userRole = flags.role
+      req.userAiEnabled = flags.aiEnabled
 
       // 回传身份（旧版前端仍读 X-User-Id，保留不伤安全：真正的信任来自令牌）
       res.setHeader(HEADER_USER_ID, user.id)
@@ -193,19 +200,18 @@ export class UserContextMiddleware implements NestMiddleware {
   }
 
   /**
-   * 解析角色。
-   * `users` 的常规 select 不含 role（避免未跑 0017 的环境整条查询失败），
-   * 故这里单独取一次并缓存 60s；提权后最多 60s 生效。
+   * 解析「角色 + AI 开关」。
+   * `users` 的常规 select 不含 role / ai_enabled（避免未跑 0017/0018 的环境整条查询失败），
+   * 故这里单独取一次并缓存 60s；改角色/改开关后最多 60s 生效。
    */
-  private async resolveRole(u: User): Promise<'user' | 'admin'> {
-    if (u.role === 'admin') return 'admin'
-    if (u.role === 'user') return 'user'
-    const key = `role:${u.id}`
-    const cached = await cacheGet<'user' | 'admin'>(key)
+  private async resolveFlags(u: User): Promise<{ role: 'user' | 'admin'; aiEnabled: boolean }> {
+    // 角色已在用户行里（部分环境会把 role 带进来）时，仍要单独取 ai_enabled，故统一走缓存
+    const key = `flags:${u.id}`
+    const cached = await cacheGet<{ role: 'user' | 'admin'; aiEnabled: boolean }>(key)
     if (cached) return cached
-    const role = await this.usersService.findRole(u.id)
-    await cacheSet(key, role, USER_CACHE_TTL)
-    return role
+    const flags = await this.usersService.findFlags(u.id)
+    await cacheSet(key, flags, USER_CACHE_TTL)
+    return flags
   }
 
   /** 直接回写 401（中间件抛异常会绕开过滤器，这里自己收口，响应体与全局信封一致） */
@@ -272,4 +278,36 @@ export async function requireAdmin(req: RequestWithUser): Promise<string> {
   }
 
   throw new ForbiddenException('无权限：仅管理员可维护全局知识库')
+}
+
+/**
+ * 「AI 外发」闸门（OPS-18 `R-合规-02`）。
+ *
+ * 规则（用户级、默认关）：
+ *   未开启 `users.ai_enabled` ⇒ **只走本地**（本机 OCR 侧车 + 本地题库），
+ *   任何题目文本/图片都不得发往 ima、联网检索或大模型；开启后才放行。
+ *
+ * ⚠️ 为什么在**后端**拦而不是只在前端藏按钮：
+ *   前端藏按钮只是体验，拿到接口就能绕。控制点必须在服务端。
+ * ⚠️ 取不到开关值时按 `false`（仅本地）—— 这是 fail-closed，方向不能反：
+ *   宁可少一个功能，不可在监护人未同意的情况下把孩子的题目发出去。
+ */
+export function requireAiEnabled(req: RequestWithUser): string {
+  const userId = requireUserId(req)
+  if (req.userAiEnabled === true) return userId
+  throw new ForbiddenException({
+    code: 403,
+    reason: 'AI_DISABLED',
+    message: '未开启 AI 与在线检索：当前为仅本地模式。可在「我的 · 隐私与账号」中开启。',
+  })
+}
+
+/**
+ * 清掉某个用户的标志位缓存。
+ * 用户刚把 AI 开关打开，如果还要等 60s 缓存过期才能用，会被当成"开关没生效"。
+ */
+export async function invalidateUserFlags(userId: string): Promise<void> {
+  if (!userId) return
+  await cacheDel(`flags:${userId}`)
+  await cacheDel(`user:${userId}`)
 }

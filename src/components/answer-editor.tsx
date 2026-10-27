@@ -9,6 +9,7 @@ import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
+import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
@@ -252,9 +253,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 知识库   = 只检索 ima 知识库（秒级），直接给命中条目+高亮内容，不喂给 AI
   // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
   const handleSearch = async (searchMode: 'search' | 'kb' | 'ai') => {
+    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '知识库检索' : 'AI 解题'
+    // R-合规-02：三条通道都往外部发内容。未开启时后端会 403 AI_DISABLED，
+    // 这里先拦一次是为了给出「去哪开」的提示，而不是让用户撞一个看不懂的报错。
+    if (!(await ensureAiSetting())) {
+      Taro.showToast({ title: AI_DISABLED_HINT, icon: 'none' })
+      return
+    }
     setSearching(searchMode)
     setCandidate(null)
-    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '知识库检索' : 'AI 解题'
     try {
       const res = await searchAnswer(item.id, false, searchMode)
       setCandidate(res)

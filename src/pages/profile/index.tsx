@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import QrLoginModal from '@/components/qr-login-modal'
 import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
@@ -16,6 +17,7 @@ import {
   type Overview, type StorageUsage,
 } from '@/services/api'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
+import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -30,9 +32,43 @@ export default function ProfilePage() {
   const [nickname, setNickname] = useState('')
   /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
   const [qrVisible, setQrVisible] = useState(false)
+  /** AI 外发开关（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */
+  const [aiEnabled, setAiEnabledState] = useState(peekAiEnabled())
 
   /** 打开隐私政策（R-合规-03） */
   const openPolicy = () => Taro.navigateTo({ url: '/pages/privacy/index' })
+
+  /**
+   * 切换「AI 与在线检索」开关（R-合规-02）。
+   * 打开方向必须二次确认：这一步等于监护人同意把孩子的题目发往第三方。
+   * 关闭方向不确认——收紧权限不需要征求同意。
+   */
+  const handleToggleAi = async (next: boolean) => {
+    if (busy) return
+    if (next) {
+      const r = await Taro.showModal({
+        title: '开启 AI 与在线检索',
+        content:
+          '开启后，题目文字与图片会发送给第三方 AI 服务（在线搜题、知识库检索、大模型解题）用于给出答案与讲解。\n\n' +
+          '不开启时：识别在本机完成，答案只在本地题库里找，任何内容都不会离开设备。\n\n' +
+          '可随时回来关闭。',
+        confirmText: '同意开启',
+        cancelText: '继续仅本地',
+      })
+      if (!r.confirm) return
+    }
+    setBusy(true)
+    try {
+      const v = await updateAiEnabled(next)
+      setAiEnabledState(v)
+      Taro.showToast({ title: v ? '已开启 AI 与在线检索' : '已切换为仅本地模式', icon: 'none' })
+    } catch (e) {
+      console.error('[profile] 保存 AI 开关失败', e)
+      Taro.showToast({ title: '保存失败，请稍后重试', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
 
   /**
    * 注销账号（R-合规-03）。
@@ -97,6 +133,8 @@ export default function ProfilePage() {
 
   useDidShow(() => {
     load()
+    // 开关可能被别的入口改过（例如隐私页），回到本页时对齐一次
+    void ensureAiSetting().then(setAiEnabledState)
   })
 
   const handleLogin = async () => {
@@ -300,6 +338,22 @@ export default function ProfilePage() {
               )}
             </Card>
           )}
+
+          {/* AI 与在线检索（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */}
+          <Card className="rounded-2xl border-border p-4 mb-5">
+            <View className="flex flex-row items-center justify-between">
+              <View className="flex flex-row items-center gap-2">
+                <Bot size={16} color="#9A948A" />
+                <Text className="block text-sm font-semibold text-foreground">AI 与在线检索</Text>
+              </View>
+              <Switch checked={aiEnabled} disabled={busy} onCheckedChange={handleToggleAi} />
+            </View>
+            <Text className="block mt-2 text-xs text-muted-foreground">
+              {aiEnabled
+                ? '已开启：搜答案与智能客服会调用第三方 AI 服务（在线搜题 / 知识库检索 / 大模型解题）。题目内容会离开本机。'
+                : '未开启（仅本地）：识别与题库匹配都在本机完成，题目内容不会发送给任何第三方。开启后才能使用搜答案与智能客服。'}
+            </Text>
+          </Card>
 
           {/* 隐私与账号（R-合规-03）：政策可查、数据可删、账号可注销 */}
           <Card className="rounded-2xl border-border p-4 mb-5">

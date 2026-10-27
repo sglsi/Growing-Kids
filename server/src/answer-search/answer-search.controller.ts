@@ -1,5 +1,5 @@
 import { Controller, Post, Body, Param, Req, HttpCode } from '@nestjs/common'
-import { requireUserId, type RequestWithUser } from '../shared/user-context'
+import { requireAiEnabled, type RequestWithUser } from '../shared/user-context'
 import { AnswerSearchService } from './answer-search.service'
 
 @Controller('answer-search')
@@ -24,7 +24,10 @@ export class AnswerSearchController {
     @Param('id') id: string,
     @Body() body: { force?: boolean; mode?: 'search' | 'ai' | 'kb' } = {},
   ) {
-    const userId = requireUserId(req)
+    // R-合规-02：三条通道（search 联网检索 / kb ima / ai 大模型）**全部是外发**，
+    // 未开启 AI 外发时一律 403 AI_DISABLED。仅本地模式下滑题功能整体不可用，
+    // 这是有意的：本地题库能兜住的用它兜，兜不住的宁可不给答案，也不偷偷发出去。
+    const userId = requireAiEnabled(req)
     const mode = body?.mode === 'ai' ? 'ai' : body?.mode === 'kb' ? 'kb' : 'search'
     const data = await this.answerSearchService.searchAnswer(userId, id, {
       force: !!body?.force,

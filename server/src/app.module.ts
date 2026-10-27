@@ -6,6 +6,7 @@ import { AppService } from './app.service'
 // 基础设施
 import { StorageModule } from './storage/storage.module'
 import { UsersModule } from './users/users.module'
+import { SettingsModule } from './settings/settings.module'
 import { UserContextMiddleware } from './shared/user-context'
 
 // 业务模块（v4：统一 timeline）
@@ -35,6 +36,7 @@ import { MaterialsModule } from './materials/materials.module'
     ScheduleModule.forRoot(),
     StorageModule,
     UsersModule,
+    SettingsModule, // 用户设置：AI 外发开关（R-合规-02）
     AuthModule,
     SubjectsModule,
     TimelineModule,

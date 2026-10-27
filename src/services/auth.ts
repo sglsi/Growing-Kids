@@ -14,6 +14,7 @@ import Taro from '@tarojs/taro'
 import { Network } from '@/network'
 import { buildHeaders, captureUserId, getUserId, setAuthToken, setUserId } from '@/services/net'
 import { clearAllCache } from '@/services/cache'
+import { clearAiSetting } from '@/services/ai-settings'
 import { resetWakeState } from '@/services/wake'
 import type {
   ApiEnvelope,
@@ -79,6 +80,7 @@ export function applyLoginUser(user: AuthUser): void {
   saveAuthState(toAuthState(user))
   // 与 login() 同一动作：身份切换后旧缓存作废（详见 cache.ts 的 userId 隔离设计）
   clearAllCache()
+  clearAiSetting()
 }
 // ------------------------------------------------------------
 // wx.login 封装（Promise 化）
@@ -143,6 +145,7 @@ export async function login(profile?: UpdateProfilePayload): Promise<LoginResult
   // 匿名 → 正式：userId 变了，旧匿名身份下的本地缓存全部作废（数据虽已迁移，
   // 缓存 key 按 userId 隔离，不清会残留一段无人认领的缓存；顺带防切换账号串数据）
   clearAllCache()
+  clearAiSetting()
   return res
 }
 
@@ -191,6 +194,7 @@ export async function logout(): Promise<void> {
   }
   // 本地读缓存（SWR）按 userId 隔离，登出即整体清空，防止下次登录看到上账号数据
   clearAllCache()
+  clearAiSetting()
   // 唤醒状态一并重置：防止「上一个环境已确认就绪」的 30s 缓存挡住新环境的唤醒判定
   resetWakeState()
 }
