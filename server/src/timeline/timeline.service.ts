@@ -7,7 +7,7 @@ import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { IngestService } from '../storage/ingest.service'
 import {
-  memGet, memSet, invalidateUserTimeline, stableQuery,
+  cacheGet, cacheSet, invalidateUserTimeline, stableQuery,
   TL_LIST_PREFIX, TL_ITEM_PREFIX, TL_OV_KEY,
 } from '../shared/mem-cache'
 import type {
@@ -39,7 +39,7 @@ const SELECT_COLS = '*, subjects:subject_id(id, name, color)'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
 
-/** overview 返回结构（显式声明，供 mem-cache 泛型用） */
+/** overview 返回结构（显式声明，供缓存泛型用） */
 export interface OverviewResult {
   total: number
   week_total: number
@@ -148,10 +148,10 @@ export class TimelineService {
     userId: string,
     query: TimelineListQuery,
   ): Promise<{ list: TimelineItem[]; total: number; page: number; page_size: number }> {
-    // 内存缓存 30s（思傅 2026-10-21：后端读缓存，与前端 SWR 双管齐下）；
+    // 读缓存 30s（思傅 2026-10-21：后端读缓存，与前端 SWR 双管齐下；后端见 cache-store.ts）；
     // 写操作全部走 invalidateUserTimeline 失效，最坏 30s 旧值。
     const cacheKey = `${TL_LIST_PREFIX}${userId}:${stableQuery(query as Record<string, unknown>)}`
-    const cached = memGet<{ list: TimelineItem[]; total: number; page: number; page_size: number }>(cacheKey)
+    const cached = await cacheGet<{ list: TimelineItem[]; total: number; page: number; page_size: number }>(cacheKey)
     if (cached) return cached
 
     const client = getSupabaseClient()
@@ -216,15 +216,15 @@ export class TimelineService {
       page,
       page_size: pageSize,
     }
-    memSet(cacheKey, result)
+    await cacheSet(cacheKey, result)
     return result
   }
 
   // ---------- 单条 ----------
   async findOne(userId: string, id: string): Promise<TimelineItem> {
-    // 内存缓存 30s（详情页重复进入/编辑后回显都不再打 Supabase）
+    // 读缓存 30s（详情页重复进入/编辑后回显都不再打 Supabase）
     const cacheKey = `${TL_ITEM_PREFIX}${userId}:${id}`
-    const cached = memGet<TimelineItem>(cacheKey)
+    const cached = await cacheGet<TimelineItem>(cacheKey)
     if (cached) return cached
 
     const client = getSupabaseClient()
@@ -238,7 +238,7 @@ export class TimelineService {
     if (error) throw new Error(error.message)
     if (!data) throw new NotFoundException('内容不存在')
     const item = data as unknown as TimelineItem
-    memSet(cacheKey, item)
+    await cacheSet(cacheKey, item)
     return item
   }
 
@@ -319,7 +319,7 @@ export class TimelineService {
     // 迁移双写：DB_PROVIDER=dual 时把同一行镜像到腾讯云 PG（best-effort，失败不影响主库）
     await mirrorInsert(TABLE, payload)
     // 新建条目 ⇒ 列表/概览缓存失效（详情缓存按 id 失效，防旧详情残留）
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return data as unknown as TimelineItem
   }
 
@@ -417,7 +417,7 @@ export class TimelineService {
     // 迁移双写：DB_PROVIDER=dual 时把这批行镜像到腾讯云 PG（best-effort，失败不影响主库）
     await mirrorInsert(TABLE, payloads)
     // 批量入库（错题提取保存）⇒ 失效列表/概览缓存
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return (data || []) as unknown as TimelineItem[]
   }
 
@@ -504,7 +504,7 @@ export class TimelineService {
 
     // 2) 单独查询返回完整记录（此时嵌入 subjects 走的是普通 SELECT，稳定返回）
     // 先失效再查：findOne 会把最新数据写回缓存，杜绝「更新后读到旧缓存」
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return this.findOne(userId, id)
   }
 
@@ -558,7 +558,7 @@ export class TimelineService {
     }
 
     // 软删 ⇒ 列表/详情/概览缓存全部失效
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return { removed: (data || []).length }
   }
 
@@ -596,7 +596,7 @@ export class TimelineService {
       .select('id')
     if (error) throw new Error(error.message)
     // 复习本归属变化 ⇒ review 列表与概览缓存失效
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return { updated: (data || []).length }
   }
 
@@ -615,7 +615,7 @@ export class TimelineService {
       .select('id')
     if (error) throw new Error(error.message)
     // 复习本归属变化 ⇒ review 列表与概览缓存失效
-    invalidateUserTimeline(userId)
+    await invalidateUserTimeline(userId)
     return { updated: (data || []).length }
   }
 
@@ -640,9 +640,9 @@ export class TimelineService {
 
   // ---------- 首页概览 ----------
   async overview(userId: string): Promise<OverviewResult> {
-    // 内存缓存 30s（首页每次进入都打 6 个并行查询，是重复请求大户）
+    // 读缓存 30s（首页每次进入都打 6 个并行查询，是重复请求大户）
     const cacheKey = `${TL_OV_KEY}${userId}`
-    const cached = memGet<OverviewResult>(cacheKey)
+    const cached = await cacheGet<OverviewResult>(cacheKey)
     if (cached) return cached
 
     const client = getSupabaseClient()
@@ -695,7 +695,7 @@ export class TimelineService {
       subject_stats: Object.values(statsMap),
       recent: (recentRes.data || []) as unknown as TimelineItem[],
     }
-    memSet(cacheKey, result)
+    await cacheSet(cacheKey, result)
     return result
   }
 }

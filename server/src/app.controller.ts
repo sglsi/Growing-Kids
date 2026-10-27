@@ -1,5 +1,8 @@
 import { Controller, Get } from '@nestjs/common';
 import { AppService } from '@/app.service';
+import { cacheBackendInfo } from '@/shared/cache-store';
+import { authTokenEnabled } from '@/shared/auth-token';
+import { strictTokenEnabled } from '@/shared/user-context';
 
 @Controller()
 export class AppController {
@@ -39,6 +42,37 @@ export class AppController {
     return {
       status: 'success',
       data: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * 运行时诊断（运维用，不含任何密钥值）。
+   *
+   * 为什么单独开一个而不是塞进 /api/health：/api/health 的 `data` 是**时间戳字符串**，
+   * 外部拨测脚本靠它判活（health-probe.mjs），改结构会打断巡检。
+   *
+   * 这里回答三个「用了哪种后端」的问题——它们决定多副本能不能跑：
+   *  - cache：memory（单机）/ redis（多实例共享）
+   *  - ticketStore：扫码票据落库还是进程内
+   *  - strictToken：是否已关闭裸身份头
+   */
+  @Get('health/runtime')
+  getRuntime() {
+    const cache = cacheBackendInfo();
+    return {
+      status: 'success',
+      data: {
+        time: new Date().toISOString(),
+        apiVersions: ['v1', 'v2'],
+        cache: { backend: cache.kind, fallbackReason: cache.fallbackReason || undefined },
+        ticketStore: process.env.QR_TICKET_STORE || 'auto(db 优先)',
+        auth: {
+          tokenEnabled: authTokenEnabled(),
+          strictToken: strictTokenEnabled(),
+        },
+        node: process.version,
+        uptimeSec: Math.round(process.uptime()),
+      },
     };
   }
 }

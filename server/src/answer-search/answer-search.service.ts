@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { createHash } from 'crypto'
 import { LLMClient } from '../ai/llm-provider'
-import { memGet, memSet } from '../shared/mem-cache'
+import { cacheGet, cacheSet } from '../shared/mem-cache'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { TimelineService } from '../timeline/timeline.service'
 import { OcrService } from '../ocr/ocr.service'
@@ -86,14 +86,14 @@ export class AnswerSearchService {
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_DAILY_LIMIT
   }
 
-  /** 当日配额（mem-cache 计数）；force 刷新缓存同样计入，防止刷接口 */
-  private checkQuota(userId: string): { ok: boolean; used: number; limit: number } {
+  /** 当日配额（缓存计数，Redis 后端时多实例共享）；force 刷新缓存同样计入，防止刷接口 */
+  private async checkQuota(userId: string): Promise<{ ok: boolean; used: number; limit: number }> {
     const day = new Date().toISOString().slice(0, 10)
     const key = `${QUOTA_PREFIX}${userId}:${day}`
-    const used = memGet<number>(key) || 0
+    const used = (await cacheGet<number>(key)) || 0
     const limit = this.dailyLimit()
     if (used >= limit) return { ok: false, used, limit }
-    memSet(key, used + 1, CACHE_TTL_MS)
+    await cacheSet(key, used + 1, CACHE_TTL_MS)
     return { ok: true, used: used + 1, limit }
   }
 
@@ -234,12 +234,12 @@ export class AnswerSearchService {
     const qHash = createHash('sha256').update(question).digest('hex').slice(0, 32)
     const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`
     if (!opts.force) {
-      const cached = memGet<AnswerSearchResult>(cacheKey)
+      const cached = await cacheGet<AnswerSearchResult>(cacheKey)
       if (cached) return { ...cached, cached: true }
 
       const persisted = await this.cacheRead(userId, qHash, mode)
       if (persisted) {
-        memSet(cacheKey, persisted, CACHE_TTL_MS)
+        await cacheSet(cacheKey, persisted, CACHE_TTL_MS)
         this.logger.log(
           `[answer-search] 持久化缓存命中（mode=${mode}）→ 省 1 次外部调用（ima 日配额很紧，命中即赚）`,
         )
@@ -248,7 +248,7 @@ export class AnswerSearchService {
     }
 
     // ④ 配额
-    const quota = this.checkQuota(userId)
+    const quota = await this.checkQuota(userId)
     if (!quota.ok) {
       return {
         source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
@@ -350,7 +350,7 @@ export class AnswerSearchService {
     }
 
     // 结果入两级缓存（含 source=none：短期记忆，避免同一道搜不到的题反复白扣 ima 配额）
-    memSet(cacheKey, result, CACHE_TTL_MS)
+    await cacheSet(cacheKey, result, CACHE_TTL_MS)
     await this.cacheWrite(userId, qHash, mode, result)
     return result
   }

@@ -33,6 +33,7 @@ const TABLE_ALLOWLIST = new Set([
   'knowledge_articles', // 全局表：所有用户共享的客服知识库，写操作走 requireAdmin
   'blob_objects', // 内容寻址：按 content_hash 查，本身不属任何用户
   'ocr_results', // 识别层缓存：表内无 user_id 列，按 cache_key 内容寻址跨用户共享（ADD-05 第 4 章 / DD-13）
+  'login_tickets', // 扫码登录票据：按 token 主键寻址，user_id 只在授权成功后写入、不是隔离维度（0012 / OPS-18 R-技术-10）
   'health_check', // 运维探针
   'users', // 身份表：按 id / open_id / device_id 限定，不是按 user_id
 ])

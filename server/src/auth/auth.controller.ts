@@ -93,7 +93,8 @@ export class AuthController {
   @Post('qr-login/ticket')
   @HttpCode(200)
   async createQrTicket() {
-    const data = this.qrLoginService.createTicket()
+    // 票据落库（多副本可共享，见 OPS-18 R-技术-10）；db 不可用时内部降级为内存
+    const data = await this.qrLoginService.createTicket()
     return { code: 200, msg: 'success', data }
   }
 

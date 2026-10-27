@@ -18,7 +18,7 @@ import { ForbiddenException, Injectable, NestMiddleware } from '@nestjs/common'
 import type { Request, Response, NextFunction } from 'express'
 import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
-import { memGet, memSet } from './mem-cache'
+import { cacheGet, cacheSet } from './mem-cache'
 import { authTokenEnabled, readAuthHeader, signAuthToken, verifyAuthToken } from './auth-token'
 
 const HEADER_USER_ID = 'x-user-id'
@@ -41,10 +41,34 @@ const USER_CACHE_TTL = 60_000
 const SKIP_ANONYMOUS_PREFIXES = ['/api/auth/', '/api/health']
 
 /**
- * 引导路由：这些路由允许无令牌访问，用于「换取第一张令牌」。
- * 严格模式下它们是唯一的身份入口，业务路由一律要求令牌。
+ * 公开路由：**允许完全匿名访问**（连身份都不需要）。
+ *
+ * ⚠️ 这里必须白名单而不是「/api/auth/ 全放」：
+ *    - `/api/auth/me`、`/api/auth/profile` 是要身份的，全放就等于把身份校验关掉；
+ *    - `/api/health` 更关键——健康拨测（health-probe.mjs / wake-server）不带令牌，
+ *      一旦它 401，巡检会把「服务正常」误判为「后端已挂」并触发无意义重启。
  */
-const BOOTSTRAP_PREFIXES = ['/api/auth/', '/api/health']
+const PUBLIC_ROUTES = [
+  /^\/api\/health(\/|$)/,
+  /^\/api\/auth\/login$/,
+  /^\/api\/auth\/anonymous$/,
+  /^\/api\/auth\/logout$/,
+  /^\/api\/auth\/qr-login(\/|$)/,
+]
+
+/**
+ * 引导路由：允许在**没有令牌**时用 `X-Device-Id` / `X-Open-Id` 换一张令牌。
+ * 只覆盖「换身份」的三个入口，别扩大——扩大就等于给业务路由留了后门。
+ */
+const BOOTSTRAP_ROUTES = [
+  /^\/api\/auth\/login$/,
+  /^\/api\/auth\/anonymous$/,
+  /^\/api\/auth\/qr-login\/authorize$/,
+]
+
+function matchAny(list: RegExp[], url: string): boolean {
+  return list.some((re) => re.test(url.split('?')[0]))
+}
 
 export interface RequestWithUser extends Request {
   userId?: string
@@ -77,7 +101,8 @@ export class UserContextMiddleware implements NestMiddleware {
       const headerToken = readAuthHeader(req.headers as Record<string, unknown>)
 
       const strict = strictTokenEnabled()
-      const bootstrap = BOOTSTRAP_PREFIXES.some((p) => url.startsWith(p))
+      const isPublic = matchAny(PUBLIC_ROUTES, url)
+      const bootstrap = matchAny(BOOTSTRAP_ROUTES, url)
       let user: User | null = null
 
       // ---------- 1) 令牌：唯一被采信的业务身份 ----------
@@ -123,8 +148,11 @@ export class UserContextMiddleware implements NestMiddleware {
       }
 
       if (!user) {
-        // 严格模式且引导路由也没换成身份：业务请求一律 401，前端拿 401 去走引导换令牌
-        if (strict) return this.reject(res, 'NEED_AUTH_TOKEN', '缺少身份令牌，请重新进入小程序')
+        // 严格模式：公开路由原样放行（无身份也继续），其余一律 401。
+        // 注意 /api/health 必须放行——健康拨测不带令牌，401 会让巡检误判「后端挂了」。
+        if (strict && !isPublic) {
+          return this.reject(res, 'NEED_AUTH_TOKEN', '缺少身份令牌，请重新进入小程序')
+        }
         req.deviceId = headerDeviceId
         return next()
       }
@@ -152,10 +180,10 @@ export class UserContextMiddleware implements NestMiddleware {
   /** 读用户（内存缓存 60s） */
   private async loadUser(id: string): Promise<User | null> {
     const key = `user:${id}`
-    let found = memGet<User>(key)
+    let found = await cacheGet<User>(key)
     if (!found) {
       found = await this.usersService.findById(id)
-      if (found) memSet(key, found, USER_CACHE_TTL)
+      if (found) await cacheSet(key, found, USER_CACHE_TTL)
     }
     if (found && this.isExpiredAnonymous(found)) {
       console.warn('[user-context] 匿名身份已过期（等待维护任务清理）', id)
@@ -173,10 +201,10 @@ export class UserContextMiddleware implements NestMiddleware {
     if (u.role === 'admin') return 'admin'
     if (u.role === 'user') return 'user'
     const key = `role:${u.id}`
-    const cached = memGet<'user' | 'admin'>(key)
+    const cached = await cacheGet<'user' | 'admin'>(key)
     if (cached) return cached
     const role = await this.usersService.findRole(u.id)
-    memSet(key, role, USER_CACHE_TTL)
+    await cacheSet(key, role, USER_CACHE_TTL)
     return role
   }
 
