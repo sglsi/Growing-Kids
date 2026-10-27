@@ -699,11 +699,26 @@ function toReadable(nodes: MathNode[]): string {
       case 'env': {
         if (n.name === 'cases' || n.name === 'dcases' || n.name === 'rcases') {
           // 分段函数：两列时按「条件 时 值」读，一列时直接分号连接
+          // ⚠️ 同通用环境：单元格必须先 trim 再过滤空值。`x & x>0 \\` 这类写法
+          //    会解析出带空白的首尾单元格，直接拼接就成了 " x>0 时 x " ——
+          //    分号两侧多出的空格在抄写/读屏时会变成无意义停顿。
           out += n.rows
-            .map((r) => (r.length >= 2 ? `${toReadable(r[1])}时${toReadable(r[0])}` : toReadable(r[0] || [])))
+            .map((r) => {
+              const cells = r.map((c) => toReadable(c).trim()).filter(Boolean)
+              if (cells.length >= 2) return `${cells[1]}时${cells[0]}`
+              return cells[0] || ''
+            })
+            .filter(Boolean)
             .join('；')
         } else {
-          out += n.rows.map((r) => r.map((c) => toReadable(c)).join(' ')).join('；')
+          // 通用环境（matrix/array 等）：列间用空格连接。
+          // ⚠️ 必须过滤**空单元格**再 join：解析 `a & b \\ c & d` 时行尾/转义处会
+          //    产出空列，直接 join 会得到 " a   b " 这种连续空白碎片（分模块验证
+          //    M12 捕获）——读屏与抄写时它是纯噪音，看着像排版损坏。
+          out += n.rows
+            .map((r) => r.map((c) => toReadable(c).trim()).filter(Boolean).join(' '))
+            .filter(Boolean)
+            .join('；')
         }
         break
       }
