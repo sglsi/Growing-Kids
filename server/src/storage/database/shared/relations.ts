@@ -1,3 +1,7 @@
+// ⛔️ 已失真 · 禁止作为真相源（GK-OPS-18 R-工程-09，2026-10-27）
+// 与 ./schema 同为早期 drizzle introspect 生成物，引用了库里已不存在的
+// subjects_legacy / questions_legacy 等表，且无人 import。保留仅为留痕，
+// 真相源是仓库根 migrations/*.sql（见 GK-ADD-05 第 9 章）。
 import { relations } from "drizzle-orm/relations";
 import { subjectsLegacy, questionsLegacy, users, timelineItems, subjects, libraryDocs, documents } from "./schema";
 

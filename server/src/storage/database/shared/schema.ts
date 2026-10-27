@@ -1,3 +1,23 @@
+// ============================================================================
+// ⛔️ 已失真 · 禁止作为真相源（GK-OPS-18 R-工程-09，2026-10-27）
+//
+// 本文件是**早期 drizzle introspect 的自动生成产物**，此刻与真实数据库不一致，
+// 且有 `@ts-nocheck`（类型检查对它无效），**没有任何运行时代码 import 它**
+// （唯一的引用方 relations.ts 同样是生成物）。
+//
+// 实测差异（comm 比对 pgTable 与 migrations/*.sql）：
+//   缺 6 张现行表：answer_cache、ocr_results、memories、memory_media、questions、materials
+//   多 4 张库里不存在的表：documents_legacy、materials_legacy、questions_legacy、subjects_legacy
+//
+// 为什么保留而不删：删除属于不可逆动作，需单独确认（用户 2026-10-27 选择「保留+标注」）。
+//
+// 🚩 三条不要做：
+//   1) 不要按本文件写查询/生成 DTO —— 会漏表；
+//   2) 不要按本文件去「对齐」数据库 —— 会把已删的 *_legacy 表又建回来；
+//   3) 不要以为改这里会影响运行 —— 它不参与任何运行路径。
+//
+// ✅ 唯一真相源：仓库根 `migrations/*.sql`（见 GK-ADD-05 第 9 章）
+// ============================================================================
 // @ts-nocheck
 import { pgTable, serial, timestamp, index, unique, varchar, integer, foreignKey, text, jsonb, boolean, bigint } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"

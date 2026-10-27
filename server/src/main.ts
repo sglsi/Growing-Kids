@@ -45,6 +45,7 @@ import { AppController } from '@/app.controller';
 import * as express from 'express';
 import { HttpStatusInterceptor } from '@/interceptors/http-status.interceptor';
 import { AllExceptionsFilter } from '@/filters/all-exceptions.filter';
+import { accessLog, installLogTee } from '@/shared/logger';
 
 function parsePort(): number {
   const args = process.argv.slice(2);
@@ -71,7 +72,34 @@ function parsePort(): number {
 }
 
 async function bootstrap() {
+  // 0. 接管 console.* → 同时落盘 server/logs/app-YYYY-MM-DD.log（保留 7 天）
+  //    必须早于 NestFactory.create：否则模块初始化阶段的日志抓不到。
+  installLogTee();
   const app = await NestFactory.create(AppModule);
+
+  // 0.5 API 版本前缀：`/api/v2/xxx` → `/api/xxx`（OPS-18 R-工程-06）
+  //
+  // 为什么用「重写」而不是重挂 70 个处理器：换前缀若靠改 controller 路径，
+  // 等于把「版本」硬编码进每个文件，下次 v3 还得再改一遍；重写只在一处，
+  // 且**旧 `/api` 继续可用**（向后兼容，老版本小程序不会当场炸）。
+  // 响应头 `X-Api-Version` 让调用方知道自己命中的是哪个入口。
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const url = req.url || '';
+    if (url.startsWith('/api/v2/') || url === '/api/v2') {
+      const rest = url.slice('/api/v2'.length);
+      const rewritten = `/api${rest}`;
+      req.url = rewritten;
+      // originalUrl 也要改：下游（user-context 的引导路由判断、访问日志）读的是它
+      (req as unknown as { originalUrl: string }).originalUrl = rewritten;
+      res.setHeader('X-Api-Version', 'v2');
+    } else if (url.startsWith('/api/')) {
+      res.setHeader('X-Api-Version', 'v1');
+    }
+    next();
+  });
+
+  // 0.6 访问日志：每请求一行（方法/路径/状态/耗时/用户/traceId）
+  app.use(accessLog);
 
   app.enableCors({
     origin: true,
