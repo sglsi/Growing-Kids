@@ -340,7 +340,7 @@ class Parser {
       const rows: MathNode[][][] = []
       // 按 \\ 分行、按 & 分列；空行/空列保留结构
       for (const rowStr of bodyStr.split(/\\\\/)) {
-        rows.push(rowStr.split('&').map((c) => new Parser(c).parse(false)))
+        rows.push(rowStr.split('&').map((cell) => new Parser(cell).parse(false)))
       }
       if (!rows.length) throw new UnsupportedLatexError('空环境')
       return [{ t: 'env', name: env, rows }]
@@ -885,8 +885,8 @@ export function readableToLatex(src: string): string {
   }
 
   /** 去掉最外层括号（frac/根号的参数本身已分组，括号只会多个可见括号） */
-  const stripParen = (s: string): string =>
-    s.startsWith('(') && s.endsWith(')') && s.length > 2 ? s.slice(1, -1) : s
+  const stripParen = (raw: string): string =>
+    raw.startsWith('(') && raw.endsWith(')') && raw.length > 2 ? raw.slice(1, -1) : raw
 
   /**
    * 从已生成文本末尾取回一个原子（分数/上下标/装饰要挂到它上面）。

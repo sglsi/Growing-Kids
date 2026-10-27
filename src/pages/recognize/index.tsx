@@ -1,3 +1,7 @@
+// 例外说明：「序号快选」那个输入框外面已经套了自绘胶囊容器（h-9 rounded-xl border border-border），
+// 而 ui/input 内建 h-10 + border + px-3，套进去会变成双层边框、高度也对不上。
+// 该处只需要一个无装饰的原生输入体，故保留 Taro 原生 Input。
+// eslint-disable-next-line no-restricted-syntax
 import { View, Text, ScrollView, Input, Image as TaroImage, Picker } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState, useEffect, useRef } from 'react'

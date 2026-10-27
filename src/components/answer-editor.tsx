@@ -251,19 +251,19 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 联网搜题 = 只做真实网络检索，直接给来源摘要+链接，不喂给 AI
   // 知识库   = 只检索 ima 知识库（秒级），直接给命中条目+高亮内容，不喂给 AI
   // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
-  const handleSearch = async (mode: 'search' | 'kb' | 'ai') => {
-    setSearching(mode)
+  const handleSearch = async (searchMode: 'search' | 'kb' | 'ai') => {
+    setSearching(searchMode)
     setCandidate(null)
-    const label = mode === 'search' ? '联网搜题' : mode === 'kb' ? '知识库检索' : 'AI 解题'
+    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '知识库检索' : 'AI 解题'
     try {
-      const res = await searchAnswer(item.id, false, mode)
+      const res = await searchAnswer(item.id, false, searchMode)
       setCandidate(res)
       if (res.source === 'none') {
-        Taro.showToast({ title: res.note || `${label}未成功`, icon: 'none' })
+        Taro.showToast({ title: res.note || `${searchLabel}未成功`, icon: 'none' })
       }
     } catch (e) {
-      console.error(`${label}失败`, e)
-      Taro.showToast({ title: `${label}失败，请稍后重试`, icon: 'none' })
+      console.error(`${searchLabel}失败`, e)
+      Taro.showToast({ title: `${searchLabel}失败，请稍后重试`, icon: 'none' })
     } finally {
       setSearching(null)
     }
@@ -296,7 +296,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }
 
-  const btn = 'flex flex-row items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border'
+  const btn = 'flex flex-row items-center gap-1 px-[10px] py-[6px] rounded-lg border border-border'
 
   return (
     <View className="mb-4">

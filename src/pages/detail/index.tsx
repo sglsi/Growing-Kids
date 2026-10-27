@@ -687,21 +687,21 @@ export default function DetailPage() {
                   </View>
                   <View className="flex flex-row items-center flex-wrap justify-center gap-1 mt-1">
                     <View
-                      className="px-1.5 rounded"
+                      className="px-[6px] rounded"
                       style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => handleEditImage(u)}
                     >
                       <Text className="block text-xs" style={{ color: BRAND_TEXT }}>编辑</Text>
                     </View>
                     <View
-                      className="px-1.5 rounded"
+                      className="px-[6px] rounded"
                       style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => { if (!ocrBusy) void handleOcrImage(u) }}
                     >
                       <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{ocrBusy ? '识别中' : '识别'}</Text>
                     </View>
                     <View
-                      className="px-1.5 rounded"
+                      className="px-[6px] rounded"
                       style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                       onClick={() => void handleDeleteImage('question', u)}
                     >
@@ -732,7 +732,7 @@ export default function DetailPage() {
                     />
                   </View>
                   <View
-                    className="px-1.5 rounded mt-1"
+                    className="px-[6px] rounded mt-1"
                     style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('answer', u)}
                   >
@@ -762,7 +762,7 @@ export default function DetailPage() {
                     />
                   </View>
                   <View
-                    className="px-1.5 rounded mt-1"
+                    className="px-[6px] rounded mt-1"
                     style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', paddingTop: 2, paddingBottom: 2 }}
                     onClick={() => void handleDeleteImage('legacy', u)}
                   >

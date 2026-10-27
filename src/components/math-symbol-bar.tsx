@@ -111,8 +111,8 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
   const [open, setOpen] = useState(false)
   const [page, setPage] = useState(0)
 
-  const chip = 'flex-shrink-0 px-2.5 h-8 rounded-lg border border-border bg-white flex items-center justify-center'
-  const tab = 'flex-shrink-0 px-2.5 h-7 rounded-lg flex items-center justify-center'
+  const chip = 'flex-shrink-0 px-[10px] h-8 rounded-lg border border-border bg-white flex items-center justify-center'
+  const tab = 'flex-shrink-0 px-[10px] h-7 rounded-lg flex items-center justify-center'
 
   return (
     <View className="mb-2">
@@ -124,7 +124,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         {/* 编辑 / 完成：预览态点「编辑」改内容，编辑态点「完成」保存回渲染态（思傅 2026-10-23） */}
         {onTogglePreview ? (
           <View
-            className="flex flex-row items-center px-2.5 h-8 rounded-lg mr-1.5"
+            className="flex flex-row items-center px-[10px] h-8 rounded-lg mr-[6px]"
             style={{ backgroundColor: preview ? BRAND : 'rgba(16, 185, 129,0.08)' }}
             onClick={onTogglePreview}
           >
@@ -135,7 +135,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
         ) : null}
 
         <View
-          className="flex flex-row items-center gap-1 px-2.5 h-8 rounded-lg"
+          className="flex flex-row items-center gap-1 px-[10px] h-8 rounded-lg"
           style={{ backgroundColor: open ? BRAND : 'rgba(16, 185, 129,0.08)' }}
           onClick={() => setOpen((v) => !v)}
         >
@@ -146,10 +146,10 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
       </View>
 
       {open && (
-        <View className="mt-2 rounded-xl border border-border bg-muted/40 p-2">
+        <View className="mt-2 rounded-xl border border-border bg-muted p-2">
           {/* 页签行：四个组一次只显示一组（思傅 2026-10-23） */}
           <ScrollView scrollX className="w-full whitespace-nowrap">
-            <View className="flex flex-row gap-1.5 mb-2">
+            <View className="flex flex-row gap-[6px] mb-2">
               {PAGES.map((g, i) => (
                 <View
                   key={g.label}
@@ -176,11 +176,11 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
                最多展示三行（3×32px 芯片 + 2×6px 间距 = 108px），超出上下滑动。
                公式模板页仍是横滑——中文标签横滑更省纵向空间。 */
             <ScrollView scrollY style={{ height: 108 }} className="w-full">
-              <View className="flex flex-row flex-wrap gap-1.5">
+              <View className="flex flex-row flex-wrap gap-[6px]">
                 {PAGES[page].chips.map((c) => (
                   <View
                     key={c.label}
-                    className="px-2.5 h-8 rounded-lg border border-border bg-white flex items-center justify-center"
+                    className="px-[10px] h-8 rounded-lg border border-border bg-white flex items-center justify-center"
                     onClick={() => onInsert(c.insert)}
                   >
                     <Text className="block text-xs text-foreground">{c.label}</Text>
@@ -190,7 +190,7 @@ export default function MathSymbolBar({ onInsert, preview, onTogglePreview }: Pr
             </ScrollView>
           ) : (
             <ScrollView scrollX className="w-full whitespace-nowrap">
-              <View className="flex flex-row gap-1.5">
+              <View className="flex flex-row gap-[6px]">
                 {PAGES[page].chips.map((c) => (
                   <View key={c.label} className={chip} onClick={() => onInsert(c.insert)}>
                     <Text className="block text-xs text-foreground">{c.label}</Text>

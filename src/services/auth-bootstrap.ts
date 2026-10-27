@@ -72,6 +72,10 @@ export function ensureAuthToken(): Promise<string> {
       resolve('')
       return
     }
+    // 必须直连 Taro.request（不能用 Network）：本文件被 Network 依赖（401 换令牌），
+    // 反过来 import Network 会成环，打包后可能出现 Network 为 undefined
+    // （Taro 编译到 CJS，环引用拿到的是半成品）。此处属经评估的例外。
+    // eslint-disable-next-line no-restricted-properties
     Taro.request({
       url: baseUrl('/api/auth/anonymous'),
       method: 'POST',

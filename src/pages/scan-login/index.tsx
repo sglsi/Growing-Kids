@@ -28,11 +28,13 @@ type Phase = 'checking' | 'authorizing' | 'done' | 'fail' | 'invalid'
 function loadJweixin(): Promise<void> {
   return new Promise((resolve, reject) => {
     if ((window as any).wx) return resolve()
-    const s = document.createElement('script')
-    s.src = 'https://res.wx.qq.com/open/js/jweixin-1.6.0.js'
-    s.onload = () => ((window as any).wx ? resolve() : reject(new Error('微信 SDK 加载异常')))
-    s.onerror = () => reject(new Error('微信 SDK 加载失败，请检查网络后重试'))
-    document.head.appendChild(s)
+    const script = document.createElement('script')
+    // 这一行是 SDK 的 URL，不是 className——「小数值类名」规则会把 jweixin-1.6.0 里的 `-1.6` 误判成 Tailwind 类名
+    // eslint-disable-next-line no-restricted-syntax
+    script.src = 'https://res.wx.qq.com/open/js/jweixin-1.6.0.js'
+    script.onload = () => ((window as any).wx ? resolve() : reject(new Error('微信 SDK 加载异常')))
+    script.onerror = () => reject(new Error('微信 SDK 加载失败，请检查网络后重试'))
+    document.head.appendChild(script)
   })
 }
 

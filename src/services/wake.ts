@@ -47,6 +47,9 @@ const WAIT_READY_ROUNDS = 2 // 最多 2 轮 = 40s（OCR 冷启动+模型加载�
 
 function req<T = unknown>(url: string, method: 'GET' | 'POST', timeout: number): Promise<T> {
   return new Promise((resolve, reject) => {
+    // 必须直连 Taro.request：network.ts 依赖本模块（连接失败→唤醒→重放），
+    // 反向 import Network 会成环，打包后可能拿到 undefined。此处属经评估的例外。
+    // eslint-disable-next-line no-restricted-properties
     Taro.request({
       url,
       method,

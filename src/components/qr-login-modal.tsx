@@ -76,7 +76,11 @@ export default function QrLoginModal({ visible, onClose, onSuccess }: Props) {
       const token = body.data.token
       const lib = await loadQrCodeLib()
       // Taro H5 hash 路由：origin + pathname + #/pages/scan-login/index?token=
-      const url = `${location.origin}${location.pathname}#/pages/scan-login/index?token=${encodeURIComponent(token)}`
+      // 该弹层只在 H5 用（小程序无 wx.login 场景不存在），但仍做存在性判断，
+      // 避免在小程序端误渲染时 ReferenceError（lint 也禁止裸用 location）。
+      const loc = typeof window !== 'undefined' ? window.location : undefined
+      if (!loc) throw new Error('当前环境不支持扫码登录（仅浏览器可用）')
+      const url = `${loc.origin}${loc.pathname}#/pages/scan-login/index?token=${encodeURIComponent(token)}`
       await new Promise<void>((resolve, reject) => {
         if (!canvasRef.current) {
           reject(new Error('二维码画布未就绪'))
