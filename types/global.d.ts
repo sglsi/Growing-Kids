@@ -2,6 +2,13 @@
 
 declare const PROJECT_DOMAIN: string | undefined;
 declare const TARO_ENV: "weapp" | "h5" | undefined;
+/**
+ * 后端「自动唤醒」开关（编译期常量，见 config/index.ts）。
+ * 唤醒服务是**本机开发态**的产物：小程序请求连不上后端时去打 3002 端口把
+ * 后端拉起来。生产环境（云托管）没有 3002，硬留着只会让每次连接失败多等
+ * 最多 40s 才报错。故生产构建默认关闭，本地/体验版构建默认开启。
+ */
+declare const WAKE_ENABLED: string | boolean | undefined;
 
 declare module '*.png';
 declare module '*.gif';

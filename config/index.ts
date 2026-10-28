@@ -150,6 +150,14 @@ export default defineConfig<'vite'>(async (merge, _env) => {
           : process.env.PROJECT_DOMAIN || 'http://127.0.0.1:3001',
       ),
       TARO_ENV: JSON.stringify(process.env.TARO_ENV),
+      // 后端自动唤醒开关（services/wake.ts）。生产构建**默认关闭**：
+      // 唤醒服务（3002）只存在于本机开发态，云托管上没有它，留着会让每次
+      // 连接失败先白等最多 40s 再报错。需要时可用 WAKE_ENABLED=1 显式打开。
+      WAKE_ENABLED: JSON.stringify(
+        process.env.TARO_ENV === 'h5'
+          ? '0'
+          : process.env.WAKE_ENABLED ?? (process.env.NODE_ENV === 'production' ? '0' : '1'),
+      ),
     },
     copy: {
       patterns: [],

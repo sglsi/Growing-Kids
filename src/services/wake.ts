@@ -70,7 +70,17 @@ function req<T = unknown>(url: string, method: 'GET' | 'POST', timeout: number):
  *  - 并发调用共享同一次唤醒（单 flight）：页面同时发多个请求只唤醒一次
  *  - 失败 60s 内不再尝试（防每个请求都白等 8s）
  */
+/** 唤醒开关（编译期常量 WAKE_ENABLED，见 config/index.ts 与 types/global.d.ts）。
+ *  生产构建默认 '0'：云托管上没有 3002 唤醒服务，留着只会让连接失败先白等
+ *  最多 40s 才报错——用户看到的是「转圈半天然后失败」。
+ *  未定义（老构建 / H5）时保持原行为（开启），不改变既有链路。 */
+function wakeEnabled(): boolean {
+  if (typeof WAKE_ENABLED === 'undefined') return true
+  return WAKE_ENABLED === true || WAKE_ENABLED === '1'
+}
+
 export function ensureBackendAwake(): Promise<boolean> {
+  if (!wakeEnabled()) return Promise.resolve(false)
   if (Date.now() - lastOkAt < OK_CACHE_MS) return Promise.resolve(true)
   if (Date.now() - lastFailAt < FAIL_COOLDOWN_MS) return Promise.resolve(false)
   if (inFlight) return inFlight

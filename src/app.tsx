@@ -7,6 +7,7 @@ import PrivacyGate from '@/components/privacy-gate';
 import PolicyConsent from '@/components/policy-consent';
 import { ensureAuthToken } from '@/services/auth-bootstrap';
 import { ensureAiSetting } from '@/services/ai-settings';
+import { installAppRuntime } from '@/services/app-runtime';
 import { Preset } from './presets';
 
 // ============================================================
@@ -49,6 +50,9 @@ const App = ({ children }: PropsWithChildren) => {
     void ensureAuthToken();
     // 预热 AI 外发开关：决定是否展示「问 AI / 搜答案」入口（R-合规-02）
     void ensureAiSetting();
+    // 运行时保障：版本更新检测 / 网络状态提示 / 全局错误捕获
+    // （详见 services/app-runtime.ts；非微信端内部直接返回，零副作用）
+    installAppRuntime();
   }, []);
 
   return (
