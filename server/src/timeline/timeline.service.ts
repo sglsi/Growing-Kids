@@ -237,7 +237,7 @@ export class TimelineService {
 
     // 排序：
     //   复习本默认按「到期先后」——按加入时间倒序等于「谁最近进本谁排前」，
-    //   与「该复习谁」毫无关系，天然形成块状 + 集中，与间隔/交错都相反（SRS-20 C5）。
+    //   与「该复习谁」毫无关系，天然形成块状 + 集中，与间隔/交错都相反（GK-SRS-20b C5）。
     //   ASC 在 Postgres 里 NULL 自然垫底（已毕业/未排程排最后），正是想要的顺序。
     if (scope === 'review' && query.sort !== 'added') {
       q = q

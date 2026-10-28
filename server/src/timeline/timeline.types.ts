@@ -147,7 +147,7 @@ export interface TimelineListQuery {
   due?: boolean
   /**
    * 复习本排序：'due'（默认，按到期先后）/ 'added'（旧的按加入时间倒序）。
-   * 分散练习要求「先复习最该复习的」，故默认不再用加入时间排序（SRS-20 C5）。
+   * 分散练习要求「先复习最该复习的」，故默认不再用加入时间排序（GK-SRS-20b C5）。
    */
   sort?: 'due' | 'added'
   page?: number

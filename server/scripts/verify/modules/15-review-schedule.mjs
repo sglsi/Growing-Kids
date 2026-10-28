@@ -1,7 +1,7 @@
 // 模块 15：复习排程（C4 · 分散练习）
 //
 // 为什么单独一个模块：
-//   这是全项目效应量最高的机制（d = 0.85，GK-SRS-20 §4.1），也是最容易「看起来做了、
+//   这是全项目效应量最高的机制（d = 0.85，GK-SRS-20b §4.1），也是最容易「看起来做了、
 //   其实没生效」的地方——旧实现按 created_at 现算、且只有一个「今天复习了 ✓」按钮，
 //   做对做错一个样。本模块同时钉住两件事：
 //     ① 纯函数层：间隔推进 / 回退 / 到期判定（时间无法快进的边界只能在这里测）
@@ -111,7 +111,7 @@ m.test('单编：timeline/review.ts 可独立编译（零 import 契约）', asy
 m.test('间隔表 = [1,3,7,14,28]（改动必须有证据支撑，防手滑调参）', async (c) => {
   c.ok(Array.isArray(R.REVIEW_INTERVALS), 'REVIEW_INTERVALS 不是数组')
   c.eq(R.REVIEW_INTERVALS.join(','), '1,3,7,14,28',
-    `间隔表被改动为 ${R.REVIEW_INTERVALS.join(',')} —— 依据见 GK-SRS-20 §4.3，改前请先改文档`)
+    `间隔表被改动为 ${R.REVIEW_INTERVALS.join(',')} —— 依据见 GK-SRS-20b §4.3，改前请先改文档`)
   c.eq(R.REVIEW_STAGES, 5)
 })
 
