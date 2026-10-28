@@ -1,0 +1,191 @@
+# ============================================================
+# Growing-Kids CI（GitHub Actions）
+#
+# 两个作业，按「跑起来需不需要外部依赖」切开：
+#
+#   gate      —— 无密钥、无数据库、无 OCR 侧车，**任何 push / PR 都跑**
+#                静态门禁（lint / tsc / 数据隔离扫描）+ 前端纯函数 + 工程门禁
+#                + 构建产物存在性。这一层保证「代码进主干前不会连编译都不过」。
+#
+#   api-core  —— 需要一套可用的 Supabase（真实后端 + 真实数据库）
+#                在 runner 上起 NestJS，再跑 M01–M08 + M15（不含 OCR / 大模型相关模块）。
+#                没配密钥时**自动跳过而不是失败**：个人项目不该因为没给 CI 配库就常年红。
+#
+# 为什么 OCR / AI 模块（M09–M11、M14）不在 CI：
+#   它们要 PaddleOCR 侧车（几百 MB 模型 + Python venv）、大模型 Key、以及本机
+#   备份计划的注册状态——这些在 GitHub runner 上复现成本远高于收益，属于
+#   「交付前在本机跑一次」的范畴。GK-QA-21 §2.3 已写明分工。
+#
+# OCR 质量真值评测（server/scripts/ocr-gt/）同理不进 CI：它比的是"识别得准不准"，
+# 需要真引擎，且结论是相对基线的——跑在噪声大的 runner 上只会制造假回归。
+# 交付前在本机跑：pnpm ocr:gt
+# ============================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新提交取消上一次未跑完的作业，省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '9'
+
+jobs:
+  # ----------------------------------------------------------
+  # 作业 1：静态门禁（无外部依赖）
+  # ----------------------------------------------------------
+  gate:
+    name: 静态门禁 + 前端纯函数
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # M13 会断言 dist / server/dist 存在（"产物在仓库里能构建出来"）。
+      # 因此必须先构建——否则等于用一个恒假的断言骗自己。
+      - name: 构建后端（nest build）
+        run: pnpm build:server
+
+      - name: 构建小程序产物（taro build:weapp）
+        run: pnpm build:weapp
+
+      # M12 = 前端纯函数（latex / answer-merge，单编后直跑）
+      # M13 = 隔离扫描 / 前后端 tsc / eslint / U+FFFD / 文档表格列数 / 产物存在性
+      - name: 验证套件（M12 M13）
+        working-directory: server
+        run: node scripts/verify/run.mjs M12 M13
+
+      - name: 上传验证报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-gate
+          path: |
+            docs/test/verify-summary.md
+            docs/test/verify-results.json
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------
+  # 作业 2：接口契约（需要一套真实后端环境）
+  # ----------------------------------------------------------
+  # 先探测密钥在不在：GitHub 不允许在 job 级 if 里直接用 secrets，
+  # 所以用一个小作业把它变成 output。
+  precheck:
+    name: 探测接口测试密钥
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          if [ -n "${{ secrets.GK_SUPABASE_URL }}" ] && [ -n "${{ secrets.GK_SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "接口测试：已配置 Supabase 密钥，将执行"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "接口测试：未配置 GK_SUPABASE_URL / GK_SUPABASE_SERVICE_ROLE_KEY，跳过（本地用 pnpm verify 跑）"
+          fi
+
+  api-core:
+    name: 接口契约（M01–M08 + M15）
+    needs: [gate, precheck]
+    if: needs.precheck.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 写入测试环境（server/.env）
+        # 只写接口测试真正需要的项：
+        #   · Supabase 走 service_role（RLS 未启用，隔离靠 .eq(user_id)，见 ADD-05）
+        #   · 存储用 local 驱动 —— 跑完即弃，不需要动真实 bucket
+        #   · AUTH_TOKEN_SECRET 必须配：严格令牌模式是套件的前提（裸 X-User-Id 一律 401）
+        run: |
+          cat > server/.env <<'EOF'
+          SUPABASE_URL=${{ secrets.GK_SUPABASE_URL }}
+          STORAGE_DRIVER=local
+          STORAGE_PUBLIC_BASE_URL=http://127.0.0.1:3001
+          SERVER_PORT=3001
+          ANSWER_SEARCH_PROVIDER=none
+          AI_PROVIDER=none
+          LIBRARY_NETDISK_SYNC=false
+          EOF
+          cat > server/.env.secrets <<'EOF'
+          SUPABASE_ANON_KEY=${{ secrets.GK_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY=${{ secrets.GK_SUPABASE_SERVICE_ROLE_KEY }}
+          AUTH_TOKEN_SECRET=${{ secrets.GK_AUTH_TOKEN_SECRET }}
+          EOF
+
+      - name: 构建后端
+        run: pnpm build:server
+
+      - name: 跑迁移（保持 schema 与代码同版本）
+        working-directory: server
+        env:
+          DATABASE_URL: ${{ secrets.GK_DATABASE_URL }}
+        run: |
+          if [ -n "$DATABASE_URL" ]; then node scripts/migrate.mjs; else echo "未提供 GK_DATABASE_URL，跳过迁移（假定 schema 已是最新）"; fi
+
+      - name: 启动后端
+        working-directory: server
+        run: |
+          node dist/main -p 3001 > /tmp/server.log 2>&1 &
+          echo "等待 /api/health …"
+          for i in $(seq 1 60); do
+            # ⚠️ /api/health 必须在 PUBLIC_ROUTES 里，否则这里等到超时也只是在证明
+            #    "巡检会误判后端已挂"（M01 有一条用例专门守这个）
+            if curl -sf --max-time 3 http://127.0.0.1:3001/api/health > /dev/null; then
+              echo "后端就绪（${i}s）"; exit 0
+            fi
+            sleep 1
+          done
+          echo "后端 60s 未就绪，输出日志："; tail -80 /tmp/server.log; exit 1
+
+      - name: 验证套件（M01–M08 + M15）
+        working-directory: server
+        # 不跑 M09/M10/M11/M14：需要 OCR 侧车 / 大模型 Key / 本机备份任务（见文件头）
+        run: node scripts/verify/run.mjs M01 M02 M03 M04 M05 M06 M07 M08 M15
+
+      - name: 后端日志（失败时）
+        if: failure()
+        run: tail -120 /tmp/server.log
+
+      - name: 上传验证报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-api
+          path: |
+            docs/test/verify-summary.md
+            docs/test/verify-results.json
+          if-no-files-found: ignore

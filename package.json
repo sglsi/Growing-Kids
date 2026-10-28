@@ -25,7 +25,14 @@
     "preview:tt": "pnpm exec taro build --type tt --preview",
     "preview:weapp": "pnpm exec taro build --type weapp --preview",
     "tsc": "npx tsc --noEmit --skipLibCheck",
-    "validate": "pnpm exec concurrently --kill-others-on-fail --kill-signal SIGKILL -n lint,tsc -c red,blue \"pnpm lint:build\" \"pnpm tsc\""
+    "validate": "pnpm exec concurrently --kill-others-on-fail --kill-signal SIGKILL -n lint,tsc -c red,blue \"pnpm lint:build\" \"pnpm tsc\"",
+    "verify": "cd server && node scripts/verify/run.mjs",
+    "verify:core": "cd server && node scripts/verify/run.mjs M01 M02 M03 M04 M05 M06 M07 M08 M15",
+    "verify:list": "cd server && node scripts/verify/run.mjs --list",
+    "verify:ci": "cd server && node scripts/verify/run.mjs M12 M13",
+    "ocr:gt": "cd server && node scripts/ocr-gt/run.mjs",
+    "ocr:gt:gen": "cd server && node scripts/ocr-gt/gen.mjs",
+    "ocr:gt:baseline": "cd server && node scripts/ocr-gt/run.mjs --update-baseline"
   },
   "lint-staged": {
     "src/**/*.{js,jsx,ts,tsx,css}": [
