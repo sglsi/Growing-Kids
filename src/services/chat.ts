@@ -23,7 +23,9 @@ export async function sendChat(message: string, history: ChatTurn[] = []): Promi
     method: 'POST',
     data: { message, history },
     header: buildHeaders({ 'Content-Type': 'application/json' }),
-    // 扣子非流式轮询可能较久（实测 ~90s），微信默认 60s 会超时，给足
+    // ⚠️ 扣子非流式轮询实测 ~90s，但微信 request **超时上限 60s**，
+    //    写 130000 不会生效 ⇒ 慢回答在小程序端会被掐断（表现为「发送失败」）。
+    //    未修：需后端改流式（SSE/分包返回）或异步 ticket，见 OPS-18 R-上线-01。
     timeout: 130000,
   })
   captureUserId(res)

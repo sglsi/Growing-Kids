@@ -285,6 +285,18 @@ function Bubble({
               {content}
             </Text>
           </View>
+          {/*
+            AI 生成内容标识（合规硬要求，不是文案偏好）：
+            《人工智能生成合成内容标识办法》要求向公众提供的 AI 生成内容须有
+            **显式标识**。缺失标识在审核与事后追责里都属于可归因缺陷。
+            字号 12px：低于 12px 在 Taro 4.1.9 下有渲染下限问题（QA-17）。
+          */}
+          <Text
+            className="block text-xs mt-1"
+            style={{ color: '#9A948A' }}
+          >
+            AI 生成内容，请核对后再给孩子讲
+          </Text>
         </View>
       </View>
     )

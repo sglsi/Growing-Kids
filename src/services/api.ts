@@ -222,8 +222,12 @@ export async function uploadFile(
     name: 'file',
     header: authHeaders(),
     formData,
-    // 微信 uploadFile 默认超时 60s：线上后端冷启动 ~17s + 跨境（新加坡）延迟，
-    // 手机慢网上传几 MB 的卷子照片必然被前端掐断（表现为「图片上传失败」）。
+    // ⚠️ 微信 request / uploadFile 的 **默认与最大超时都是 60s**（官方服务市场文档），
+    //    写大于 60000 的值不会生效——这里的 180000 只是「表达意图」，
+    //    **不要以为已经把超时放宽了**（这是假安全感，比不设更危险）。
+    //    背景：线上后端冷启动 ~17s + 跨境（新加坡）延迟 + 慢网上传几 MB 卷子照片，
+    //    逼近 60s 天花板时前端必然被掐断，表现为「图片上传失败」。
+    //    真正的解法在后端：长任务改异步（先回 ticket、再轮询），见 OPS-18 R-上线-01。
     timeout: 180000,
   })
   captureUserId(res)
@@ -1155,9 +1159,10 @@ export async function ocrPage(
       method: 'POST',
       data: { image_url: imageUrl, mode, rectify: opts?.rectify !== false },
       header: authHeaders(),
-      // precise 全链路（摆正 dewarp ~17s + PP-StructureV3 ~50s）实测可超 60s，
-      // 微信 request 默认 timeout 正好 60s——大图/慢机必然被前端掐断。
-      // 180s 在微信允许上限（300s）内。
+      // ⚠️ precise 全链路（摆正 dewarp ~17s + PP-StructureV3 ~50s）实测可超 60s，
+      //    而微信 request 的**超时上限就是 60s**（不是 300s，旧注释写错了），
+      //    写 180000 无效 ⇒ 该链路在小程序端**必然**被掐断，与网络好坏无关。
+      //    未修：需后端异步化（上传后返回 ticket + 轮询结果），见 OPS-18 R-上线-01。
       timeout: 180000,
     }),
   )

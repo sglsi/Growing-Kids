@@ -448,7 +448,10 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                 : candidate.source === 'kb'
                   ? `知识库检索结果（${candidate.refs.length} 条）`
                   : candidate.source === 'llm'
-                    ? 'AI 推理结果（未联网核实）'
+                    // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
+                    // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写
+                    // 「AI 推理结果」，未落到「生成内容」这一法定表述。
+                    ? 'AI 生成内容（未联网核实，请核对后再用）'
                     : '结果'}
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />

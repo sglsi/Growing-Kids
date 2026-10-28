@@ -101,8 +101,17 @@ async function bootstrap() {
   // 0.6 访问日志：每请求一行（方法/路径/状态/耗时/用户/traceId）
   app.use(accessLog);
 
+  // CORS 来源白名单：小程序端请求不带 Origin 头，同源策略对它无效；
+  // 真正受约束的是 **H5 扫码登录页**（浏览器环境）。生产环境应在
+  // `CORS_ORIGINS` 里只放行该 H5 域名（逗号分隔），未配置时保持放开
+  // （本地开发与首次部署的默认行为不变，避免一改就断）。
+  const corsOrigins = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: true,
+    origin: corsOrigins.length ? corsOrigins : true,
     credentials: true,
     // 允许前端读取身份回传头（跨域场景下非简单响应头必须显式暴露）：
     //  - X-User-Id：匿名建号回传（小程序不受同源策略限制，本来就能读到）
