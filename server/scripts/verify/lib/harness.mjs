@@ -182,6 +182,9 @@ export class Runner {
 
 // ---------------- HTTP 客户端 ----------------
 
+/** 可安全重试的方法（POST/PATCH 重发可能重复落库）。 */
+const IDEMPOTENT = new Set(['GET', 'HEAD', 'OPTIONS'])
+
 /**
  * 打后端接口。
  * @param {'GET'|'POST'|'PUT'|'PATCH'|'DELETE'} method
@@ -191,8 +194,13 @@ export async function api(method, path, opts = {}) {
   const {
     token, device, userId, openId, body, form, query,
     timeout = Number(process.env.GK_TIMEOUT || 60000),
-    headers = {}, raw = false,
+    headers = {}, raw = false, retries,
   } = opts
+
+  // ⚠️ 连接层抖动要重试，否则会被记成产品缺陷（实测：全量 177 条跑完，M11
+  // 「AI 关闭时读取本地历史仍可用」偶发 status=0，单跑 12/12 全过）。
+  // 只对幂等方法重试——POST 若服务端已落库而响应丢了，重试会重复建条目。
+  const attempts = retries ?? (IDEMPOTENT.has(method) ? 2 : 1)
 
   const url = new URL(`${BASE}${path.startsWith('/') ? path : `/${path}`}`)
   if (query) {
@@ -219,13 +227,24 @@ export async function api(method, path, opts = {}) {
   }
 
   const t0 = Date.now()
-  let res
-  try {
-    res = await fetch(url.toString(), {
-      method, headers: h, body: payload, signal: AbortSignal.timeout(timeout),
-    })
-  } catch (err) {
-    return { status: 0, ok: false, json: null, text: `请求异常：${err.message}`, headers: {}, ms: Date.now() - t0 }
+  let res = null
+  let netErr = null
+  for (let i = 0; i < attempts; i++) {
+    try {
+      res = await fetch(url.toString(), {
+        method, headers: h, body: payload, signal: AbortSignal.timeout(timeout),
+      })
+      break
+    } catch (err) {
+      netErr = err
+      // 超时是服务端真的慢，不是抖动 —— 重试只会把 60s 拖成 120s。
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') break
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 300 * (i + 1)))
+    }
+  }
+  if (!res) {
+    const times = attempts > 1 ? `（已试 ${attempts} 次）` : ''
+    return { status: 0, ok: false, json: null, text: `请求异常：${netErr?.message || '未知错误'}${times}`, headers: {}, ms: Date.now() - t0 }
   }
 
   const text = await res.text().catch(() => '')

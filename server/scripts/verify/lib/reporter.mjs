@@ -5,7 +5,12 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-export const ROOT = path.resolve(HERE, '../../..')
+/**
+ * 仓库根。⚠️ 这里曾经差一级：HERE 是 `server/scripts/verify/lib`，
+ * 少退一层会把报告写进 `server/docs/test/`（而那目录在 .gitignore 里），
+ * 于是"报告已写出"打出来了、CI 的 artifact 路径却永远找不到文件。
+ */
+export const ROOT = path.resolve(HERE, '../../../..')
 const OUT_DIR = path.join(ROOT, 'docs', 'test')
 
 function pct(n, d) { return d ? `${((n / d) * 100).toFixed(1)}%` : '—' }
