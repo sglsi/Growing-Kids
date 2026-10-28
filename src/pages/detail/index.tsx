@@ -807,8 +807,10 @@ export default function DetailPage() {
           </Card>
         )}
 
-        {/* C4 复习排程（分散练习 d = 0.85；plan 由后端现算下发） */}
-        {item && plan && (
+        {/* C4 复习排程（分散练习 d = 0.85；plan 由后端现算下发）
+            ⚠️ 只在「已在复习本」时显示：不在本里的题还没有排程，
+            显示「第 1/5 档 + 做对了」会让人以为排程已经开始工作。 */}
+        {item && plan && plan.in_review_book && (
           <Card className="rounded-2xl border-border p-4 mb-4">
             <View className="flex flex-row items-center justify-between mb-1">
               <Text className="block text-sm font-semibold text-foreground">复习排程</Text>
