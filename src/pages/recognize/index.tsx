@@ -705,8 +705,21 @@ export default function RecognizePage() {
   /** 单页全页 OCR（用户手动触发：快速/精准）；失败置 error 态并记录原因，不抛 */
   const runPageOcr = async (p: BoardPage, ocrMode: 'fast' | 'precise') => {
     setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
+    // ⚠️ 精准模式实测 ~67s（R-上线-01），必须给等待反馈：
+    //    页面上的转圈太小，用户不知道是「在跑」还是「卡死了」，只会反复点。
+    const precise = ocrMode === 'precise'
+    if (precise) Taro.showLoading({ title: '精准识别中，约需 1 分钟', mask: true })
+    let shownAt = 0
     try {
-      const r = await ocrPage(p.url, ocrMode)
+      const r = await ocrPage(p.url, ocrMode, {
+        onProgress: ({ waitedMs }) => {
+          const sec = Math.round(waitedMs / 1000)
+          if (sec >= shownAt + 10) {
+            shownAt = sec
+            Taro.showLoading({ title: `精准识别中…已等待 ${sec}s`, mask: true })
+          }
+        },
+      })
       setBoardPages((prev) =>
         prev.map((x) =>
           x.id === p.id
@@ -735,6 +748,8 @@ export default function RecognizePage() {
       const msg = e instanceof Error ? e.message : '识别失败，请重试'
       console.error('全页 OCR 失败', e)
       setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const, err: msg, lastMode: ocrMode } : x)))
+    } finally {
+      if (precise) Taro.hideLoading()
     }
   }
 
@@ -871,8 +886,20 @@ export default function RecognizePage() {
           : x,
       ),
     )
+    const precise = ocrMode === 'precise'
+    if (precise) Taro.showLoading({ title: '精准识别中，约需 1 分钟', mask: true })
+    let shownAt = 0
     try {
-      const r = await ocrPage(src, ocrMode, { rectify: false })
+      const r = await ocrPage(src, ocrMode, {
+        rectify: false,
+        onProgress: ({ waitedMs }) => {
+          const sec = Math.round(waitedMs / 1000)
+          if (sec >= shownAt + 10) {
+            shownAt = sec
+            Taro.showLoading({ title: `精准识别中…已等待 ${sec}s`, mask: true })
+          }
+        },
+      })
       setBoard((prev) =>
         prev.map((x, i) =>
           i === entryIdx
@@ -890,6 +917,8 @@ export default function RecognizePage() {
       console.error('题目图 OCR 失败', err)
       setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'error', err: msg, lastMode: ocrMode } : x)))
       Taro.showToast({ title: msg.slice(0, 30), icon: 'none', duration: 2500 })
+    } finally {
+      if (precise) Taro.hideLoading()
     }
   }
 

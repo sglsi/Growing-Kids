@@ -15,6 +15,7 @@ import { Network } from '@/network'
 import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders, captureUserId } from '@/services/net'
 import { invalidateDomain } from '@/services/cache'
+import { runJob } from '@/services/jobs'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
   SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource,
@@ -223,12 +224,14 @@ export async function uploadFile(
     header: authHeaders(),
     formData,
     // ⚠️ 微信 request / uploadFile 的 **默认与最大超时都是 60s**（官方服务市场文档），
-    //    写大于 60000 的值不会生效——这里的 180000 只是「表达意图」，
-    //    **不要以为已经把超时放宽了**（这是假安全感，比不设更危险）。
-    //    背景：线上后端冷启动 ~17s + 跨境（新加坡）延迟 + 慢网上传几 MB 卷子照片，
-    //    逼近 60s 天花板时前端必然被掐断，表现为「图片上传失败」。
-    //    真正的解法在后端：长任务改异步（先回 ticket、再轮询），见 OPS-18 R-上线-01。
-    timeout: 180000,
+    //    写 60000 是「真实生效的最大值」；写更大的值不会有任何效果。
+    //    背景：后端冷启动 ~17s + 跨境延迟 + 慢网上传几 MB 卷子照片，逼近 60s
+    //    天花板时前端必然被掐断，表现为「图片上传失败」。
+    //    这条路**没有前端解法**（超时不可调、上传不可异步化），只能减少上传体积：
+    //    选图时已走压缩（image-editor.tsx 的 compressImage），这里是最后一道兜底。
+    //    ⚠️ 上传失败时提示「请换一张小一些的图」，不要提示「网络不好」——
+    //       那是把硬限制说成偶发故障，用户会一直重试。
+    timeout: 60000,
   })
   captureUserId(res)
   console.log('[Upload Response]', res.statusCode, res.data)
@@ -1146,26 +1149,39 @@ export async function ocrPage(
      *    再摆正只会二次透视把小图拉塌（历史故障：识别后图被换成 37×39 裂图）。
      */
     rectify?: boolean
+    /** 进度回调（仅精准模式有：该模式慢到必须给用户反馈） */
+    onProgress?: (info: { stage: string; waitedMs: number }) => void
   },
 ) {
-  const data = await unwrapResponse<{
-    page: { w: number; h: number }
-    page_text: PageTextSegment[]
-    image_url: string
-    orient_suspect?: boolean
-  }>(
-    Network.request({
-      url: '/api/image/ocr-page',
-      method: 'POST',
-      data: { image_url: imageUrl, mode, rectify: opts?.rectify !== false },
-      header: authHeaders(),
-      // ⚠️ precise 全链路（摆正 dewarp ~17s + PP-StructureV3 ~50s）实测可超 60s，
-      //    而微信 request 的**超时上限就是 60s**（不是 300s，旧注释写错了），
-      //    写 180000 无效 ⇒ 该链路在小程序端**必然**被掐断，与网络好坏无关。
-      //    未修：需后端异步化（上传后返回 ticket + 轮询结果），见 OPS-18 R-上线-01。
-      timeout: 180000,
-    }),
-  )
+  const params = { image_url: imageUrl, mode, rectify: opts?.rectify !== false }
+
+  // ⚠️ 精准模式走**异步任务**：全链路（摆正 ~17s + PP-StructureV3 ~50s）实测 ~67s，
+  //    而微信 request 的超时上限就是 60s —— 同步请求在小程序端**必然**被掐断，
+  //    与网络好坏无关（OPS-18 `R-上线-01`）。改成「提交 + 轮询」后每次请求都是毫秒级。
+  const data = mode === 'precise'
+    ? await runJob<{
+        page: { w: number; h: number }
+        page_text: PageTextSegment[]
+        image_url: string
+        orient_suspect?: boolean
+      }>('ocr-page', params, opts?.onProgress ? { onProgress: opts.onProgress } : {})
+    : await unwrapResponse<{
+        page: { w: number; h: number }
+        page_text: PageTextSegment[]
+        image_url: string
+        orient_suspect?: boolean
+      }>(
+        Network.request({
+          url: '/api/image/ocr-page',
+          method: 'POST',
+          data: params,
+          header: authHeaders(),
+          // 快速模式 1~3s/页；上限写 55s —— 必须 **小于 60s**，
+          // 写再大也不会生效（微信的默认是 60s，最大值也是 60s）
+          timeout: 55000,
+        }),
+      )
+
   return {
     page: data?.page || { w: 0, h: 0 },
     page_text: data?.page_text || [],
@@ -1199,14 +1215,19 @@ export async function exportBoardDocx(items: BoardExportItem[], title?: string) 
 // ============================================================
 // 联网搜题
 // ============================================================
+/**
+ * 联网搜题（AI 解题）。
+ *
+ * ⚠️ 走**异步任务**：联网检索 + 大模型实测 60~90s，超过微信 request 的 60s
+ *    超时天花板（OPS-18 `R-上线-01`）。
+ *
+ * ⚠️ 返回字段以**后端为准**：`answer_content` / `solution` / `references`。
+ *    旧签名写的是 `answer`（前端从未有调用方，故未被发现），已一并订正。
+ */
 export function searchSolution(question: string) {
-  return unwrap<{ answer: string; solution: string; references: { title: string; url: string }[] }>(
-    Network.request({
-      url: '/api/search/solve',
-      method: 'POST',
-      data: { question_content: question },
-      header: authHeaders(),
-    }),
+  return runJob<{ answer_content: string; solution: string; references: { title: string; url: string; site_name?: string }[] }>(
+    'search-solve',
+    { question_content: question },
   )
 }
 
@@ -1240,17 +1261,19 @@ export interface AnswerSearchResult {
  *   'kb'     = 知识库：只检索 ima 知识库（秒级），不喂给 AI
  *   'ai'     = AI 解题：只做模型推理，不检索，明确标注未联网核实
  */
-export function searchAnswer(itemId: string, force = false, mode: 'search' | 'ai' | 'kb' = 'search') {
-  return unwrap<AnswerSearchResult>(
-    Network.request({
-      url: `/api/answer-search/${itemId}`,
-      method: 'POST',
-      data: { force, mode },
-      header: authHeaders(),
-      // 扣子联网搜端到端实测 110~135s（bot 真跑检索插件 ~100-115s + 提炼 ~10-60s），
-      // 微信 request 默认 60s 必被前端掐断——真机上「搜答案」从来就没成功过。给到 240s。
-      timeout: 240000,
-    }),
+export function searchAnswer(
+  itemId: string,
+  force = false,
+  mode: 'search' | 'ai' | 'kb' = 'search',
+  opts?: { onProgress?: (info: { stage: string; waitedMs: number }) => void },
+) {
+  // ⚠️ 走**异步任务**：扣子联网搜端到端实测 110~135s（bot 跑检索插件 ~100~115s
+  //    + 提炼 ~10~60s），而微信 request 超时上限就是 60s —— 同步请求在真机上
+  //    **从来就没成功过**（OPS-18 `R-上线-01`）。改成提交 + 轮询后每次请求毫秒级。
+  return runJob<AnswerSearchResult>(
+    'answer-search',
+    { item_id: itemId, force, mode },
+    opts?.onProgress ? { onProgress: opts.onProgress } : {},
   )
 }
 

@@ -264,16 +264,32 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
     setSearching(searchMode)
     setCandidate(null)
+    // ⚠️ 这三条通道实测 60~135s（联网搜题最久），必须给等待反馈——
+    //    否则用户看到的是一个没有任何变化的页面，只会认为「坏了」然后反复点。
+    //    反复点又会撞上后端的并发闸门（429），观感更差。
+    Taro.showLoading({ title: `${searchLabel}中…`, mask: true })
+    let shownAt = 0
     try {
-      const res = await searchAnswer(item.id, false, searchMode)
+      const res = await searchAnswer(item.id, false, searchMode, {
+        onProgress: ({ waitedMs }) => {
+          // 节流：每 10s 才换一次文案，避免频繁改 title 造成闪烁
+          const sec = Math.round(waitedMs / 1000)
+          if (sec >= shownAt + 10) {
+            shownAt = sec
+            Taro.showLoading({ title: `${searchLabel}中…已等待 ${sec}s`, mask: true })
+          }
+        },
+      })
       setCandidate(res)
       if (res.source === 'none') {
         Taro.showToast({ title: res.note || `${searchLabel}未成功`, icon: 'none' })
       }
     } catch (e) {
       console.error(`${searchLabel}失败`, e)
-      Taro.showToast({ title: `${searchLabel}失败，请稍后重试`, icon: 'none' })
+      const msg = e instanceof Error ? e.message : ''
+      Taro.showToast({ title: msg.slice(0, 30) || `${searchLabel}失败，请稍后重试`, icon: 'none', duration: 2500 })
     } finally {
+      Taro.hideLoading()
       setSearching(null)
     }
   }
