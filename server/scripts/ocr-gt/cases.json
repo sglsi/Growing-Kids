@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "note": "OCR 识别质量的小型真值（GT）数据集。每张图由 gen.mjs 从本文件确定性生成，因此『图 = 这份期望文本』永远可复现、可 diff。新增真实照片：把图片丢进 cases/，同目录放同名 .txt（真值），run.mjs 会自动收录（见 README）。",
+  "defaults": {
+    "width": 760,
+    "bg": "#ffffff",
+    "ink": "#141414",
+    "font": "SimSun, 'Songti SC', 'Noto Serif CJK SC', serif",
+    "lineGap": 18,
+    "padding": 36
+  },
+  "cases": [
+    {
+      "id": "arith-clean",
+      "tier": "clean",
+      "desc": "清晰印刷算术题：中文题干 + 四道四则运算（含 × ÷ 与等号）",
+      "maxCer": 0.08,
+      "minLineRecall": 0.9,
+      "minNumberRecall": 0.95,
+      "lines": [
+        { "text": "计算下面各题", "size": 32, "weight": "bold", "gap": 10 },
+        { "text": "36 + 47 = 83", "size": 30 },
+        { "text": "125 - 68 = 57", "size": 30 },
+        { "text": "24 × 3 = 72", "size": 30 },
+        { "text": "96 ÷ 8 = 12", "size": 30 }
+      ],
+      "expect": "计算下面各题\n36 + 47 = 83\n125 - 68 = 57\n24 × 3 = 72\n96 ÷ 8 = 12"
+    },
+    {
+      "id": "word-problem",
+      "tier": "clean",
+      "desc": "中文应用题：长句 + 单位 + 换算（考察中文连读与数字混排）",
+      "maxCer": 0.12,
+      "minLineRecall": 0.85,
+      "minNumberRecall": 0.95,
+      "lines": [
+        { "text": "应用题", "size": 30, "weight": "bold", "gap": 12 },
+        { "text": "妈妈买了 3 千克苹果，每千克 8 元，一共花了多少元？", "size": 26 },
+        { "text": "解：3 × 8 = 24（元）", "size": 26 },
+        { "text": "答：一共花了 24 元。", "size": 26 }
+      ],
+      "expect": "应用题\n妈妈买了 3 千克苹果，每千克 8 元，一共花了多少元？\n解：3 × 8 = 24（元）\n答：一共花了 24 元。"
+    },
+    {
+      "id": "choice-options",
+      "tier": "clean",
+      "desc": "选择题：括号占位 + A/B/C/D 选项与分数（考察括号与斜杠分数）",
+      "maxCer": 0.12,
+      "minLineRecall": 0.85,
+      "minNumberRecall": 0.9,
+      "lines": [
+        { "text": "下列各数中，最大的一个是（    ）", "size": 26, "gap": 12 },
+        { "text": "A. 0.6      B. 2/3      C. 0.58      D. 3/5", "size": 26 }
+      ],
+      "expect": "下列各数中，最大的一个是（    ）\nA. 0.6      B. 2/3      C. 0.58      D. 3/5"
+    },
+    {
+      "id": "english-lines",
+      "tier": "clean",
+      "desc": "英文短句三行（考察英文分词与句号，中文模型易丢空格）",
+      "maxCer": 0.12,
+      "minLineRecall": 0.85,
+      "minNumberRecall": 1,
+      "lines": [
+        { "text": "Read and choose.", "size": 28, "weight": "bold", "gap": 12 },
+        { "text": "The cat is on the desk.", "size": 26 },
+        { "text": "I have two apples.", "size": 26 },
+        { "text": "She likes red flowers.", "size": 26 }
+      ],
+      "expect": "Read and choose.\nThe cat is on the desk.\nI have two apples.\nShe likes red flowers."
+    },
+    {
+      "id": "vertical-sum",
+      "tier": "clean",
+      "desc": "竖式加法：靠空格对齐的三行数字（最容易整行丢或串行）",
+      "knownIssue": "R-算法-07：独立成行的「+」与横线「-----」在 fast 与 precise 两个引擎里都被丢掉，竖式退化成「37 / 15 / 52」——数字没识别错，但竖式的结构（谁加谁、横线在哪）全丢了",
+      "maxCer": 0.2,
+      "minLineRecall": 0.75,
+      "minNumberRecall": 1,
+      "lines": [
+        { "text": "用竖式计算", "size": 28, "weight": "bold", "gap": 14 },
+        { "text": "    3 7", "size": 30, "mono": true },
+        { "text": "+   1 5", "size": 30, "mono": true },
+        { "text": "--------", "size": 30, "mono": true },
+        { "text": "    5 2", "size": 30, "mono": true }
+      ],
+      "expect": "用竖式计算\n3 7\n+ 1 5\n--------\n5 2"
+    },
+    {
+      "id": "arith-skew",
+      "tier": "degraded",
+      "desc": "退化：arith-clean 旋转 3°（模拟手持拍照，考察摆正链路）",
+      "of": "arith-clean",
+      "degrade": { "rotate": 3 },
+      "maxCer": 0.18,
+      "minLineRecall": 0.75,
+      "minNumberRecall": 0.85
+    },
+    {
+      "id": "arith-soft",
+      "tier": "degraded",
+      "desc": "退化：arith-clean 轻微模糊 + 降低对比度（模拟手机抖动/光线不足）",
+      "of": "arith-clean",
+      "degrade": { "blur": 0.8, "contrast": 0.55 },
+      "maxCer": 0.18,
+      "minLineRecall": 0.75,
+      "minNumberRecall": 0.85
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-10-28T02:59:47.091Z",
+  "mode": "fast",
+  "engine_note": "基线由 --update-baseline 生成；只在\"确认这是当前引擎的真实水平\"时才更新",
+  "cases": {
+    "arith-clean": {
+      "cer": 0,
+      "lineRecall": 1,
+      "numberRecall": 1
+    },
+    "word-problem": {
+      "cer": 0,
+      "lineRecall": 1,
+      "numberRecall": 1
+    },
+    "choice-options": {
+      "cer": 0.0286,
+      "lineRecall": 1,
+      "numberRecall": 1
+    },
+    "english-lines": {
+      "cer": 0,
+      "lineRecall": 1,
+      "numberRecall": 1
+    },
+    "vertical-sum": {
+      "cer": 0.45,
+      "lineRecall": 0.6,
+      "numberRecall": 1
+    },
+    "arith-skew": {
+      "cer": 0.027,
+      "lineRecall": 1,
+      "numberRecall": 1
+    },
+    "arith-soft": {
+      "cer": 0,
+      "lineRecall": 1,
+      "numberRecall": 1
+    }
+  }
+}

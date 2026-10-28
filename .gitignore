@@ -98,3 +98,7 @@ src/build-meta.ts
 
 # 验证套件生成的报告（每次跑都会变，CI 用 artifact 留存）
 docs/test/
+
+# OCR 真值集的运行产物（baseline.json 例外：那是要入库的基线）
+/server/scripts/ocr-gt/report.md
+/server/scripts/ocr-gt/report.json
