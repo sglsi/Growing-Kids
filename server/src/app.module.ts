@@ -30,6 +30,7 @@ import { ChatModule } from './chat/chat.module'
 // （2026-10-19 补注册，同时补齐 user_id 隔离）
 import { QuestionsModule } from './questions/questions.module'
 import { MaterialsModule } from './materials/materials.module'
+import { JobsModule } from './jobs/jobs.module'
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { MaterialsModule } from './materials/materials.module'
     ChatModule, // 智能客服
     QuestionsModule, // 题目（v3 遗留，2026-10-19 补注册 + 补用户隔离）
     MaterialsModule, // 素材（v3 遗留，同上）
+    JobsModule, // 异步任务（R-上线-01：长任务提交+轮询，绕开微信 60s 超时天花板）
   ],
   controllers: [AppController],
   providers: [AppService],
