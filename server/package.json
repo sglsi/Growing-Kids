@@ -14,7 +14,8 @@
     "check:isolation": "node scripts/check-isolation.mjs",
     "ocr:gt": "node scripts/ocr-gt/run.mjs",
     "ocr:gt:gen": "node scripts/ocr-gt/gen.mjs",
-    "verify": "node scripts/verify/run.mjs"
+    "verify": "node scripts/verify/run.mjs",
+    "method:check": "node scripts/method-gates.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.958.0",

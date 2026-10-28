@@ -29,7 +29,8 @@
     "verify": "cd server && node scripts/verify/run.mjs",
     "verify:core": "cd server && node scripts/verify/run.mjs M01 M02 M03 M04 M05 M06 M07 M08 M15",
     "verify:list": "cd server && node scripts/verify/run.mjs --list",
-    "verify:ci": "cd server && node scripts/verify/run.mjs M12 M13",
+    "verify:ci": "cd server && node scripts/verify/run.mjs M12 M13 M16",
+    "method:check": "node server/scripts/method-gates.mjs",
     "ocr:gt": "cd server && node scripts/ocr-gt/run.mjs",
     "ocr:gt:gen": "cd server && node scripts/ocr-gt/gen.mjs",
     "ocr:gt:baseline": "cd server && node scripts/ocr-gt/run.mjs --update-baseline"

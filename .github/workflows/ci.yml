@@ -5,7 +5,9 @@
 #
 #   gate      —— 无密钥、无数据库、无 OCR 侧车，**任何 push / PR 都跑**
 #                静态门禁（lint / tsc / 数据隔离扫描）+ 前端纯函数 + 工程门禁
-#                + 构建产物存在性。这一层保证「代码进主干前不会连编译都不过」。
+#                + **方法论三条硬门（M16）** + 构建产物存在性。
+#                这一层保证「代码进主干前不会连编译都不过」，也保证
+#                「提案单缺栏 / 文案违禁 / 参数与断言漂移」不会悄悄合进来。
 #
 #   api-core  —— 需要一套可用的 Supabase（真实后端 + 真实数据库）
 #                在 runner 上起 NestJS，再跑 M01–M08 + M15（不含 OCR / 大模型相关模块）。
@@ -70,9 +72,12 @@ jobs:
 
       # M12 = 前端纯函数（latex / answer-merge，单编后直跑）
       # M13 = 隔离扫描 / 前后端 tsc / eslint / U+FFFD / 文档表格列数 / 产物存在性
-      - name: 验证套件（M12 M13）
+      # M16 = 方法论三条硬门（GK-OPS-22 §4）：提案单六栏 + 引用可解析 / 用户可见面
+      #       禁用宣称词 / 镜像参数逐字一致（间隔表、导出口径）
+      #       详见 server/scripts/method-gates.mjs；本地等价 pnpm method:check
+      - name: 验证套件（M12 M13 M16）
         working-directory: server
-        run: node scripts/verify/run.mjs M12 M13
+        run: node scripts/verify/run.mjs M12 M13 M16
 
       - name: 上传验证报告
         if: always()
