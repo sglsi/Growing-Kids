@@ -1,7 +1,7 @@
 {
   "miniprogramRoot": "dist/",
   "projectname": "growing-kids",
-  "description": "test",
+  "description": "成长学童 · 学习记录与复习",
   "appid": "wx48bf5ba9bae0bf39",
   "setting": {
     "urlCheck": false,

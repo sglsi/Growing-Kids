@@ -31,6 +31,10 @@
     "verify:list": "cd server && node scripts/verify/run.mjs --list",
     "verify:ci": "cd server && node scripts/verify/run.mjs M12 M13 M16",
     "method:check": "node server/scripts/method-gates.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "release:prepare": "pnpm build:weapp && node scripts/release-check.mjs --prepare",
+    "release:revert": "node scripts/release-check.mjs --revert",
+
     "ocr:gt": "cd server && node scripts/ocr-gt/run.mjs",
     "ocr:gt:gen": "cd server && node scripts/ocr-gt/gen.mjs",
     "ocr:gt:baseline": "cd server && node scripts/ocr-gt/run.mjs --update-baseline"
