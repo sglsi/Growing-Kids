@@ -56,6 +56,8 @@ export function stableQuery(q: Record<string, unknown>): string {
 export const TL_LIST_PREFIX = 'tl:list:'
 export const TL_ITEM_PREFIX = 'tl:item:'
 export const TL_OV_KEY = 'tl:ov:'
+/** 复习排程汇总（今日待复习 / 未排程 / 已毕业） */
+export const TL_REVIEW_SUM_KEY = 'tl:revsum:'
 
 /**
  * 失效某用户的 timeline 全部读缓存（列表 / 详情 / 概览）。
@@ -66,4 +68,5 @@ export async function invalidateUserTimeline(userId: string): Promise<void> {
   await cacheDelPrefix(`${TL_LIST_PREFIX}${userId}:`)
   await cacheDelPrefix(`${TL_ITEM_PREFIX}${userId}:`)
   await cacheDel(`${TL_OV_KEY}${userId}`)
+  await cacheDel(`${TL_REVIEW_SUM_KEY}${userId}`)
 }

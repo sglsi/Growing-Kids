@@ -2,13 +2,13 @@ import { Injectable, BadRequestException, NotFoundException, Logger } from '@nes
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
 import { findSimilarQuestions } from '../ocr/ocr-similar'
-import { buildReviewPlan, nextReviewCount } from './review'
+import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, REVIEW_STAGES, type ReviewResult } from './review'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { IngestService } from '../storage/ingest.service'
 import {
   cacheGet, cacheSet, invalidateUserTimeline, stableQuery,
-  TL_LIST_PREFIX, TL_ITEM_PREFIX, TL_OV_KEY,
+  TL_LIST_PREFIX, TL_ITEM_PREFIX, TL_OV_KEY, TL_REVIEW_SUM_KEY,
 } from '../shared/mem-cache'
 import type {
   TimelineItem, TimelineListQuery, CreateTimelineDto, UpdateTimelineDto, TimelineItemWithUrl, QuestionContent,
@@ -38,6 +38,14 @@ function isThumbConsistent(fileKey?: string | null, thumbKey?: string | null): b
 const SELECT_COLS = '*, subjects:subject_id(id, name, color)'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
+/**
+ * 排程汇总一次最多扫多少条复习本记录。
+ * 复习本是用户级小集合（几十到几百条），一次取回后本地分组比多次 count 更快也更一致；
+ * Supabase/PostgREST 默认单次上限 1000 行，故取 1000 ——**超出时计数会低估**，
+ * 届时应改为「DB 侧 count + 本地 due 判定」的混合方案（届时也不必再怕不一致：
+ * 到期判定已收敛到 review.ts 的 endOfLocalDay）。
+ */
+const SUMMARY_SCAN_LIMIT = 1000
 
 /** overview 返回结构（显式声明，供缓存泛型用） */
 export interface OverviewResult {
@@ -47,6 +55,22 @@ export interface OverviewResult {
   review_total: number
   subject_stats: { subject_id: string; name: string; color: string; count: number; week_count: number }[]
   recent: TimelineItem[]
+  /** 今日该复习（含逾期）——首页「复习本」卡片上的待办数 */
+  review_due: number
+}
+
+/** 复习排程汇总（「今日该复习 N 题」入口的数据源） */
+export interface ReviewSummary {
+  /** 复习本总量 */
+  in_book: number
+  /** 今天该复习（含逾期） */
+  due_today: number
+  /** 在复习本但没排程（异常信号：多为历史数据） */
+  unscheduled: number
+  /** 五档走完 */
+  graduated: number
+  /** 最近的未来到期时间（没有则为 null） */
+  next_due_at: string | null
 }
 
 /**
@@ -166,9 +190,16 @@ export class TimelineService {
       .eq('user_id', userId)          // 强制用户隔离
       .is('deleted_at', null)         // 软删过滤
 
-    const scope = query.scope || 'recent'
+    // due=1 时强制走复习语义（前端即便只传 due 不传 scope 也不会查错）
+    const scope: 'recent' | 'review' = query.due ? 'review' : (query.scope || 'recent')
     if (scope === 'review') {
       q = q.eq('in_review_book', true)
+    }
+    if (query.due) {
+      // 到期 = next_review_at 落在今天或更早。
+      // 上界取**本地日末**而非 now：排程是日历语义，晚上才到期的题在当天上午也该算
+      // 「今天该复习」，否则家长早上打开看不到任何待办，会以为功能没生效。
+      q = q.lte('next_review_at', endOfLocalDay().toISOString())
     }
 
     // ⚠️ 哨兵值（思傅 2026-10-21「点未分类筛不出题」）：
@@ -204,8 +235,19 @@ export class TimelineService {
       }
     }
 
-    const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
-    q = q.order(orderField, { ascending: false }).range(from, to)
+    // 排序：
+    //   复习本默认按「到期先后」——按加入时间倒序等于「谁最近进本谁排前」，
+    //   与「该复习谁」毫无关系，天然形成块状 + 集中，与间隔/交错都相反（SRS-20 C5）。
+    //   ASC 在 Postgres 里 NULL 自然垫底（已毕业/未排程排最后），正是想要的顺序。
+    if (scope === 'review' && query.sort !== 'added') {
+      q = q
+        .order('next_review_at', { ascending: true })
+        .order('added_to_review_at', { ascending: false })
+    } else {
+      const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
+      q = q.order(orderField, { ascending: false })
+    }
+    q = q.range(from, to)
 
     const { data, error, count } = await q
     if (error) throw new Error(error.message)
@@ -581,23 +623,38 @@ export class TimelineService {
   }
 
   // ---------- 加入 / 移出复习本 ----------
-  async addToReviewBook(userId: string, ids: string[]): Promise<{ updated: number }> {
-    if (!ids.length) return { updated: 0 }
+  async addToReviewBook(userId: string, ids: string[]): Promise<{ updated: number; scheduled: number }> {
+    if (!ids.length) return { updated: 0, scheduled: 0 }
     const client = getSupabaseClient()
+    const now = new Date().toISOString()
     const { data, error } = await client
       .from(TABLE)
       .update({
         in_review_book: true,
-        added_to_review_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        added_to_review_at: now,
+        updated_at: now,
       })
       .eq('user_id', userId)
       .in('id', ids)
       .select('id')
     if (error) throw new Error(error.message)
-    // 复习本归属变化 ⇒ review 列表与概览缓存失效
+
+    // 给「还没排程」的条目排上第一档（1 天后到期）。
+    // ⚠️ 只补空、不改已有排程：重复点「加入复习本」不应把正在等的条目重置回第 1 档，
+    //    否则反复勾选就能把间隔永久锁死在最短档位。
+    // ⚠️ 已毕业（review_count = 5）的不再排程：它们已经走完五档。
+    const { data: scheduled } = await client
+      .from(TABLE)
+      .update({ next_review_at: firstReviewAt(), updated_at: now })
+      .eq('user_id', userId)
+      .in('id', ids)
+      .is('next_review_at', null)
+      .lt('review_count', REVIEW_STAGES)
+      .select('id')
+
+    // 复习本归属变化 ⇒ review 列表 / 概览 / 排程汇总缓存失效
     await invalidateUserTimeline(userId)
-    return { updated: (data || []).length }
+    return { updated: (data || []).length, scheduled: (scheduled || []).length }
   }
 
   async removeFromReviewBook(userId: string, ids: string[]): Promise<{ updated: number }> {
@@ -608,13 +665,16 @@ export class TimelineService {
       .update({
         in_review_book: false,
         added_to_review_at: null,
+        // 移出即取消排程，否则会继续占用「今日该复习」的待办位
+        // （review_count / review_lapses 保留：再次加入时从原档位继续，不白费之前的复习）
+        next_review_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq('user_id', userId)
       .in('id', ids)
       .select('id')
     if (error) throw new Error(error.message)
-    // 复习本归属变化 ⇒ review 列表与概览缓存失效
+    // 复习本归属变化 ⇒ review 列表 / 概览 / 排程汇总缓存失效
     await invalidateUserTimeline(userId)
     return { updated: (data || []).length }
   }
@@ -624,18 +684,122 @@ export class TimelineService {
     return findSimilarQuestions(userId, id, limit)
   }
 
-  // ---------- P2-18 艾宾浩斯复习：标记完成一次复习 ----------
+  // ---------- C4 复习排程：记录一次复习 ----------
   /**
-   * 把指定题的复习计数 +1（封顶 total 阶段数），返回更新后的计数与现算的复习计划。
-   * 复习计划由 created_at + review_count 现算（见 ./review.ts），不冗余存储。
+   * 记录一次复习结果，推进或回退排程（推导见 ./review.ts 的 advanceReview）。
+   *
+   * 为什么必须区分对错：
+   *   旧实现只有一个「今天复习了 ✓」按钮，做对做错一个样 ⇒ review_count 单调递增，
+   *   五档走完就「毕业」，与是否真的记住毫无关系。而分散练习的收益前提是**成功提取**
+   *   （Roediger & Karpicke 2006），答错说明这次提取失败，间隔必须回到最短档位。
+   *
+   * @param result 'correct' 做对（推进一档）/ 'wrong' 做错（归零，明天再来）
    */
-  async markReviewed(userId: string, id: string): Promise<{ review_count: number; plan: ReturnType<typeof buildReviewPlan> }> {
+  async review(userId: string, id: string, result: ReviewResult = 'correct') {
     const item = await this.findOne(userId, id)
-    const cur = typeof item.content?.review_count === 'number' ? item.content.review_count : 0
-    const next = nextReviewCount(cur)
-    const merged = { ...(item.content || {}), review_count: next }
-    const updated = await this.update(userId, id, { content: merged })
-    return { review_count: next, plan: buildReviewPlan(updated.created_at, next) }
+    const adv = advanceReview(item, result)
+    const client = getSupabaseClient()
+    const now = new Date().toISOString()
+
+    const { data, error } = await client
+      .from(TABLE)
+      .update({
+        review_count: adv.review_count,
+        review_lapses: adv.review_lapses,
+        last_reviewed_at: adv.last_reviewed_at,
+        next_review_at: adv.next_review_at,
+        // 未入本的题被直接复习时自动入本（否则排程无处生根：不在本里就不参与待办）
+        in_review_book: true,
+        added_to_review_at: item.added_to_review_at || now,
+        updated_at: now,
+      })
+      .eq('user_id', userId)   // 隔离红线：不带上就是越权改别人数据
+      .eq('id', id)
+      .is('deleted_at', null)
+      .select('id')
+    if (error) throw new Error(error.message)
+    if (!data || !data.length) throw new NotFoundException('题目不存在')
+
+    await invalidateUserTimeline(userId)
+    const merged = { ...item, ...adv, in_review_book: true, added_to_review_at: item.added_to_review_at || now }
+    return {
+      review_count: adv.review_count,
+      review_lapses: adv.review_lapses,
+      last_reviewed_at: adv.last_reviewed_at,
+      next_review_at: adv.next_review_at,
+      plan: buildReviewPlan(merged),
+    }
+  }
+
+  /**
+   * 复习排程汇总：给「今日该复习 N 题」这个入口供数。
+   *
+   * 三个数字分别对应三种真实处境，不能只给一个 due：
+   *   due_today   —— 今天该做（含逾期）；这是唯一需要推动用户行动的数字
+   *   unscheduled —— 在复习本但没排程；通常意味着历史数据或代码漏排，属异常信号
+   *   graduated   —— 五档走完；用来向家长证明「这些已经掌握」，不是失败
+   *
+   * ⚠️ 实现上刻意只发**一次查询**、计数在本地算：
+   *   早先版本用 5 个 `count:'exact', head:true` 并行查（in_book / due / 未排程 / 毕业 / 最近到期）。
+   *   两个问题——① 5 次跨境往返任一卡住就整体超时（实测出现过 >60s）；
+   *   ② 5 个独立查询不是同一快照，due_today 可能与 due 列表条数对不上，
+   *   用户会看到「今天该复习 3 题」点进去只有 2 条。
+   *   复习本是**用户级小集合**（几十到几百条），一次取回全部再在内存里分组既更快也更一致。
+   */
+  async reviewSummary(userId: string) {
+    const cacheKey = `${TL_REVIEW_SUM_KEY}${userId}`
+    const cached = await cacheGet<ReviewSummary>(cacheKey)
+    if (cached) return cached
+
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .select('next_review_at, review_count')
+      .eq('user_id', userId)     // 隔离红线
+      .is('deleted_at', null)
+      .eq('in_review_book', true)
+      .limit(SUMMARY_SCAN_LIMIT)
+    if (error) throw new Error(error.message)
+
+    const rows = (data || []) as { next_review_at: string | null; review_count: number | null }[]
+    const now = new Date()
+    // 与 buildReviewPlan 的判定同源（本地日界）：跨端比较一律走时间戳，
+    // 不要拿 ISO 字符串比较 —— Postgres 回的是 "+00:00"，JS 生成的是 "Z"。
+    const endTodayMs = endOfLocalDay(now).getTime()
+
+    let dueToday = 0
+    let unscheduled = 0
+    let graduated = 0
+    let nextDueMs: number | null = null
+    let nextDueAt: string | null = null
+
+    for (const row of rows) {
+      const nra = row.next_review_at
+      const count = Number(row.review_count) || 0
+      if (!nra) {
+        if (count >= REVIEW_STAGES) graduated++
+        else unscheduled++
+        continue
+      }
+      const ms = new Date(nra).getTime()
+      if (Number.isNaN(ms)) { unscheduled++; continue }
+      if (ms <= endTodayMs) {
+        dueToday++
+      } else if (nextDueMs === null || ms < nextDueMs) {
+        nextDueMs = ms
+        nextDueAt = nra
+      }
+    }
+
+    const result: ReviewSummary = {
+      in_book: rows.length,
+      due_today: dueToday,
+      unscheduled,
+      graduated,
+      next_due_at: nextDueAt,
+    }
+    await cacheSet(cacheKey, result)
+    return result
   }
 
   // ---------- 首页概览 ----------
@@ -651,11 +815,13 @@ export class TimelineService {
       client.from(TABLE).select('id', { count: 'exact', head: true })
         .eq('user_id', userId).is('deleted_at', null)
 
-    const [totalRes, weekRes, pendingRes, reviewRes, subjectRowsRes, recentRes] = await Promise.all([
+    const [totalRes, weekRes, pendingRes, reviewRes, dueRes, subjectRowsRes, recentRes] = await Promise.all([
       base(),
       base().gte('created_at', weekAgo),
       base().eq('kind', 'question').eq('content->>status', 'pending'),
       base().eq('in_review_book', true),
+      // 今日该复习（含逾期）：首页「复习本」卡片靠它显示待办角标
+      base().eq('in_review_book', true).lte('next_review_at', endOfLocalDay().toISOString()),
       client
         .from(TABLE)
         .select('subject_id, subjects:subject_id(id, name, color)')
@@ -692,6 +858,7 @@ export class TimelineService {
       week_total: weekRes.count || 0,
       pending: pendingRes.count || 0,
       review_total: reviewRes.count || 0,
+      review_due: dueRes.count || 0,
       subject_stats: Object.values(statsMap),
       recent: (recentRes.data || []) as unknown as TimelineItem[],
     }

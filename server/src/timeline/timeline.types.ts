@@ -65,7 +65,10 @@ export interface QuestionContent {
    * P3 起随保存落库，供错题库查看/检索/复习时识别「这是哪一节哪一道」）。
    */
   question_label?: string
-  /** P2-18 艾宾浩斯复习阶段计数：已完成的复习次数（计划由 created_at + 该值现算） */
+  /**
+   * @deprecated 旧版复习计数（存于 content JSON）。0019 起真相是独立列 `review_count`，
+   * 该字段仅为兼容旧数据与旧前端包保留，新代码一律读列（见 review.ts）。
+   */
   review_count?: number
   // ---------- 答案（思傅 2026-10-21）----------
   /** 答案附件：图片 / 文档 / 文本片段，与题目同记录存储 ⇒ 不可能挂错题 */
@@ -98,6 +101,15 @@ export interface TimelineItem {
   // 复习本
   in_review_book: boolean
   added_to_review_at: string | null
+  // 复习排程（migrations/0019）：档位与到期时间，排程计算见 ./review.ts
+  /** 已走过的间隔档位（0..5）。做对 +1，做错归零，满 5 即毕业 */
+  review_count: number
+  /** 最近一次实际复习时间 */
+  last_reviewed_at: string | null
+  /** 下次到期时间；null = 未排程或已毕业 */
+  next_review_at: string | null
+  /** 累计答错次数（只记账，不参与排程） */
+  review_lapses: number
   // 标签与状态
   tags: string[]
   mastered: boolean
@@ -128,6 +140,16 @@ export interface TimelineListQuery {
   keyword?: string
   /** ISO 时间，过滤 created_at >= since（review 模式下按 added_to_review_at） */
   since?: string
+  /**
+   * 只看「今天该复习」（含逾期）：next_review_at <= 今天 23:59:59。
+   * 仅对复习本有意义，置 true 时自动按 review 语义过滤（in_review_book = true）。
+   */
+  due?: boolean
+  /**
+   * 复习本排序：'due'（默认，按到期先后）/ 'added'（旧的按加入时间倒序）。
+   * 分散练习要求「先复习最该复习的」，故默认不再用加入时间排序（SRS-20 C5）。
+   */
+  sort?: 'due' | 'added'
   page?: number
   page_size?: number
 }
