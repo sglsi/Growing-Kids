@@ -343,13 +343,32 @@ function widestHorizontalGap(items: Line[], minHeight: number): { height: number
 }
 
 /**
+ * 行级阅读序：**先聚"视觉行"，行内再按 x**。
+ *
+ * ⚠️ 不能直接用 `y0 升序 → x0 升序`：同一行里各 OCR 框的 y0 会有 1~3px 抖动，
+ *    于是「A. 0.6  B. 2/3  C. 0.58」会按抖动排序，变成 B 在 A 前面——
+ *    选项顺序一乱，答案就对错位（GT 数据集 choice-options 实测就是这条）。
+ *    用**行中心 + 行高容差**聚簇，抖动就进不了比较式。
+ */
+function sortLinesByReadingOrder(items: Line[], medH: number): Line[] {
+  const rows: Line[][] = []
+  for (const l of [...items].sort((a, b) => a.cy - b.cy)) {
+    const row = rows[rows.length - 1]
+    const tol = SAME_LINE_RATIO * Math.min(medH, l.h)
+    if (row && Math.abs(l.cy - row[0].cy) <= tol) row.push(l)
+    else rows.push([l])
+  }
+  return rows.flatMap((r) => r.sort((a, b) => a.x0 - b.x0))
+}
+
+/**
  * 递归 XY-Cut：竖切分栏优先（多栏文档的首要矛盾），
- * 否则横切分段，切不动即为叶子（按 y 再按 x 排序）。
+ * 否则横切分段，切不动即为叶子（按阅读序排序）。
  * 返回「人在阅读时的行顺序」。
  */
 function xyCutOrder(items: Line[], medH: number, depth = 0): Line[] {
   if (items.length < MIN_XY_ITEMS || depth >= MAX_XY_DEPTH) {
-    return [...items].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)
+    return sortLinesByReadingOrder(items, medH)
   }
   // ① 竖切：栏间沟 → 先左栏后右栏
   const v = widestVerticalGap(items, XY_V_GAP_RATIO * medH)
@@ -369,7 +388,7 @@ function xyCutOrder(items: Line[], medH: number, depth = 0): Line[] {
       return [...xyCutOrder(top, medH, depth + 1), ...xyCutOrder(bottom, medH, depth + 1)]
     }
   }
-  return [...items].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)
+  return sortLinesByReadingOrder(items, medH)
 }
 
 /**
