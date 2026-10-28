@@ -213,14 +213,14 @@ export default function DetailPage() {
   const handlePrint = async () => {
     if (!item) return
     Taro.showActionSheet({
-      itemList: ['导出本题（不含答案）', '导出本题（含答案与解析）'],
+      itemList: ['打印练习卷（本题·不含答案）', '答疑解惑（本题·含答案与解析）'],
       success: async (r) => {
         const withAnswers = r.tapIndex === 1
         try {
           const res = await exportDocument({
             ids: [id],
             include_answers: withAnswers,
-            title: `题目导出 · ${new Date().toLocaleDateString('zh-CN')}`,
+            title: `${withAnswers ? '答疑解惑' : '练习卷'} · ${new Date().toLocaleDateString('zh-CN')}`,
           })
           openStorageFile(res.url, false, res.file_key)
         } catch (e) {

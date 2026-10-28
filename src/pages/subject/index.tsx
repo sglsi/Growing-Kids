@@ -440,10 +440,10 @@ export default function SubjectPage() {
     }
     Taro.showActionSheet({
       itemList: [
-        '合成 PDF（不含答案）',
-        '合成 Word（不含答案）',
-        '合成 PDF（含答案·解析）',
-        '合成 Word（含答案·解析）',
+        '练习卷 PDF（不含答案）',
+        '练习卷 Word（不含答案）',
+        '答疑解惑 PDF（含答案）',
+        '答疑解惑 Word（含答案）',
       ],
       success: async (r) => {
         const format: 'pdf' | 'docx' = r.tapIndex === 1 || r.tapIndex === 3 ? 'docx' : 'pdf'

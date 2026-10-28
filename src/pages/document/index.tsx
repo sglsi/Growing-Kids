@@ -129,11 +129,20 @@ export default function DocumentPage() {
     }
   }
 
-  const handleExport = async () => {
+  /**
+   * 导出 Word（2026-10-28 起两种用途分开，默认练习卷）。
+   *
+   * 背景：本页是全站唯一的「按时间段汇总成 Word」入口，此前不传 `include_answers`
+   * 而后端默认含答案 ⇒ 家长想打一份空白练习卷，拿到的却是答案纸
+   * （而复习本合成 PDF 的默认恰好相反，同一产品两套默认）。
+   * 现在按钮把用途写明：**打印练习卷 = 不含答案**，另一颗按钮才是答疑解惑。
+   */
+  const handleExport = async (withAnswers: boolean) => {
     if (!questions.length) {
       Taro.showToast({ title: '请先生成汇总', icon: 'none' })
       return
     }
+    if (exporting) return
     setExporting(true)
     try {
       const { start, end } = getDateRange(range, latestTimestamp)
@@ -142,8 +151,10 @@ export default function DocumentPage() {
         start_date: start,
         end_date: end,
         include_mastered: includeMastered,
+        include_answers: withAnswers,
       })
       openStorageFile(res.url, false, res.file_key)
+      Taro.showToast({ title: withAnswers ? '已生成答疑解惑版' : '已生成练习卷', icon: 'none' })
       loadDocs({ silent: true })
     } catch (e) {
       console.error('导出失败', e)
@@ -275,6 +286,13 @@ export default function DocumentPage() {
               <Switch checked={includeMastered} onCheckedChange={(v) => setIncludeMastered(v)} />
             </View>
 
+            <View className="bg-muted rounded-xl px-4 py-3 mb-5">
+              <Text className="block text-sm font-medium text-foreground">两种导出用途</Text>
+              <Text className="block text-xs text-muted-foreground mt-1">
+                「打印练习卷」＝不含答案与解析，打给孩子做；「答疑解惑」＝含答案/解析/错因，用于对答案与讲解。两份可分别导出。
+              </Text>
+            </View>
+
             <Button variant="outline" className="w-full h-11 rounded-xl mb-5" disabled={loading} onClick={handlePreview}>
               <Text className="block text-sm">{loading ? '生成中…' : '生成汇总预览'}</Text>
             </Button>
@@ -303,8 +321,11 @@ export default function DocumentPage() {
             padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
           }}
           >
-            <Button className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={handleExport}>
-              <Text className="block text-sm">{exporting ? '导出中…' : '导出 Word 并打印'}</Text>
+            <Button className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(false)}>
+              <Text className="block text-sm">{exporting ? '导出中…' : '打印练习卷'}</Text>
+            </Button>
+            <Button variant="outline" className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(true)}>
+              <Text className="block text-sm">答疑解惑（含答案）</Text>
             </Button>
           </View>
         </ScrollView>

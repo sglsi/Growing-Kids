@@ -21,7 +21,14 @@ interface ExportParams {
   ids?: string[]
   /**
    * 是否包含答案/解析/错误作答区块。
-   * undefined = 保持旧行为（含答案，汇总页沿用）；false = 纯题目卷（详情页默认）。
+   *
+   * ⚠️ 语义已于 2026-10-28 统一（GK-OPS-18 `R-技术-13` 关闭）：
+   * **不传 / undefined = 不含答案**（与 `pdf/combine` 一致）。
+   *
+   * 旧实现是 `!== false` ⇒ 不传就含答案，而汇总页恰好不传，于是同一个产品里
+   * 「汇总导出」和「复习本合成」对"默认给什么"给出相反答案。产品口径裁定为：
+   * **本产品的主用途是打给孩子做练习**（打印练习），答案属于"对答案/讲解"的
+   * 第二用途，必须明示索取 —— 默认给答案等于把练习卷变成答案纸。
    */
   include_answers?: boolean
 }
@@ -36,6 +43,12 @@ interface RawRow {
     error_analysis?: { type?: string; label?: string; reason?: string; suggestion?: string } | null
     review_count?: number
   }
+  /**
+   * C4（0019 迁移）后复习档位是**列**，不再在 content 里。
+   * 旧导出只读 content.review_count ⇒ 迁移后「复习进度」一行静默消失。
+   * 这里同时保留 content 兜底，兼容迁移前遗留数据。
+   */
+  review_count?: number | null
   source: string | null
   created_at: string
   subjects: { id: string; name: string } | null
@@ -48,7 +61,7 @@ export class DocumentService {
     const client = getSupabaseClient()
     let q = client
       .from('timeline_items')
-      .select('id, content, source, created_at, subjects:subject_id(id, name)')
+      .select('id, content, review_count, source, created_at, subjects:subject_id(id, name)')
       .eq('user_id', userId)
       .eq('kind', 'question')
       .is('deleted_at', null)
@@ -120,7 +133,9 @@ export class DocumentService {
         border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: '2E6F4E' } },
         children: [
           new TextRun({
-            text: `共 ${rows.length} 题 · 生成于 ${new Date().toLocaleDateString('zh-CN')}`,
+            // 「练习卷 / 答疑解惑」写进副标题：两份 Word 打出来长得几乎一样，
+            // 不标版本就只能靠翻到答案那一页才知道手里拿的是哪一份。
+            text: `共 ${rows.length} 题 · ${params.include_answers === true ? '答疑解惑（含答案与解析）' : '练习卷（不含答案）'} · 生成于 ${new Date().toLocaleDateString('zh-CN')}`,
             size: 20, color: '6B655D', font: '宋体',
           }),
         ],
@@ -148,9 +163,9 @@ export class DocumentService {
         )
         children.push(...this.textParagraphs(c.question || '', { size: 22 }))
 
-        // 答案区块（思傅 2026-10-26）：include_answers === false 时输出纯题目卷（无答案/解析/错答），
-        // 其余情况保持旧行为（含答案）——汇总页不受影响
-        const withAnswers = params.include_answers !== false
+        // 答案区块（2026-10-28 语义统一）：只有显式 include_answers === true 才输出，
+        // 不传 = 打印练习卷。与 pdf/combine 保持一致，避免同一产品两种默认。
+        const withAnswers = params.include_answers === true
         if (withAnswers && c.wrong_answer) {
           children.push(
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '我的错误作答：', size: 20, color: '9A948A', font: '宋体' })] }),
@@ -188,12 +203,14 @@ export class DocumentService {
           }
         }
 
-        // P2-18 艾宾浩斯复习进度
-        if (typeof c.review_count === 'number' && c.review_count > 0) {
+        // P2-18 复习进度（C4 后档位在列上；只有打印练习卷才写）
+        const reviewCount =
+          typeof row.review_count === 'number' ? row.review_count : (typeof c.review_count === 'number' ? c.review_count : 0)
+        if (reviewCount > 0) {
           children.push(
             new Paragraph({
               spacing: { before: 20, after: 20 },
-              children: [new TextRun({ text: `复习进度：已复习 ${c.review_count} 次`, size: 18, color: '6B655D', italics: true, font: '宋体' })],
+              children: [new TextRun({ text: `复习进度：已复习 ${reviewCount} 次`, size: 18, color: '6B655D', italics: true, font: '宋体' })],
             }),
           )
         }

@@ -12,7 +12,10 @@ interface ExportBody {
   include_mastered?: boolean
   /** 指定题目 id 白名单（详情页「导出打印」只导本题）；提供时忽略学科/时间/掌握筛选 */
   ids?: string[]
-  /** false = 纯题目卷；undefined = 旧行为（含答案） */
+  /**
+   * true = 答疑解惑（含答案/解析/错答/错因）；**不传 = 打印练习卷（不含答案）**。
+   * 2026-10-28 与 `pdf/combine` 统一默认口径（GK-OPS-18 R-技术-13 关闭）。
+   */
   include_answers?: boolean
 }
 

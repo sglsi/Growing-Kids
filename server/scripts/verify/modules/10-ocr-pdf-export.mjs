@@ -1,8 +1,23 @@
 // 模块 10：OCR 识别、PDF 合成与 Word 导出
 
 import { Module } from '../lib/harness.mjs'
+import { docxText } from '../lib/zip.mjs'
 
 const m = new Module('M10', 'OCR 与导出')
+
+/** 导出返回的是 .docx，必须解包看正文才能验"带没带答案"（R-技术-13 就是这么被漏掉的） */
+async function exportAndRead(c, body) {
+  const id = await c.ident('main')
+  const res = await c.api('POST', '/document/export', { token: id.token, body, timeout: 180000 })
+  c.status(res, 200, `导出失败：${res.text.slice(0, 250)}`)
+  const url = res.json?.data?.url
+  c.ok(!!url, `未返回导出地址：${res.text.slice(0, 200)}`)
+  const raw = await fetch(url, { headers: { 'X-Auth-Token': id.token }, signal: AbortSignal.timeout(120000) })
+  c.status({ status: raw.status, text: `下载 ${url.slice(0, 90)}` }, 200, '导出文件下载失败')
+  const buf = Buffer.from(await raw.arrayBuffer())
+  c.ok(buf.length > 1000, `导出文件过小（${buf.length}B），多半不是有效 docx`)
+  return docxText(buf)
+}
 
 async function newQuestion(c, extra = {}) {
   const id = await c.ident('main')
@@ -81,22 +96,39 @@ m.test('文档导出：空筛选条件（全量）可跑通', async (c) => {
   c.status(res, 200, `全量导出失败：${res.text.slice(0, 250)}`)
 })
 
-m.test('🔴 导出内容口径：include_answers=false 与不传的默认值必须一致', async (c) => {
-  const id = await c.ident('main')
-  const item = await newQuestion(c, { question: '口径对比题' })
-  const noAns = await c.api('POST', '/document/export', {
-    token: id.token, body: { ids: [item.id], include_answers: false }, timeout: 120000,
+m.test('🔴 导出口径：不传 include_answers 必须等于练习卷（不含答案）', async (c) => {
+  const item = await newQuestion(c, {
+    question: '口径默认值题',
+    answer: '42',
+    solution: '这是解析文本-SHOULD-NOT-APPEAR',
   })
-  c.status(noAns, 200)
-  const def = await c.api('POST', '/document/export', {
-    token: id.token, body: { ids: [item.id] }, timeout: 120000,
+  // 不传 include_answers（汇总页旧行为就是"不传"）
+  const text = await exportAndRead(c, { ids: [item.id], title: '默认口径' })
+
+  c.ok(text.includes('口径默认值题'), `导出正文里没有题干，解包逻辑或导出本身有问题：${text.slice(0, 200)}`)
+  c.ok(!text.includes('正确答案'), `默认导出了答案块（应统一为练习卷）：\n${text.slice(0, 400)}`)
+  c.ok(!text.includes('SHOULD-NOT-APPEAR'), '默认导出了解析内容')
+  c.ok(text.includes('练习卷'), `副标题未标明版本（应为「练习卷（不含答案）」）：${text.slice(0, 200)}`)
+})
+
+m.test('🔴 导出口径：include_answers=true 才输出答案/解析（答疑解惑版）', async (c) => {
+  const item = await newQuestion(c, {
+    question: '答疑解惑题',
+    answer: '43',
+    solution: '这是解析文本-MUST-APPEAR',
   })
-  c.status(def, 200)
-  // 只记录差异，判定放在文档里说明：两处口径不一致属**设计风险**
-  c.state.exportAnswerSemantics = {
-    explicit_false: !!noAns.json?.data?.file_key,
-    undefined: !!def.json?.data?.file_key,
-  }
+  const text = await exportAndRead(c, { ids: [item.id], title: '答疑解惑口径', include_answers: true })
+  c.ok(text.includes('正确答案'), `显式要答案却没输出答案块：\n${text.slice(0, 400)}`)
+  c.ok(text.includes('MUST-APPEAR'), '解析未输出')
+  c.ok(text.includes('答疑解惑'), `副标题未标明版本：${text.slice(0, 200)}`)
+})
+
+m.test('导出口径：include_answers=false 显式传与不传结果一致', async (c) => {
+  const item = await newQuestion(c, { question: '显式 false 题', answer: '7' })
+  const a = await exportAndRead(c, { ids: [item.id], title: 'A', include_answers: false })
+  const b = await exportAndRead(c, { ids: [item.id], title: 'B' })
+  const strip = (s) => s.replace(/生成于\s*\S+/g, '').replace(/A|B/, '')
+  c.eq(strip(a) === strip(b), true, '显式 false 与不传的结果不一致（语义未统一）')
 })
 
 m.test('PDF 合成：ids 必须是数组', async (c) => {

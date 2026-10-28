@@ -1314,7 +1314,10 @@ export interface ExportParams {
   include_mastered?: boolean
   /** 指定题目 id 白名单（详情页「导出打印」只导本题）；提供时后端忽略学科/时间/掌握筛选 */
   ids?: string[]
-  /** false = 纯题目卷（不带答案/解析）；不传 = 旧行为（含答案，汇总页沿用） */
+  /**
+   * true = 答疑解惑（含答案/解析）；**不传 = 打印练习卷（不含答案）**。
+   * ⚠️ 2026-10-28 起与 combineToPdf 一致：默认不含答案（旧默认是含答案）。
+   */
   include_answers?: boolean
 }
 
