@@ -195,13 +195,16 @@ m.test('复习本：加入 / 列表可见 / 移出', async (c) => {
   c.ok(!(list2.json.data.list || []).some((x) => x.id === item.id), '移出复习本后仍能查到')
 })
 
-m.test('复习：markReviewed 推进复习计划', async (c) => {
+m.test('复习：提交结果推进排程（C4，详见 M15）', async (c) => {
   const id = await c.ident('main')
   const item = await newQuestion(c, { question: '复习推进检查' })
   await c.api('POST', '/timeline/review-book', { token: id.token, body: { ids: [item.id] } })
-  const res = await c.api('POST', `/timeline/${item.id}/review`, { token: id.token })
+  const res = await c.api('POST', `/timeline/${item.id}/review`, {
+    token: id.token, body: { result: 'correct' },
+  })
   c.status(res, 200)
-  c.ok(res.json.data !== undefined && res.json.data !== null, 'markReviewed 无返回')
+  c.eq(res.json?.data?.review_count, 1, '做对后档位未推进')
+  c.ok(!!res.json?.data?.next_review_at, '做对后未排下次复习')
 })
 
 m.test('相似题推荐：不崩且返回数组', async (c) => {
