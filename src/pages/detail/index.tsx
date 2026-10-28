@@ -19,30 +19,32 @@ import MathSymbolBar from '@/components/math-symbol-bar'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { splitAnswerSolution, joinAnswerSolution } from '@/utils/answer-merge'
 import { useCaret } from '@/utils/use-caret'
-import { getSubjectColor, formatTime, formatDate, truncate, type SimilarItem, type ReviewPlan } from '@/types'
+import { getSubjectColor, formatTime, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
-import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
 
-/** P2-18 艾宾浩斯间隔（与后端 timeline/review.ts 保持一致） */
-const EBBINGHAUS_INTERVALS = [1, 2, 4, 7, 15, 30]
-/** 前端现算复习计划（纯本地，避免跨端引后端模块） */
-function computePlan(createdAt?: string, reviewCount = 0): ReviewPlan {
-  const base = createdAt ? new Date(createdAt) : new Date()
-  const total = EBBINGHAUS_INTERVALS.length
-  const count = Math.max(0, Math.min(total, Math.floor(reviewCount) || 0))
-  const schedule = EBBINGHAUS_INTERVALS.map((day, i) => {
-    const d = new Date(base)
-    d.setDate(d.getDate() + day)
-    return { stage: i + 1, day, date: d.toISOString(), done: i < count }
-  })
-  const next = schedule.find((s) => !s.done)
-  return {
-    review_count: count,
-    total_stages: total,
-    completed: count >= total,
-    next_review_at: next ? next.date : null,
-    schedule,
-  }
+/**
+ * 复习排程计划**由后端现算**（GET /api/timeline/:id 返回 review_plan）。
+ *
+ * 为什么删掉这里原本的 computePlan：
+ *   它按 `created_at + 累计间隔` 在本地算了一份"艾宾浩斯计划"，与后端各算一遍，
+ *   基准（创建时间而非上次复习）和档位都不同 ⇒ 两端显示必然打架，改规则要改两处。
+ *   C4 改造后档位真相在后端（timeline/review.ts），前端只负责展示。
+ */
+
+/**
+ * 「下次什么时候复习」文案。
+ * 不直接显示日期：孩子/家长关心的是「还有几天」，日期只在括号里做参照。
+ */
+function planTextOf(plan: ReviewPlan | null): string {
+  if (!plan) return ''
+  if (plan.completed) return '五档已走完'
+  if (plan.status === 'graduated') return '五档已走完'
+  if (!plan.next_review_at) return '未排程'
+  const d = new Date(plan.next_review_at)
+  const days = plan.days_until_due ?? 0
+  if (days <= 0) return `今天该复习（${d.getMonth() + 1}/${d.getDate()}）`
+  return `${days} 天后（${d.getMonth() + 1}/${d.getDate()}）`
 }
 
 export default function DetailPage() {
@@ -95,7 +97,7 @@ export default function DetailPage() {
       latexToReadable(it.content?.solution || ''),
     ))
     setMastered(it.mastered)
-    setPlan(computePlan(it.created_at, it.content?.review_count))
+    setPlan(it.review_plan || null)
   }
 
   const load = async () => {
@@ -379,15 +381,32 @@ export default function DetailPage() {
     }
   }
 
-  // P2-18 标记本次复习完成：更新计数并刷新复习计划
-  const handleReview = async () => {
+  /**
+   * C4 记录一次复习结果。
+   *
+   * 必须分「做对 / 做错」两个按钮：分散练习的收益前提是**成功提取**，
+   * 做错说明这次提取失败、间隔必须回到最短档位（次日再来），
+   * 做对才推进一档。合成一个「今天复习了 ✓」等于让数据无法区分两者。
+   */
+  const handleReview = async (result: 'correct' | 'wrong') => {
     if (!item) return
     setReviewing(true)
     try {
-      const { review_count, plan: newPlan } = await markReviewed(item.id)
-      setPlan(newPlan)
-      setItem({ ...item, content: { ...item.content, review_count } })
-      Taro.showToast({ title: '已记录本次复习', icon: 'success' })
+      const res = await markReviewed(item.id, result)
+      setPlan(res.plan)
+      setItem({
+        ...item,
+        in_review_book: true,
+        review_count: res.review_count,
+        review_lapses: res.review_lapses,
+        last_reviewed_at: res.last_reviewed_at,
+        next_review_at: res.next_review_at,
+        review_plan: res.plan,
+      })
+      Taro.showToast({
+        title: result === 'correct' ? `做对了，下次 ${planTextOf(res.plan)}` : '做错了，明天再来',
+        icon: 'none',
+      })
     } catch (e) {
       console.error(e)
       Taro.showToast({ title: '操作失败', icon: 'none' })
@@ -788,38 +807,66 @@ export default function DetailPage() {
           </Card>
         )}
 
-        {/* P2-18 艾宾浩斯复习计划 */}
+        {/* C4 复习排程（分散练习 d = 0.85；plan 由后端现算下发） */}
         {item && plan && (
           <Card className="rounded-2xl border-border p-4 mb-4">
-            <View className="flex flex-row items-center justify-between mb-2">
-              <Text className="block text-sm font-semibold text-foreground">复习计划（艾宾浩斯）</Text>
-              <Text className="block text-xs text-muted-foreground">已复习 {plan.review_count}/{plan.total_stages}</Text>
+            <View className="flex flex-row items-center justify-between mb-1">
+              <Text className="block text-sm font-semibold text-foreground">复习排程</Text>
+              <Text className="block text-xs text-muted-foreground">
+                {plan.status === 'graduated'
+                  ? `已走完 ${plan.total_stages} 档`
+                  : `第 ${Math.min(plan.review_count + 1, plan.total_stages)}/${plan.total_stages} 档`}
+              </Text>
             </View>
+            <Text className="block text-xs text-muted-foreground mb-2">
+              {plan.status === 'graduated'
+                ? `五档都做对了，这题已经稳了（仍留在复习本）${plan.review_lapses > 0 ? ` · 曾做错 ${plan.review_lapses} 次` : ''}`
+                : plan.status === 'due'
+                  ? (plan.overdue_days > 0 ? `已逾期 ${plan.overdue_days} 天，今天补上` : '今天就该复习')
+                  : plan.status === 'unscheduled'
+                    ? '未排程（移出复习本会取消排程）'
+                    : `下次：${planTextOf(plan)}${plan.review_lapses > 0 ? ` · 曾做错 ${plan.review_lapses} 次` : ''}`}
+            </Text>
             <View className="flex flex-row items-center gap-1 flex-wrap mb-3">
               {plan.schedule.map((s) => (
                 <View key={s.stage} className="flex flex-col items-center px-1">
                   <View
-                    className={`w-6 h-6 rounded-full flex items-center justify-center ${s.done ? 'border-0' : 'bg-muted border border-border'}`}
-                    style={s.done ? { backgroundColor: BRAND } : undefined}
+                    className={`w-6 h-6 rounded-full flex items-center justify-center ${s.done ? 'border-0' : s.current ? 'border-2' : 'bg-muted border border-border'}`}
+                    style={s.done ? { backgroundColor: BRAND } : s.current ? { borderColor: BRAND } : undefined}
                   >
-                    <Text className={`text-xs ${s.done ? '' : 'text-muted-foreground'}`} style={s.done ? { color: BRAND_FOREGROUND } : undefined}>
+                    <Text
+                      className="text-xs"
+                      style={s.done ? { color: BRAND_FOREGROUND } : s.current ? { color: BRAND_TEXT } : undefined}
+                    >
                       {s.done ? '✓' : s.stage}
                     </Text>
                   </View>
-                  <Text className="block text-xs text-muted-foreground mt-1">第{s.day}天</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">{s.interval_days}天</Text>
                 </View>
               ))}
             </View>
-            <View className="flex flex-row items-center justify-between">
-              <Text className="block text-xs text-muted-foreground">
-                {plan.completed ? '已全部完成复习阶段 🎉' : `下次复习：${plan.next_review_at ? formatDate(plan.next_review_at) : '—'}`}
-              </Text>
-              {!plan.completed && (
-                <Button variant="outline" className="h-8 rounded-lg px-3" onClick={handleReview} disabled={reviewing}>
-                  <Text className="block text-xs">{reviewing ? '记录中…' : '今天复习了 ✓'}</Text>
+            {plan.status !== 'graduated' && (
+              <View className="flex flex-row items-center gap-2">
+                <Button
+                  variant="outline"
+                  className="h-9 rounded-lg px-3 flex-1"
+                  onClick={() => handleReview('wrong')}
+                  disabled={reviewing}
+                >
+                  <Text className="block text-xs" style={{ color: DANGER }}>
+                    {reviewing ? '记录中…' : '做错了'}
+                  </Text>
                 </Button>
-              )}
-            </View>
+                <Button className="h-9 rounded-lg px-3 flex-1" onClick={() => handleReview('correct')} disabled={reviewing}>
+                  <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>
+                    {reviewing ? '记录中…' : '做对了'}
+                  </Text>
+                </Button>
+              </View>
+            )}
+            <Text className="block text-xs text-muted-foreground mt-2">
+              做对推进一档（1→3→7→14→28 天），做错回到第 1 档、明天再来。分几次复习，比一次做三遍记得更久。
+            </Text>
           </Card>
         )}
 

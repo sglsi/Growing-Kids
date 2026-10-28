@@ -531,7 +531,12 @@ export default function IndexPage() {
               <View className="flex flex-row gap-3 mb-6">
                 <StatCard label="本周新增" value={overview?.week_total ?? 0} highlight />
                 <StatCard label="收件箱" value={overview?.total ?? 0} />
-                <StatCard label="复习本" value={overview?.review_total ?? 0} onTap={goReviewBook} />
+                <StatCard
+                  label="复习本"
+                  value={overview?.review_total ?? 0}
+                  hint={overview?.review_due ? `今日待复习 ${overview.review_due}` : undefined}
+                  onTap={goReviewBook}
+                />
               </View>
 
               {/* 学科分类（思傅 2026-10-21：就地筛选下方最近题目，不再跳复习本） */}
@@ -741,7 +746,7 @@ export default function IndexPage() {
   )
 }
 
-function StatCard({ label, value, highlight, onTap }: { label: string; value: number; highlight?: boolean; onTap?: () => void }) {
+function StatCard({ label, value, highlight, hint, onTap }: { label: string; value: number; highlight?: boolean; hint?: string; onTap?: () => void }) {
   return (
     <Card className={`flex-1 rounded-2xl border-border p-4 ${highlight ? 'bg-brand' : ''}`} onClick={onTap}>
       {/* 字阶 D1/D5：数字 24px 拉开视觉重量，标签 12px 弱化——靠尺寸而非颜色建立层级 */}
@@ -751,6 +756,12 @@ function StatCard({ label, value, highlight, onTap }: { label: string; value: nu
       <Text className={`block text-xs mt-1 ${highlight ? 'text-brand-foreground opacity-80' : 'text-muted-foreground'}`}>
         {label}
       </Text>
+      {/* 复习本的「今日待复习」：分散练习唯一需要推动行动的数字，挂在总量下面而不是替换总量 */}
+      {hint ? (
+        <Text className="block text-xs mt-1" style={{ color: highlight ? BRAND_FOREGROUND : BRAND_TEXT }}>
+          {hint}
+        </Text>
+      ) : null}
     </Card>
   )
 }

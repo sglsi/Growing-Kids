@@ -94,19 +94,47 @@ export interface ErrorAnalysis {
   sbert?: number
 }
 
-/** P2-18 艾宾浩斯复习计划 */
+/**
+ * C4 复习排程计划（后端 timeline/review.ts 现算，随详情下发）
+ * ⚠️ 前端**不再自己算**间隔：两端各算一份必然漂移，且算法改一次要改两处。
+ */
 export interface ReviewStage {
+  /** 第几档（从 1 起） */
   stage: number
-  day: number
-  date: string
+  /** 该档间隔天数（1/3/7/14/28） */
+  interval_days: number
   done: boolean
+  /** 是否正在等这一档 */
+  current: boolean
 }
+
+/** 到期状态：out 不在本 / unscheduled 未排程 / due 今天该复习 / upcoming 未到期 / graduated 走完五档 */
+export type ReviewDueStatus = 'out' | 'unscheduled' | 'due' | 'upcoming' | 'graduated'
+
 export interface ReviewPlan {
+  in_review_book: boolean
   review_count: number
+  /** 累计答错次数（只记账） */
+  review_lapses: number
   total_stages: number
   completed: boolean
+  status: ReviewDueStatus
   next_review_at: string | null
+  /** 逾期天数（未到期为 0） */
+  overdue_days: number
+  /** 距到期还有几天（逾期为 0；未排程/已毕业为 null） */
+  days_until_due: number | null
+  last_reviewed_at: string | null
   schedule: ReviewStage[]
+}
+
+/** 复习排程汇总（「今日该复习 N 题」入口） */
+export interface ReviewSummary {
+  in_book: number
+  due_today: number
+  unscheduled: number
+  graduated: number
+  next_due_at: string | null
 }
 
 /** P2-17 相似题推荐项 */
@@ -145,6 +173,16 @@ export interface TimelineItem {
   // 复习本
   in_review_book: boolean
   added_to_review_at: string | null
+
+  // 复习排程（0019）
+  /** 已走过的档位 0..5：做对 +1、做错归零、满 5 毕业 */
+  review_count?: number
+  last_reviewed_at?: string | null
+  /** 下次到期；null = 未排程或已毕业 */
+  next_review_at?: string | null
+  review_lapses?: number
+  /** 详情接口附带的现算计划（列表不带） */
+  review_plan?: ReviewPlan
 
   // 标签与状态
   tags: string[]
@@ -223,6 +261,8 @@ export interface Overview {
   week_total: number
   pending: number
   review_total: number
+  /** 今日该复习（含逾期） */
+  review_due?: number
   subject_stats: { subject_id: string; name: string; color: string; count: number; week_count: number }[]
   recent: TimelineItem[]
 }

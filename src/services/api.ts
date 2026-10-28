@@ -17,10 +17,10 @@ import { buildHeaders, captureUserId } from '@/services/net'
 import { invalidateDomain } from '@/services/cache'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
-  SimilarItem, ReviewPlan, AnswerAttachment, AnswerSource,
+  SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource,
 } from '@/types'
 
-export type { TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged }
+export type { TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged, ReviewSummary, ReviewPlan }
 export { getUserId } from '@/services/net'
 
 /** 构造带身份头的请求头（首次为匿名，后端回传 X-User-Id 后续用） */
@@ -378,6 +378,10 @@ export interface TimelineQuery {
   keyword?: string
   /** ISO 时间，过滤 created_at >= since（review 模式下按 added_to_review_at） */
   since?: string
+  /** 只看今天该复习（含逾期）；置 true 时后端自动按复习本语义过滤 */
+  due?: boolean
+  /** 复习本排序：due（默认，按到期）/ added（按加入时间） */
+  sort?: 'due' | 'added'
   page?: number
   pageSize?: number
 }
@@ -389,10 +393,19 @@ export function fetchTimeline(q: TimelineQuery = {}) {
   if (q.tag) data.tag = q.tag
   if (q.keyword) data.keyword = q.keyword
   if (q.since) data.since = q.since
+  if (q.due) data.due = '1'
+  if (q.sort && q.sort !== 'due') data.sort = q.sort
   if (q.page !== undefined) data.page = q.page
   if (q.pageSize !== undefined) data.page_size = q.pageSize
   return unwrap<Paged<TimelineItem>>(
     Network.request({ url: '/api/timeline', method: 'GET', data, header: authHeaders() }),
+  )
+}
+
+/** 复习排程汇总：今日该复习 / 未排程 / 已毕业 */
+export function fetchReviewSummary() {
+  return unwrap<ReviewSummary>(
+    Network.request({ url: '/api/timeline/review/summary', method: 'GET', header: authHeaders() }),
   )
 }
 
@@ -720,11 +733,29 @@ export function fetchSimilar(id: string, limit = 5) {
   )
 }
 
-/** P2-18 艾宾浩斯复习：标记本次复习已完成，返回更新后的复习计划 */
-export function markReviewed(id: string) {
+/**
+ * C4 复习排程：记录一次复习结果。
+ *
+ * ⚠️ 必须传对错（'correct' | 'wrong'）：
+ *   旧签名只发空 body = 「今天复习了 ✓」，做对做错一样推进档位，
+ *   等于把「是否真的记住」从数据里抹掉了 —— 分散练习因此拿不到效应量。
+ *   做错归零并次日再来，做对推进一档，满五档毕业。
+ */
+export function markReviewed(id: string, result: 'correct' | 'wrong' = 'correct') {
   return invalidateAfter(
-    unwrap<{ review_count: number; plan: ReviewPlan }>(
-      Network.request({ url: `/api/timeline/${id}/review`, method: 'POST', data: {}, header: authHeaders() }),
+    unwrap<{
+      review_count: number
+      review_lapses: number
+      last_reviewed_at: string
+      next_review_at: string | null
+      plan: ReviewPlan
+    }>(
+      Network.request({
+        url: `/api/timeline/${id}/review`,
+        method: 'POST',
+        data: { result },
+        header: authHeaders(),
+      }),
     ),
     'tl',
   )

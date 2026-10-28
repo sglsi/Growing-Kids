@@ -16,12 +16,13 @@ import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/ra
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
-  updateTimeline, updateQuestion, uploadImage, replaceTimelineImage,
-  type Subject, type TimelineItem, type Paged, type ImageAction,
+  updateTimeline, updateQuestion, uploadImage, replaceTimelineImage, fetchReviewSummary,
+  type Subject, type TimelineItem, type Paged, type ImageAction, type ReviewSummary,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile } from '@/services/net'
-import { DANGER, INK, BRAND_FOREGROUND } from '@/lib/theme'
+import { DANGER, INK, BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
+import { formatDate } from '@/types'
 
 const PAGE_SIZE = 20
 
@@ -46,6 +47,10 @@ export default function SubjectPage() {
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** 复习排程汇总（今日该复习 / 未排程 / 已毕业）—— C4 */
+  const [sum, setSum] = useState<ReviewSummary | null>(null)
+  /** 只看今天该复习（含逾期） */
+  const [dueOnly, setDueOnly] = useState(false)
   const sel = useSelection()
   // 图片编辑器状态（思傅 2026-10-22：复习本与首页同一套规则——点图片可直接编辑）
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
@@ -96,15 +101,16 @@ export default function SubjectPage() {
    * 骨架屏替换整个列表 → ScrollView 内容塌缩 → 滚动位置被钳到顶部。
    * silent = 不置 loading、不显骨架，旧列表留屏，后台静默替换（与首页同规则）。
    */
-  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; since?: string; append?: boolean; silent?: boolean }) => {
+  const load = async (opts: { subjectId: string; keyword: string; tag: string; page: number; since?: string; append?: boolean; silent?: boolean; due?: boolean }) => {
     const { subjectId, keyword: kw, tag, page: p, since, append, silent } = opts
+    const due = opts.due ?? dueOnly
     if (append) setLoadingMore(true)
     else if (!silent) setLoading(true)
     // SWR（思傅 2026-10-21）：只对「第一页、非追加」查询读缓存——
     // 分页追加的中间页缓存意义小且 key 会膨胀；写操作已在 api.ts 失效 tl 域。
     const listKey = append
       ? ''
-      : cacheListKey('tl', { scope: 'review', subjectId, keyword: kw, tag, since: since || '', page: p, pageSize: PAGE_SIZE })
+      : cacheListKey('tl', { scope: 'review', subjectId, keyword: kw, tag, since: since || '', due: due ? '1' : '', page: p, pageSize: PAGE_SIZE })
     const cached = listKey ? cacheGet<Paged<TimelineItem>>(listKey) : null
     if (cached && !append) {
       setItems(cached.list)
@@ -123,6 +129,7 @@ export default function SubjectPage() {
         keyword: kw || undefined,
         tag: tag || undefined,
         since,
+        due: due || undefined,
         page: p,
         pageSize: PAGE_SIZE,
       })
@@ -161,6 +168,12 @@ export default function SubjectPage() {
     } catch (e) {
       console.error('加载学科失败', e)
     }
+    // 复习排程汇总：失败不影响列表（只影响顶部那条待办横幅）
+    try {
+      setSum(await fetchReviewSummary())
+    } catch (e) {
+      console.error('加载复习排程失败', e)
+    }
     const preset = Taro.getStorageSync('filter_subject_id') || ''
     if (preset) Taro.removeStorageSync('filter_subject_id')
     setActiveSubject(preset)
@@ -181,9 +194,10 @@ export default function SubjectPage() {
     init()
   })
 
-  const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string; range: RangeValue }>) => {
+  const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string; range: RangeValue; due: boolean }>) => {
     const nextRange = patch.range !== undefined ? patch.range : range
     const since = getSinceFromRange(nextRange, latestTimestamp)
+    const nextDue = patch.due !== undefined ? patch.due : dueOnly
     const next = {
       subjectId: patch.subjectId !== undefined ? patch.subjectId : activeSubject,
       keyword: patch.keyword !== undefined ? patch.keyword : keyword,
@@ -192,13 +206,14 @@ export default function SubjectPage() {
     if (patch.subjectId !== undefined) setActiveSubject(patch.subjectId)
     if (patch.keyword !== undefined) setKeyword(patch.keyword)
     if (patch.tag !== undefined) setActiveTag(patch.tag)
+    if (patch.due !== undefined) setDueOnly(patch.due)
     if (patch.range !== undefined) {
       setRange(patch.range)
       // 切到自动时清空锚点，由下次请求首条重新确定
       if (patch.range !== 'auto') setLatestTimestamp(undefined)
     }
     sel.exit()
-    load({ ...next, page: 1, since })
+    load({ ...next, page: 1, since, due: nextDue })
   }
 
   /**
@@ -490,6 +505,40 @@ export default function SubjectPage() {
         }}
       >
         <View className="px-4 pb-28 pt-3">
+          {/**
+            * C4 复习排程横幅：「今天该复习 N 题」是分散练习唯一需要推动用户行动的数字。
+            * 只在复习本非空时出现；due_today = 0 时给一句明确的「今天没有到期的题」，
+            * 避免用户以为排程坏了（空状态也要有话说）。
+            * ⚠️ 点击区用 View 不用 Text —— Taro 4.1.9 下 Text 绑 onClick 不响应。
+            */}
+          {sum && sum.in_book > 0 && (
+            <View
+              className="rounded-2xl p-3 mb-3"
+              style={{ backgroundColor: sum.due_today > 0 ? 'rgba(16, 185, 129, 0.08)' : '#F7F5EF' }}
+            >
+              <View className="flex flex-row items-center justify-between">
+                <Text className="block text-sm font-semibold text-foreground">
+                  {sum.due_today > 0 ? `今天该复习 ${sum.due_today} 题` : '今天没有到期的题'}
+                </Text>
+                <View
+                  className="px-2 py-1 rounded-lg"
+                  style={dueOnly
+                    ? { backgroundColor: BRAND }
+                    : { border: `1px solid ${BRAND}` }}
+                  onClick={() => resetAndLoad({ due: !dueOnly })}
+                >
+                  <Text className="block text-xs" style={{ color: dueOnly ? BRAND_FOREGROUND : BRAND_TEXT }}>
+                    {dueOnly ? '看全部' : '只看今天'}
+                  </Text>
+                </View>
+              </View>
+              <Text className="block text-xs text-muted-foreground mt-1">
+                复习本共 {sum.in_book} 题
+                {sum.graduated > 0 ? ` · 已走完五档 ${sum.graduated}` : ''}
+                {sum.next_due_at ? ` · 下次 ${formatDate(sum.next_due_at)}` : ''}
+              </Text>
+            </View>
+          )}
           {loading ? (
             <View className="space-y-3">
               <Skeleton className="h-24 w-full rounded-2xl" />
