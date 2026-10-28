@@ -224,8 +224,12 @@ git rev-list --count HEAD..origin/main    # 远端领先，应为 0
 2. build                        pnpm build:weapp
 3. dist 特征串校验              grep -c "特征串" dist/pages/<页>/index.js
 4. 重启后端并验 health 时间戳    curl --noproxy '*' http://127.0.0.1:3001/api/health
-5. 更新设计文档与项目记忆
+5. 方法论硬门（L1 及以上改动）    pnpm method:check（H1 归因 / H2 口径 / H3 同步）
+                                并附提案单：docs/design/method/proposals/P-NNN-*.md
+6. 更新设计文档与项目记忆
 ```
+
+> 📌 **第 5 步什么时候是必须的**：按 `GK-OPS-22` §2 判档，凡触碰**学习行为**（题型、反馈、排程、掌握判定、导出默认口径、复习排序）即为 L1 及以上。判档看「会不会改变孩子的学习行为」，不看改了多少行。
 
 ⚠️ **commit ≠ 发货**：前端必须重建 dist 并让开发者工具重新编译；真机调试**重新生成二维码并重新扫码**。
 
@@ -242,6 +246,7 @@ git rev-list --count HEAD..origin/main    # 远端领先，应为 0
 | 算法参数与阈值变动 | DD-10、DD-14 |
 | 业务流程变动 | DD-14、SRS-03（用户手册） |
 | **新踩的坑** | OPS-18（登记风险）+ 本文第 6 / 7 章（写成纪律） |
+| **学习行为改动（L1 及以上）** | **OPS-22 提案单** + 20a/20b 对应条目 + `method/decision-log.md` 记 D 号 |
 | 密钥位置 / 轮换方式变动 | ADD-07 第 4 章 |
 | 发布 / 运维步骤变动 | QA-16 |
 
