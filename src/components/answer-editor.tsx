@@ -153,14 +153,18 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
    * 在预览态点符号面板会自动进入编辑态（先把已有内容转成可读形式再插入）。
    */
   const insertAnswerSymbol = (snippet: string) => {
-    const cur = mode === 'edit' ? editing : latexToReadable(text)
-    const pos = caret.position(cur.length)
-    const marker = snippet.indexOf('|')
-    const plain = snippet.replace('|', '')
-    const next = cur.slice(0, pos) + plain + cur.slice(pos)
-    setEditing(next)
-    if (mode !== 'edit') setMode('edit')
-    caret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    // 延迟一拍：点 chip 会先让 textarea 失焦，带真实 cursor 的 blur 往往晚于
+    // chip 的 tap 回调 ⇒ 抢在 blur 前插入会用到上一次打字的光标（思傅 2026-10-29）
+    setTimeout(() => {
+      const cur = mode === 'edit' ? editing : latexToReadable(text)
+      const pos = caret.position(cur.length)
+      const marker = snippet.indexOf('|')
+      const plain = snippet.replace('|', '')
+      const next = cur.slice(0, pos) + plain + cur.slice(pos)
+      setEditing(next)
+      if (mode !== 'edit') setMode('edit')
+      caret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    }, 60)
   }
 
   const addAttachment = async (a: AnswerAttachment) => {
@@ -366,6 +370,10 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               maxlength={-1}
               cursor={caret.cursor}
               onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor) }}
+              // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
+              // （否则符号会插到上一次打字处，思傅 2026-10-29）
+              onBlur={(e) => caret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onFocus={(e) => caret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           )}
         </>

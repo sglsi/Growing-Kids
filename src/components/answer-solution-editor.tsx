@@ -30,11 +30,21 @@ interface Props {
   cursor: number
   /** 输入回调（第二个参数是原生事件给的光标位置，交给 useCaret.track） */
   onInput: (value: string, cursor?: number) => void
+  /**
+   * 光标位置回调（失焦 / 聚焦时都会给一次）。
+   *
+   * 为什么需要（思傅 2026-10-29「符号插到上一次编辑的位置」）：
+   * 微信 textarea 只有 onInput 会带 `cursor`；用户**用手指点**到句子中间换位置
+   * 没有任何输入事件 ⇒ useCaret 记的还是上一次打字的位置，点符号就插错地方。
+   * 点符号 chip 会先让 textarea 失焦，而 blur 事件的 detail 里带真实 cursor，
+   * 于是补上这一条链路即可让「插入位置 = 当前光标」。
+   */
+  onCaret?: (cursor?: number) => void
   /** 点数学符号/模板：页面负责按光标位置插入并回请求光标 */
   onInsert: (snippet: string) => void
 }
 
-export default function AnswerSolutionEditor({ value, cursor, onInput, onInsert }: Props) {
+export default function AnswerSolutionEditor({ value, cursor, onInput, onCaret, onInsert }: Props) {
   // 预览是纯展示开关，放组件内部即可（不涉及入库）
   const [preview, setPreview] = useState(false)
 
@@ -57,6 +67,9 @@ export default function AnswerSolutionEditor({ value, cursor, onInput, onInsert 
           maxlength={-1}
           cursor={cursor}
           onInput={(e) => onInput(e.detail.value, e.detail.cursor)}
+          // 失焦/聚焦补记光标位置：手指点选位置不产生 input 事件，只靠 blur/focus 拿得到
+          onBlur={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
+          onFocus={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
         />
         <Text className="block text-xs text-muted-foreground mt-2">
           「解析：」之后的内容会单独存为解题过程，导出 Word/PDF 时分「正确答案」「解析」两段；不写这一行就整段当答案。

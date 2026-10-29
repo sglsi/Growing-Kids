@@ -38,6 +38,15 @@ const PAGES: Group[] = [
     label: '常用符号',
     wrap: true,
     chips: [
+      // 四则运算四件套（思傅 2026-10-29 补：加号/减号/等号/平行四边形）——
+      // 原来一屏都是「高级符号」，最基本的 + − = 反而要切键盘，孩子录算式很别扭。
+      // 减号 label 用 U+2212（视觉上的「−」），insert 用 ASCII `-`：连续文本里
+      // 减号与括号/数字混排时 ASCII 更省事，readableToLatex 也按运算符处理。
+      { label: '+', insert: '+' },
+      { label: '−', insert: '-' },
+      { label: '=', insert: '=' },
+      // 平行四边形（▱ABCD 的读法；中文教材用空心斜四边形，与 △/○/⊙ 同族）
+      { label: '▱', insert: '▱' },
       { label: '√', insert: '√' }, { label: '∛', insert: '∛' },
       { label: '²', insert: '²' }, { label: '³', insert: '³' }, { label: 'ⁿ', insert: 'ⁿ' },
       { label: '½', insert: '½' }, { label: '⅓', insert: '⅓' }, { label: '¼', insert: '¼' },
