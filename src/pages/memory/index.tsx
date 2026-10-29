@@ -51,7 +51,7 @@ export default function MemoryHomePage() {
       setList(cached.list || [])
       setTotal(cached.total || 0)
       setErrorMsg(null)
-      if (!opts.silent) setLoading(false)
+      setLoading(false)
     } else if (!opts.silent) {
       setLoading(true)
       setErrorMsg(null)
@@ -74,7 +74,7 @@ export default function MemoryHomePage() {
       const msg = e instanceof Error ? e.message : '加载失败'
       setErrorMsg(msg)
     } finally {
-      if (!opts.silent) setLoading(false)
+      setLoading(false)
     }
   }, [category, activeKeyword])
 

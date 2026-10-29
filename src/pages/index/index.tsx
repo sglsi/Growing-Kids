@@ -75,6 +75,12 @@ export default function IndexPage() {
   /** 离开首页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
   const restoreItemIdRef = useRef<string>('')
   const [savingEdit, setSavingEdit] = useState(false)
+  /**
+   * 在途 load 计数（思傅 2026-10-29）：骨架屏由「最后一个请求」解除。
+   * 用布尔会在并发（useDidShow 的 fresh 刷新 + 用户点学科筛选）时先返回的那个
+   * 提前放行，另一个还没回就拿旧数据渲染。
+   */
+  const pendingLoadsRef = useRef(0)
   const sel = useSelection()
 
   /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
@@ -107,8 +113,17 @@ export default function IndexPage() {
    * 每次页面显示都**跳过本地缓存**直接取服务端。旧实现先拿缓存铺首帧，若网络
    * 请求这一轮失败（304/慢网/后端刚醒），列表就停在缓存上，用户看到的就是
    * 「新加的题没出现」。缓存只用于「首次进页面 0 等待」，不该用于「回到页面」。
+   *
+   * ⚠️ silent 只表示「**开始时**不要主动把骨架屏顶出来」，**不能**连带把
+   * 「结束时解除骨架」也跳过（思傅 2026-10-29 报「首页内容一直不能正常显示」）：
+   * 上一版 finally 写的是 `if (!opts.silent) setLoading(false)`，而 useDidShow
+   * 又固定传 silent:true ⇒ loading 初值 true 永远没人置回 false ⇒ 统计区、学科
+   * 分类、「最近题目」全被 `<View>{loading ? 骨架 : 内容}</View>` 挡住，只剩三块
+   * 灰条，而且请求再成功也不显示。现在：缓存命中即解除；请求结束（成功或失败）
+   * 由**最后一个**在途请求解除——用计数而非布尔，避免并发时先返回的那个提前放行。
    */
   const load = async (sid = subjectFilter, opts: { silent?: boolean; fresh?: boolean } = {}) => {
+    pendingLoadsRef.current += 1
     setAuth(getAuthState())
     // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
     // 先同步读本地缓存渲染首帧（0 网络等待），再后台刷新、静默回写。
@@ -124,32 +139,51 @@ export default function IndexPage() {
         setInboxTotal(cachedList.total)
       }
       if (cachedSubs) setSubjects(cachedSubs)
-      if (!opts.silent) setLoading(false)
+      // 缓存已经把内容铺上屏了，骨架屏没有继续挡着的理由（哪怕这次是 silent 调用）
+      setLoading(false)
     } else if (!opts.silent) {
       setLoading(true)
     }
     try {
-      const [ov, list, subs] = await Promise.all([
-        fetchOverview(),
+      // ⚠️ 不要把 overview 和列表放进同一个 Promise.all（思傅 2026-10-29
+      // 「内容一直不能正常显示」的第二个原因）：overview 是聚合统计，
+      // 跨境实测 5~8 秒（app 日志里 5777/8107/6678ms 比比皆是），而
+      // /api/timeline 常在 1~3 秒内回。绑在一起 ⇒ 三块统计、学科分类、
+      // 「最近题目」全要等那个最慢的请求，用户看到的就是「一直空着」。
+      // 现在列表先到先渲染，统计后到再填；statistics 失败不影响列表。
+      const [list, subs] = await Promise.all([
         // 学科筛选走后端（subjectId），不是前端过滤——否则只能筛已加载的 20 条
         fetchTimeline({ scope: 'recent', subjectId: sid || undefined, pageSize: 20 }),
         fetchSubjects().catch(() => [] as Subject[]),
       ])
-      setOverview(ov)
       setInbox(list.list)
       setInboxTotal(list.total)
       setSubjects(subs)
-      cacheSet('tl:ov', ov)
       cacheSet(listKey, list)
       if (subs.length) cacheSet('subj:list', subs)
+      // 列表已经能看了，先把骨架屏撤掉（finally 的计数只做兜底）
+      setLoading(false)
+
+      // 统计单独跑，**不 await**：它是聚合查询，跨境 5~8 秒是常态，
+      // 放在 try 里会让 finally 迟迟不执行（计数不归零），也会把整段流程拖住。
+      // 失败就保留旧值/0，不影响列表——用户要看的是题目，不是三个数字。
+      void fetchOverview()
+        .then((ov) => {
+          setOverview(ov)
+          cacheSet('tl:ov', ov)
+        })
+        .catch((e) => console.error('加载概览失败', e))
     } catch (e) {
-      console.error('加载概览失败', e)
+      console.error('加载列表失败', e)
       // 有缓存则静默保留（刷新失败不打扰）；完全无缓存才提示
-      if (!cachedOv && !cachedList) {
+      if (!cachedList) {
         Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
       }
     } finally {
-      if (!opts.silent) setLoading(false)
+      // 解除骨架屏：只由最后一个在途请求做，且**与 silent 无关**。
+      // 失败路径同样走这里——宁可显示「暂无内容」也别让用户对着灰条干等。
+      pendingLoadsRef.current = Math.max(0, pendingLoadsRef.current - 1)
+      if (pendingLoadsRef.current === 0) setLoading(false)
       // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
       const rid = pendingRestoreIdRef.current
       if (rid) {
@@ -533,13 +567,14 @@ export default function IndexPage() {
             </View>
           ) : (
             <>
-              {/* 数据统计 */}
+              {/* 数据统计：overview 未到时显示「—」而不是 0——本来有 23 条题却写「0」
+                  会让人以为数据丢了（思傅 2026-10-29 首页不显示的连带观感问题）。 */}
               <View className="flex flex-row gap-3 mb-6">
-                <StatCard label="本周新增" value={overview?.week_total ?? 0} highlight />
-                <StatCard label="收件箱" value={overview?.total ?? 0} />
+                <StatCard label="本周新增" value={overview ? overview.week_total : '—'} highlight />
+                <StatCard label="收件箱" value={overview ? overview.total : '—'} />
                 <StatCard
                   label="复习本"
-                  value={overview?.review_total ?? 0}
+                  value={overview ? overview.review_total : '—'}
                   hint={overview?.review_due ? `今日待复习 ${overview.review_due}` : undefined}
                   onTap={goReviewBook}
                 />
@@ -563,7 +598,8 @@ export default function IndexPage() {
                     onClick={() => filterSubject(s.subject_id)}
                   />
                 ))}
-                {!overview?.subject_stats?.length ? (
+                {/* overview 是后台异步填的（5~8s），未到时别急着喊「暂无分类数据」 */}
+                {overview && !overview.subject_stats?.length ? (
                   <Text className="block text-xs text-muted-foreground">暂无分类数据</Text>
                 ) : null}
               </View>
@@ -752,7 +788,7 @@ export default function IndexPage() {
   )
 }
 
-function StatCard({ label, value, highlight, hint, onTap }: { label: string; value: number; highlight?: boolean; hint?: string; onTap?: () => void }) {
+function StatCard({ label, value, highlight, hint, onTap }: { label: string; value: number | string; highlight?: boolean; hint?: string; onTap?: () => void }) {
   return (
     <Card className={`flex-1 rounded-2xl border-border p-4 ${highlight ? 'bg-brand' : ''}`} onClick={onTap}>
       {/* 字阶 D1/D5：数字 24px 拉开视觉重量，标签 12px 弱化——靠尺寸而非颜色建立层级 */}

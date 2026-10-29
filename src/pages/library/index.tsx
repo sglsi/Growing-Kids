@@ -69,7 +69,7 @@ export default function LibraryPage() {
     const cached = cacheGet<Paged<LibraryDoc>>(listKey)
     if (cached) {
       setDocs(cached.list)
-      if (!opts.silent) setLoading(false)
+      setLoading(false)
     } else if (!opts.silent) {
       setLoading(true)
     }
@@ -85,7 +85,7 @@ export default function LibraryPage() {
       console.error('加载资料库失败', e)
       if (!cached) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
     } finally {
-      if (!opts.silent) setLoading(false)
+      setLoading(false)
     }
   }
 

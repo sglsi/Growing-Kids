@@ -81,7 +81,7 @@ export default function DocumentPage() {
     const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
     if (cached) {
       setDocs(cached.list || [])
-      if (!opts.silent) setDocsLoading(false)
+      setDocsLoading(false)
     } else if (!opts.silent) {
       setDocsLoading(true)
     }
@@ -92,7 +92,7 @@ export default function DocumentPage() {
     } catch (e) {
       console.error('加载文档失败', e)
     } finally {
-      if (!opts.silent) setDocsLoading(false)
+      setDocsLoading(false)
     }
   }
 
