@@ -159,11 +159,15 @@ export default function ProfilePage() {
       })
       if (!r.confirm) return
       await purgeAccount(false)
+      // ⚠️ 必须走 logout()（2026-10-29 分模块测试发现并修复，缺陷 P1-E）：
+      // 只清 `gk_auth_token` / `gk_user_id` 会漏掉 `gk_auth_state`（= AUTH_STORAGE_KEY），
+      // 而 `isLoggedIn()` / `getAuthState()` 只读它 ⇒ 账号在服务端已删除，「我的」页
+      // 仍显示「已登录（数据云端同步）」与旧昵称头像。logout() 还会清 SWR 缓存、
+      // AI 开关与唤醒状态——这些残留会让下一个身份看到上一个账号的数据。
       try {
-        Taro.removeStorageSync('gk_auth_token')
-        Taro.removeStorageSync('gk_user_id')
+        await logout()
       } catch {
-        /* ignore */
+        /* 账号已注销，后端 logout 必然失败；本地清理才是目的 */
       }
       Taro.showToast({ title: '已注销', icon: 'success' })
       setTimeout(() => Taro.reLaunch({ url: '/pages/index/index' }), 800)
@@ -428,9 +432,9 @@ export default function ProfilePage() {
                   {state?.nickname || (logged ? '微信用户' : '未登录')}
                 </Text>
                 {logged && (
-                  <Text className="block text-xs text-primary rounded-lg border border-border px-2 py-1" onClick={handleEditNickname}>
+                  <View className="block text-xs text-primary rounded-lg border border-border px-2 py-1" onClick={handleEditNickname}>
                     编辑
-                  </Text>
+                  </View>
                 )}
               </View>
               <Text className="block text-xs text-muted-foreground mt-1">

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { applyLoginUser } from '@/services/auth'
-import { buildHeaders, captureUserId, getUserId } from '@/services/net'
+import { buildHeaders, captureUserId, getUserId, setAuthToken } from '@/services/net'
 import type { AuthUser } from '@/types/auth'
 import { BRAND_TEXT } from '@/lib/theme'
 
@@ -78,10 +78,16 @@ export default function ScanLoginPage() {
         data: { code, token, anonymous_id: getUserId() || undefined },
       })
       captureUserId(res)
-      const body = res.data as { code: number; msg?: string; data?: { user?: AuthUser } }
+      const body = res.data as { code: number; msg?: string; data?: { user?: AuthUser; auth_token?: string } }
       if (res.statusCode < 200 || res.statusCode >= 300 || body?.code !== 200) {
         throw new Error(body?.msg || `授权失败(${res.statusCode})`)
       }
+      // 🔴 必须先落令牌再落身份（2026-10-29 分模块测试发现并修复，缺陷 P0-C）：
+      // 后端 `authorizeQrTicket` 明确回传 `auth_token`（auth.controller.ts），原实现只读
+      // `data.user` 把令牌丢了；而 `captureUserId(res)` 已经把中间件在 public 路由上
+      // 按 `X-Device-Id` 新建的**匿名**身份写进本地 ⇒ 之后业务请求仍带匿名令牌，
+      // 表现为「手机端提示授权成功，但数据仍是空的」。严格令牌模式下令牌才是身份。
+      if (body.data?.auth_token) setAuthToken(body.data.auth_token)
       if (body.data?.user) applyLoginUser(body.data.user)
       setPhase('done')
     } catch (e) {
