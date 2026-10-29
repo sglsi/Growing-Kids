@@ -64,9 +64,11 @@ export default function PolicyConsent() {
 
         <ScrollView scrollY className="mt-3 max-h-[36vh]">
           <Text className="block text-[13px] leading-[21px] text-foreground">{POLICY_CONSENT_TEXT}</Text>
-          <Text className="mt-2 block text-[13px] leading-[21px] text-brand-text" onClick={openPolicy}>
-            查看完整《隐私政策》›
-          </Text>
+          {/* ⚠️ Taro 4.1.9：Text 上绑 onClick 不生效（见 app.tsx 顶部遗留 bug 说明），
+              可点击元素一律用 View —— 否则「查看完整《隐私政策》」点了没反应。 */}
+          <View className="mt-2" onClick={openPolicy}>
+            <Text className="block text-[13px] leading-[21px] text-brand-text">查看完整《隐私政策》›</Text>
+          </View>
           <Text className="mt-3 block text-[12px] leading-[19px] text-muted-foreground">
             要点：数据保存在云端（含境外区域）；检索与讲解会把题干发给第三方服务方；我们不会收集孩子的姓名、学校、位置；
             可随时在「我的」中删除数据或注销账号。

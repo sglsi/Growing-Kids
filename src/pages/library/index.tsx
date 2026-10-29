@@ -18,7 +18,7 @@ import {
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
-import { reportChooseFail } from '@/utils/privacy'
+import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 
 /** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
 function getTypeLabel(mime: string | null, name: string): string {
@@ -169,6 +169,7 @@ export default function LibraryPage() {
   }
 
   const handleChooseDoc = async () => {
+    if (!(await guardPrivacy('选择文档'))) return
     try {
       const res = await Taro.chooseMessageFile({
         count: 1,
@@ -183,6 +184,7 @@ export default function LibraryPage() {
   }
 
   const handleChooseImage = async () => {
+    if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseImage({ count: 1, sourceType: ['album', 'camera'] })
       const f = res.tempFiles[0]

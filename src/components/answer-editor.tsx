@@ -8,7 +8,7 @@ import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
-import { reportChooseFail } from '@/utils/privacy'
+import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
@@ -177,6 +177,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   // ---------- 图片：拍照/相册 → 裁剪 → 上传 ----------
   const pickImage = async () => {
+    if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({ count: 1, mediaType: ['image'], sourceType: ['camera', 'album'] })
       const p = res.tempFiles?.[0]?.tempFilePath
@@ -210,6 +211,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   // ---------- 文档：会话选文件 → 上传 ----------
   const pickDoc = async () => {
+    if (!(await guardPrivacy('选择文件'))) return
     try {
       const res = await Taro.chooseMessageFile({ count: 1 })
       const f = res.tempFiles?.[0]

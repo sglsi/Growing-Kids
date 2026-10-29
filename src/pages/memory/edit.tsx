@@ -19,7 +19,7 @@ import {
 } from '@/services/api'
 import type { Subject } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
-import { reportChooseFail } from '@/utils/privacy'
+import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -147,6 +147,7 @@ export default function MemoryEditPage() {
 
   // ---------- 添加媒体：图片 ----------
   const onPickImages = useCallback(async () => {
+    if (!(await guardPrivacy('选择图片'))) return
     try {
       const env = Taro.getEnv()
       if (env === Taro.ENV_TYPE.WEB) {
@@ -194,6 +195,7 @@ export default function MemoryEditPage() {
 
   // ---------- 添加媒体：视频 ----------
   const onPickVideo = useCallback(async () => {
+    if (!(await guardPrivacy('选择视频'))) return
     try {
       const env = Taro.getEnv()
       if (env === Taro.ENV_TYPE.WEB) {
@@ -239,7 +241,7 @@ export default function MemoryEditPage() {
   }, [])
 
   // ---------- 录音 ----------
-  const onStartRecord = useCallback(() => {
+  const onStartRecord = useCallback(async () => {
     const env = Taro.getEnv()
     if (env !== Taro.ENV_TYPE.WEAPP && env !== Taro.ENV_TYPE.TT) {
       Taro.showModal({
@@ -249,6 +251,9 @@ export default function MemoryEditPage() {
       })
       return
     }
+    // 录音（RecorderManager.start）在微信隐私清单里属「访问你的麦克风」，
+    // 未授权时 start 不报错也不出声 —— 必须先过闸门。
+    if (!(await guardPrivacy('录音'))) return
     try {
       const r = Taro.getRecorderManager()
       recorderRef.current = r
@@ -522,13 +527,22 @@ export default function MemoryEditPage() {
         />
 
         <Label className="block text-xs text-muted-foreground mb-1 mt-3">内容</Label>
+        {/*
+          ⚠️ 这里必须给**确定高度**（height），不能用 minHeight：
+          Textarea 在小程序里是**原生组件**，层级永远高于普通 View。
+          只要它的实际渲染高度不受控（minHeight 只给下限、原生组件还会按内容/默认值撑），
+          就会盖住下方「图片 / 录音 / 视频」按钮 —— 点击落在透明输入框上，
+          表现为「点按钮没反应、光标却跑进内容栏」。
+          同理不要用 style.background: transparent 覆盖 className 的 bg-muted：
+          那样连「输入框在哪」都看不见，故障更难判断。
+        */}
         <Textarea
           value={content}
           placeholder="写下今天的小发现 / 心得 / 感悟"
           maxlength={2000}
           onInput={(e) => setContent(e.detail.value)}
-          className="bg-muted rounded-xl p-3 text-sm min-h-32"
-          style={{ width: '100%', minHeight: '160px', background: 'transparent' }}
+          className="bg-muted rounded-xl p-3 text-sm"
+          style={{ width: '100%', height: '160px' }}
         />
       </View>
 

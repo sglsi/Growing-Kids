@@ -26,7 +26,7 @@ import {
 import { openStorageFile } from '@/services/net'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, INK } from '@/lib/theme'
-import { reportChooseFail } from '@/utils/privacy'
+import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -181,6 +181,9 @@ export default function RecognizePage() {
   }
 
   const chooseImage = async (slot: 'paper' | 'question' | 'answer') => {
+    // 先过隐私闸门：未授权时 chooseMedia 会被基础库挂起（既不成功也不失败），
+    // 表现为「点了没反应」。闸门会把这种情况变成明确提示。
+    if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({
         count: 1,
@@ -310,6 +313,7 @@ export default function RecognizePage() {
   // 目前入口：资料库选文档；图片识别走拍照/相册
 
   const pickDoc = async (cb: (path: string, name: string) => void) => {
+    if (!(await guardPrivacy('选择文档'))) return
     try {
       const res = await Taro.chooseMessageFile({
         count: 1,
@@ -673,6 +677,7 @@ export default function RecognizePage() {
       return
     }
     let files: { tempFilePath: string }[] = []
+    if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({ count: room, mediaType: ['image'], sourceType: ['camera', 'album'] })
       files = res.tempFiles || []
