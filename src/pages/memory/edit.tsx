@@ -528,13 +528,12 @@ export default function MemoryEditPage() {
 
         <Label className="block text-xs text-muted-foreground mb-1 mt-3">内容</Label>
         {/*
-          ⚠️ 这里必须给**确定高度**（height），不能用 minHeight：
-          Textarea 在小程序里是**原生组件**，层级永远高于普通 View。
-          只要它的实际渲染高度不受控（minHeight 只给下限、原生组件还会按内容/默认值撑），
-          就会盖住下方「图片 / 录音 / 视频」按钮 —— 点击落在透明输入框上，
-          表现为「点按钮没反应、光标却跑进内容栏」。
-          同理不要用 style.background: transparent 覆盖 className 的 bg-muted：
-          那样连「输入框在哪」都看不见，故障更难判断。
+          ⚠️ 「点图片/录音/视频没反应、光标却跑进内容栏」的真凶不在这一行的 style，
+          而在 `ui/textarea` 的壳：它原来把壳固定成 h-20（80px），却把 `style` 透传给
+          里面的**原生** textarea。这里传 height:160 ⇒ 原生层 160px、壳 80px，
+          多出的 80px 溢出到壳外（原生组件不裁剪），正好压住下面的媒体按钮。
+          已在组件里修掉（style 落壳、内层同步同一份高度、壳改 min-h-20）。
+          这里保持显式高度是**故意**的：内容框固定 160px，页面滚动范围稳定。
         */}
         <Textarea
           value={content}
