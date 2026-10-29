@@ -188,11 +188,10 @@ const big = walk(DIST)
 if (big.length) warn('大文件明细', big.map((x) => `${path.relative(DIST, x.f)} ${fmtKB(x.s)}`).join('；'), '按需拆包')
 
 // ── 2. 隐私与合规 ───────────────────────────────────────────
-if (appJson.__usePrivacyCheck__ === true) {
-  ok('__usePrivacyCheck__', '已开启（app.json）')
-} else {
-  block('__usePrivacyCheck__', 'app.json 中不是 true', '隐私接口在体验版/正式版会直接失败；检查 src/app.config.ts')
-}
+// ⚠️ 2026-10-29 修订：原规则「必须 true」会把当前状态判成阻断，但与事实相反——
+// 托管方尚未代配《用户隐私保护指引》时，true 会让**所有隐私接口被基础库挂起**
+// （拍照/相册/录音全部「点了没反应」）。故此处只做**记录**，真正的门禁在 4.1：
+// 开发态允许关闭（warn），发布态必须开启（block）。
 
 // ── 3. 包内安全 ─────────────────────────────────────────────
 const SECRET_PATTERNS = [
@@ -255,6 +254,34 @@ if (!pconfig?.setting) {
   if (pconfig.description === 'test' || !pconfig.description) {
     warn('项目描述', `description="${pconfig.description ?? ''}"`, '--prepare 会改成正式描述')
   }
+}
+
+// ── 4.1 隐私保护校验开关（__usePrivacyCheck__）─────────────────
+// 背景：`__usePrivacyCheck__: true` 会让基础库拦截/挂起所有隐私接口，直到平台侧
+// 《用户隐私保护指引》配好且用户已同意。本项目托管状态下指引尚未代配，故当前
+// **关闭**以保证功能可用（否则拍照/相册/录音全部「点了没反应」）。
+// 但开启是合规要求 ⇒ 发布前必须重新打开，这里做门禁防止忘记。
+let usePrivacyCheck = null
+try {
+  const appJson = JSON.parse(fs.readFileSync(path.join(DIST, 'app.json'), 'utf8'))
+  usePrivacyCheck = appJson.__usePrivacyCheck__
+} catch {
+  /* 读不到交给下面的 block 处理 */
+}
+if (usePrivacyCheck === true) {
+  ok('隐私保护校验', '__usePrivacyCheck__ = true')
+} else if (MODE_DEV) {
+  warn(
+    '隐私保护校验',
+    `当前关闭（__usePrivacyCheck__=${String(usePrivacyCheck)}）`,
+    '开发/体验阶段可接受：托管方代配隐私指引后，用 GK_PRIVACY_CHECK=1 重新 build',
+  )
+} else {
+  block(
+    '隐私保护校验',
+    `发布态仍为 __usePrivacyCheck__=${String(usePrivacyCheck)}`,
+    '隐私指引已配好后，必须 `GK_PRIVACY_CHECK=1 pnpm build:weapp` 重新构建再上传；否则「告知并取得同意」这一步缺平台侧留痕',
+  )
 }
 
 // ── 5. 后端域名（上线硬门槛）────────────────────────────────

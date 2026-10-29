@@ -1,4 +1,5 @@
-import { View, Text, Image, ScrollView } from '@tarojs/components'
+// eslint-disable-next-line no-restricted-syntax -- open-type/chooseAvatar 只有原生 button 支持
+import { View, Text, Image, ScrollView, Button as NativeButton } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot } from 'lucide-react-taro'
@@ -13,12 +14,30 @@ import {
   type AuthState,
 } from '@/services/auth'
 import {
-  fetchOverview, fetchStorageUsage, formatBytes, purgeAccount,
+  fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImage,
   type Overview, type StorageUsage,
 } from '@/services/api'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
+
+/** 头像本机持久化路径（`chooseAvatar` 给的是临时文件，重启即失效） */
+const AVATAR_LOCAL_KEY = 'gk_avatar_local'
+
+/**
+ * 把 `avatar_url` 变成 `Image` 能用的 src。
+ *
+ * 后端存的是**对象存储 key**（不是 URL）：URL 是 24h 签名链接，存下来第二天就失效，
+ * 头像会变成裂图。key 不会过期，需要显示时再换 —— 而 `/api/storage/files/{key}`
+ * 只在 local 驱动下可用（supabase 驱动直连对象存储，不经此路由），
+ * 所以**本机走本地持久化副本，跨设备交给后端按 key 现签**（后续增强）。
+ * 这里若拿到 http(s) 地址（历史数据 / 未来的签名 URL）直接用。
+ */
+function toImageSrc(v?: string): string {
+  const s = (v || '').trim()
+  if (!s) return ''
+  return /^https?:\/\//.test(s) ? s : ''
+}
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -31,6 +50,8 @@ export default function ProfilePage() {
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
   const [nickname, setNickname] = useState('')
+  /** 头像本机持久化副本（`chooseAvatar` 只给临时文件，冷启后必须靠它显示） */
+  const [avatarLocal, setAvatarLocal] = useState('')
   /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
   const [qrVisible, setQrVisible] = useState(false)
   /** AI 外发开关（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */
@@ -136,6 +157,13 @@ export default function ProfilePage() {
 
   useDidShow(() => {
     load()
+    // 头像本机副本：冷启后 state.avatarUrl 只有 key，需靠本地文件显示
+    try {
+      const p = Taro.getStorageSync(AVATAR_LOCAL_KEY) as string
+      if (p) setAvatarLocal(p)
+    } catch {
+      /* 读不到就不显示，不影响其它功能 */
+    }
     // 开关可能被别的入口改过（例如隐私页），回到本页时对齐一次
     void ensureAiSetting().then(setAiEnabledState)
   })
@@ -170,6 +198,48 @@ export default function ProfilePage() {
     setEditing(true)
   }
 
+  /**
+   * 选择头像（微信官方唯一可用方式）。
+   *
+   * ⚠️ 不能「直接获取微信头像昵称」：`wx.getUserProfile` / `getUserInfo` 自 2022-10 起
+   * 已被收回，返回的是**匿名数据**（昵称固定「微信用户」、头像是灰色占位图）——
+   * 这正是本页此前「头像空白 + 显示微信用户」的原因，不是取数失败。
+   * 官方替代方案就是下面的 `open-type="chooseAvatar"` 与 `input type="nickname"`：
+   * 用户点头像时微信会**直接提供「使用微信头像」选项**，一步即可，体验等同"自动获取"，
+   * 但授权链条合规（由用户自己确认）。
+   */
+  const handleChooseAvatar = async (e: unknown) => {
+    const url = (e as { detail?: { avatarUrl?: string } })?.detail?.avatarUrl
+    if (!url) return
+    if (busy) return
+    setBusy(true)
+    Taro.showLoading({ title: '保存头像' })
+    try {
+      // ① 上传到后端（attach = 只持久化，不建条目，否则会凭空多出一条「最近题目」）
+      const up = await uploadImage(url, { purpose: 'attach' })
+      // ② 后端存 key（长期有效）；本机再落一份持久化副本用于立刻显示
+      await updateProfile({ avatar_url: up.key })
+      const local = `${Taro.env.USER_DATA_PATH}/gk_avatar.png`
+      try {
+        Taro.getFileSystemManager().copyFileSync(url, local)
+        Taro.setStorageSync(AVATAR_LOCAL_KEY, local)
+      } catch (err) {
+        // 本机持久化失败不影响后端已保存，只是下次冷启可能看不到图
+        console.warn('[profile] 头像本地缓存失败', err)
+      }
+      setState((prev) =>
+        prev ? { ...prev, avatarUrl: up.key } : { userId: '', nickname: '', avatarUrl: up.key, isAnonymous: false },
+      )
+      Taro.showToast({ title: '头像已更新', icon: 'success' })
+    } catch (err) {
+      console.error('[profile] 头像保存失败', err)
+      Taro.showToast({ title: '头像保存失败，请重试', icon: 'none' })
+    } finally {
+      Taro.hideLoading()
+      setBusy(false)
+    }
+  }
+
   const handleSaveNickname = async () => {
     const name = nickname.trim()
     if (!name) {
@@ -190,6 +260,12 @@ export default function ProfilePage() {
   }
 
   const logged = isLoggedIn()
+  /**
+   * 头像实际显示源：本机持久化副本优先（重启后仍可见），
+   * 其次才是后端给的 http(s) 地址（历史数据 / 未来签名 URL）。
+   * 后端存的是 key，`toImageSrc` 会把它过滤掉——不这么区分就会出现「裂图」。
+   */
+  const avatarSrc = avatarLocal || toImageSrc(state?.avatarUrl)
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
@@ -207,18 +283,45 @@ export default function ProfilePage() {
         <View className="px-4 pt-6 pb-16">
           {/* 头像 + 身份 */}
           <View className="flex flex-row items-center gap-4 mb-5">
-            {state?.avatarUrl ? (
-              <Image
-                src={state.avatarUrl}
-                className="rounded-full border border-border"
-                style={{ width: '64px', height: '64px' }}
-                mode="aspectFill"
-              />
-            ) : (
-              <View className="rounded-full bg-muted flex items-center justify-center" style={{ width: '64px', height: '64px' }}>
-                <CircleUser size={36} color="#9A948A" />
-              </View>
-            )}
+            {/* ⚠️ 头像必须由用户自己选：微信已收回 `getUserProfile` 的头像，
+                唯一合规入口是 `button open-type="chooseAvatar"`（用户点头像时
+                微信会提供「使用微信头像」选项）。这里用一层透明按钮盖在头像上，
+                视觉不变、命中区域完整；`opacity:0` 不影响点击。 */}
+            <View style={{ position: 'relative', width: '64px', height: '64px' }}>
+              {avatarSrc ? (
+                <Image
+                  src={avatarSrc}
+                  className="rounded-full border border-border"
+                  style={{ width: '64px', height: '64px' }}
+                  mode="aspectFill"
+                />
+              ) : (
+                <View className="rounded-full bg-muted flex items-center justify-center" style={{ width: '64px', height: '64px' }}>
+                  <CircleUser size={36} color="#9A948A" />
+                </View>
+              )}
+              {/* ⚠️ 必须用**原生 button**：`open-type` 只有原生 button 支持，
+                  项目里的 ui/Button 是基于 View 的，写 openType 无效。
+                  这是项目内唯一合理的例外，故就地豁免该规则。 */}
+              {/* eslint-disable-next-line no-restricted-syntax */}
+              <NativeButton
+                openType="chooseAvatar"
+                {...({ onChooseAvatar: handleChooseAvatar } as Record<string, unknown>)}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '64px',
+                  height: '64px',
+                  padding: 0,
+                  margin: 0,
+                  opacity: 0,
+                  background: 'transparent',
+                }}
+              >
+                <Text> </Text>
+              </NativeButton>
+            </View>
             <View className="flex-1">
               <View className="flex flex-row items-center gap-2">
                 <Text className="block text-lg font-bold text-foreground">
@@ -233,6 +336,11 @@ export default function ProfilePage() {
               <Text className="block text-xs text-muted-foreground mt-1">
                 {logged ? '已登录（数据云端同步）' : '匿名使用中（本机数据保留 30 天）'}
               </Text>
+              {logged && !state?.nickname && (
+                <Text className="block text-[11px] text-muted-foreground mt-1">
+                  点头像可选微信头像，点「编辑」填昵称
+                </Text>
+              )}
             </View>
           </View>
 
@@ -240,9 +348,13 @@ export default function ProfilePage() {
             <Card className="rounded-2xl border-border p-4 mb-5">
               <View className="flex flex-row items-center gap-2">
                 <View className="flex-1 border border-border rounded-xl px-3 py-2">
+                  {/* `type="nickname"`：微信官方替代方案——聚焦时键盘上方会出现
+                      「使用微信昵称」，用户一键填入。`getUserProfile` 已不再返回真昵称
+                      （固定「微信用户」），这是唯一合规且省事的做法。 */}
                   <Input
                     value={nickname}
-                    placeholder="输入昵称"
+                    type="nickname"
+                    placeholder="填写昵称（可点选微信昵称）"
                     onInput={(e) => setNickname(e.detail.value)}
                   />
                 </View>

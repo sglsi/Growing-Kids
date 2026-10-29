@@ -186,18 +186,30 @@ export function queryNeedAuthorization(): Promise<boolean | null> {
  *
  * 所以每个隐私接口调用点都先 `if (!(await guardPrivacy('选择图片'))) return`。
  */
-export type PrivacyAuthResult = 'ok' | 'denied' | 'not-configured' | 'unavailable'
-
-/** 隐私状态查询的超时（毫秒）。超时按「不阻塞用户」处理，放行并由后续接口自己报错。 */
-const PRIVACY_PROBE_TIMEOUT = 3000
+export type PrivacyAuthResult = 'ok' | 'denied' | 'not-configured' | 'unavailable' | 'timeout'
 
 /**
- * 探针失效标记：一旦 `getPrivacySetting` 超时过一次，后续直接放行不再探。
- * 否则每次点按都要白等 3 秒——把「点了没反应」换成「点了反应很慢」，等于没解决。
+ * 隐私状态查询的超时（毫秒）。
+ * ⚠️ 隐私 API 在正常状态下是**毫秒级**回调。超过这个时长只有两种可能：
+ *   ① `__usePrivacyCheck__` 关闭，基础库压根不回调 `getPrivacySetting`；
+ *   ② 校验开启但平台侧指引未配，接口被**挂起**。
+ * 两种情况都不能把用户卡住——超时即放行，让真正的接口自己去暴露结果。
+ */
+const PRIVACY_PROBE_TIMEOUT = 2000
+
+/**
+ * 探针失效标记：一旦超时过一次，本进程后续直接放行不再探。
+ * 否则每次点按都要白等一个超时周期——把「点了没反应」换成「点了要等 2 秒」，等于没解决。
  */
 let probeBroken = false
 
+/** 本次启动是否已经就「隐私能力异常」提示过用户（只提示一次，避免每次点按都弹） */
+let warnedOnce = false
+
 export function ensurePrivacyAuthorized(): Promise<PrivacyAuthResult> {
+  // 编译期开关关闭 ⇒ 平台不校验隐私接口，探针不会回调，直接放行（零延迟）。
+  if (PRIVACY_CHECK !== '1') return Promise.resolve('unavailable')
+
   const getSetting = nativeApi<NonNullable<WxPrivacyApi['getPrivacySetting']>>('getPrivacySetting')
   // 环境不支持（H5 / 低版本基础库）⇒ 交给原接口行为，不在这里拦
   if (!getSetting) return Promise.resolve('unavailable')
@@ -210,11 +222,12 @@ export function ensurePrivacyAuthorized(): Promise<PrivacyAuthResult> {
       settled = true
       resolve(r)
     }
-    // 看门狗：getPrivacySetting 本身也可能因平台异常不回调，不能把用户卡在这里
+    // 看门狗同时兜住 `getPrivacySetting` 与 `requirePrivacyAuthorize` 两个阶段：
+    // 二者都可能在「指引未配」时永不回调。
     const timer = setTimeout(() => {
       probeBroken = true
-      console.warn('[privacy] getPrivacySetting 超时，后续调用直接放行')
-      finish('unavailable')
+      console.warn('[privacy] 隐私探针超时（校验可能已关闭或指引未配置），本次放行')
+      finish('timeout')
     }, PRIVACY_PROBE_TIMEOUT)
     const done = (r: PrivacyAuthResult) => {
       clearTimeout(timer)
@@ -267,6 +280,16 @@ export async function guardPrivacy(action: string): Promise<boolean> {
   if (r === 'denied') {
     Taro.showToast({ title: `未同意隐私保护指引，无法${action}`, icon: 'none' })
     return false
+  }
+  if (r === 'timeout' && !warnedOnce) {
+    // 探针超时 = 无法确认授权状态。**不阻断**（阻断会让功能彻底不可用），
+    // 但必须让用户/开发者知道「后台可能有一项没配」，否则又会回到「点了没反应」。
+    warnedOnce = true
+    Taro.showToast({
+      title: '隐私授权状态异常，已尝试直接打开（若无效请检查后台隐私指引）',
+      icon: 'none',
+      duration: 3500,
+    })
   }
   return true
 }

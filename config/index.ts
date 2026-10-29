@@ -158,6 +158,11 @@ export default defineConfig<'vite'>(async (merge, _env) => {
           ? '0'
           : process.env.WAKE_ENABLED ?? (process.env.NODE_ENV === 'production' ? '0' : '1'),
       ),
+      // 隐私保护校验总开关，必须与 `src/app.config.ts` 的 `__usePrivacyCheck__` 保持一致
+      // （两处读同一个 env，避免「app.json 开了、代码里以为没开」的错位）。
+      // 目前为 `'0'`：托管方尚未代配《用户隐私保护指引》，开着的后果是所有隐私接口
+      // 被基础库挂起（点击毫无反应）。详见 app.config.ts 顶部注释。
+      PRIVACY_CHECK: JSON.stringify(process.env.GK_PRIVACY_CHECK === '1' ? '1' : '0'),
     },
     copy: {
       patterns: [],

@@ -1,11 +1,33 @@
+/**
+ * 隐私保护校验总开关（2026-10-29 修正：由硬编码 true 改为按需开启）
+ *
+ * ⚠️ **这是「故障依旧」的真正原因，务必理解这一条**：
+ * `__usePrivacyCheck__: true` 的含义不是「我要弹隐私弹窗」，而是
+ * 「本小程序启用隐私协议机制」——一旦启用，基础库就会**拦截/挂起**所有隐私接口
+ * （`chooseMedia` / `chooseImage` / `chooseMessageFile` / `RecorderManager.start`），
+ * 直到平台侧《用户隐私保护指引》已配置且用户已同意为止。
+ *
+ * 本项目托管在第三方平台，隐私指引**还没代配**。此时置 true 等于自锁：
+ * 接口被挂起 → Promise 既不 resolve 也不 reject → catch 进不去 → 不弹窗不报错
+ * ⇒ 用户看到的就是「所有拍照/相册/录音按钮点了毫无反应」。
+ * 开发者工具里那条 `[wxapplib] backgroundfetch privacy fail {"errno":101}`
+ * 就是同一机制的旁证——连基础库自己的内部接口都被隐私校验拦下了。
+ *
+ * 因此默认值改为**关闭**（`GK_PRIVACY_CHECK` 未设时 false）：
+ *   - 现在（指引未配）：关掉 ⇐ 功能可用，把我们自己的隐私弹窗作为唯一同意入口
+ *   - 指引配好后：`GK_PRIVACY_CHECK=1 pnpm build:weapp` 重新开启（发布必须开启）
+ * `scripts/release-check.mjs` 会对「发布态 + 未开启」直接阻断，防止忘记。
+ *
+ * 自定义弹窗仍由 components/privacy-gate.tsx + utils/privacy.ts 负责，
+ * 与这个开关无关——关掉它不会失去「告知并取得同意」这一步。
+ *
+ * 取值来自 config/index.ts 注入的编译期常量（与 utils/privacy.ts 读同一个值，
+ * 杜绝「app.json 开了、代码里以为没开」的错位）。
+ */
+const PRIVACY_CHECK_ENABLED = typeof PRIVACY_CHECK !== 'undefined' && PRIVACY_CHECK === '1'
+
 export default defineAppConfig({
-  /**
-   * 开启隐私保护校验（必须与 mp 后台「用户隐私保护指引」配套）。
-   * 本项目调用 chooseMedia/chooseImage（相册/摄像头）属隐私接口，未声明则
-   * **体验版/正式版调用直接失败**；开发版因豁免而无感知。
-   * 实际弹窗由 components/privacy-gate.tsx + utils/privacy.ts 处理。
-   */
-  __usePrivacyCheck__: true,
+  __usePrivacyCheck__: PRIVACY_CHECK_ENABLED,
   pages: [
     'pages/index/index',
     'pages/subject/index',

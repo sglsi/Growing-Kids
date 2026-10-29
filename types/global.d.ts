@@ -9,6 +9,13 @@ declare const TARO_ENV: "weapp" | "h5" | undefined;
  * 最多 40s 才报错。故生产构建默认关闭，本地/体验版构建默认开启。
  */
 declare const WAKE_ENABLED: string | boolean | undefined;
+/**
+ * 隐私保护校验是否开启（编译期常量，见 config/index.ts 与 app.config.ts）。
+ * `'1'` = 开启，其余 = 关闭。
+ * ⚠️ 关闭时**不要**再走隐私探针：`getPrivacySetting` 会因校验关闭而不回调，
+ * 白等一个超时周期（等于「点了要等 2 秒才动」）。
+ */
+declare const PRIVACY_CHECK: string | undefined;
 
 declare module '*.png';
 declare module '*.gif';
