@@ -1,6 +1,6 @@
 # GK-QA-16 运维、发布与故障处置手册
 
-> 编号：GK-QA-16 ｜ 版本：v1.15 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 4.5.15 根因订正为 `__usePrivacyCheck__` 自锁（Taro 缺 API 仅为次因）· 4.5.16 头像昵称只能由用户自选 · 4.5.17 保存失败（学科外键 `''`）/列表 304 不刷新/头像不更新/符号插入位置四条根因 · 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path/隐私开关**
+> 编号：GK-QA-16 ｜ 版本：v1.16 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 4.5.15 根因订正为 `__usePrivacyCheck__` 自锁（Taro 缺 API 仅为次因）· 4.5.16 头像昵称只能由用户自选 · 4.5.17 保存失败（学科外键 `''`）/列表 304 不刷新/头像不更新/符号插入位置/**首页 loading 被 silent 钉死**五条根因 · 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path/隐私开关**
 > 读者：运维 / 开发 ｜ 上游：ADD-04、ADD-07、DD-09 ｜ 下游：无
 > 定位：从本地到生产的路径 + **出问题时的第一本手册**（含原发布部署设计、运维手册、故障处置三份）。
 > 密钥清单与轮换方式见 ADD-07 第 4 章（**本文不写密钥值**）；交付路由方案见 GK-OPS-19。
@@ -687,9 +687,9 @@ grep -rl "onNeedPrivacyAuthorization" \
   > 必须 `Network.downloadFile({ header: buildHeaders() })` 下载到 `USER_DATA_PATH` 再渲染
   > ——这也让换设备/重装后头像能恢复。
 
-#### 4.5.17 三个「看着像缓存、其实是写坏了」的故障（2026-10-29 新增）
+#### 4.5.17 五条「看着像缓存、其实是写坏了」的故障（2026-10-29 新增）
 
-本节三条都是当天真机/开发者工具上一起报的，根因完全不同，**不要用同一套「清缓存」思路去猜**。
+本节几条都是当天真机/开发者工具上一起报的，根因完全不同，**不要用同一套「清缓存」思路去猜**。
 
 **① 点「保存修改」必失败：`violates foreign key constraint "timeline_items_subject_id_fkey"`**
 
@@ -734,6 +734,19 @@ node .tmp/verify-fk.mjs     # 期望：带空串学科保存 = 200，subject_id 
 常常**晚于** chip 的 tap 回调落地。
 修法两条一起下：① `onBlur` / `onFocus` 也 `track(detail.cursor)`；② 插入动作延后一拍（60ms）再读位置。
 ⚠️ 这是**平台事件时序**问题，不是 `useCaret` 算法问题——不要为此改回「每次输入都重绑 `cursor`」，那会把光标跳末尾的老毛病放回来。
+
+**⑤ 首页「内容一直不能正常显示」，只剩三块灰条**
+
+| 项 | 内容 |
+|---|---|
+| 现场 | 进首页 / 从别处切回首页，统计卡片、学科分类、「最近题目」**全都不出现**，只有三块骨架屏；等待再久也不变 |
+| 真因 | 修 ②（304）时把 `useDidShow` 改成 `load(subjectFilter, { silent:true, fresh:true })`，而 `load()` 的 `finally` 写的是 `if (!opts.silent) setLoading(false)` ⇒ `loading` 初值 `true` **永远没人置回 `false`**，`{loading ? 骨架 : 内容}` 也就永远选中骨架。**silent 被当成了「全程静默」，而它只该管「开始时别把骨架顶出来」** |
+| 第二因 | `Promise.all([fetchOverview, fetchTimeline, fetchSubjects])` 把列表绑在**最慢的聚合统计**上：`/api/timeline/overview` 实测 5777 / 8107 / 6678 ms，`/api/timeline` 只要 1~3 s ⇒ 即使 loading 修好，卡片也要等 8 秒才出来，观感仍是「一直空着」 |
+| 修法 | ① 解除骨架与 `silent` **脱钩**：缓存在手 → 立刻 `setLoading(false)`；请求结束（成功或失败）由**最后一个在途请求**解除（`pendingLoadsRef` 计数，不用布尔——并发时先返回的那个会把骨架提前放掉）。② 列表 + 学科先 `await` 渲染，`overview` 改 `void fetchOverview().then(...)` **不阻塞**。③ 统计未到时显示 `—` 而非 `0`（有 23 条题却写「0」，会让人以为数据丢了）；`overview` 到位前学科区不喊「暂无分类数据」 |
+| 同源修正 | 资料库 / 文档 / 记忆三个列表页是同一个写法（`if (!opts.silent) setLoading(false)`），一并改成无条件解除。它们首次加载恰好都非 silent 所以没爆，但只要哪天有人给首次加载传 `silent` 就立刻复现 |
+
+> 铁律：**`silent` 只约束「开始」，不约束「结束」**。骨架/loading 的解除必须无条件；
+> 「别闪骨架」和「别让列表塌缩」是两件事，别塞进同一个开关。
 
 ---
 
@@ -1314,3 +1327,4 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 | **v1.13** | 2026-10-29 | **新增 4.5.15：隐私接口「点了没反应」的排障（本次唯一带根因证据的一条）**。起因：真机上识别页拍照框、详情页图片/文档按钮、记忆页录音/图片/视频全部点击无反应，且无任何报错。根因是 **Taro 4.1.9 运行时没有隐私 API**（`onNeedPrivacyAuthorization` / `getPrivacySetting` / `openPrivacyContract` / `requirePrivacyAuthorize` 只在 `.d.ts` 里，js 里零实现）⇒ `typeof Taro.xxx === 'function'` 恒 false ⇒ 监听从未注册 ⇒ 隐私接口被基础库挂起（既不 resolve 也不 reject）⇒ `catch` 进不去 ⇒ 表现为「按钮点了没反应」。修复：`utils/privacy.ts` 改为**原生 `wx` 优先**，并在 5 个调用点前加 `guardPrivacy()`（`getPrivacySetting` → `requirePrivacyAuthorize`），把静默挂起变成「成功 / 拒绝 / 未配置」三种明确结果；`getPrivacySetting` 加 3s 看门狗且超时一次后永久放行。同时修掉一个独立陷阱：记忆页内容框用 `minHeight` + `background:transparent` 写原生 `Textarea`，会被撑高并透明盖住下方按钮（表现为「点按钮没反应、光标跑进内容栏」），改为确定 `height` + 保留底色。另把 `policy-consent.tsx` 里「查看完整《隐私政策》」的 `Text onClick` 改为 `View`（Taro 4.1.9 事件绑定红线）。 |
 | **v1.14** | 2026-10-29 | **订正 v1.13 的根因判断（重要）+ 新增 4.5.16**。v1.13 把「隐私接口点了没反应」归因于「Taro 4.1.9 没有隐私 API」，那只是**次因**；真机复测故障依旧后重查，**主因是 `__usePrivacyCheck__: true` 与「平台侧《用户隐私保护指引》未代配」同时成立**——该开关的语义是「启用隐私协议机制」，启用后基础库会拦截/挂起所有隐私接口（`chooseMedia`/`chooseImage`/`chooseMessageFile`/`RecorderManager.start`），Promise 既不 resolve 也不 reject ⇒ `catch` 进不去 ⇒ 不弹窗不报错。开发者工具里 `[wxapplib] backgroundfetch privacy fail {"errno":101}` 是同一机制的旁证（该 API 全仓零调用，是基础库内部预检）。修复：① **治本**——`__usePrivacyCheck__` 改由编译期常量 `PRIVACY_CHECK` 控制，默认关闭；指引配好后 `GK_PRIVACY_CHECK=1` 重新构建，`release-check` 4.1 节对「发布态仍关闭」直接阻断；② **治标**（保留，供指引配好后使用）——闸门总超时 2s、超时即放行，且开关关闭时首行直接返回（零延迟）。另新增 **4.5.16**：头像/昵称**不能直接取微信的**（`getUserProfile` 自 2022-10 起返回匿名数据，昵称恒为「微信用户」、头像为灰色占位），官方替代是原生 `button open-type="chooseAvatar"` + `input type="nickname"`；并写明存储口径（后端存 key 不存签名 URL、`purpose` 必须 `attach`、本机副本供冷启显示）。 |
 | **v1.15** | 2026-10-29 | **新增 4.5.17「三个看着像缓存、其实是写坏了的故障」**（当天四条真机反馈，根因各不相同）。① **保存修改必 500：`timeline_items_subject_id_fkey`** —— 未分类条目的 `subject_id` 是 `NULL`，详情页铺成 `''` 又原样回写，空串不是 NULL ⇒ 外键约束炸，用户改的题干/答案全丢；两侧同修：前端 `subject_id: subjectId \|\| null`，后端新增 `resolveSubjectId()`（`''`/无效/越权 ⇒ `NULL`，**降级为未分类而不是报错**），并把外键报错翻成人话。② **回首页不刷新** —— 日志一天 53 次 `status:304`：Express 默认 ETag，小程序带 `If-None-Match` 拿到 304 + 空 body，前端 `unwrap` 只认 2xx 当失败 ⇒ 列表停在缓存；修法 `app.set('etag', false)` + `/api` 全量 `Cache-Control: no-store`，首页 `useDidShow` 改 `{silent:true, fresh:true}` 跳过本地缓存；顺带修「图片直存 title 变成 `tmp_xxx`」（临时名回退「图片题目」，并已订正 7 条历史数据）。③ **头像选完没变化** —— 保存链路本来成功（后端 3 次 `POST /api/upload` + `PATCH /auth/profile` 全 200），坏在显示：`toImageSrc()` 把 key 过滤成 `''`、本机副本固定同名且没 `setState`；改为 `{key, path}` + 带时间戳文件名 + **带令牌 `downloadFile` 拉 key 落本机再渲染**（该路由要 `X-Auth-Token`，裸拼 URL 当 `<Image src>` 实测 401，故不能直接代理；4.5.16 展示优先级同步订正）。④ **数学符号插到上一次打字处** —— 手指点选位置不产生 `input` 事件，且 chip 的 tap 早于 textarea 的 `blur`；`onBlur/onFocus` 补记 + 插入延后 60ms。另：常用符号页新增 `+` `−` `=` `▱`（平行四边形）。 |
+| **v1.16** | 2026-10-29 | **4.5.17 增补第 ⑤ 条「首页内容一直不能正常显示」** —— 上一版修 304 时把 `useDidShow` 改成 `load(subjectFilter, {silent:true, fresh:true})`，而 `load()` 的 `finally` 是 `if (!opts.silent) setLoading(false)` ⇒ `loading` 初值 `true` **永远没人置回 false**，统计/学科/「最近题目」全被 `{loading ? 骨架 : 内容}` 挡住，等再久也只有三块灰条。**silent 的语义被误用成「全程静默」，它只该管「开始时别顶骨架」**。修法：解除骨架与 silent 脱钩（缓存命中立即解除；请求结束由**最后一个在途请求**用 `pendingLoadsRef` 计数解除，布尔会在并发时提前放行）；顺手把 `Promise.all([overview, timeline, subjects])` 拆开——overview 实测 5777/8107/6678 ms，把列表也拖到 8 秒后才出，改为 `void fetchOverview().then(...)` 不阻塞；统计未到显示 `—` 而非 `0`。同源的资料库/文档/记忆三页一并统一为无条件解除。 |
