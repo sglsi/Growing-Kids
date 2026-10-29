@@ -101,6 +101,22 @@ async function bootstrap() {
   // 0.6 访问日志：每请求一行（方法/路径/状态/耗时/用户/traceId）
   app.use(accessLog);
 
+  // 0.7 关掉 HTTP 协商缓存（ETag / 304）+ 强制 no-store
+  //
+  // ⚠️ 思傅 2026-10-29 报「新加题目回首页不刷新」的真因之一（日志里一天 53 次 304）：
+  //    Express 默认给每个 JSON 响应发 ETag。小程序（尤其开发者工具）会带
+  //    `If-None-Match` 再来，命中即回 **304 + 空 body**。而前端 `unwrap` 只认
+  //    2xx，304 被当成失败 → 列表静默停在旧数据，用户看到的就是「没刷新」。
+  //    本项目缓存分两层且都自带失效（前端 SWR 按域失效 + 后端 30s 内存/Redis 缓存），
+  //    HTTP 层再协商一次毫无收益，只会制造空响应。
+  //    注：`/api/storage/files/*` 会在控制器里显式写 `Cache-Control: immutable`，
+  //    晚于本中间件，故图片/文档的强缓存不受影响。
+  app.getHttpAdapter().getInstance().set('etag', false);
+  app.use((_req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+
   // CORS 来源白名单：小程序端请求不带 Origin 头，同源策略对它无效；
   // 真正受约束的是 **H5 扫码登录页**（浏览器环境）。生产环境应在
   // `CORS_ORIGINS` 里只放行该 H5 域名（逗号分隔），未配置时保持放开

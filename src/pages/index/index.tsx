@@ -102,16 +102,21 @@ export default function IndexPage() {
    * 滚动位置被原生钳到顶部 ⇒ 操作完 visually 跳回第 1 题（已改过两次都没治住，
    * 前两次只修了「从详情返回」的锚回，没治列表内操作这条路径）。
    * silent = 不置 loading、不显骨架，旧列表留在屏上，后台拉新数据静默替换。
+   *
+   * ⚠️ fresh（思傅 2026-10-29 修「新加题目回首页不刷新」）：
+   * 每次页面显示都**跳过本地缓存**直接取服务端。旧实现先拿缓存铺首帧，若网络
+   * 请求这一轮失败（304/慢网/后端刚醒），列表就停在缓存上，用户看到的就是
+   * 「新加的题没出现」。缓存只用于「首次进页面 0 等待」，不该用于「回到页面」。
    */
-  const load = async (sid = subjectFilter, opts: { silent?: boolean } = {}) => {
+  const load = async (sid = subjectFilter, opts: { silent?: boolean; fresh?: boolean } = {}) => {
     setAuth(getAuthState())
     // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
     // 先同步读本地缓存渲染首帧（0 网络等待），再后台刷新、静默回写。
     // 写操作已在 api.ts 收口失效缓存，这里取到即是最新。
     const listKey = cacheListKey('tl', { scope: 'recent', subjectId: sid || '', pageSize: 20 })
-    const cachedOv = cacheGet<Overview>('tl:ov')
-    const cachedList = cacheGet<Paged<TimelineItem>>(listKey)
-    const cachedSubs = cacheGet<Subject[]>('subj:list')
+    const cachedOv = opts.fresh ? null : cacheGet<Overview>('tl:ov')
+    const cachedList = opts.fresh ? null : cacheGet<Paged<TimelineItem>>(listKey)
+    const cachedSubs = opts.fresh ? null : cacheGet<Subject[]>('subj:list')
     if (cachedOv || cachedList || cachedSubs) {
       if (cachedOv) setOverview(cachedOv)
       if (cachedList) {
@@ -168,7 +173,8 @@ export default function IndexPage() {
       pendingRestoreIdRef.current = restoreItemIdRef.current
       restoredRef.current = true
     }
-    load()
+    // fresh：回到本页一律以服务端为准（新增题目/识别入库/别处改答案都要立刻可见）
+    void load(subjectFilter, { silent: true, fresh: true })
   })
 
   const goRecognize = () => {
