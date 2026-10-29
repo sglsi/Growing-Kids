@@ -33,8 +33,8 @@ export default function MemoryDetailPage() {
       setLoading(true)
     }
     try {
-      const res = await fetchMemoryDetail(id)
-      const data = (res as any).data?.data || (res as any).data || res
+      // service 层已解包 + 驼峰化
+      const data = await fetchMemoryDetail(id)
       setMemory(data.memory as Memory)
       setMedia((data.media || []) as MemoryMedia[])
       cacheSet(itemKey, { memory: data.memory, media: data.media || [] })

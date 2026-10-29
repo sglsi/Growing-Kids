@@ -9,8 +9,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  fetchMemoryDetail, createMemory,
-  addMemoryMedia,
+  fetchMemoryDetail, createMemory, updateMemory,
+  addMemoryMedia, deleteMemoryMedia,
   type Memory, type MemoryCategory, type MemoryMood, type MemoryKind,
   MEMORY_CATEGORIES, MEMORY_MOODS,
 } from '@/services/memory'
@@ -67,6 +67,13 @@ export default function MemoryEditPage() {
   })
 
   const [media, setMedia] = useState<DraftMedia[]>([])
+  /**
+   * 编辑模式下**服务端已有的媒体 id**（加载时快照）。
+   * 用途：① 保存时跳过这些项，否则会对已有媒体再 `addMemoryMedia` 一遍（每次编辑翻倍）；
+   *      ② 用户在编辑页删掉的那些，保存时调 `deleteMemoryMedia` 真正删除
+   *      （原实现 `removeMedia` 只改本地 state，保存后图还在）。
+   */
+  const initialMediaIdsRef = useRef<Set<string>>(new Set())
 
   // ---------- 元数据 ----------
   const [subjects, setSubjects] = useState<Subject[]>([])
@@ -82,8 +89,8 @@ export default function MemoryEditPage() {
     let alive = true
     fetchSubjects().then((s) => { if (alive) setSubjects(s) }).catch(() => undefined)
     if (editId) {
-      fetchMemoryDetail(editId).then((res) => {
-        const data = (res as any).data?.data || (res as any).data || res
+      // service 层已解包 + 驼峰化（原双重解包拿到的仍是 snake_case，导致时间框 NaN）
+      fetchMemoryDetail(editId).then((data) => {
         if (!alive || !data) return
         const mem = data.memory as Memory
         setTitle(mem.title || '')
@@ -94,6 +101,7 @@ export default function MemoryEditPage() {
         setTags(mem.tags || [])
         setOccurredAt(formatDateTimeLocal(new Date(mem.occurredAt)))
         const existing: Media[] = (data.media || []) as Media[]
+        initialMediaIdsRef.current = new Set(existing.map((m) => m.id))
         setMedia(existing.map((m) => ({
           localKey: m.id,
           tempPath: m.url || '',
@@ -363,8 +371,10 @@ export default function MemoryEditPage() {
         setSaving(false)
         return
       }
-      // 创建记忆
-      const mem = await createMemory({
+      // 🔴 编辑必须走 update（2026-10-29 分模块测试发现并修复，缺陷 P1-D）：
+      // 原实现无条件 `createMemory`，`editId` 只用于加载 ⇒ 每次编辑都多出一条
+      // 一模一样的记忆，原条目永远不变。
+      const payload = {
         title: title.trim() || undefined,
         content: content.trim() || undefined,
         category,
@@ -372,12 +382,31 @@ export default function MemoryEditPage() {
         subject_id: category === 'study' ? (subjectId || undefined) : undefined,
         tags: tags.length ? tags : undefined,
         occurred_at: new Date(occurredAt).toISOString(),
-      })
-      const memId = (mem as any).data?.id || (mem as any).id
-      // 追加媒体
-      for (let i = 0; i < uploaded.length; i++) {
-        const m = uploaded[i]
+      }
+      const mem = editId
+        ? await updateMemory(editId, payload as any)
+        : await createMemory(payload as any)
+      const memId = (mem as any)?.id || editId
+      if (!memId) throw new Error('保存后未取到记忆 id')
+
+      // 编辑模式下：用户在页面上删掉的媒体要真正删掉（否则保存后图还在）
+      if (editId) {
+        const kept = new Set(
+          uploaded.map((m) => m.serverMediaId).filter(Boolean) as string[],
+        )
+        for (const oldId of Array.from(initialMediaIdsRef.current)) {
+          if (kept.has(oldId)) continue
+          await deleteMemoryMedia(memId, oldId).catch((e) =>
+            console.error('[memory] 删除已有媒体失败', oldId, e),
+          )
+        }
+      }
+
+      // 追加媒体：只追加本轮新上传的（已有 serverMediaId 的跳过，否则每次保存翻倍）
+      let sort = 0
+      for (const m of uploaded) {
         if (!m.serverKey) continue
+        if (m.serverMediaId) continue
         await addMemoryMedia(memId, {
           kind: m.kind,
           file_key: m.serverKey,
@@ -387,7 +416,7 @@ export default function MemoryEditPage() {
           height: m.height,
           size_bytes: m.sizeBytes,
           duration_sec: m.durationSec,
-          sort_order: i,
+          sort_order: sort++,
         } as any)
       }
       Taro.removeStorageSync(`${DRAFT_KEY_PREFIX}new`)

@@ -63,10 +63,9 @@ export default function MemoryHomePage() {
         page: 1,
         pageSize: 50,
       })
-      // 列表响应需要解包：res.data.data.list
-      const data = (res as any).data?.data || (res as any).data || res
-      const nextList = (data.list || []) as Memory[]
-      const nextTotal = data.total || 0
+      // service 层已解包 + 驼峰化（fetchMemories 直接返回 MemoryListResp）
+      const nextList = (res.list || []) as Memory[]
+      const nextTotal = res.total || 0
       setList(nextList)
       setTotal(nextTotal)
       cacheSet(listKey, { list: nextList, total: nextTotal })
@@ -168,7 +167,7 @@ export default function MemoryHomePage() {
       {/* 搜索 + 新增 */}
       <View className="flex flex-row items-center gap-2 px-4 pt-3">
         <View className="flex-1 flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9">
-          <Text className="block text-xs text-muted-foreground" onClick={onSearch}>🔍</Text>
+          <View className="block text-xs text-muted-foreground" onClick={onSearch}>🔍</View>
           <View className="flex-1">
             <input
               className="w-full text-sm bg-transparent outline-none"
@@ -180,9 +179,9 @@ export default function MemoryHomePage() {
             />
           </View>
           {keyword ? (
-            <Text className="block text-xs text-muted-foreground" onClick={() => { setKeyword(''); setActiveKeyword(''); }}>
+            <View className="block text-xs text-muted-foreground" onClick={() => { setKeyword(''); setActiveKeyword(''); }}>
               清空
-            </Text>
+            </View>
           ) : null}
         </View>
         {!sel.selecting && (
@@ -211,12 +210,12 @@ export default function MemoryHomePage() {
       {!sel.selecting && (
         <View className="flex flex-row items-center justify-between px-4 pt-2 pb-2">
           <Text className="block text-xs text-muted-foreground">{`共 ${total} 条`}</Text>
-          <Text
+          <View
             className="block text-xs text-muted-foreground"
             onClick={() => list.length && sel.enter()}
           >
             批量
-          </Text>
+          </View>
         </View>
       )}
 

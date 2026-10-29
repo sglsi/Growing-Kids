@@ -1,5 +1,29 @@
 import { Network } from '@/network'
 import { invalidateDomain } from '@/services/cache'
+import { captureUserId } from '@/services/net'
+
+/**
+ * 统一解包：与 `services/api.ts` 的 `unwrap` 同口径（HTTP 2xx + body.code===200 → body.data）。
+ *
+ * 🔴 为什么这里必须自己解包（2026-10-29 分模块测试发现并修复，缺陷 P0-A）：
+ * `Network.request` 返回的是 **Taro 完整响应对象**（`{ statusCode, data:{code,msg,data} }`），
+ * 不是业务数据。本文件原先直接把它当业务数据返回，调用方只能写
+ * `(res as any).data?.data || res` 这种双重解包，且**解出来的仍是后端 snake_case 字段**，
+ * 而本文件的 `Memory` 类型是驼峰 ⇒ `m.occurredAt` 恒 undefined ⇒ 记忆列表按月份分组时
+ * 全部 `continue` ⇒ 页面显示「共 N 条」却一张卡片都没有。
+ */
+async function unwrap<T>(p: Promise<any>): Promise<T> {
+  const res = await p
+  captureUserId(res)
+  const body = res?.data
+  if (!res || res.statusCode < 200 || res.statusCode >= 300) {
+    throw new Error(body?.msg || `请求失败(${res?.statusCode ?? '无响应'})`)
+  }
+  if (body?.code !== undefined && body.code !== 200) {
+    throw new Error(body.msg || '请求失败')
+  }
+  return body.data as T
+}
 
 /** 写操作收口：成功后失效 mem 缓存域（与 api.ts 的 invalidateAfter 同义） */
 function invalidateAfter<T>(p: Promise<T>, ...domains: string[]): Promise<T> {
@@ -129,22 +153,27 @@ export function fetchMemories(q: MemoryListQuery = {}) {
     if (v === undefined || v === null || v === '') continue
     data[k] = v
   }
-  return Network.request<MemoryListResp>({
-    url: '/api/memories',
-    method: 'GET',
-    data,
-  })
+  return unwrap<Record<string, unknown>>(
+    Network.request({ url: '/api/memories', method: 'GET', data }),
+  ).then(normalizeMemoryListResp)
 }
 
 /** 详情 */
 export function fetchMemoryDetail(id: string) {
-  return Network.request<MemoryDetailResp>({ url: `/api/memories/${id}`, method: 'GET' })
+  return unwrap<Record<string, unknown>>(
+    Network.request({ url: `/api/memories/${id}`, method: 'GET' }),
+  ).then((raw) => ({
+    memory: normalizeMemory((raw.memory || {}) as Record<string, unknown>),
+    media: ((raw.media || []) as Record<string, unknown>[]).map(normalizeMemoryMedia),
+  }))
 }
 
 /** 创建 */
 export function createMemory(payload: CreateMemoryPayload) {
   return invalidateAfter(
-    Network.request<Memory>({ url: '/api/memories', method: 'POST', data: payload }),
+    unwrap<Record<string, unknown>>(
+      Network.request({ url: '/api/memories', method: 'POST', data: payload }),
+    ).then(normalizeMemory),
     'mem',
   )
 }
@@ -152,7 +181,9 @@ export function createMemory(payload: CreateMemoryPayload) {
 /** 修改 */
 export function updateMemory(id: string, payload: UpdateMemoryPayload) {
   return invalidateAfter(
-    Network.request<Memory>({ url: `/api/memories/${id}`, method: 'PATCH', data: payload }),
+    unwrap<Record<string, unknown>>(
+      Network.request({ url: `/api/memories/${id}`, method: 'PATCH', data: payload }),
+    ).then(normalizeMemory),
     'mem',
   )
 }
