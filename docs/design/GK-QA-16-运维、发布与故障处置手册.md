@@ -1,6 +1,6 @@
 # GK-QA-16 运维、发布与故障处置手册
 
-> 编号：GK-QA-16 ｜ 版本：v1.14 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 4.5.15 根因订正为 `__usePrivacyCheck__` 自锁（Taro 缺 API 仅为次因）· 新增 4.5.16 头像昵称只能由用户自选 · 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path/隐私开关**
+> 编号：GK-QA-16 ｜ 版本：v1.15 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 4.5.15 根因订正为 `__usePrivacyCheck__` 自锁（Taro 缺 API 仅为次因）· 4.5.16 头像昵称只能由用户自选 · 4.5.17 保存失败（学科外键 `''`）/列表 304 不刷新/头像不更新/符号插入位置四条根因 · 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path/隐私开关**
 > 读者：运维 / 开发 ｜ 上游：ADD-04、ADD-07、DD-09 ｜ 下游：无
 > 定位：从本地到生产的路径 + **出问题时的第一本手册**（含原发布部署设计、运维手册、故障处置三份）。
 > 密钥清单与轮换方式见 ADD-07 第 4 章（**本文不写密钥值**）；交付路由方案见 GK-OPS-19。
@@ -677,8 +677,60 @@ grep -rl "onNeedPrivacyAuthorization" \
 - `chooseAvatar` 给的是**临时文件**（`wxfile://tmp_…`），冷启即失效 ⇒ 必须
   ① 上传后端换 key（`purpose: 'attach'`，**不能用 `save`**，否则凭空多一条「最近题目」）；
   ② 本机再 `copyFileSync` 到 `USER_DATA_PATH` 并存 Storage，供本机冷启显示。
-- 展示优先级：本机副本 → `avatar_url` 为 http(s) 时直接用 → 占位图标。
-  前端 `toImageSrc()` 会把 key 过滤掉，**不区分就会裂图**。
+- 展示优先级：**本机副本（且其记录的 key 与当前 `avatar_url` 一致时）→ `/api/storage/files/{key}` 代理地址 → 占位图标**。
+  > 2026-10-29 订正：旧版写「本机副本 → http(s) 地址」，而 `toImageSrc()` 会把 key 过滤成 `''` ⇒
+  > 第一次选完头像**当场仍是空白**（保存其实成功了）；而本机副本固定写 `gk_avatar.png`，
+  > 第二次换头像 `copyFileSync` 因目标已存在失败 ⇒ 永远显示第一张。现改为
+  > 本机副本记 `{key, path}`（换头像用带时间戳的新文件名）、key 不一致就回落到服务端代理地址。
+  > `/api/storage/files/*` 在 local 与 supabase 两种驱动下都可用（supabase 由服务端下载回传）。
+
+#### 4.5.17 三个「看着像缓存、其实是写坏了」的故障（2026-10-29 新增）
+
+本节三条都是当天真机/开发者工具上一起报的，根因完全不同，**不要用同一套「清缓存」思路去猜**。
+
+**① 点「保存修改」必失败：`violates foreign key constraint "timeline_items_subject_id_fkey"`**
+
+| 项 | 内容 |
+|---|---|
+| 现场 | 题目详情页（含「图片条目」详情页的题干编辑）改完题干/答案 → 保存失败，`api.ts` 抛 `ApiError` 带整段 PG 约束名 |
+| 证据 | `server/logs/error-YYYY-MM-DD.log` 里请求体是 `{"subject_id":"", ...}` —— **空串** |
+| 真因 | 未分类条目 `subject_id` 是 `NULL`；页面 `applyItem` 把它铺成 `''`（便于 Picker 显示），保存时又原样发回。`''` 既不是 `NULL` 也不是任何学科 id ⇒ Postgres 外键约束直接 500，用户刚改的内容全丢 |
+| 修法（两侧都改） | 前端：`subject_id: subjectId \|\| null`；后端：`resolveSubjectId()` 统一口径——`''`/空白/无效 id/越权 id 一律落 `NULL`（降级为「未分类」而不是报错，**标签可以再选，题干丢了就是真丢**），并把外键类报错翻成人话 |
+| 回归命令 | 见下方「一条命令复现」 |
+
+```bash
+# 复现 + 验证（自带造号/清理，不碰真实数据）
+node .tmp/verify-fk.mjs     # 期望：带空串学科保存 = 200，subject_id 落 null
+```
+
+> 铁律：**空串不是 NULL**。任何外键字段从「界面 state」回写数据库前，必须先 `trim()` 再判空。
+> 同类问题在资料库早已修过（`library.service.ts` 的 `patch.subject_id === '' ? null`），本次是 timeline 侧漏了。
+
+**② 新加的题目回到首页不刷新**
+
+| 项 | 内容 |
+|---|---|
+| 现场 | 识别/直存成功后返回首页，列表仍是旧的（手动下拉或重进才有） |
+| 证据 | `server/logs/app-*.log` 一天出现 **53 次 `status: 304`**（`/api/timeline`、`/api/timeline/overview`、`/api/subjects`） |
+| 真因 | Express 默认给 JSON 响应发 `ETag`；小程序（尤其开发者工具）会带 `If-None-Match` 再来，命中即回 **304 + 空 body**。前端 `unwrap` 只认 2xx ⇒ 当成失败 ⇒ 列表静默停在本地缓存 |
+| 修法 | 后端 `main.ts`：`app.set('etag', false)` + 全 `/api` 加 `Cache-Control: no-store`（`/api/storage/files/*` 自己的 `immutable` 晚写，不受影响）；前端首页 `useDidShow` 改 `load(subjectFilter, { silent:true, fresh:true })`，**回到页面一律跳过本地缓存**直接取服务端 |
+| 判据 | `curl -sI <api>/api/timeline` 看不到 `ETag`，且有 `cache-control: no-store`（本机实测已验） |
+
+> 顺带修掉一个「看起来像没刷新」的真凶：上传直存建条目时 `title` 取了 multipart 的临时名
+> （`tmp_a09aaa…`），首页卡片显示一串乱码。现临时名（`tmp_`/`wx_`/`file_`）一律回退为「图片题目」。
+
+**③ 选了「使用微信头像」、转一圈又没变化**
+
+见 4.5.16 末尾「展示优先级」——保存链路本来就是通的（后端日志有 3 次 `POST /api/upload` + `PATCH /auth/profile` 全 200），
+坏的是**显示**：`toImageSrc()` 把 key 过滤成 `''`，本机副本又没 `setState`。不是网速、不是权限。
+
+**④ 数学符号插到「上一次打字的位置」，不是当前光标**
+
+微信 `textarea` 只有 `onInput` 的 `detail` 带 `cursor`。用户**用手指点**到句子中间换位置时没有任何输入事件，
+`useCaret` 记的还是上一次打字处；而且点符号 chip 会让 textarea 先失焦，带真实 `cursor` 的 `blur`
+常常**晚于** chip 的 tap 回调落地。
+修法两条一起下：① `onBlur` / `onFocus` 也 `track(detail.cursor)`；② 插入动作延后一拍（60ms）再读位置。
+⚠️ 这是**平台事件时序**问题，不是 `useCaret` 算法问题——不要为此改回「每次输入都重绑 `cursor`」，那会把光标跳末尾的老毛病放回来。
 
 ---
 
@@ -1258,3 +1310,4 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 | **v1.12** | 2026-10-29 | **⚠️ 隐私项由 4 项更正为 5 项（补「麦克风」）**。起因：核对录制链路时发现 `memory/edit.tsx` 有语音备忘（`Taro.getRecorderManager().start()`），官方隐私接口清单把 `RecorderManager.start` 归入「访问你的麦克风」。原 4.5.4 表里写着「录音 ❌ 不要勾」——**方向性错误**，照做会导致录音点了无反应且不报错（`errno 112`）。同步改：4.5.4 表与订正说明、4.5.5 改「五项用途说明」并拆成「面板短句（填后台）」与「书面长句（写政策）」两列、4.5.3 勾选步、常见坑表、面板配置步、7.1 发布清单。另：小程序内《隐私政策》第二节/第三节补麦克风与语音备忘披露（原政策完全未提麦克风，与指引对不上会被比对出不一致）。 |
 | **v1.13** | 2026-10-29 | **新增 4.5.15：隐私接口「点了没反应」的排障（本次唯一带根因证据的一条）**。起因：真机上识别页拍照框、详情页图片/文档按钮、记忆页录音/图片/视频全部点击无反应，且无任何报错。根因是 **Taro 4.1.9 运行时没有隐私 API**（`onNeedPrivacyAuthorization` / `getPrivacySetting` / `openPrivacyContract` / `requirePrivacyAuthorize` 只在 `.d.ts` 里，js 里零实现）⇒ `typeof Taro.xxx === 'function'` 恒 false ⇒ 监听从未注册 ⇒ 隐私接口被基础库挂起（既不 resolve 也不 reject）⇒ `catch` 进不去 ⇒ 表现为「按钮点了没反应」。修复：`utils/privacy.ts` 改为**原生 `wx` 优先**，并在 5 个调用点前加 `guardPrivacy()`（`getPrivacySetting` → `requirePrivacyAuthorize`），把静默挂起变成「成功 / 拒绝 / 未配置」三种明确结果；`getPrivacySetting` 加 3s 看门狗且超时一次后永久放行。同时修掉一个独立陷阱：记忆页内容框用 `minHeight` + `background:transparent` 写原生 `Textarea`，会被撑高并透明盖住下方按钮（表现为「点按钮没反应、光标跑进内容栏」），改为确定 `height` + 保留底色。另把 `policy-consent.tsx` 里「查看完整《隐私政策》」的 `Text onClick` 改为 `View`（Taro 4.1.9 事件绑定红线）。 |
 | **v1.14** | 2026-10-29 | **订正 v1.13 的根因判断（重要）+ 新增 4.5.16**。v1.13 把「隐私接口点了没反应」归因于「Taro 4.1.9 没有隐私 API」，那只是**次因**；真机复测故障依旧后重查，**主因是 `__usePrivacyCheck__: true` 与「平台侧《用户隐私保护指引》未代配」同时成立**——该开关的语义是「启用隐私协议机制」，启用后基础库会拦截/挂起所有隐私接口（`chooseMedia`/`chooseImage`/`chooseMessageFile`/`RecorderManager.start`），Promise 既不 resolve 也不 reject ⇒ `catch` 进不去 ⇒ 不弹窗不报错。开发者工具里 `[wxapplib] backgroundfetch privacy fail {"errno":101}` 是同一机制的旁证（该 API 全仓零调用，是基础库内部预检）。修复：① **治本**——`__usePrivacyCheck__` 改由编译期常量 `PRIVACY_CHECK` 控制，默认关闭；指引配好后 `GK_PRIVACY_CHECK=1` 重新构建，`release-check` 4.1 节对「发布态仍关闭」直接阻断；② **治标**（保留，供指引配好后使用）——闸门总超时 2s、超时即放行，且开关关闭时首行直接返回（零延迟）。另新增 **4.5.16**：头像/昵称**不能直接取微信的**（`getUserProfile` 自 2022-10 起返回匿名数据，昵称恒为「微信用户」、头像为灰色占位），官方替代是原生 `button open-type="chooseAvatar"` + `input type="nickname"`；并写明存储口径（后端存 key 不存签名 URL、`purpose` 必须 `attach`、本机副本供冷启显示）。 |
+| **v1.15** | 2026-10-29 | **新增 4.5.17「三个看着像缓存、其实是写坏了的故障」**（当天四条真机反馈，根因各不相同）。① **保存修改必 500：`timeline_items_subject_id_fkey`** —— 未分类条目的 `subject_id` 是 `NULL`，详情页铺成 `''` 又原样回写，空串不是 NULL ⇒ 外键约束炸，用户改的题干/答案全丢；两侧同修：前端 `subject_id: subjectId \|\| null`，后端新增 `resolveSubjectId()`（`''`/无效/越权 ⇒ `NULL`，**降级为未分类而不是报错**），并把外键报错翻成人话。② **回首页不刷新** —— 日志一天 53 次 `status:304`：Express 默认 ETag，小程序带 `If-None-Match` 拿到 304 + 空 body，前端 `unwrap` 只认 2xx 当失败 ⇒ 列表停在缓存；修法 `app.set('etag', false)` + `/api` 全量 `Cache-Control: no-store`，首页 `useDidShow` 改 `{silent:true, fresh:true}` 跳过本地缓存；顺带修「图片直存 title 变成 `tmp_xxx`」（临时名回退「图片题目」，并已订正 7 条历史数据）。③ **头像选完没变化** —— 保存链路本来成功（后端 3 次 `POST /api/upload` + `PATCH /auth/profile` 全 200），坏在显示：`toImageSrc()` 把 key 过滤成 `''`、本机副本固定同名且没 `setState`；改为 `{key, path}` + 带时间戳文件名 + `/api/storage/files/{key}` 兜底（4.5.16 展示优先级同步订正）。④ **数学符号插到上一次打字处** —— 手指点选位置不产生 `input` 事件，且 chip 的 tap 早于 textarea 的 `blur`；`onBlur/onFocus` 补记 + 插入延后 60ms。另：常用符号页新增 `+` `−` `=` `▱`（平行四边形）。 |
