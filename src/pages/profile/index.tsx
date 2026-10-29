@@ -16,7 +16,8 @@ import {
 import { fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImage,
   type Overview, type StorageUsage,
 } from '@/services/api'
-import { storageFileUrl } from '@/services/net'
+import { buildHeaders } from '@/services/net'
+import { Network } from '@/network'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
@@ -67,13 +68,14 @@ function readLocalAvatar(): LocalAvatar | null {
  * 把 `avatar_url` 变成 `Image` 能用的 src。
  *
  * 后端存的是**对象存储 key**（不是 URL）：URL 是 24h 签名链接，存下来第二天就失效，
- * 头像会变成裂图。key 不会过期，显示时再换成本服务的代理地址
- * （见 services/net.ts 的 storageFileUrl）。已是 http(s) 的历史数据直接用。
+ * 头像会变成裂图。key 本身不能直接当 src（`/api/storage/files/*` 要身份令牌，
+ * 而 `<Image>` 不会带请求头，实测 401）⇒ key 一律先 `downloadFile`（带令牌）落到
+ * 本机再显示，见 ensureAvatarLocal。这里只认历史数据里的 http(s) 地址。
  */
 function toImageSrc(v?: string): string {
   const s = (v || '').trim()
   if (!s) return ''
-  return /^https?:\/\//i.test(s) ? s : storageFileUrl(s)
+  return /^https?:\/\//i.test(s) ? s : ''
 }
 
 /**
@@ -170,6 +172,46 @@ export default function ProfilePage() {
     }
   }
 
+  /**
+   * 把服务端头像（对象存储 **key**）落到本机再显示。
+   *
+   * 为什么必须下载而不能直接当 `<Image src>`（思傅 2026-10-29 实测）：
+   * `/api/storage/files/{key}` 是要身份令牌的（实测裸请求 401 NEED_AUTH_TOKEN），
+   * 而 `<Image>` 不会带 `X-Auth-Token` ⇒ 直接拼 URL 就是裂图。
+   * `Network.downloadFile` 可以带 header，所以：下载 → 存 USER_DATA_PATH → 用本地路径渲染。
+   * 顺带的收益：换设备/重装/清缓存后头像仍能恢复（旧实现只认本机副本）。
+   */
+  const ensureAvatarLocal = async (key: string) => {
+    const k = (key || '').trim()
+    if (!k) return
+    if (/^https?:\/\//i.test(k)) return            // 历史数据是 URL，toImageSrc 直接可用
+    if (Taro.getEnv() === Taro.ENV_TYPE.WEB) return // H5 无 USER_DATA_PATH，跳过
+    const cur = readLocalAvatar()
+    if (cur?.path && cur.key === k) {
+      setLocalAvatar(cur)                          // 已经是这份 key 的副本，不必重下
+      return
+    }
+    try {
+      const dl = await Network.downloadFile({
+        url: `/api/storage/files/${k}`,
+        header: buildHeaders(),
+        timeout: 20000,
+      })
+      const tmp = (dl as unknown as { tempFilePath?: string })?.tempFilePath
+      if (!tmp) return
+      const local = `${Taro.env.USER_DATA_PATH}/gk_avatar_${Date.now()}.png`
+      Taro.getFileSystemManager().copyFileSync(tmp, local)
+      setLocalAvatar({ key: k, path: local })
+      Taro.setStorageSync(AVATAR_LOCAL_KEY, JSON.stringify({ key: k, path: local }))
+      if (cur?.path && cur.path !== local) {
+        Taro.getFileSystemManager().unlink({ filePath: cur.path, fail: () => { /* 不存在就算了 */ } })
+      }
+    } catch (e) {
+      // 拉不到就保持现状（占位图标 / 已有副本），不影响本页其余功能
+      console.warn('[profile] 头像拉取失败', e)
+    }
+  }
+
   const load = async () => {
     setState(getAuthState())
     try {
@@ -186,6 +228,7 @@ export default function ProfilePage() {
       try {
         const user = await fetchMe()
         setState({ userId: user.id, nickname: user.nickname || '', avatarUrl: user.avatar_url || '', isAnonymous: !!user.is_anonymous })
+        void ensureAvatarLocal(user.avatar_url || '')
       } catch {
         /* 校验失败保留本地展示 */
       }
@@ -309,10 +352,10 @@ export default function ProfilePage() {
    * 头像实际显示源（2026-10-29 重写）：
    *   ① 本机副本**只在它与服务端 key 一致时**才用——否则换手机/换账号/
    *      服务端已更新时会被旧文件盖住；
-   *   ② 否则按服务端 key 走本服务代理地址（`/api/storage/files/{key}`），
-   *      换设备、重装后照样能显示；
+   *   ② 没有可用副本时由 `ensureAvatarLocal()` 用带令牌的 downloadFile 拉下来再显示
+   *      （key 不能直接当 src，见该函数注释）；
    *   ③ 历史数据是 http(s) 地址时直接用。
-   * 本机文件被清理（`onError`）时也回落到服务端地址。
+   * 本机文件被清理（`onError`）时丢掉副本，等下次进入页面重新下载。
    */
   const serverAvatarSrc = toImageSrc(state?.avatarUrl)
   const localFresh = !!localAvatar?.path
