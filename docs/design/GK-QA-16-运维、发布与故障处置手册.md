@@ -1,6 +1,6 @@
 # GK-QA-16 运维、发布与故障处置手册
 
-> 编号：GK-QA-16 ｜ 版本：v1.13 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 新增 4.5.15 隐私接口「点了没反应」排障（Taro 4.1.9 无隐私 API）· 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path**
+> 编号：GK-QA-16 ｜ 版本：v1.14 ｜ 日期：2026-10-29 ｜ 状态：**正文完成 · 已有备份/演练整章 · 已有隐私指引申报手册 · 已有分享面板逐屏级操作手册（4.5.14）· 隐私项 4 → 5（补麦克风）· 4.5.15 根因订正为 `__usePrivacyCheck__` 自锁（Taro 缺 API 仅为次因）· 新增 4.5.16 头像昵称只能由用户自选 · 7.1 阻断项已覆盖备案/类目/AI 入口/UGC 声明/订单中心 path/隐私开关**
 > 读者：运维 / 开发 ｜ 上游：ADD-04、ADD-07、DD-09 ｜ 下游：无
 > 定位：从本地到生产的路径 + **出问题时的第一本手册**（含原发布部署设计、运维手册、故障处置三份）。
 > 密钥清单与轮换方式见 ADD-07 第 4 章（**本文不写密钥值**）；交付路由方案见 GK-OPS-19。
@@ -585,38 +585,63 @@ node -e "const c=require('./dist/project.config.json');console.log(c.appid,JSON.
 **症状**：识别页点「点击拍照 / 从相册选择」、题目详情页点「图片 / 文档」、记忆页点「录音 / 图片 / 视频」——
 **毫无反应**：不弹窗、不报错、连 `catch` 里的 toast 都没有。
 
-**根因（已确认，不是猜测）**：**Taro 4.1.9 运行时没有隐私 API。**
+**根因（2026-10-29 二次修订：主因是 `__usePrivacyCheck__` 自锁，Taro 只是次因）**
+
+**主因**：`src/app.config.ts` 里 `__usePrivacyCheck__: true`，而平台侧《用户隐私保护指引》**尚未代配**
+（托管状态，后台入口不存在）。这个组合不是「开启隐私弹窗」，而是「启用隐私协议机制」——
+基础库会把**所有隐私接口拦截/挂起**，直到指引配好且用户同意为止。
+
+```
+__usePrivacyCheck__: true  +  指引未配
+  → chooseMedia / chooseImage / chooseMessageFile / RecorderManager.start 全部被挂起
+    → Promise 既不 resolve 也不 reject → catch 进不去 → 不弹窗、不报错、无 toast
+      → 用户看到的就是「所有拍照/相册/录音按钮点了毫无反应」
+```
+
+**旁证**（开发者工具 Console 里那条与业务无关的报错，正是同一机制在拦基础库自己的接口）：
+
+```
+[wxapplib]] backgroundfetch privacy fail {"errno":101,
+  "errMsg":"private_getBackgroundFetchData:fail:jsapi invalid request data"}
+```
+
+> 这条**不是本项目代码触发的**（全仓 `grep backgroundFetch` 零命中），
+> 是基础库内部 `getBackgroundFetchData` 的隐私预检失败。它出现 = 隐私校验处于「已启用但未放行」。
+
+**次因**：Taro 4.1.9 运行时没有隐私 API —— `onNeedPrivacyAuthorization` / `getPrivacySetting` /
+`openPrivacyContract` / `requirePrivacyAuthorize` **只存在于 `.d.ts`，js 里零实现**：
 
 ```bash
-# 判据：这几个名字只存在于 .d.ts，运行时的 js 里一个都没有
 grep -rl "onNeedPrivacyAuthorization" \
   node_modules/.pnpm/@tarojs+taro@*/node_modules/@tarojs/taro
 # → 只命中 types/api/open-api/privacy.d.ts，没有任何 .js
 ```
 
-于是 `typeof Taro.onNeedPrivacyAuthorization === 'function'` **恒为 false** ⇒
-`installPrivacyListener()` 直接 return，监听从未注册 ⇒ 隐私接口被基础库**挂起**：
-Promise 既不 resolve 也不 reject ⇒ `catch` 进不去 ⇒ 用户看到的就是「点了没反应」。
+次因的后果：即便平台弹窗路径成立，我们也注册不上监听，无法自行 resolve ⇒ 只能等平台兜底。
 
-> 官方文档只说「未注册监听时用平台统一弹窗」，但平台弹窗要能渲染，前提是隐私指引已在后台配好；
-> 本项目托管状态下指引尚未代配，两条前提同时不成立，所以连弹窗都没有。
+**修复（两层，缺一不可）**
 
-**修复（已在代码中落地，`src/utils/privacy.ts`）**：
+1. **治本**：`__usePrivacyCheck__` 改为按编译期常量 `PRIVACY_CHECK` 控制，**默认关闭**
+   （`src/app.config.ts` + `config/index.ts` + `types/global.d.ts` 三处同源）。
+   指引配好后 `GK_PRIVACY_CHECK=1 pnpm build:weapp` 重新开启。
+   `scripts/release-check.mjs` 4.1 节对「发布态仍未开启」**直接阻断**，防止忘记。
+   > 关闭不会丢合规：`components/policy-consent.tsx` 的《隐私政策》同意弹窗仍在，
+   > 它才是面向用户的告知与同意入口；`__usePrivacyCheck__` 只管**平台侧**那套校验。
+2. **治标**（保留，用于指引配好之后）：`utils/privacy.ts` 隐私 API 一律走原生 `wx`
+   （`globalThis.wx`，H5 自动回落）；5 个调用点前 `await guardPrivacy()` 把静默挂起变成
+   **`ok` / `denied` / `not-configured` / `timeout`** 四种明确结果；探针总超时 **2s** 且超时一次后永久放行。
 
-1. 隐私 API **一律走原生 `wx`**（`globalThis.wx`，H5 端自动回落），Taro 只作兜底；
-2. 每个隐私接口调用点前加 `await guardPrivacy('选择图片')` ——
-   内部先 `wx.getPrivacySetting`，需要授权再 `wx.requirePrivacyAuthorize`，
-   把「静默挂起」变成**有成功/失败/未配置三种明确结果**；
-3. `getPrivacySetting` 加 3s 看门狗，且**超时一次后永久放行**（`probeBroken`），
-   避免把「点了没反应」换成「点了等 3 秒」。
+⚠️ **开关关闭时闸门必须零延迟**：`ensurePrivacyAuthorized()` 首行判断 `PRIVACY_CHECK !== '1'` 直接返回，
+否则 `getPrivacySetting` 在校验关闭时根本不回调，会白等 2s —— 把「点了没反应」换成「点了要等 2 秒」。
 
 **排障顺序（照这个查，别跳步）**：
 
 | 步 | 动作 | 判据 |
 |---|---|---|
-| 1 | 真机点一次按钮，看有没有 toast/弹窗 | 有提示 ⇒ 看第 2 步按提示处理；仍无 ⇒ 第 4 步 |
-| 2 | 提示「隐私指引未配置」 | 平台侧没配 ⇒ 走 4.5.13 方案 W 由托管方代配，代码改不了 |
-| 3 | 提示「未同意隐私保护指引」 | 用户拒绝过 ⇒ 需在小程序「设置」里重新同意，或换账号 |
+| 0 | **先看 `dist/app.json` 的 `__usePrivacyCheck__`** | `false` 才能继续排查；`true` 且指引未配 ⇒ 一切静默挂起都是它，先改这里 |
+| 1 | 真机点一次按钮，看有没有 toast/弹窗 | 有提示 ⇒ 按提示处理；仍无 ⇒ 第 4 步 |
+| 2 | 提示「隐私指引未配置」 | 平台侧没配 ⇒ 走 4.5.13 方案 W 由托管方代配 |
+| 3 | 提示「未同意隐私保护指引」 | 用户拒绝过 ⇒ 在小程序「设置」里重新同意 |
 | 4 | 无任何提示且 Console 无 `[privacy]` 日志 | 事件没到 handler ⇒ 查是否被原生组件（`Textarea`）覆盖，见下条 |
 
 **另一个独立陷阱（同批修掉）**：`Textarea` 在小程序里是**原生组件，层级永远最高**。
@@ -627,6 +652,33 @@ Promise 既不 resolve 也不 reject ⇒ `catch` 进不去 ⇒ 用户看到的�
 已改为**确定高度 `height:160px` + 保留 `bg-muted` 底色**。
 ⇒ 规则：小程序里凡是原生组件（`Textarea` / `Input` / `Camera` / `Canvas` / `Video`）附近的按钮，
 都不得用 `minHeight` 定尺寸，也不要把它的背景改透明。
+
+#### 4.5.16 头像与昵称：**不能直接取微信的**，只能让用户自己选（2026-10-29 新增）
+
+**症状**：登录后「我的」页头像空白、昵称显示「微信用户」。
+
+**这不是 bug，也不该去「修成自动获取」**：`wx.getUserProfile` / `wx.getUserInfo` 自 **2022-10** 起
+已收回真实头像昵称，返回的是**匿名数据**——昵称固定 `微信用户`、头像是灰色占位图。
+继续调用只会拿到同样的假数据，且「强制授权头像昵称」本身已不被允许。
+
+**官方替代方案（已落地在 `src/pages/profile/index.tsx`）**
+
+| 项 | 做法 | 关键约束 |
+|---|---|---|
+| 头像 | 原生 `<button open-type="chooseAvatar">` | ⚠️ **必须用原生 button**：项目的 `ui/Button` 基于 `View`，`open-type` 无效。现用一层 `opacity:0` 的透明 button 盖在头像上（`opacity` 不影响点击命中），视觉不变 |
+| 昵称 | `<input type="nickname">` | 聚焦时键盘上方出现「使用微信昵称」，一键填入。`ui/Input` 已透传 `type` |
+
+用户点头像时，微信会**直接提供「使用微信头像」选项**——体验上等同"一键获取"，但授权链条合规。
+
+**存储口径（容易做错的地方）**
+
+- 后端 `users.avatar_url` 存的是**对象存储 key**，不是 URL。
+  因为 `getPublicUrl()` 在 Supabase 私有桶下是 `createSignedUrl(key, 86400)` —— **存 URL 第二天就变裂图**。
+- `chooseAvatar` 给的是**临时文件**（`wxfile://tmp_…`），冷启即失效 ⇒ 必须
+  ① 上传后端换 key（`purpose: 'attach'`，**不能用 `save`**，否则凭空多一条「最近题目」）；
+  ② 本机再 `copyFileSync` 到 `USER_DATA_PATH` 并存 Storage，供本机冷启显示。
+- 展示优先级：本机副本 → `avatar_url` 为 http(s) 时直接用 → 占位图标。
+  前端 `toImageSrc()` 会把 key 过滤掉，**不区分就会裂图**。
 
 ---
 
@@ -1205,3 +1257,4 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 | **v1.11** | 2026-10-29 | **7.1 发布清单新增「小程序订单中心 path 留空」一条**（v1.10 漏登记）。规则只约束「选择商品/服务 → 下单 → 支付」全流程的小程序，本项目无支付/订单/会员，弹窗直接关掉即可；明示不要填 `/pages/order/index/index` 这类教程兜底值（页面不存在会被判无效），若提审被强制卡住则改为新建空态订单页再填真实路径。依据见 `docs/reports/小程序上线验收-差距评估与整改记录.md` §3.4。 |
 | **v1.12** | 2026-10-29 | **⚠️ 隐私项由 4 项更正为 5 项（补「麦克风」）**。起因：核对录制链路时发现 `memory/edit.tsx` 有语音备忘（`Taro.getRecorderManager().start()`），官方隐私接口清单把 `RecorderManager.start` 归入「访问你的麦克风」。原 4.5.4 表里写着「录音 ❌ 不要勾」——**方向性错误**，照做会导致录音点了无反应且不报错（`errno 112`）。同步改：4.5.4 表与订正说明、4.5.5 改「五项用途说明」并拆成「面板短句（填后台）」与「书面长句（写政策）」两列、4.5.3 勾选步、常见坑表、面板配置步、7.1 发布清单。另：小程序内《隐私政策》第二节/第三节补麦克风与语音备忘披露（原政策完全未提麦克风，与指引对不上会被比对出不一致）。 |
 | **v1.13** | 2026-10-29 | **新增 4.5.15：隐私接口「点了没反应」的排障（本次唯一带根因证据的一条）**。起因：真机上识别页拍照框、详情页图片/文档按钮、记忆页录音/图片/视频全部点击无反应，且无任何报错。根因是 **Taro 4.1.9 运行时没有隐私 API**（`onNeedPrivacyAuthorization` / `getPrivacySetting` / `openPrivacyContract` / `requirePrivacyAuthorize` 只在 `.d.ts` 里，js 里零实现）⇒ `typeof Taro.xxx === 'function'` 恒 false ⇒ 监听从未注册 ⇒ 隐私接口被基础库挂起（既不 resolve 也不 reject）⇒ `catch` 进不去 ⇒ 表现为「按钮点了没反应」。修复：`utils/privacy.ts` 改为**原生 `wx` 优先**，并在 5 个调用点前加 `guardPrivacy()`（`getPrivacySetting` → `requirePrivacyAuthorize`），把静默挂起变成「成功 / 拒绝 / 未配置」三种明确结果；`getPrivacySetting` 加 3s 看门狗且超时一次后永久放行。同时修掉一个独立陷阱：记忆页内容框用 `minHeight` + `background:transparent` 写原生 `Textarea`，会被撑高并透明盖住下方按钮（表现为「点按钮没反应、光标跑进内容栏」），改为确定 `height` + 保留底色。另把 `policy-consent.tsx` 里「查看完整《隐私政策》」的 `Text onClick` 改为 `View`（Taro 4.1.9 事件绑定红线）。 |
+| **v1.14** | 2026-10-29 | **订正 v1.13 的根因判断（重要）+ 新增 4.5.16**。v1.13 把「隐私接口点了没反应」归因于「Taro 4.1.9 没有隐私 API」，那只是**次因**；真机复测故障依旧后重查，**主因是 `__usePrivacyCheck__: true` 与「平台侧《用户隐私保护指引》未代配」同时成立**——该开关的语义是「启用隐私协议机制」，启用后基础库会拦截/挂起所有隐私接口（`chooseMedia`/`chooseImage`/`chooseMessageFile`/`RecorderManager.start`），Promise 既不 resolve 也不 reject ⇒ `catch` 进不去 ⇒ 不弹窗不报错。开发者工具里 `[wxapplib] backgroundfetch privacy fail {"errno":101}` 是同一机制的旁证（该 API 全仓零调用，是基础库内部预检）。修复：① **治本**——`__usePrivacyCheck__` 改由编译期常量 `PRIVACY_CHECK` 控制，默认关闭；指引配好后 `GK_PRIVACY_CHECK=1` 重新构建，`release-check` 4.1 节对「发布态仍关闭」直接阻断；② **治标**（保留，供指引配好后使用）——闸门总超时 2s、超时即放行，且开关关闭时首行直接返回（零延迟）。另新增 **4.5.16**：头像/昵称**不能直接取微信的**（`getUserProfile` 自 2022-10 起返回匿名数据，昵称恒为「微信用户」、头像为灰色占位），官方替代是原生 `button open-type="chooseAvatar"` + `input type="nickname"`；并写明存储口径（后端存 key 不存签名 URL、`purpose` 必须 `attach`、本机副本供冷启显示）。 |
