@@ -91,6 +91,25 @@ export function captureUserId(res: { header?: Record<string, string> }) {
   }
 }
 
+/**
+ * 对象存储 key → 可直接给 `<Image src>` 用的绝对地址。
+ *
+ * 为什么要它（思傅 2026-10-29「选了微信头像、提示保存中、过一会没变化」）：
+ * 后端 `users.avatar_url` 存的是**内容寻址 key**（`blobs/be/…/display.webp`），
+ * 不是 URL——签名 URL 24h 就失效，不能存。但页面直接拿 key 当 src 是裂图，
+ * 于是头像区一直是空的（保存其实早成功了）。
+ *
+ * `/api/storage/files/*` 在 local 与 supabase 两种驱动下都可用：本地盘直接流盘，
+ * supabase 由服务端下载后回传（同 openStorageFile，避免手机跨境直连）。
+ */
+export function storageFileUrl(key?: string | null): string {
+  const k = (key || '').trim()
+  if (!k) return ''
+  if (/^https?:\/\//i.test(k)) return k
+  const base = PROJECT_DOMAIN || (TARO_ENV === 'h5' ? '' : 'http://127.0.0.1:3001')
+  return `${base}/api/storage/files/${k}`
+}
+
 export function isPdfFile(mimeOrUrl: string): boolean {
   return /pdf/i.test(mimeOrUrl)
 }

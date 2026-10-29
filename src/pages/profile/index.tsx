@@ -13,30 +13,67 @@ import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
   type AuthState,
 } from '@/services/auth'
-import {
-  fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImage,
+import { fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImage,
   type Overview, type StorageUsage,
 } from '@/services/api'
+import { storageFileUrl } from '@/services/net'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
 
-/** 头像本机持久化路径（`chooseAvatar` 给的是临时文件，重启即失效） */
+/**
+ * 头像本机持久化副本（`chooseAvatar` 给的是临时文件，重启即失效）。
+ *
+ * ⚠️ 2026-10-29 起存的是 JSON `{ key, path }` 而不是裸路径（思傅反馈「选了头像
+ * 没变化」）：
+ *   · 旧实现只把路径写进 storage，却**没有 setState**，本页当场仍渲染空头像
+ *     （`state.avatarUrl` 是 key，`toImageSrc()` 会把 key 过滤成 ''）；
+ *   · 旧实现固定写 `gk_avatar.png`，第二次换头像 `copyFileSync` 因目标已存在而
+ *     失败，本机副本永远停在**第一张**——于是「换了头像还是旧图」。
+ *   · 记下 key 才能判断本机这份副本是不是当前头像：换账号/换设备/服务端已更新时
+ *     一律以服务端为准，不会拿旧本地文件盖住新头像。
+ */
 const AVATAR_LOCAL_KEY = 'gk_avatar_local'
+
+interface LocalAvatar {
+  /** 这份本机副本对应的后端 key（空 = 旧格式遗留，无法比对） */
+  key: string
+  /** 本机持久化路径（USER_DATA_PATH 下） */
+  path: string
+}
+
+/** 读本机头像副本；兼容旧格式（裸路径字符串） */
+function readLocalAvatar(): LocalAvatar | null {
+  try {
+    const raw = Taro.getStorageSync(AVATAR_LOCAL_KEY)
+    if (!raw) return null
+    if (typeof raw === 'object') {
+      const o = raw as Partial<LocalAvatar>
+      return o.path ? { key: o.key || '', path: o.path } : null
+    }
+    const s = String(raw)
+    if (s.startsWith('{')) {
+      const o = JSON.parse(s) as Partial<LocalAvatar>
+      return o.path ? { key: o.key || '', path: o.path } : null
+    }
+    // 旧格式：只有路径，没有 key
+    return { key: '', path: s }
+  } catch {
+    return null
+  }
+}
 
 /**
  * 把 `avatar_url` 变成 `Image` 能用的 src。
  *
  * 后端存的是**对象存储 key**（不是 URL）：URL 是 24h 签名链接，存下来第二天就失效，
- * 头像会变成裂图。key 不会过期，需要显示时再换 —— 而 `/api/storage/files/{key}`
- * 只在 local 驱动下可用（supabase 驱动直连对象存储，不经此路由），
- * 所以**本机走本地持久化副本，跨设备交给后端按 key 现签**（后续增强）。
- * 这里若拿到 http(s) 地址（历史数据 / 未来的签名 URL）直接用。
+ * 头像会变成裂图。key 不会过期，显示时再换成本服务的代理地址
+ * （见 services/net.ts 的 storageFileUrl）。已是 http(s) 的历史数据直接用。
  */
 function toImageSrc(v?: string): string {
   const s = (v || '').trim()
   if (!s) return ''
-  return /^https?:\/\//.test(s) ? s : ''
+  return /^https?:\/\//i.test(s) ? s : storageFileUrl(s)
 }
 
 /**
@@ -51,7 +88,7 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false)
   const [nickname, setNickname] = useState('')
   /** 头像本机持久化副本（`chooseAvatar` 只给临时文件，冷启后必须靠它显示） */
-  const [avatarLocal, setAvatarLocal] = useState('')
+  const [localAvatar, setLocalAvatar] = useState<LocalAvatar | null>(null)
   /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
   const [qrVisible, setQrVisible] = useState(false)
   /** AI 外发开关（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */
@@ -158,12 +195,7 @@ export default function ProfilePage() {
   useDidShow(() => {
     load()
     // 头像本机副本：冷启后 state.avatarUrl 只有 key，需靠本地文件显示
-    try {
-      const p = Taro.getStorageSync(AVATAR_LOCAL_KEY) as string
-      if (p) setAvatarLocal(p)
-    } catch {
-      /* 读不到就不显示，不影响其它功能 */
-    }
+    setLocalAvatar(readLocalAvatar())
     // 开关可能被别的入口改过（例如隐私页），回到本页时对齐一次
     void ensureAiSetting().then(setAiEnabledState)
   })
@@ -219,13 +251,26 @@ export default function ProfilePage() {
       const up = await uploadImage(url, { purpose: 'attach' })
       // ② 后端存 key（长期有效）；本机再落一份持久化副本用于立刻显示
       await updateProfile({ avatar_url: up.key })
-      const local = `${Taro.env.USER_DATA_PATH}/gk_avatar.png`
+      /**
+       * ⚠️ 文件名带时间戳（思傅 2026-10-29）：固定写 `gk_avatar.png` 时，
+       * 第二次换头像 `copyFileSync` 因目标已存在而失败 ⇒ 本地永远是第一张图，
+       * 加上旧代码只认本地副本，表现就是「换了头像没反应」。
+       */
+      const local = `${Taro.env.USER_DATA_PATH}/gk_avatar_${Date.now()}.png`
+      // 旧副本要在写新值之前读，否则读到的就是刚写进去的那份
+      const prevLocal = readLocalAvatar()
       try {
         Taro.getFileSystemManager().copyFileSync(url, local)
-        Taro.setStorageSync(AVATAR_LOCAL_KEY, local)
+        setLocalAvatar({ key: up.key, path: local })
+        Taro.setStorageSync(AVATAR_LOCAL_KEY, JSON.stringify({ key: up.key, path: local }))
+        // 清掉上一份副本，别把 USER_DATA_PATH 撑爆
+        if (prevLocal && prevLocal.path && prevLocal.path !== local) {
+          Taro.getFileSystemManager().unlink({ filePath: prevLocal.path, fail: () => { /* 不存在就算了 */ } })
+        }
       } catch (err) {
-        // 本机持久化失败不影响后端已保存，只是下次冷启可能看不到图
+        // 本机副本失败不影响后端已保存：至少服务端 URL 兜底能显示出新头像
         console.warn('[profile] 头像本地缓存失败', err)
+        setLocalAvatar(null)
       }
       setState((prev) =>
         prev ? { ...prev, avatarUrl: up.key } : { userId: '', nickname: '', avatarUrl: up.key, isAnonymous: false },
@@ -261,11 +306,18 @@ export default function ProfilePage() {
 
   const logged = isLoggedIn()
   /**
-   * 头像实际显示源：本机持久化副本优先（重启后仍可见），
-   * 其次才是后端给的 http(s) 地址（历史数据 / 未来签名 URL）。
-   * 后端存的是 key，`toImageSrc` 会把它过滤掉——不这么区分就会出现「裂图」。
+   * 头像实际显示源（2026-10-29 重写）：
+   *   ① 本机副本**只在它与服务端 key 一致时**才用——否则换手机/换账号/
+   *      服务端已更新时会被旧文件盖住；
+   *   ② 否则按服务端 key 走本服务代理地址（`/api/storage/files/{key}`），
+   *      换设备、重装后照样能显示；
+   *   ③ 历史数据是 http(s) 地址时直接用。
+   * 本机文件被清理（`onError`）时也回落到服务端地址。
    */
-  const avatarSrc = avatarLocal || toImageSrc(state?.avatarUrl)
+  const serverAvatarSrc = toImageSrc(state?.avatarUrl)
+  const localFresh = !!localAvatar?.path
+    && (!localAvatar.key || !state?.avatarUrl || localAvatar.key === state.avatarUrl)
+  const avatarSrc = (localFresh ? localAvatar!.path : '') || serverAvatarSrc
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
@@ -294,6 +346,11 @@ export default function ProfilePage() {
                   className="rounded-full border border-border"
                   style={{ width: '64px', height: '64px' }}
                   mode="aspectFill"
+                  onError={() => {
+                    // 本机副本被系统清理 / 服务端暂时取不到：丢掉本机副本回落到服务端地址，
+                    // 免得一直显示裂图（服务端也失败时自然回退到占位图标）
+                    if (localFresh) setLocalAvatar(null)
+                  }}
                 />
               ) : (
                 <View className="rounded-full bg-muted flex items-center justify-center" style={{ width: '64px', height: '64px' }}>
