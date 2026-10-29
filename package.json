@@ -30,6 +30,8 @@
     "verify:core": "cd server && node scripts/verify/run.mjs M01 M02 M03 M04 M05 M06 M07 M08 M15",
     "verify:list": "cd server && node scripts/verify/run.mjs --list",
     "verify:ci": "cd server && node scripts/verify/run.mjs M12 M13 M16",
+    "verify:fe": "cd server && node scripts/verify/run.mjs M18",
+    "verify:gate": "cd server && node scripts/verify/run.mjs M12 M13 M16 M18",
     "method:check": "node server/scripts/method-gates.mjs",
     "release:check": "node scripts/release-check.mjs",
     "release:prepare": "pnpm build:weapp && node scripts/release-check.mjs --prepare",
