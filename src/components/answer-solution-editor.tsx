@@ -60,9 +60,9 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
     <View className="mt-4">
       <View className="flex flex-row items-center justify-between mb-2">
         <Text className="block text-sm font-semibold text-foreground">答案与解题过程</Text>
-        <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => setPreview((v) => !v)}>
+        <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => setPreview((v) => !v)}>
           {preview ? '收起预览' : '数学式预览'}
-        </Text>
+        </View>
       </View>
 
       <MathSymbolBar onInsert={onInsert} />

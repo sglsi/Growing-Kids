@@ -476,8 +476,14 @@ export default function RecognizePage() {
         idxSet = new Set([...picked].flatMap((n) => byLabel.get(n) || []))
       }
     }
-    if (!idxSet) idxSet = picked // 位置匹配（picked 是 1-based 显示序号）
-    setDrafts((prev) => prev.map((d, i) => ({ ...d, selected: idxSet!.has(i + 1) })))
+    if (!idxSet) {
+      // 位置匹配：picked 是 1-based 显示序号，统一折算成 0-based
+      idxSet = new Set([...picked].map((n) => n - 1))
+    }
+    // 🔴 两条分支的基准必须一致（2026-10-29 分模块测试发现并修复，缺陷 P1-F）：
+    // byLabel 存的是 0-based 下标，而下面原写 `idxSet.has(i + 1)`（1-based）⇒
+    // 按印刷题号勾选时整体错位一位，存入错题库的题不是用户点的那道。
+    setDrafts((prev) => prev.map((d, i) => ({ ...d, selected: idxSet!.has(i) })))
     Taro.showToast({ title: `已选 ${idxSet.size} 题`, icon: 'success' })
   }
 
@@ -687,6 +693,10 @@ export default function RecognizePage() {
     }
     if (!files.length) return
     setBoardBusy(true)
+    // ⚠️ 必须有可见反馈（2026-10-29 分模块测试发现并修复，缺陷 P1-G）：
+    // 多选（最多 9 张）是串行上传，每次 `uploadFile` 上限 60s ⇒ 最坏要等 9 分钟；
+    // 原来只有 `boardBusy` 控制 opacity，界面看起来「点了没反应」，用户会反复点。
+    if (files.length > 1) Taro.showLoading({ title: `上传 ${files.length} 张图片…`, mask: true })
     const added: BoardPage[] = []
     try {
       for (const f of files) {
@@ -698,6 +708,8 @@ export default function RecognizePage() {
       Taro.showToast({ title: '图片上传失败，请重试', icon: 'none' })
       setBoardBusy(false)
       return
+    } finally {
+      if (files.length > 1) Taro.hideLoading()
     }
     const firstNew = boardPages.length
     setBoardPages((prev) => [...prev, ...added])
@@ -1150,6 +1162,9 @@ export default function RecognizePage() {
       }))
       await createTimelineBatch(payloads)
       Taro.showToast({ title: `已存入错题库 ${payloads.length} 题`, icon: 'success' })
+      // ⚠️ 成功必须清空粘贴栏（2026-10-29 分模块测试发现并修复，缺陷 P2-H）：
+      // 原来只置 saving=false，内容仍在、按钮立刻可再点 ⇒ 同一批题被重复存两遍。
+      setBoard([])
       nudgeLoginIfAnonymous()
     } catch (e) {
       console.error('存入错题库失败', e)
@@ -1538,9 +1553,9 @@ export default function RecognizePage() {
                         <Text className="block text-xs text-primary">看大图</Text>
                       </View>
                       {curPage.ocr === 'error' ? (
-                        <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => void retryPageOcr(activePage)}>
+                        <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => void retryPageOcr(activePage)}>
                           重新识别本页
-                        </Text>
+                        </View>
                       ) : null}
                       <View className="rounded-lg border border-border px-2 py-1" onClick={() => void addBoardPages()}>
                         <Text className="block text-xs text-primary">添加图片</Text>
@@ -1588,9 +1603,9 @@ export default function RecognizePage() {
                       ) : null}
                     </View>
                     <View className="flex flex-row items-center gap-3">
-                      <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</Text>
-                      <Text className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</Text>
-                      <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => removeEntry(idx)}>删除</Text>
+                      <View className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, -1)}>上移</View>
+                      <View className="block text-xs text-muted-foreground" onClick={() => moveEntry(idx, 1)}>下移</View>
+                      <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => removeEntry(idx)}>删除</View>
                     </View>
                   </View>
 
@@ -1915,7 +1930,7 @@ export default function RecognizePage() {
                         <Text className="block text-xs text-primary">{subjectName(d.subject_id)}</Text>
                       </View>
                     </Picker>
-                    <Text className="block text-xs text-muted-foreground" onClick={() => removeDraft(idx)}>删除</Text>
+                    <View className="block text-xs text-muted-foreground" onClick={() => removeDraft(idx)}>删除</View>
                   </View>
                 </View>
 

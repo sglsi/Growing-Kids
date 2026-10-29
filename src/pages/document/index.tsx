@@ -63,7 +63,8 @@ export default function DocumentPage() {
           setSubjects(s)
           if (s.length) cacheSet('subj:list', s)
         })
-        .catch(() => {})
+        // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）
+        .catch((e) => console.error('[document] 学科列表加载失败', e))
     }
     sel.exit()
     loadDocs()
@@ -91,6 +92,9 @@ export default function DocumentPage() {
       cacheSet(listKey, res)
     } catch (e) {
       console.error('加载文档失败', e)
+      // ⚠️ 不能静默（2026-10-29 分模块测试发现并修复，缺陷 P2-I）：后端不通时列表显示
+      // 「暂无文档」，用户以为资料丢了。只有后台静默刷新（silent）才不打扰用户。
+      if (!opts.silent) Taro.showToast({ title: '加载失败，请下拉重试', icon: 'none' })
     } finally {
       setDocsLoading(false)
     }
@@ -124,6 +128,7 @@ export default function DocumentPage() {
       setQuestions(list)
     } catch (e) {
       console.error('预览失败', e)
+      Taro.showToast({ title: '汇总预览失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
@@ -197,10 +202,16 @@ export default function DocumentPage() {
 
   const handleRenameConfirm = async (value: string) => {
     if (!renameTarget) return
-    await renameDocument(renameTarget.id, value)
-    setRenameTarget(null)
-    Taro.showToast({ title: '已重命名', icon: 'success' })
-    loadDocs({ silent: true })
+    // ⚠️ 必须捕获：原实现无 try/catch ⇒ 失败时弹层不关、无提示（见资料库同类修复）
+    try {
+      await renameDocument(renameTarget.id, value)
+      setRenameTarget(null)
+      Taro.showToast({ title: '已重命名', icon: 'success' })
+      loadDocs({ silent: true })
+    } catch (e) {
+      console.error('[document] 重命名失败', e)
+      Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
+    }
   }
 
   const handleDelete = async () => {

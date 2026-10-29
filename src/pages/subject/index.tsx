@@ -480,6 +480,8 @@ export default function SubjectPage() {
           keyword={keyword}
           onKeywordChange={(kw) => setKeyword(kw)}
           onSearch={() => resetAndLoad({ keyword: keyword })}
+          // ⚠️ 清空必须显式传空串：不能复用 onSearch（它拿到的是旧 keyword 闭包值）
+          onClear={() => { setKeyword(''); resetAndLoad({ keyword: '' }) }}
           countText={`复习本 · 共 ${total} 条`}
           placeholder="搜索题干 / 答案关键词，回车确认"
           right={<SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />}

@@ -87,9 +87,9 @@ export default function WrongqTextPanel(props: Props) {
         <Text className="block text-sm font-semibold text-foreground">
           全页 OCR 文本（{segments.length} 段）
         </Text>
-        <Text className="block text-xs text-muted-foreground" onClick={() => setExpanded((v) => !v)}>
+        <View className="block text-xs text-muted-foreground" onClick={() => setExpanded((v) => !v)}>
           {expanded ? '收起' : '展开'}
-        </Text>
+        </View>
       </View>
       <Text className="block text-xs text-muted-foreground mb-2">
         按阅读序平铺；点选片段可粘贴到某题题干/答案，或仅导出所选
@@ -130,27 +130,27 @@ export default function WrongqTextPanel(props: Props) {
 
           {/* 操作条 */}
           <View className="flex flex-row items-center gap-2 mt-2">
-            <Text
+            <View
               className="block text-xs text-muted-foreground"
               onClick={() => setSelected(new Set(segments.map((_, i) => i)))}
             >
               全选
-            </Text>
-            <Text className="block text-xs text-muted-foreground" onClick={() => setSelected(new Set())}>
+            </View>
+            <View className="block text-xs text-muted-foreground" onClick={() => setSelected(new Set())}>
               清空
-            </Text>
+            </View>
             <View style={{ flex: 1 }} />
             {n > 0 ? (
               <>
-                <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => pickDraft('question')}>
+                <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => pickDraft('question')}>
                   粘贴到题干
-                </Text>
-                <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => pickDraft('answer')}>
+                </View>
+                <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => pickDraft('answer')}>
                   粘贴到答案
-                </Text>
-                <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={exportSelected}>
+                </View>
+                <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={exportSelected}>
                   导出所选（{n}）
-                </Text>
+                </View>
               </>
             ) : (
               <Text className="block text-xs text-muted-foreground">已选 0 段</Text>

@@ -693,12 +693,12 @@ export default function DetailPage() {
                 </View>
               </Picker>
             </View>
-            <Text
+            <View
               className="block text-xs text-primary"
               onClick={toggleReviewBook}
             >
               {item.in_review_book ? '★ 已加入复习本' : '☆ 加入复习本'}
-            </Text>
+            </View>
           </View>
         )}
 
@@ -920,9 +920,9 @@ export default function DetailPage() {
 
         {/* P2-17 相似 / 变式题（基于用户自建错题历史） */}
         <View className="mb-4">
-          <Text className="block text-sm font-semibold text-foreground mb-2" onClick={toggleSimilar}>
+          <View className="block text-sm font-semibold text-foreground mb-2" onClick={toggleSimilar}>
             相似 / 变式题 {similarOpen ? '▾' : '▸'}
-          </Text>
+          </View>
           {similarOpen && (
             similarLoading ? (
               <Text className="block text-xs text-muted-foreground">加载中…</Text>
@@ -977,9 +977,9 @@ export default function DetailPage() {
         )}
 
         <View className="mt-6">
-          <Text className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND_TEXT }}>
+          <View className="block text-xs text-muted-foreground" onClick={handleDelete} style={{ color: BRAND_TEXT }}>
             删除这条记录
-          </Text>
+          </View>
         </View>
       </View>
 

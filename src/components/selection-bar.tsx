@@ -46,19 +46,19 @@ export default function SelectionBar({
 }: SelectionBarProps) {
   if (!selection.selecting) {
     return (
-      <Text className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.enter}>{enterLabel}</Text>
+      <View className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.enter}>{enterLabel}</View>
     )
   }
   return (
     <View className="flex flex-row items-center gap-3">
       <Text className="block text-sm text-foreground">{countPrefix} {selection.count}</Text>
       {onSelectAll ? (
-        <Text className="block text-sm text-muted-foreground" onClick={onSelectAll}>{selectAllLabel}</Text>
+        <View className="block text-sm text-muted-foreground" onClick={onSelectAll}>{selectAllLabel}</View>
       ) : null}
       {selection.count > 0 ? (
-        <Text className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</Text>
+        <View className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</View>
       ) : null}
-      <Text className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.exit}>取消</Text>
+      <View className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.exit}>取消</View>
     </View>
   )
 }

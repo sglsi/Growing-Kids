@@ -13,6 +13,16 @@ interface Props {
   onKeywordChange: (kw: string) => void
   /** 回车/点搜索图标时触发（用于真正发起查询） */
   onSearch?: () => void
+  /**
+   * 点「清空」时触发。
+   *
+   * ⚠️ 为什么需要单独一个回调（2026-10-29 分模块测试发现并修复，缺陷 P1-C）：
+   * 若复用 `onSearch()`，调用方拿到的是**同一 tick 内的旧 keyword 闭包值**——
+   * 先 `onKeywordChange('')` 再 `onSearch()`，而 `onSearch={() => resetAndLoad({ keyword })}`
+   * 里的 `keyword` 还是旧值，resetAndLoad 内部又把它写回 state ⇒ 输入框清不掉、
+   * 列表按旧关键词重查。资料库页就是显式传空串才是对的（`library/index.tsx`）。
+   */
+  onClear?: () => void
   /** 顶部左侧计数文案，如「共 32 条」 */
   countText?: string
   /** 右上角操作区（批量选择 / 已选 n / 取消） */
@@ -27,7 +37,7 @@ interface Props {
  * 学科 pill 横向滚动 + 关键词搜索 + 自定义操作区
  */
 export default function FilterHeader({
-  subjects, activeSubject, onSubjectChange, keyword, onKeywordChange, onSearch,
+  subjects, activeSubject, onSubjectChange, keyword, onKeywordChange, onSearch, onClear,
   countText, right, placeholder = '搜索题目 / 答案关键词', children,
 }: Props) {
   return (
@@ -49,7 +59,7 @@ export default function FilterHeader({
 
       <View className="px-4 pt-2">
         <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9">
-          <Text className="block text-xs text-muted-foreground" onClick={() => onSearch?.()}>🔍</Text>
+          <View className="block text-xs text-muted-foreground" onClick={() => onSearch?.()}>🔍</View>
           <Input
             className="flex-1 text-sm bg-transparent"
             value={keyword}
@@ -60,12 +70,16 @@ export default function FilterHeader({
             onConfirm={() => onSearch?.()}
           />
           {keyword ? (
-            <Text
+            <View
               className="block text-xs text-muted-foreground"
-              onClick={() => { onKeywordChange(''); onSearch?.() }}
+              onClick={() => {
+                if (onClear) { onClear(); return }
+                onKeywordChange('')
+                onSearch?.()
+              }}
             >
               清空
-            </Text>
+            </View>
           ) : null}
         </View>
       </View>
@@ -181,13 +195,13 @@ export function ImagePreviewOverlay({ url, title, onClose }: { url: string; titl
       <View className="flex flex-col h-full" onClick={(e) => e.stopPropagation()}>
         <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border">
           <Text className="block text-sm font-semibold text-foreground flex-1 pr-2 truncate">{title || '图片'}</Text>
-          <Text className="block text-sm text-muted-foreground" onClick={onClose}>关闭</Text>
+          <View className="block text-sm text-muted-foreground" onClick={onClose}>关闭</View>
         </View>
         <View className="flex flex-row items-center justify-center gap-5 px-4 py-2 border-b border-border">
           <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => change(-0.25)}>
             <Text className="block text-lg leading-none">−</Text>
           </View>
-          <Text className="block text-sm w-16 text-center" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</Text>
+          <View className="block text-sm w-16 text-center" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</View>
           <View className="w-8 h-8 rounded-full border border-border flex items-center justify-center" onClick={() => change(0.25)}>
             <Text className="block text-lg leading-none">+</Text>
           </View>

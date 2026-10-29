@@ -291,7 +291,7 @@ export default function WrongqBoxEditor(props: Props) {
       {/* 头部：标题 + 手势说明 + 收起 */}
       <View className="flex flex-row items-center justify-between mb-2">
         <Text className="block text-sm font-semibold text-foreground">圈定范围校对</Text>
-        <Text className="block text-xs text-muted-foreground" onClick={props.onClose}>收起</Text>
+        <View className="block text-xs text-muted-foreground" onClick={props.onClose}>收起</View>
       </View>
       <Text className="block text-xs text-muted-foreground mb-2">
         拖动移动 · 角点缩放 · 长按删除/添加 · 空白处画新框（松手自动重新识别）

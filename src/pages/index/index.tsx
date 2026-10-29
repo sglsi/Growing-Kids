@@ -620,7 +620,7 @@ export default function IndexPage() {
                       || overview?.subject_stats?.find((s) => s.subject_id === subjectFilter)?.name
                       || '该学科'}」
                   </Text>
-                  <Text className="block text-xs text-muted-foreground" onClick={() => filterSubject('')}>✕ 显示全部</Text>
+                  <View className="block text-xs text-muted-foreground" onClick={() => filterSubject('')}>✕ 显示全部</View>
                 </View>
               ) : null}
 

@@ -73,7 +73,7 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
       >
         <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border">
           <Text className="block text-sm font-semibold text-foreground">{title || '从资料库选择'}</Text>
-          <Text className="block text-sm text-muted-foreground" onClick={onClose}>关闭</Text>
+          <View className="block text-sm text-muted-foreground" onClick={onClose}>关闭</View>
         </View>
 
         <ScrollView scrollY style={{ maxHeight: '55vh' }}>

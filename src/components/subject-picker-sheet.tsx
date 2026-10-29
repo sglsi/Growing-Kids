@@ -46,7 +46,7 @@ export default function SubjectPickerSheet({
       >
         <View className="flex flex-row items-center justify-between px-4 py-3 border-b border-border">
           <Text className="block text-sm font-semibold text-foreground">归属学科</Text>
-          <Text className="block text-sm text-muted-foreground" onClick={onCancel}>取消</Text>
+          <View className="block text-sm text-muted-foreground" onClick={onCancel}>取消</View>
         </View>
 
         <ScrollView scrollY style={{ maxHeight: '55vh' }}>

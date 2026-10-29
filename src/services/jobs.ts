@@ -149,7 +149,8 @@ export async function runJob<T = Record<string, unknown>>(
   }
 
   // 前端先放弃：把 ticket 删掉，避免表里留一条没人管的 running
-  void removeJob(id).catch(() => {})
+  // best-effort：删不掉不影响本次放弃，但必须留下痕迹（工程规范第 7 章第 2 条）
+  void removeJob(id).catch((e) => console.warn('[jobs] 放弃等待后删除 ticket 失败', id, e))
   throw new Error('处理时间过长，已停止等待，请稍后重试')
 }
 

@@ -99,7 +99,9 @@ export default function LibraryPage() {
         setSubjects(s)
         if (s.length) cacheSet('subj:list', s)
       })
-      .catch(() => {})
+      // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）：
+      // 空 catch 会把「服务不可用」伪装成「资料未分类」，排查时无从下手。
+      .catch((e) => console.error('[library] 学科列表加载失败', e))
     load()
   })
 
@@ -243,10 +245,17 @@ export default function LibraryPage() {
 
   const handleRenameConfirm = async (value: string) => {
     if (!renameTarget) return
-    await renameLibraryDoc(renameTarget.id, value)
-    setRenameTarget(null)
-    Taro.showToast({ title: '已重命名', icon: 'success' })
-    load({ silent: true })
+    // ⚠️ 必须捕获：原实现无 try/catch ⇒ 失败时弹层不关、无提示，像「点了没反应」，
+    // 且 rejection 逃逸成 unhandled（2026-10-29 分模块测试修复）
+    try {
+      await renameLibraryDoc(renameTarget.id, value)
+      setRenameTarget(null)
+      Taro.showToast({ title: '已重命名', icon: 'success' })
+      load({ silent: true })
+    } catch (e) {
+      console.error('[library] 重命名失败', e)
+      Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
+    }
   }
 
   const getSubjectDot = (id: string | null) => {
@@ -276,7 +285,7 @@ export default function LibraryPage() {
           </View>
         </View>
         <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9 mb-3">
-          <Text className="block text-xs text-muted-foreground" onClick={() => load({ keyword })}>🔍</Text>
+          <View className="block text-xs text-muted-foreground" onClick={() => load({ keyword })}>🔍</View>
           <Input
             className="flex-1 text-sm bg-transparent"
             value={keyword}
@@ -287,7 +296,7 @@ export default function LibraryPage() {
             onConfirm={() => load({ keyword })}
           />
           {keyword ? (
-            <Text className="block text-xs text-muted-foreground" onClick={() => { setKeyword(''); load({ keyword: '' }) }}>清空</Text>
+            <View className="block text-xs text-muted-foreground" onClick={() => { setKeyword(''); load({ keyword: '' }) }}>清空</View>
           ) : null}
         </View>
       </View>
