@@ -38,6 +38,30 @@ function isThumbConsistent(fileKey?: string | null, thumbKey?: string | null): b
 const SELECT_COLS = '*, subjects:subject_id(id, name, color)'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
+
+/**
+ * 学科外键的**唯一**落库口径（create / createBatch / update 共用）。
+ *
+ * 为什么必须有这一层（思傅 2026-10-29 报「保存失败 … violates foreign key
+ * constraint "timeline_items_subject_id_fkey"」）：
+ *   详情页把 `item.subject_id`（可能是 null = 未分类）铺进 state 时用的是
+ *   `it.subject_id || ''`，保存时又原样发回 `subject_id: ''`。
+ *   `''` 既不是 null 也不是任何学科 id ⇒ Postgres 直接抛外键约束 500，
+ *   用户改的题干/答案全丢。
+ *
+ * 现在的口径：
+ *   - `''` / 空白 / 非字符串 ⇒ null（= 未分类，这本来就是合法状态）
+ *   - 学科已删除 / 不属于当前用户 ⇒ 也降级为 null（宁可归到「未分类」，
+ *     也不能因为一个陈旧 id 把整次保存打回）
+ *
+ * ⚠️ 这里**故意不抛错**：学科是「归档标签」，丢了标签可以让用户再选，
+ *    丢了题干/答案就是真丢数据。
+ */
+function normalizeSubjectId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  return s ? s : null
+}
 /**
  * 排程汇总一次最多扫多少条复习本记录。
  * 复习本是用户级小集合（几十到几百条），一次取回后本地分组比多次 count 更快也更一致；
@@ -365,12 +389,54 @@ export class TimelineService {
     return data as unknown as TimelineItem
   }
 
+  /**
+   * 批量取「确实属于该用户」的学科 id 集合。
+   * 批量创建时先一次性查好，避免每题一次跨境查询（一页卷子 30 题就是 30 次 RTT）。
+   */
+  private async ownedSubjectIds(userId: string, ids: unknown[]): Promise<Set<string>> {
+    const uniq = Array.from(new Set(ids.map(normalizeSubjectId).filter((v): v is string => !!v)))
+    if (!uniq.length) return new Set()
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from('subjects')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', uniq)
+    if (error) throw new Error(error.message)
+    return new Set(((data || []) as { id: string }[]).map((r) => r.id))
+  }
+
+  /**
+   * 学科外键落地值：'' / 无效 / 越权 / 已删除 ⇒ null（详见 normalizeSubjectId 注释）。
+   * `owned` 传入时不再单查（批量创建已一次性查好）。
+   */
+  private async resolveSubjectId(
+    userId: string,
+    raw: unknown,
+    owned?: Set<string>,
+  ): Promise<string | null> {
+    const sid = normalizeSubjectId(raw)
+    if (!sid) return null
+    const set = owned ?? (await this.ownedSubjectIds(userId, [sid]))
+    if (!set.has(sid)) {
+      // 陈旧/越权 id：降级为「未分类」，绝不让整次保存失败（见 normalizeSubjectId 注释）
+      this.logger.warn(`[timeline] 学科 id 不可用，降级为未分类：user=${userId} subject=${sid}`)
+      return null
+    }
+    return sid
+  }
+
   /** 组装单条插入 payload（create 与 createBatch 共用）；async：含 tmp/ 临时对象固化 */
-  private async buildPayload(userId: string, dto: CreateTimelineDto): Promise<Record<string, unknown>> {
+  private async buildPayload(
+    userId: string,
+    dto: CreateTimelineDto,
+    ownedSubjects?: Set<string>,
+  ): Promise<Record<string, unknown>> {
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
-      subject_id: dto.subject_id ?? null,
+      // ⚠️ 绝不能直接写 dto.subject_id：空串会撞外键约束（见 normalizeSubjectId）
+      subject_id: await this.resolveSubjectId(userId, dto.subject_id, ownedSubjects),
       // ⚠️ 允许「只有图、没文字」的题目（思傅 2026-10-21：裁剪后不识别，只把图存入错题库）——
       //    此时题干为空，title 兜底为「图片题目」，否则列表里是一条空白标题。
       title: dto.title ?? (dto.kind === 'image'
@@ -433,6 +499,8 @@ export class TimelineService {
   async createBatch(userId: string, dtos: CreateTimelineDto[]): Promise<TimelineItem[]> {
     if (!Array.isArray(dtos) || !dtos.length) return []
     const client = getSupabaseClient()
+    // 学科归属一次性查好（整批共用），避免逐题跨境查询
+    const ownedSubjects = await this.ownedSubjectIds(userId, dtos.map((d) => d.subject_id))
     const payloads: Record<string, unknown>[] = []
     for (const dto of dtos) {
       if (dto.kind !== 'image' && dto.kind !== 'question') {
@@ -452,7 +520,7 @@ export class TimelineService {
           || !!((c2.images || []).length)
         if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
-      payloads.push(await this.buildPayload(userId, dto))
+      payloads.push(await this.buildPayload(userId, dto, ownedSubjects))
     }
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
@@ -496,7 +564,13 @@ export class TimelineService {
     }
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (dto.title !== undefined) payload.title = dto.title
-    if (dto.subject_id !== undefined) payload.subject_id = dto.subject_id
+    // ⚠️ 思傅 2026-10-29 修「保存失败 … violates foreign key constraint
+    //    timeline_items_subject_id_fkey」：详情页把 null（未分类）铺成 ''、保存时又原样
+    //    发回 ''，Postgres 直接抛外键 500，题干/答案全没存上。
+    //    统一过 resolveSubjectId：'' / 无效 / 越权 ⇒ null，永不把 '' 写进库。
+    if (dto.subject_id !== undefined) {
+      payload.subject_id = await this.resolveSubjectId(userId, dto.subject_id)
+    }
     if (dto.tags !== undefined) payload.tags = dto.tags
     if (mergedContent !== undefined) payload.content = mergedContent
     // 图片字段（kind=image 的「原位替换」）：
@@ -536,7 +610,13 @@ export class TimelineService {
       .eq('user_id', userId)
       .eq('id', id)
       .select('id')
-    if (error) throw new Error(error.message)
+    if (error) {
+      // 兜底：外键类错误翻译成人话（正常路径已被 resolveSubjectId 拦掉，这里防新外键）
+      if (/foreign key constraint/i.test(error.message)) {
+        throw new BadRequestException('关联数据已失效（学科可能已被删除），请重新选择后再保存')
+      }
+      throw new Error(error.message)
+    }
     // 更新命中 0 行 = 该 id 不属于当前用户 / 已软删 / 不存在
     if (!updated || updated.length === 0) {
       throw new NotFoundException('内容不存在或无权修改')

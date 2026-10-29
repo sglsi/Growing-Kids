@@ -255,4 +255,52 @@ m.test('参数健壮性：非法 page/page_size 不 500', async (c) => {
   }
 })
 
+/**
+ * 回归（思傅 2026-10-29 真机故障）：
+ * 详情页把「未分类条目」的 null 铺成 '' 再原样回写，Postgres 抛
+ * `violates foreign key constraint "timeline_items_subject_id_fkey"`，
+ * 用户改的题干/答案全丢。**空串不是 NULL**，这一条守住它。
+ */
+m.test('🔴 未分类条目：subject_id 传空串不得撞外键', async (c) => {
+  const id = await c.ident('main')
+  const created = await c.api('POST', '/timeline', {
+    token: id.token,
+    body: { kind: 'question', subject_id: null, content: { question: '未分类题目', answer: '', status: 'pending' } },
+  })
+  c.status(created, 200, `建未分类题目失败: ${created.text.slice(0, 200)}`)
+  const item = created.json.data
+  c.eq(item.subject_id, null, '未分类条目 subject_id 应为 null')
+
+  // 老前端的写法：subject_id: ''
+  const put = await c.api('PUT', `/timeline/${item.id}`, {
+    token: id.token,
+    body: {
+      subject_id: '',
+      mastered: false,
+      content: { question: '改过的未分类题干', answer: '1', solution: '', status: 'answered' },
+    },
+  })
+  c.status(put, 200, `空串学科保存失败（外键约束）: ${put.text.slice(0, 200)}`)
+  c.eq(put.json?.data?.subject_id, null, '空串学科应落库为未分类（null）')
+  c.eq(put.json?.data?.content?.question, '改过的未分类题干', '保存后题干没变 —— 内容被丢掉了')
+})
+
+m.test('🔴 无效/越权学科 id：降级为未分类，不阻断保存', async (c) => {
+  const id = await c.ident('main')
+  const foe = await c.foe()
+  const foeSubs = await c.api('GET', '/subjects', { token: foe.token })
+  const foreignSubjectId = foeSubs.json?.data?.[0]?.id
+  c.ok(!!foreignSubjectId, '对方账号没有默认学科，用例前提不成立')
+
+  const item = await newQuestion(c, { question: '越权学科保存检查' })
+  // ① 压根不存在的 id ② 别人账号的学科 id —— 两者都不能让保存失败
+  for (const sid of ['not-a-real-subject-id', foreignSubjectId]) {
+    const res = await c.api('PUT', `/timeline/${item.id}`, {
+      token: id.token, body: { subject_id: sid, content: { question: '越权学科后仍应保存' } },
+    })
+    c.status(res, 200, `学科 ${sid.slice(0, 12)}… 导致保存失败: ${res.text.slice(0, 200)}`)
+    c.eq(res.json?.data?.subject_id, null, '越权/无效学科应降级为未分类，而不是写进库')
+  }
+})
+
 export default m

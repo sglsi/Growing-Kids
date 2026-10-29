@@ -554,7 +554,8 @@ export function updateTimeline(
 export function updateQuestion(
   id: string,
   payload: {
-    subject_id?: string
+    /** null = 显式清空为「未分类」。⚠️ 绝不能传 ''（会撞 timeline_items 的学科外键） */
+    subject_id?: string | null
     question_content?: string
     answer_content?: string
     solution?: string

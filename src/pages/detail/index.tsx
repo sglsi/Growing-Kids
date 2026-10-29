@@ -138,6 +138,12 @@ export default function DetailPage() {
    * 保存时按「解析：」切分回 answer / solution 两个字段，所见即所存。
    */
   const handleSave = async () => {
+    // 条目还没加载完就点保存：subjectId 仍是初始 ''，写回去会撞学科外键（历史事故见下），
+    // 而且会把空题干写进库。直接不动作更安全。
+    if (!item) {
+      Taro.showToast({ title: '内容还在加载，请稍候再保存', icon: 'none' })
+      return
+    }
     setSaving(true)
     try {
       const parts = splitAnswerSolution(answerDraft)
@@ -153,7 +159,14 @@ export default function DetailPage() {
         ? (item?.content?.solution || '')
         : readableToLatex(parts.solution)
       const updated = await updateQuestion(id, {
-        subject_id: subjectId,
+        /**
+         * ⚠️ 必须是 null 而不是 ''（思傅 2026-10-29 修「保存失败：
+         * timeline_items_subject_id_fkey」）：
+         * 未分类条目的 subject_id 是 NULL，applyItem 把它铺成 `''` 显示用；
+         * 直接发 `''` 出去，Postgres 会当成一个不存在的学科 id ⇒ 外键约束 500，
+         * 用户刚改的题干/答案全丢。空串在这里一律翻译成「未分类」。
+         */
+        subject_id: subjectId || null,
         question_content: qContent,
         answer_content: answerLatex,
         solution: solutionLatex,
@@ -161,11 +174,15 @@ export default function DetailPage() {
         mastered,
       })
       setItem(updated)
+      // 后端可能把无效学科降级成 null，这里跟库对齐，避免界面还显示旧学科
+      setSubjectId(updated.subject_id || '')
       dirtyRef.current = false
       Taro.showToast({ title: '已保存', icon: 'success' })
     } catch (e) {
       console.error('保存失败', e)
-      Taro.showToast({ title: '保存失败', icon: 'none' })
+      // 把后端的具体原因带出来（配额满 / 学科失效 / 网络），比干巴巴的「保存失败」可查得多
+      const msg = e instanceof Error && e.message ? e.message : '保存失败，请重试'
+      Taro.showToast({ title: msg.slice(0, 40), icon: 'none' })
     } finally {
       setSaving(false)
     }
@@ -176,32 +193,42 @@ export default function DetailPage() {
 
   /**
    * 数学符号/模板插入「答案与解题过程」框：`|` 为插入后光标停留位（模板用）。
-   * 光标位置取最近一次真实输入事件（caret.position），插入后一次性定位——
+   * 光标位置取最近一次真实输入/失焦事件（caret.position），插入后一次性定位——
    * 不再每次输入都改 cursor 属性（那是光标跳末尾的元凶）。
+   *
+   * ⚠️ 插入必须**延迟一拍**（思傅 2026-10-29「符号插到上一次编辑的位置」）：
+   * 点 chip 会让 textarea 先失焦，而带真实 cursor 的 blur 事件常常晚于 chip 的
+   * tap 回调落地。抢在 blur 之前插入，用的就是上一次打字的光标位置。
+   * 等 60ms（手指无感）再读位置，插入点才等于用户当前光标。
    */
   const insertAnswerSymbol = (snippet: string) => {
-    const cur = answerDraft
-    const pos = aCaret.position(cur.length)
-    const marker = snippet.indexOf('|')
-    const plain = snippet.replace('|', '')
-    const next = cur.slice(0, pos) + plain + cur.slice(pos)
-    setAnswerDraft(next)
-    dirtyRef.current = true
-    aCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    setTimeout(() => {
+      const cur = answerDraft
+      const pos = aCaret.position(cur.length)
+      const marker = snippet.indexOf('|')
+      const plain = snippet.replace('|', '')
+      const next = cur.slice(0, pos) + plain + cur.slice(pos)
+      setAnswerDraft(next)
+      dirtyRef.current = true
+      aCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    }, 60)
   }
 
   /**
    * 数学符号/模板插入题目栏（思傅 2026-10-23：题目栏也支持数学符号输入）。
    * 题干是纯文本编辑（不转 LaTeX），符号与模板的可读片段直接插入。
+   * 延迟一拍的道理同 insertAnswerSymbol。
    */
   const insertQuestionSymbol = (snippet: string) => {
-    const pos = qCaret.position(qContent.length)
-    const marker = snippet.indexOf('|')
-    const plain = snippet.replace('|', '')
-    const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
-    setQContent(next)
-    dirtyRef.current = true
-    qCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    setTimeout(() => {
+      const pos = qCaret.position(qContent.length)
+      const marker = snippet.indexOf('|')
+      const plain = snippet.replace('|', '')
+      const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
+      setQContent(next)
+      dirtyRef.current = true
+      qCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+    }, 60)
   }
 
   /**
@@ -509,6 +536,10 @@ export default function DetailPage() {
               maxlength={-1}
               cursor={qCaret.cursor}
               onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor); dirtyRef.current = true }}
+              // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
+              // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
+              onBlur={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           </Card>
 
@@ -556,6 +587,7 @@ export default function DetailPage() {
             value={answerDraft}
             cursor={aCaret.cursor}
             onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c); dirtyRef.current = true }}
+            onCaret={(c) => aCaret.track(c)}
             onInsert={insertAnswerSymbol}
           />
 
