@@ -18,10 +18,22 @@ import { useCallback, useRef, useState } from 'react'
 export interface Caret {
   /** 传给 Textarea 的 cursor；-1 = 不指定（原生按自己的规则走） */
   cursor: number
+  /** 传给 Textarea 的 focus：插入符号后要把输入态还回去，否则得再点一次输入框 */
+  focus: boolean
   /** onInput 里调用：只记录位置，不重渲染 */
   track: (cursor?: number) => void
   /** 程序化插入文本后调用：请求把光标定位到 pos（一次性） */
   request: (pos: number) => void
+  /**
+   * 程序化插入后重新聚焦（思傅 2026-10-29「插完符号就退出输入状态」）。
+   *
+   * 微信原生 textarea 的 `focus` 是**边沿触发**：值一直是 true 时再设 true 不会做事。
+   * 所以这里先落成 false、下一拍再置 true，制造一次真正的「重新聚焦」。
+   * 同时 `cursor` 只有**聚焦中**才会被采信，两步必须一起做。
+   */
+  refocus: () => void
+  /** 真实失焦时调用：让受控 focus 与原生状态保持一致，避免用户收不起键盘 */
+  blur: () => void
   /** 当前可用的插入位置（未记录/越界时退化为 len） */
   position: (len: number) => number
 }
@@ -33,6 +45,8 @@ export function useCaret(): Caret {
   const shotRef = useRef(-1)
   /** 一次性定位：只有它会被写进 cursor 属性 */
   const [shot, setShot] = useState(-1)
+  /** 受控聚焦态（见 Caret.refocus 的说明） */
+  const [focused, setFocused] = useState(false)
 
   const track = useCallback((cursor?: number) => {
     if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
@@ -51,11 +65,19 @@ export function useCaret(): Caret {
     setShot(p)
   }, [])
 
+  const refocus = useCallback(() => {
+    setFocused(false)
+    // 30ms：等这一次 value 更新的 setData 落地，再做 true 的边沿
+    setTimeout(() => setFocused(true), 30)
+  }, [])
+
+  const blur = useCallback(() => setFocused(false), [])
+
   const position = useCallback((len: number) => {
     const p = live.current
     if (p < 0) return len
     return Math.min(p, len)
   }, [])
 
-  return { cursor: shot, track, request, position }
+  return { cursor: shot, focus: focused, track, request, refocus, blur, position }
 }

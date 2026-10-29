@@ -28,6 +28,12 @@ interface Props {
   value: string
   /** 一次性光标定位请求（-1 = 不指定），由页面的 useCaret 提供 */
   cursor: number
+  /**
+   * 受控聚焦（思傅 2026-10-29「插完符号就退出输入状态，不能连续输入」）。
+   * 点符号 chip 会让原生 textarea 失焦、键盘收起；只给 cursor 不会把输入态还回来。
+   * 页面插入后调 `useCaret.refocus()` 制造一次 false→true 边沿，这里只负责透传。
+   */
+  focus?: boolean
   /** 输入回调（第二个参数是原生事件给的光标位置，交给 useCaret.track） */
   onInput: (value: string, cursor?: number) => void
   /**
@@ -40,11 +46,13 @@ interface Props {
    * 于是补上这一条链路即可让「插入位置 = 当前光标」。
    */
   onCaret?: (cursor?: number) => void
+  /** 真实失焦：让页面的受控 focus 一起落下，否则用户收不起键盘 */
+  onBlurCaret?: () => void
   /** 点数学符号/模板：页面负责按光标位置插入并回请求光标 */
   onInsert: (snippet: string) => void
 }
 
-export default function AnswerSolutionEditor({ value, cursor, onInput, onCaret, onInsert }: Props) {
+export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onBlurCaret, onInsert }: Props) {
   // 预览是纯展示开关，放组件内部即可（不涉及入库）
   const [preview, setPreview] = useState(false)
 
@@ -66,9 +74,13 @@ export default function AnswerSolutionEditor({ value, cursor, onInput, onCaret, 
           placeholder="先写答案，另起一行写「解析：」再写解题过程（长度不限，1/2、√3、x² 等写法都认）"
           maxlength={-1}
           cursor={cursor}
+          focus={focus}
           onInput={(e) => onInput(e.detail.value, e.detail.cursor)}
           // 失焦/聚焦补记光标位置：手指点选位置不产生 input 事件，只靠 blur/focus 拿得到
-          onBlur={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
+          onBlur={(e) => {
+            onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)
+            onBlurCaret?.()
+          }}
           onFocus={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
         />
         <Text className="block text-xs text-muted-foreground mt-2">

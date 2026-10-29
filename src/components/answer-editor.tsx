@@ -164,6 +164,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       setEditing(next)
       if (mode !== 'edit') setMode('edit')
       caret.request(marker >= 0 ? pos + marker : pos + plain.length)
+      // 插入后把输入态还回去，否则每插一个符号都要再点一次输入框（思傅 2026-10-29）
+      caret.refocus()
     }, 60)
   }
 
@@ -369,10 +371,11 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               value={editing}
               maxlength={-1}
               cursor={caret.cursor}
+              focus={caret.focus}
               onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor) }}
               // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
               // （否则符号会插到上一次打字处，思傅 2026-10-29）
-              onBlur={(e) => caret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onBlur={(e) => { caret.track((e.detail as { cursor?: number } | undefined)?.cursor); caret.blur() }}
               onFocus={(e) => caret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           )}

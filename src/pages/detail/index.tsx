@@ -200,6 +200,11 @@ export default function DetailPage() {
    * 点 chip 会让 textarea 先失焦，而带真实 cursor 的 blur 事件常常晚于 chip 的
    * tap 回调落地。抢在 blur 之前插入，用的就是上一次打字的光标位置。
    * 等 60ms（手指无感）再读位置，插入点才等于用户当前光标。
+   *
+   * ⚠️ 插入完还要 `refocus()`（思傅 2026-10-29「插一个符号就退出输入态」）：
+   * 点 chip 时 textarea 已经失焦、键盘收起，只给 `cursor` 不会把输入态还回来，
+   * 用户必须再点一次输入框才能接着打字。refocus 做一次 false→true 的边沿，
+   * 配合同一个 cursor，插入后就能连续输入。
    */
   const insertAnswerSymbol = (snippet: string) => {
     setTimeout(() => {
@@ -211,13 +216,14 @@ export default function DetailPage() {
       setAnswerDraft(next)
       dirtyRef.current = true
       aCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+      aCaret.refocus()
     }, 60)
   }
 
   /**
    * 数学符号/模板插入题目栏（思傅 2026-10-23：题目栏也支持数学符号输入）。
    * 题干是纯文本编辑（不转 LaTeX），符号与模板的可读片段直接插入。
-   * 延迟一拍的道理同 insertAnswerSymbol。
+   * 延迟一拍 + 插入后 refocus 的道理同 insertAnswerSymbol。
    */
   const insertQuestionSymbol = (snippet: string) => {
     setTimeout(() => {
@@ -228,6 +234,7 @@ export default function DetailPage() {
       setQContent(next)
       dirtyRef.current = true
       qCaret.request(marker >= 0 ? pos + marker : pos + plain.length)
+      qCaret.refocus()
     }, 60)
   }
 
@@ -535,10 +542,12 @@ export default function DetailPage() {
               placeholder="题目内容（可点「识别」从图片提取）"
               maxlength={-1}
               cursor={qCaret.cursor}
+              focus={qCaret.focus}
               onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor); dirtyRef.current = true }}
               // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
-              onBlur={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+              // 失焦还要把受控 focus 一起落下，否则状态与原生不一致，用户会收不起键盘
+              onBlur={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); qCaret.blur() }}
               onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           </Card>
@@ -586,8 +595,10 @@ export default function DetailPage() {
           <AnswerSolutionEditor
             value={answerDraft}
             cursor={aCaret.cursor}
+            focus={aCaret.focus}
             onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c); dirtyRef.current = true }}
             onCaret={(c) => aCaret.track(c)}
+            onBlurCaret={() => aCaret.blur()}
             onInsert={insertAnswerSymbol}
           />
 
@@ -715,7 +726,10 @@ export default function DetailPage() {
             placeholder="题目内容"
             maxlength={-1}
             cursor={qCaret.cursor}
+            focus={qCaret.focus}
             onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor); dirtyRef.current = true }}
+            onBlur={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); qCaret.blur() }}
+            onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
           />
         </Card>
 
