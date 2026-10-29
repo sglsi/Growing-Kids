@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
+import { buildHeaders } from '@/services/net'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
 
@@ -986,8 +987,15 @@ export default function ImageEditor({
   const downloadWithTimeout = (url: string, ms: number): Promise<any> => {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('下载超时')), ms)
+      // ⚠️ 只有打到自家后端才需要身份头（2026-10-29 分模块测试发现并修复）：
+      // `/api/storage/files/*` 不在 PUBLIC_ROUTES，缺 `X-Auth-Token` 必 401；
+      // 而对象存储签名直链带自定义头反而可能被拒 ⇒ 按目标判定，不一刀切。
+      const needAuth =
+        /^\/api\//.test(url) ||
+        (typeof PROJECT_DOMAIN === 'string' && !!PROJECT_DOMAIN && url.startsWith(PROJECT_DOMAIN))
       Network.downloadFile({
         url,
+        ...(needAuth ? { header: buildHeaders() } : null),
         success: (r: any) => { clearTimeout(timer); resolve(r) },
         fail: (e: any) => { clearTimeout(timer); reject(e) },
       })
@@ -1854,12 +1862,12 @@ export default function ImageEditor({
                   <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).left}
                   </Text>
-                  <Text
+                  <View
                     className="block text-white text-opacity-70 text-xs"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认
-                  </Text>
+                  </View>
                   <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activePreset] || SLIDER_HINT.enhance).right}
                   </Text>
@@ -2082,12 +2090,12 @@ export default function ImageEditor({
                   <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).left}
                   </Text>
-                  <Text
+                  <View
                     className="block text-white text-opacity-70 text-xs"
                     onClick={() => onPresetSliderChange(PRESET_SLIDER_DEFAULT)}
                   >
                     恢复默认
-                  </Text>
+                  </View>
                   <Text className="block text-white text-opacity-50 text-xs">
                     {(SLIDER_HINT[activeMode] || SLIDER_HINT.enhance).right}
                   </Text>

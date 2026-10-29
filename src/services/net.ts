@@ -108,8 +108,18 @@ export function openStorageFile(url: string, isPdf = false, fileKey?: string) {
   const dlUrl = fileKey ? `/api/storage/files/${fileKey}` : url
   // ⚠️ 必须显式 timeout：微信 downloadFile 默认 60s，跨境/慢网下干等太久。
   // 30s 失败后走「复制链接」兜底，比干等 60s 体验好；失败时打 URL 便于后续诊断。
+  //
+  // 🔴 必须显式带身份头（2026-10-29 分模块测试发现并修复，缺陷 P0-B）：
+  // `Network.downloadFile` 只补域名前缀，**不会**像 `Network.request` 那样自动
+  // 注入 `X-Auth-Token`（见 network.ts：只有 request 有 401 换牌重放逻辑）。
+  // 而 `/api/storage/files/*` 不在 PUBLIC_ROUTES 里，严格令牌模式下中间件直接
+  // `NEED_AUTH_TOKEN` 401 ⇒ downloadFile 非 2xx 走 fail ⇒ 表现为「转一下圈就
+  // 提示加载失败，地址已复制」——资料库/文档/详情页的 PDF、Word 全都打不开。
+  // 对照：profile 头像下载（profile/index.tsx）就是手动传 `header: buildHeaders()`
+  // 才通的。这里同理。
   Network.downloadFile({
     url: dlUrl,
+    header: buildHeaders(),
     timeout: 30000,
     success: (d) => {
       Taro.hideLoading()
