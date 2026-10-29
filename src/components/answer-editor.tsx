@@ -11,6 +11,7 @@ import { useCaret } from '@/utils/use-caret'
 import { reportChooseFail } from '@/utils/privacy'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
+import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
@@ -427,21 +428,27 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
-        {/* 联网搜题：只做真实网络检索，不喂给 AI */}
-        <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
-          <Globe size={12} color={INK} />
-          <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
-        </View>
-        {/* 知识库：只检索 ima 知识库（秒级），不喂给 AI */}
-        <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
-          <BookOpen size={12} color={INK} />
-          <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '知识库'}</Text>
-        </View>
-        {/* AI 解题：只做模型推理，不检索 */}
-        <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
-          <Bot size={12} color={INK} />
-          <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
-        </View>
+        {/* 联网搜题 / 知识库 / AI 解题：三条通道都往外部发内容，属 AI 服务。
+            个人主体不开放（见 constants/app-info.ts），此处直接不渲染入口。 */}
+        {AI_PUBLIC_ENTRY && (
+          <>
+            {/* 联网搜题：只做真实网络检索，不喂给 AI */}
+            <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
+              <Globe size={12} color={INK} />
+              <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
+            </View>
+            {/* 知识库：只检索 ima 知识库（秒级），不喂给 AI */}
+            <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
+              <BookOpen size={12} color={INK} />
+              <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '知识库'}</Text>
+            </View>
+            {/* AI 解题：只做模型推理，不检索 */}
+            <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
+              <Bot size={12} color={INK} />
+              <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
+            </View>
+          </>
+        )}
         {/* 保存：仅编辑态需要（预览态内容即已入库内容；附件操作都是即时保存） */}
         {mode === 'edit' ? (
           <View

@@ -9,9 +9,11 @@
 //    （components/policy-consent.tsx 按版本号比对）。
 // ============================================================
 
-export const PRIVACY_POLICY_VERSION = '2026-10-27-r2'
+import { ICP_FILING_NO } from './app-info'
 
-export const PRIVACY_POLICY_TITLE = '成长学习伙伴 · 隐私政策'
+export const PRIVACY_POLICY_VERSION = '2026-10-29-r3'
+
+export const PRIVACY_POLICY_TITLE = '成长学童 · 隐私政策'
 
 export interface PolicySection {
   heading: string
@@ -22,7 +24,7 @@ export const PRIVACY_POLICY_SECTIONS: PolicySection[] = [
   {
     heading: '一、这份政策管什么',
     paragraphs: [
-      '「成长学习伙伴」（以下简称"本小程序"）由个人开发者运营，用于帮家长整理孩子的错题、复习与学习记录。',
+      '「成长学童」（以下简称"本小程序"）由个人开发者运营，用于帮家长整理孩子的错题、复习与学习记录。',
       '本政策说明我们收集哪些信息、为什么收集、会和谁共享、保存多久，以及你可以怎么查、改、删。',
       '本小程序面向家长使用，实际记录的学习数据属于未成年人。因此我们在第 5 节对未成年人信息做了额外约定。',
     ],
@@ -112,9 +114,10 @@ export const PRIVACY_POLICY_SECTIONS: PolicySection[] = [
     ],
   },
   {
-    heading: '十、联系我们',
+    heading: '十、运营者与备案信息',
     paragraphs: [
-      '对本政策有疑问、要行使上述权利、或要投诉，可通过小程序内「我的 → 意见反馈」留言，或通过开发者在小程序详情页公示的联系方式联系。',
+      `本小程序由个人开发者运营（个人主体），已完成小程序 ICP 备案，备案号：${ICP_FILING_NO}。`,
+      '对本政策有疑问、要行使上述权利、或要投诉，可通过小程序「右上角 ··· → 更多资料」页公示的开发者联系方式与我们联系。',
       '我们会在 15 个工作日内答复。',
     ],
   },

@@ -18,6 +18,7 @@ import {
 } from '@/services/api'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
+import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
 
 /**
  * 我的：登录 / 退出 / 资料 / 账号信息
@@ -37,6 +38,8 @@ export default function ProfilePage() {
 
   /** 打开隐私政策（R-合规-03） */
   const openPolicy = () => Taro.navigateTo({ url: '/pages/privacy/index' })
+  /** 打开用户协议（提审要求与隐私政策齐备） */
+  const openAgreement = () => Taro.navigateTo({ url: '/pages/agreement/index' })
 
   /**
    * 切换「AI 与在线检索」开关（R-合规-02）。
@@ -280,27 +283,29 @@ export default function ProfilePage() {
             )}
           </Card>
 
-          {/* 智能客服 */}
-          <Card
-            className="rounded-2xl border-border p-4 mb-5"
-            onClick={() => Taro.navigateTo({ url: '/pages/chat/index' })}
-          >
-            <View className="flex flex-row items-center gap-3">
-              <View
-                className="rounded-xl flex items-center justify-center"
-                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
-              >
-                <Bot size={20} color={INK} />
+          {/* 智能客服：走大模型 ⇒ 属 AI 外发，个人主体不开放（见 constants/app-info.ts） */}
+          {AI_PUBLIC_ENTRY && (
+            <Card
+              className="rounded-2xl border-border p-4 mb-5"
+              onClick={() => Taro.navigateTo({ url: '/pages/chat/index' })}
+            >
+              <View className="flex flex-row items-center gap-3">
+                <View
+                  className="rounded-xl flex items-center justify-center"
+                  style={{ width: '40px', height: '40px', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
+                >
+                  <Bot size={20} color={INK} />
+                </View>
+                <View className="flex-1">
+                  <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">
+                    关于小程序的功能和使用问题都可以问我
+                  </Text>
+                </View>
+                <Text className="block text-base text-muted-foreground">›</Text>
               </View>
-              <View className="flex-1">
-                <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
-                <Text className="block text-xs text-muted-foreground mt-1">
-                  关于小程序的功能和使用问题都可以问我
-                </Text>
-              </View>
-              <Text className="block text-base text-muted-foreground">›</Text>
-            </View>
-          </Card>
+            </Card>
+          )}
 
           {/* 数据概览 */}
           <View className="flex flex-row gap-3 mb-5">
@@ -339,21 +344,35 @@ export default function ProfilePage() {
             </Card>
           )}
 
-          {/* AI 与在线检索（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */}
-          <Card className="rounded-2xl border-border p-4 mb-5">
-            <View className="flex flex-row items-center justify-between">
+          {/* AI 与在线检索（R-合规-02）：默认关 = 仅本地，任何内容不出机器。
+              ⚠️ 个人主体下整块收起（见 constants/app-info.ts）：留着开关等于让审核员
+              看到「用户可自行打开 AI 服务」，会被要求补「深度合成-AI问答」类目。 */}
+          {AI_PUBLIC_ENTRY ? (
+            <Card className="rounded-2xl border-border p-4 mb-5">
+              <View className="flex flex-row items-center justify-between">
+                <View className="flex flex-row items-center gap-2">
+                  <Bot size={16} color="#9A948A" />
+                  <Text className="block text-sm font-semibold text-foreground">AI 与在线检索</Text>
+                </View>
+                <Switch checked={aiEnabled} disabled={busy} onCheckedChange={handleToggleAi} />
+              </View>
+              <Text className="block mt-2 text-xs text-muted-foreground">
+                {aiEnabled
+                  ? '已开启：搜答案与智能客服会调用第三方 AI 服务（在线搜题 / 知识库检索 / 大模型解题）。题目内容会离开本机。'
+                  : '未开启（仅本地）：识别与题库匹配都在本机完成，题目内容不会发送给任何第三方。开启后才能使用搜答案与智能客服。'}
+              </Text>
+            </Card>
+          ) : (
+            <Card className="rounded-2xl border-border p-4 mb-5">
               <View className="flex flex-row items-center gap-2">
                 <Bot size={16} color="#9A948A" />
-                <Text className="block text-sm font-semibold text-foreground">AI 与在线检索</Text>
+                <Text className="block text-sm font-semibold text-foreground">数据在哪处理</Text>
               </View>
-              <Switch checked={aiEnabled} disabled={busy} onCheckedChange={handleToggleAi} />
-            </View>
-            <Text className="block mt-2 text-xs text-muted-foreground">
-              {aiEnabled
-                ? '已开启：搜答案与智能客服会调用第三方 AI 服务（在线搜题 / 知识库检索 / 大模型解题）。题目内容会离开本机。'
-                : '未开启（仅本地）：识别与题库匹配都在本机完成，题目内容不会发送给任何第三方。开启后才能使用搜答案与智能客服。'}
-            </Text>
-          </Card>
+              <Text className="block mt-2 text-xs text-muted-foreground">
+                识别、切题、复习排程都在本服务上完成，题目内容不发送给任何第三方。
+              </Text>
+            </Card>
+          )}
 
           {/* 隐私与账号（R-合规-03）：政策可查、数据可删、账号可注销 */}
           <Card className="rounded-2xl border-border p-4 mb-5">
@@ -373,6 +392,14 @@ export default function ProfilePage() {
                 <Text className="text-[13px] text-foreground">隐私政策</Text>
               </View>
               <View
+                className="flex h-9 flex-1 items-center justify-center rounded-xl border border-border"
+                onClick={openAgreement}
+              >
+                <Text className="text-[13px] text-foreground">用户协议</Text>
+              </View>
+            </View>
+            <View className="mt-3 flex flex-row">
+              <View
                 className="flex h-9 flex-1 items-center justify-center rounded-xl border border-[#E8C4C0]"
                 onClick={handlePurge}
               >
@@ -380,6 +407,13 @@ export default function ProfilePage() {
               </View>
             </View>
           </Card>
+
+          {/* 备案信息（2026-10-29 通过）：微信客户端会在小程序「更多资料」页自动展示备案号，
+              这里再放一份，便于审核比对与用户核查。个人主体不公示姓名，只公示备案号。 */}
+          <View className="mb-6 mt-1 flex flex-col items-center">
+            <Text className="block text-[12px] text-muted-foreground">{APP_NAME}</Text>
+            <Text className="mt-1 block text-[12px] text-muted-foreground">{ICP_FILING_NO}</Text>
+          </View>
 
           {!logged && (
             <EmptyCard

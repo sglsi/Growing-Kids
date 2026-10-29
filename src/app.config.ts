@@ -16,6 +16,8 @@ export default defineAppConfig({
     'pages/library/index',
     'pages/profile/index',
     'pages/privacy/index',
+    // 用户协议（上线验收第 11 项：提审要求与隐私政策齐备）
+    'pages/agreement/index',
     'pages/chat/index',
     'pages/chat/admin',
     'pages/memory/edit',

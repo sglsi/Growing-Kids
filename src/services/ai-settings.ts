@@ -14,13 +14,20 @@
 //    只靠前端判断等于没有控制（拿到接口就绕过去了）。
 // ============================================================
 import { getSettings, setAiEnabled } from '@/services/api'
+import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 
 /** null = 还没读到（未知）；true/false = 已知 */
 let cached: boolean | null = null
 let inflight: Promise<boolean> | null = null
 
-/** 仅本地模式的统一提示语（各处复用，避免同一件事三种说法） */
-export const AI_DISABLED_HINT = '未开启 AI 与在线检索（当前仅本地处理），可在「我的 · 隐私与账号」中开启'
+/**
+ * AI 不可用时的统一提示语（各处复用，避免同一件事三种说法）。
+ * ⚠️ 对公众不开放时**不能写「去某处开启」**——入口已经收起，指向不存在的开关
+ *    会让用户以为坏了；也不能写「即将上线 AI 解题」，那会被视为预告该类服务。
+ */
+export const AI_DISABLED_HINT = AI_PUBLIC_ENTRY
+  ? '未开启 AI 与在线检索（当前仅本地处理），可在「我的 · 隐私与账号」中开启'
+  : '当前版本仅在本机完成识别与整理，未提供在线解题'
 
 /** 同步读缓存：未知时返回 false（宁可少放行，也不要先发出去再道歉） */
 export function peekAiEnabled(): boolean {
