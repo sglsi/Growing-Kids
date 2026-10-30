@@ -23,6 +23,13 @@
  *   node scripts/db-backup.mjs --keep 30       本地与网盘各保留 30 份（默认 14）
  *   node scripts/db-backup.mjs --out D:/bk     自定义本地目录
  *   node scripts/db-backup.mjs --quiet         只输出一行 JSON（计划任务用）
+ *   node scripts/db-backup.mjs --new-passphrase  已有备份但口令丢了时才用：确认弃旧就新
+ *
+ * ⚠️ 两道硬守卫（2026-10-31 服务器上真实踩到，别删）：
+ *    1) RLS 守卫：备份角色若没有 BYPASSRLS，开了 RLS 的表会被**静默导出 0 行**
+ *       ——备份成功、自检也通过，只是表是空的，恢复时才发现数据没了。见 main() 步骤 ⓪。
+ *    2) 换锁守卫：.env.secrets 缺口令又检测到已有备份时，不再自动生成新口令
+ *       （自动生成 = 让旧备份永久作废）。需用 --new-passphrase 显式确认。
  *
  * 退出码：0 成功 ｜ 1 致命失败 ｜ 2 本地成功但网盘上传失败（需人工关注）
  */
@@ -47,6 +54,8 @@ function opt(name, fallback) {
 
 const NO_UPLOAD = flag('no-upload')
 const QUIET = flag('quiet')
+// 显式确认「弃用旧备份、启用新口令」。缺省状态下脚本拒绝自动换锁，见 lib/backup-format.mjs
+const NEW_PASSPHRASE = flag('new-passphrase')
 const KEEP = Math.max(1, Number(opt('keep', '14')) || 14)
 const OUT_DIR = path.resolve(opt('out', BACKUP_DIR))
 const PAGE_SIZE = 2000
@@ -107,6 +116,32 @@ async function main() {
   let tmpPath = ''
 
   try {
+    // ⓪ RLS 守卫（2026-10-31 服务器上真实踩到，务必保留）
+    //    开了 RLS 且没有 policy 的表，对「非 owner 且无 BYPASSRLS」的角色会**静默返回 0 行**：
+    //    备份照常成功、读回自检照常通过，只是那张表的内容是空的——等到真正要恢复才发现。
+    //    本项目 `ocr_results` 就是这种表（迁移后 14 行，备份却只导出 0 行）。
+    //    ⇒ 宁可当场报错中止，也不要产出一份看起来完美、实则缺数据的备份。
+    //    修法（一次性）：ALTER ROLE <备份角色> BYPASSRLS;
+    const rlsRow = await client.query(
+      `select coalesce(json_agg(c.relname order by c.relname), '[]'::json) as names
+         from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind = 'r'
+          and (c.relrowsecurity or c.relforcerowsecurity)`,
+    )
+    const selfRow = await client.query(
+      `select current_user as u,
+              (select rolbypassrls from pg_roles where rolname = current_user) as bypass`,
+    )
+    const rlsTables = rlsRow.rows[0].names || []
+    if (rlsTables.length && selfRow.rows[0].bypass !== true) {
+      throw new Error(
+        `备份角色 "${selfRow.rows[0].u}" 没有 BYPASSRLS，而以下表启用了 RLS：${rlsTables.join('、')}。\n` +
+          `  ⇒ 这些表会被**静默导出为 0 行**（不报错、自检也过，但恢复时数据是空的）。\n` +
+          `  解决：alter role ${selfRow.rows[0].u} bypassrls;`,
+      )
+    }
+    if (rlsTables.length) log(`[backup] RLS 表 ${rlsTables.length} 张已确认可读（角色具备 BYPASSRLS）`)
+
     // ① 一致性快照：所有表必须同一时间点，否则会导出"有订单没用户"这种不可恢复的中间态
     await client.query('begin isolation level repeatable read read only')
 
@@ -176,7 +211,11 @@ async function main() {
     )
 
     // ④ 加密（导出含全体用户数据，落消费级网盘前必须先加密）
-    const { passphrase, created } = ensurePassphrase(true)
+    const { passphrase, created } = ensurePassphrase(true, {
+      // 服务器上用 --out 指向独立目录，历史备份不在默认 BACKUP_DIR，也要纳入"换锁"检查
+      extraDirs: [OUT_DIR],
+      allowReplace: NEW_PASSPHRASE,
+    })
     if (created) {
       log('')
       log('  ⚠️  已生成备份加密口令并写入 server/.env.secrets 的 BACKUP_PASSPHRASE')

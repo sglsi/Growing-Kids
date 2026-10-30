@@ -27,6 +27,8 @@ const PCS_SUPERFILE = 'https://d.pcs.baidu.com/rest/2.0/pcs/superfile2'
 const TOKEN_ERRNOS = new Set([111, -6, 2, 10])
 const REQ_TIMEOUT_MS = Number(env('BAIDU_TIMEOUT_MS', '30000'))
 const UPLOAD_TIMEOUT_MS = Number(env('BAIDU_UPLOAD_TIMEOUT_MS', '180000'))
+// 百度 superfile2 的约定：每片必须正好 4 MB（最后一片可不足）
+const PART_SIZE = 4 * 1024 * 1024
 
 export class Netdisk {
   /** @param {string} root 绝对目录，默认 /apps/GrowingKids/GrowingKids备份 */
@@ -125,51 +127,90 @@ export class Netdisk {
     }
   }
 
-  /** 上传（三步）；返回网盘绝对路径 */
+  /**
+   * 上传（precreate → 逐片 upload → create 合片）；返回网盘绝对路径
+   *
+   * ⚠️ 为什么改成分片（2026-10-31）：文件备份 66.7 MB 单片直传，百度返回 `error_code: -1`
+   *     且响应体为空，而同一流程传 176 KB 的数据库备份却正常 ⇒ 单片对大文件不可靠。
+   *     百度官方 superfile2 的预期用法就是分片：每片必须是 4 MB，最后一片可以不足。
+   *
+   * ⚠️ 顺带修掉一个排障盲点：老实现把非 JSON 响应当成 `e.error_msg || ''`，
+   *     遇到 HTML/空响应时错误信息是空的，只能看到"分片上传失败 -1："这种无从下手的提示。
+   *     现在把 HTTP 状态码和响应体前 200 字符都带出来。
+   */
   async upload(fileName, buffer) {
     if (!this.enabled()) throw new Error(`百度网盘未启用（缺 ${this.missingKeys().join(' / ')}）`)
     await this.ensureDir(this.root)
     const absPath = `${this.root}/${fileName}`
-    const md5 = createHash('md5').update(buffer).digest('hex')
-    const size = String(buffer.length)
+    const size = buffer.length
+
+    const parts = []
+    for (let off = 0; off < size; off += PART_SIZE) {
+      const chunk = buffer.subarray(off, Math.min(off + PART_SIZE, size))
+      parts.push({ seq: parts.length, md5: createHash('md5').update(chunk).digest('hex'), chunk })
+    }
+    const blockList = parts.map((p) => p.md5)
+
+    /** 单片上传；失败重试 2 次（拉 CDN 抖动很常见），并把原始响应带出来 */
+    const putPart = async (token, uploadid, part) => {
+      let lastErr = ''
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const form = new FormData()
+        form.append('file', new Blob([new Uint8Array(part.chunk)]), fileName)
+        const url =
+          `${PCS_SUPERFILE}?method=upload&access_token=${token}&type=tmpfile` +
+          `&path=${encodeURIComponent(absPath)}&uploadid=${encodeURIComponent(uploadid)}&partseq=${part.seq}`
+        try {
+          const upRes = await fetch(url, {
+            method: 'POST',
+            body: form,
+            signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+          })
+          const upText = await upRes.text().catch(() => '')
+          let upJson = null
+          try {
+            upJson = JSON.parse(upText)
+          } catch {
+            upJson = null
+          }
+          const code = upJson && upJson.error_code !== undefined ? Number(upJson.error_code) : upRes.ok ? 0 : -1
+          if (code === 0) return
+          lastErr =
+            `partseq=${part.seq} HTTP=${upRes.status} code=${code} ` +
+            `${upJson?.error_msg || upText.slice(0, 200)}`
+        } catch (e) {
+          lastErr = `partseq=${part.seq} 网络异常：${e?.message || e}`
+        }
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt))
+      }
+      throw new Error(`分片上传失败（重试 3 次）：${lastErr}`)
+    }
 
     return this.call(async (token) => {
       const pre = await this.postForm(`${PAN_FILE}?method=precreate&access_token=${token}`, {
         path: absPath,
-        size,
+        size: String(size),
         isdir: '0',
         autoinit: '1',
-        block_list: JSON.stringify([md5]),
+        block_list: JSON.stringify(blockList),
         rtype: '3',
       })
       if (Number(pre.errno) !== 0) throw new Error(`precreate 失败 errno=${pre.errno}: ${pre.errmsg || ''}`)
-      const blocks = Array.isArray(pre.block_list) ? pre.block_list : []
-      if (blocks.length === 0) return { value: absPath, errno: 0 } // 秒传
+
+      const missing = Array.isArray(pre.block_list) ? pre.block_list.map(Number) : []
+      if (missing.length === 0) return { value: absPath, errno: 0 } // 服务端已有所有分片 ⇒ 秒传
 
       const uploadid = String(pre.uploadid || '')
-      const form = new FormData()
-      form.append('file', new Blob([new Uint8Array(buffer)]), fileName)
-      const upRes = await fetch(
-        `${PCS_SUPERFILE}?method=upload&access_token=${token}&type=tmpfile` +
-          `&path=${encodeURIComponent(absPath)}&uploadid=${encodeURIComponent(uploadid)}&partseq=0`,
-        { method: 'POST', body: form, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) },
-      )
-      const upText = await upRes.text().catch(() => '')
-      let upJson
-      try {
-        upJson = JSON.parse(upText)
-      } catch {
-        upJson = { error_code: upRes.ok ? 0 : -1, error_msg: upText.slice(0, 200) }
-      }
-      if (upJson.error_code !== undefined && Number(upJson.error_code) !== 0) {
-        throw new Error(`分片上传失败 ${upJson.error_code}: ${upJson.error_msg || ''}`)
+      for (const part of parts) {
+        if (missing.length && !missing.includes(part.seq)) continue // 服务端已有该片，跳过
+        await putPart(token, uploadid, part)
       }
 
       const cr = await this.postForm(`${PAN_FILE}?method=create&access_token=${token}`, {
         path: absPath,
-        size,
+        size: String(size),
         isdir: '0',
-        block_list: JSON.stringify([md5]),
+        block_list: JSON.stringify(blockList),
         uploadid,
         rtype: '3',
       })

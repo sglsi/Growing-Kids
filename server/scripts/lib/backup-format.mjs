@@ -42,11 +42,37 @@ function deriveKey(passphrase, salt) {
   return crypto.scryptSync(passphrase, salt, KEY_LEN, SCRYPT)
 }
 
+const FILE_RE = /^gk-db-\d{8}-\d{6}\.gkbk$/
+
+/** 一批目录里已存在的备份文件名（新→旧），用于阻止"换锁"事故 */
+export function listPriorBackups(dirs = [BACKUP_DIR]) {
+  const dirList = Array.isArray(dirs) ? dirs : [dirs]
+  const out = []
+  for (const dir of dirList) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (FILE_RE.test(f) && fs.statSync(path.join(dir, f)).isFile()) out.push(f)
+      }
+    } catch {
+      /* 目录不存在就当没有历史备份 */
+    }
+  }
+  return [...new Set(out)].sort((a, b) => b.localeCompare(a))
+}
+
 /**
  * 取口令；不存在且 allowCreate 时生成并写入 .env.secrets。
+ *
+ * ⚠️ 2026-10-31 真实事故：口令被**静默重新生成**，导致此前 5 份备份全部变成打不开的死文件
+ *    （现象：文件头 GKBK/版本都正常，唯独 GCM 校验过不去，容易误判成"文件损坏"）。
+ *    根因不是磁盘或格式，而是「没有口令 → 自动生成一把新的」，老备份当场被换锁。
+ *  ⇒ 现在的策略：如果 backups 目录里**已经存在备份**，缺口令时不再自动新建，
+ *     而是报错让人明确选择——要不要真的启动一条新链。
+ *
  * @returns {{ passphrase: string, created: boolean }}
  */
-export function ensurePassphrase(allowCreate = true) {
+export function ensurePassphrase(allowCreate = true, options = {}) {
+  const { allowReplace = false, extraDirs = [] } = options
   const existing = env('BACKUP_PASSPHRASE')
   if (existing && existing.length >= 16) return { passphrase: existing, created: false }
 
@@ -55,6 +81,20 @@ export function ensurePassphrase(allowCreate = true) {
       'server/.env.secrets 缺少 BACKUP_PASSPHRASE（至少 16 字符）。\n' +
         '  首次使用请先跑一次 `node scripts/db-backup.mjs`（会自动生成并提示托管），\n' +
         '  或手工写入一个你妥善保存的口令。',
+    )
+  }
+
+  // 已有的备份文件 —— 继续自动生成新口令 = 让它们永久失效，必须拦下来
+  const prior = listPriorBackups([BACKUP_DIR, ...extraDirs])
+  if (prior.length && !allowReplace) {
+    throw new Error(
+      `server/.env.secrets 里没有 BACKUP_PASSPHRASE，但 backups 目录已有 ${prior.length} 份备份：\n` +
+        `    ${prior.slice(0, 3).join('\n    ')}${prior.length > 3 ? '\n    …' : ''}\n` +
+        `  这些备份是用**别的口令**加密的。若此刻自动生成新口令，它们将永远打不开。\n` +
+        `  请二选一：\n` +
+        `    A. 找回旧口令（查 KEY-ESCROW.txt / 密码管理器），写回 BACKUP_PASSPHRASE；\n` +
+        `    B. 确认旧备份可以放弃，显式执行：node scripts/db-backup.mjs --new-passphrase\n` +
+        `      （建议先把旧文件挪到 server/backups/orphaned/ 留档，别直接删）`,
     )
   }
 
