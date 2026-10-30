@@ -56,6 +56,24 @@ else:
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
     os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
 
+# ---------------------------------------------------------------------------
+# paddlepaddle 3.3.x 在 CPU 上的 oneDNN/PIR 回归（2026-10-31 定位并修复）
+#
+# 症状：走 paddle/PP-StructureV3 推理必抛
+#   NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
+#   not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+#   (at new_executor/instruction/onednn/onednn_instruction.cc:116)
+#
+# 根因（PaddlePaddle/Paddle#77340）：3.3.0 起 PIR 执行器默认启用 oneDNN(MKLDNN)，
+# 属性转换在 CPU 路径有回归；官方修复 #77430 只合到 develop，**从未回植 3.3.x**。
+# ⚠️ 已证伪、别再试：FLAGS_use_mkldnn=0 / FLAGS_enable_pir_in_executor=0 /
+#    FLAGS_enable_pir_api=0（paddle 层 FLAGS，管不到 PaddleX 自己默认打开的 oneDNN）。
+# ✅ 有效的是 PaddleX 层这一个，必须在 import paddleocr 之前设置（本文件下方才是重依赖导入）。
+# 代价：关掉 oneDNN 后推理慢 3~6 倍，换来「能用」，且保住 3.3.1 才有的模型与能力。
+# 同步说明：main.py 顶部有同一段，两处必须一致（精准链路走本文件，快速链路走 main.py）。
+# ---------------------------------------------------------------------------
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
