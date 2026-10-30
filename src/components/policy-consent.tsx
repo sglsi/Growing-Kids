@@ -1,9 +1,12 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { useEffect, useState } from 'react'
-import { POLICY_CONSENT_TEXT, PRIVACY_POLICY_VERSION } from '@/constants/privacy-policy'
-
-const STORAGE_KEY = 'gk_policy_agreed_v1'
+import { useEffect, useRef, useState } from 'react'
+import { POLICY_CONSENT_TEXT } from '@/constants/privacy-policy'
+import {
+  hasAgreedPolicy,
+  markPolicyAgreed,
+  onPolicyConsentRequest,
+} from '@/services/policy-gate'
 
 /**
  * 《隐私政策》首屏同意闸门（OPS-18 `R-合规-03` 第 2 点：监护人同意流程）。
@@ -22,15 +25,18 @@ export default function PolicyConsent() {
   const [visible, setVisible] = useState(false)
   const [checked, setChecked] = useState(false)
 
+  /** 这次弹出是不是被写操作拦下来的（决定关掉后要不要提示「请重试刚才的操作」） */
+  const forcedRef = useRef(false)
+
   useEffect(() => {
-    let agreed = ''
-    try {
-      agreed = Taro.getStorageSync(STORAGE_KEY) || ''
-    } catch {
-      agreed = ''
-    }
     // 版本号变化后重新征求同意（政策更新是实质变更，不能沿用旧同意）
-    if (agreed !== PRIVACY_POLICY_VERSION) setVisible(true)
+    if (!hasAgreedPolicy()) setVisible(true)
+    // GK-23-24：写操作被 guardPolicy 拦下时会唤起本层，用户点「去同意」才走到这里
+    return onPolicyConsentRequest(() => {
+      forcedRef.current = true
+      setChecked(false)
+      setVisible(true)
+    })
   }, [])
 
   if (!visible) return null
@@ -44,16 +50,25 @@ export default function PolicyConsent() {
       Taro.showToast({ title: '请先勾选同意', icon: 'none' })
       return
     }
-    try {
-      Taro.setStorageSync(STORAGE_KEY, PRIVACY_POLICY_VERSION)
-    } catch {
-      /* ignore */
+    if (!markPolicyAgreed()) {
+      // 写不进去等于没同意：必须说清楚，否则用户点十次上传都会被同一道闸门拦回
+      Taro.showToast({ title: '同意状态保存失败，请检查存储空间后重试', icon: 'none', duration: 3000 })
+      return
     }
     setVisible(false)
+    if (forcedRef.current) {
+      forcedRef.current = false
+      Taro.showToast({ title: '已同意，请重新点击刚才的按钮', icon: 'none', duration: 2500 })
+    }
   }
 
   const later = () => {
     setVisible(false)
+    if (forcedRef.current) {
+      forcedRef.current = false
+      Taro.showToast({ title: '未同意，本次操作已取消', icon: 'none', duration: 2500 })
+      return
+    }
     Taro.showToast({ title: '可随时在「我的 → 隐私与账号」中同意', icon: 'none', duration: 2500 })
   }
 

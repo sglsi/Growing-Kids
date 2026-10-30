@@ -13,6 +13,15 @@ import { ICP_FILING_NO } from './app-info'
 
 export const PRIVACY_POLICY_VERSION = '2026-10-29-r3'
 
+/**
+ * 「已同意本版本隐私政策」的本地存储键（业务级同意，见 components/policy-consent）。
+ *
+ * ⚠️ 放在这里而不是各文件里写字符串：`services/policy-gate`（写操作前的闸门）、
+ * `components/policy-consent`（同意弹层）、`pages/privacy`（政策页）三处必须
+ * 认**同一个键**，任何一处写错都会变成「同意了但没记住」或「永远要求同意」。
+ */
+export const POLICY_CONSENT_STORAGE_KEY = 'gk_policy_agreed_v1'
+
 export const PRIVACY_POLICY_TITLE = '成长学童 · 隐私政策'
 
 export interface PolicySection {

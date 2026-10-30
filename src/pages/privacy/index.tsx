@@ -1,7 +1,13 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useState } from 'react'
-import { PRIVACY_POLICY_SECTIONS, PRIVACY_POLICY_TITLE, PRIVACY_POLICY_VERSION } from '@/constants/privacy-policy'
+import {
+  POLICY_CONSENT_STORAGE_KEY,
+  PRIVACY_POLICY_SECTIONS,
+  PRIVACY_POLICY_TITLE,
+  PRIVACY_POLICY_VERSION,
+} from '@/constants/privacy-policy'
+import { hasAgreedPolicy, markPolicyAgreed } from '@/services/policy-gate'
 
 /**
  * 隐私政策页（OPS-18 R-合规-03）。
@@ -12,19 +18,14 @@ import { PRIVACY_POLICY_SECTIONS, PRIVACY_POLICY_TITLE, PRIVACY_POLICY_VERSION }
  *  - 注销账号前的二次确认
  */
 export default function PrivacyPage() {
-  const [agreed, setAgreed] = useState(() => {
-    try {
-      return Taro.getStorageSync('gk_policy_agreed_v1') === PRIVACY_POLICY_VERSION
-    } catch {
-      return false
-    }
-  })
+  const [agreed, setAgreed] = useState(() => hasAgreedPolicy())
 
   const agree = () => {
-    try {
-      Taro.setStorageSync('gk_policy_agreed_v1', PRIVACY_POLICY_VERSION)
-    } catch {
-      /* ignore */
+    // 与 policy-consent / guardPolicy 共用同一份状态（services/policy-gate），
+    // 否则会出现「这里显示已同意、上传时仍被拦」的裂脑
+    if (!markPolicyAgreed()) {
+      Taro.showToast({ title: '同意状态保存失败，请检查存储空间', icon: 'none' })
+      return
     }
     setAgreed(true)
     Taro.showToast({ title: '已记录同意', icon: 'success' })
@@ -40,7 +41,7 @@ export default function PrivacyPage() {
     })
     if (!r.confirm) return
     try {
-      Taro.removeStorageSync('gk_policy_agreed_v1')
+      Taro.removeStorageSync(POLICY_CONSENT_STORAGE_KEY)
     } catch {
       /* ignore */
     }
