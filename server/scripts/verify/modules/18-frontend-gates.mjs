@@ -176,4 +176,42 @@ m.test('🔴 前端：列表页 loading 必须在 finally 无条件解除', asyn
   c.eq(bad.length, 0, `以下列表页在 finally 之外解除（或根本不解除）loading：${bad.join('、')}`)
 })
 
+// ---------------------------------------------------------------
+// 9. 🔴 内容落库/上传之前必须过业务隐私政策闸门（GK-23-24）
+//    事故：policy-consent 注释一直写着「上传/写入前需先同意」，但**没有任何一处**
+//    真正检查过 ⇒ 点「稍后」之后照样拍照入库，首屏那次征求同意只是装饰。
+//    断言口径：出现「建条目/批量入库」这类写操作的文件，必须引入 guardPolicy。
+// ---------------------------------------------------------------
+m.test('🔴 前端：内容入库/上传文件必须引入 guardPolicy（业务隐私同意）', async (c) => {
+  // 只挑「把内容写进库里」的**服务函数**调用；列表刷新、改分类之类不算
+  const WRITE_API = /\b(createTimelineBatch|createMemory|addMemoryMedia|createLibraryDoc|saveAnswer)\s*\(/
+  const bad = []
+  for (const f of walk(SRC)) {
+    // services/ 下是这些函数的**定义处**（函数名与调用长得一样），闸门归调用方
+    if (f.includes(`${path.sep}services${path.sep}`)) continue
+    const src = fs.readFileSync(f, 'utf8')
+    const code = src.split(/\r?\n/).filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n')
+    if (!WRITE_API.test(code)) continue
+    if (!/guardPolicy/.test(src)) bad.push(rel(f))
+  }
+  c.eq(bad.length, 0, `以下文件有内容入库调用却没有 guardPolicy 闸门：${bad.slice(0, 10).join('、')}`)
+})
+
+// ---------------------------------------------------------------
+// 10. 🔴 业务隐私同意的存储键只允许在一个地方定义（GK-23-24 附带）
+//     三处（闸门/弹层/政策页）各写一份字符串 ⇒ 迟早有一处写错，
+//     表现是「明明同意了，上传还是被拦」或「永远要求同意」。
+// ---------------------------------------------------------------
+m.test('🔴 前端：隐私同意存储键不得在 constants 之外硬编码', async (c) => {
+  const bad = []
+  const allow = path.join(SRC, 'constants', 'privacy-policy.ts')
+  for (const f of walk(SRC)) {
+    if (f === allow) continue
+    const src = fs.readFileSync(f, 'utf8')
+    const code = src.split(/\r?\n/).filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n')
+    if (/'gk_policy_agreed_v1'/.test(code)) bad.push(rel(f))
+  }
+  c.eq(bad.length, 0, `以下文件硬编码了隐私同意键（应引 POLICY_CONSENT_STORAGE_KEY）：${bad.slice(0, 10).join('、')}`)
+})
+
 export default m
