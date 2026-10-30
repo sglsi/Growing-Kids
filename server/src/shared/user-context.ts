@@ -65,6 +65,17 @@ const PUBLIC_ROUTES = [
   // 若部署在公网且不愿暴露，可用反向代理单独拦截这两条路径。
   /^\/api\/image\/capabilities$/,
   /^\/api\/image\/ocr-diagnose$/,
+  // ---- local 存储驱动的**对象读取路由**（2026-10-30 L3 迁发布态时发现并修复）----
+  // 切 STORAGE_DRIVER=local 后才暴露：getPublicUrl() 返的是「后端地址 + /api/storage/files/<key>」，
+  // 而小程序 <Image src> / wx.previewImage **只发 GET、不带任何头部**，令牌一概到不了服务端
+  // ⇒ 这条路由 401 ⇒ 收件箱缩略图、题目图、资料封面**整片空白**，且前端拿不到任何可归因的错误。
+  // Supabase 时代不暴露是因为图片走对象存储公网直链，根本不经过后端。
+  //
+  // 暴露面评估（与迁移前的实际状态**完全等价**，不是新开口子）：
+  //   · 这些 key 是内容寻址哈希（blobs/<2>/<sha256>/<variant>），无用户文档系数，猜不到；
+  //   · 迁移前它们本来就在 **public 桶**里（`SUPABASE_STORAGE_PUBLIC=true`），早已可被任意 GET。
+  // 若将来要做私有化：正确做法是把 file_key 换成短时效签名 URL，而不是把这里改回需要登录。
+  /^\/api\/storage\/files\//,
 ]
 
 /**
