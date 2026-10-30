@@ -38,7 +38,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import pg from 'pg'
-import { databaseUrl, env, maskUrl, pgConfig, PROJECT_ROOT, SERVER_ROOT } from './lib/gk-env.mjs'
+import { backupDatabaseUrl, env, maskUrl, pgConfig, PROJECT_ROOT, SERVER_ROOT } from './lib/gk-env.mjs'
 import { BACKUP_DIR, ensurePassphrase, open, seal } from './lib/backup-format.mjs'
 import { Netdisk } from './lib/netdisk.mjs'
 
@@ -108,7 +108,7 @@ function readMigrations() {
 }
 
 async function main() {
-  const url = databaseUrl()
+  const url = backupDatabaseUrl()
   log(`[backup] 开始 · 源库 ${maskUrl(url)}`)
 
   const client = new pg.Client(pgConfig(url))

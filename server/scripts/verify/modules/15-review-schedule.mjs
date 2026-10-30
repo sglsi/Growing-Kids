@@ -401,4 +401,45 @@ m.test('详情附带 review_plan 与列值一致（前端不再自己算）', as
     'plan.next_review_at 与列不一致')
 })
 
+// ------------------------------------------------------------------
+// 结果指标的可观测性（GK-OPS-22 §6）
+//
+// 为什么这里用**静态断言**而不是跑真实查询：
+//   OPS-22 §6 规定唯一够格的结果指标是「到期首次作答正确率（按档位分组）」，
+//   而它依赖 `review_events`（迁移 0021）——本地验证环境连的是远端 Supabase，
+//   建表与否不该决定一条门能不能跑。真正会漂移的是**口径文本**，
+//   所以把它们锁在源码与迁移文件里；落到数据上的部分留给出数时人工看（只报不拦）。
+//
+// ⚠️ 不写「文件存在」「字段非空」这类永真断言（OPS-22 §8 反模式）。
+//    这两条分别锁死：口径的两个关键片段、埋点不阻断作答。
+// ------------------------------------------------------------------
+const MIGRATION_0021 = path.join(ROOT, 'migrations', '0021_review_events.sql')
+const SERVICE_FILE = path.join(process.cwd(), 'src', 'timeline', 'timeline.service.ts')
+
+m.test('结果指标口径：迁移里锁住「首次作答 + 排除提前作答」两个关键片段', (c) => {
+  const txt = fs.readFileSync(MIGRATION_0021, 'utf8')
+  // ① 同一次到期里只取最早一条 —— 少了它，孩子答错后重做会把正确率系统性高估
+  c.ok(txt.includes('distinct on (item_id, due_on)'),
+    '迁移 0021 缺少 distinct on (item_id, due_on)：会把重试也算成首次作答')
+  // ② 只算「到期当天或之后」的作答 —— 少了它，提前复习也会进分母，L1 延迟前提被破坏
+  c.ok(txt.includes("due_on <= (occurred_at at time zone 'Asia/Shanghai')::date"),
+    '迁移 0021 缺少到期过滤：提前复习会被算进「到期作答」')
+  // ③ 出数门槛写清楚，避免 3 条样本就说「机制有效」
+  c.ok(/样本\s*<\s*30/.test(txt), '迁移 0021 未写明出数门槛（每档样本 < 30 的处置）')
+})
+
+m.test('埋点不得阻断作答：写入失败只记日志，不抛给前端', (c) => {
+  const txt = fs.readFileSync(SERVICE_FILE, 'utf8')
+  const seg = txt.slice(txt.indexOf("from('review_events')"))
+  c.ok(seg.length > 0, 'timeline.service.ts 里找不到 review_events 写入（埋点被删了？）')
+  const head = txt.slice(Math.max(0, txt.indexOf("from('review_events')") - 600), txt.indexOf("from('review_events')"))
+  c.ok(head.includes('try {'), '埋点不在 try 里：一次插入失败就会让孩子刚做完的这次作答报错')
+  const tail = seg.slice(0, 1500)
+  c.ok(tail.includes('console.error'), '埋点失败必须记日志（否则「没出数」会被误判成「没人复习」）')
+  // ⚠️ 先剥行注释再匹配：源码注释里讨论「不能空 catch」是正常且必要的，
+  //    直接扫原文会把注释里的字样当成代码判失败（本次实测就撞上一次）。
+  const codeOnly = tail.replace(/\/\/.*$/gm, '')
+  c.ok(!/catch\s*\{\s*\}/.test(codeOnly), '禁空 catch：埋点失败需要留痕')
+})
+
 export default m

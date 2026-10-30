@@ -80,6 +80,25 @@ export function databaseUrl() {
   return url
 }
 
+/**
+ * 备份专用连接串（只读）：BACKUP_DATABASE_URL > DATABASE_URL
+ *
+ * 为什么单独一个变量（2026-10-31）：备份只需要 SELECT，迁移需要写。
+ * 共用 `.env.migrate` 一份串时，两者只能取权限更大的那个——
+ * 要么备份拿可写角色（超权限），要么迁移拿只读角色（迁移静默失败）。
+ * 拆开后：`.env.migrate` 放可写的 gk_owner，`.env.secrets` 放只读的 gk_backup。
+ */
+export function backupDatabaseUrl() {
+  const url = env('BACKUP_DATABASE_URL') || env('DATABASE_URL') || env('SUPABASE_DB_URL')
+  if (!url) {
+    throw new Error(
+      '找不到备份用数据库连接串：请在 server/.env.secrets 配置 BACKUP_DATABASE_URL\n' +
+        '  （指向只读角色；缺省时回退 .env.migrate 的 DATABASE_URL）',
+    )
+  }
+  return url
+}
+
 /** postgres 超级用户连接串（仅恢复演练建/删临时库用） */
 export function superUserUrl() {
   const fromFile = parseEnvFile(path.join(SERVER_ROOT, '.env.migrate.bak-postgres'))

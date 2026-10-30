@@ -2,7 +2,7 @@ import { Injectable, BadRequestException, NotFoundException, Logger } from '@nes
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
 import { findSimilarQuestions } from '../ocr/ocr-similar'
-import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, REVIEW_STAGES, type ReviewResult } from './review'
+import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, localDayKey, REVIEW_STAGES, type ReviewResult } from './review'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { IngestService } from '../storage/ingest.service'
@@ -799,6 +799,33 @@ export class TimelineService {
       .select('id')
     if (error) throw new Error(error.message)
     if (!data || !data.length) throw new NotFoundException('题目不存在')
+
+    // ---- 结果指标埋点（GK-OPS-22 §6；迁移 0021 review_events）----
+    // 为什么必须有这一行：OPS-22 规定唯一够格的结果指标是
+    //   「到期首次作答正确率（按档位分组）」，而 0019 只存了**累计状态**
+    //   （review_count / review_lapses），推不出"每一次到期第一次作答对没对"；
+    //   一个到期周期内答错后重做会把正确率系统性高估，正是 20a M3 要防的。
+    // 三条纪律：① 只记流水、不参与任何业务判定；② 不外发；③ **失败不阻断作答**
+    //   ——埋点挂了不能让孩子刚做完的这次白做（这是埋点最容易犯的错：为观测牺牲功能）。
+    try {
+      const dueAt = item.next_review_at ? new Date(item.next_review_at) : null
+      await client.from('review_events').insert({
+        user_id: userId, // 隔离红线（RLS 未启用）
+        item_id: id,
+        result,
+        stage_before: item.review_count ?? 0,
+        stage_after: adv.review_count,
+        // due_on 用本地日：分组键要的是「哪一天」，用 UTC 会把晚上 8 点后的作答算到第二天
+        due_on: dueAt ? localDayKey(dueAt) : null,
+        // 是否已逾期：到期日早于今天（YYYY-MM-DD 可字典序比较，避开时区体操）
+        is_overdue: dueAt ? localDayKey(dueAt) < localDayKey(new Date(now)) : false,
+        occurred_at: now,
+      })
+    } catch (e) {
+      // ⚠️ 刻意吞掉：埋点失败只记日志。但**必须记**（不能 catch {}），
+      //    否则「指标没出数」会被误判成「没人复习」，而不是「埋点坏了」。
+      console.error('[timeline] 复习事件写入失败（不阻断作答）:', id, (e as Error)?.message || e)
+    }
 
     await invalidateUserTimeline(userId)
     const merged = { ...item, ...adv, in_review_book: true, added_to_review_at: item.added_to_review_at || now }
