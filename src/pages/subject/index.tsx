@@ -157,23 +157,6 @@ export default function SubjectPage() {
   }
 
   const init = async () => {
-    try {
-      if (subjects.length === 0) {
-        const cachedSubs = cacheGet<Subject[]>('subj:list')
-        if (cachedSubs) setSubjects(cachedSubs)
-        const subs = await fetchSubjects()
-        setSubjects(subs)
-        if (subs.length) cacheSet('subj:list', subs)
-      }
-    } catch (e) {
-      console.error('加载学科失败', e)
-    }
-    // 复习排程汇总：失败不影响列表（只影响顶部那条待办横幅）
-    try {
-      setSum(await fetchReviewSummary())
-    } catch (e) {
-      console.error('加载复习排程失败', e)
-    }
     const preset = Taro.getStorageSync('filter_subject_id') || ''
     if (preset) Taro.removeStorageSync('filter_subject_id')
     setActiveSubject(preset)
@@ -182,7 +165,25 @@ export default function SubjectPage() {
     setRange('all')
     setLatestTimestamp(undefined)
     sel.exit()
-    await load({ subjectId: preset, keyword: '', tag: '', page: 1 })
+
+    /**
+     * GK-23-20：学科 → 汇总 → 列表 三次网络往返原先**串行**，首屏等于「三段耗时相加」。
+     * 三者互不依赖（列表只吃 subjectId 参数，不读 subjects 状态），并行后首屏≈最慢那段。
+     * 失败互不影响：学科/汇总只影响胶囊与顶部横幅，列表才是主内容。
+     */
+    const subsTask = (async () => {
+      if (subjects.length > 0) return
+      const cachedSubs = cacheGet<Subject[]>('subj:list')
+      if (cachedSubs) setSubjects(cachedSubs)
+      const subs = await fetchSubjects()
+      setSubjects(subs)
+      if (subs.length) cacheSet('subj:list', subs)
+    })().catch((e) => console.error('加载学科失败', e))
+    const sumTask = fetchReviewSummary()
+      .then(setSum)
+      .catch((e) => console.error('加载复习排程失败', e))
+    const listTask = load({ subjectId: preset, keyword: '', tag: '', page: 1 })
+    await Promise.all([subsTask, sumTask, listTask])
   }
 
   useDidShow(() => {

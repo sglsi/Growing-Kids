@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { View, Text, Textarea, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { Plus, Trash2, Crop, Globe, FileText, Check, X, Bot, BookOpen } from 'lucide-react-taro'
@@ -9,7 +9,9 @@ import MathText from '@/components/math-text'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
+import { guardPolicy } from '@/services/policy-gate'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
+import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 import type { AnswerAttachment, TimelineItem } from '@/types'
@@ -75,6 +77,17 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   const [saving, setSaving] = useState(false)
   // 当前正在进行的解题模式（null=空闲）：'search' 联网搜题 / 'kb' 知识库 / 'ai' AI 解题
   const [searching, setSearching] = useState<'search' | 'kb' | 'ai' | null>(null)
+  /**
+   * 卸载探针（GK-23-19）：联网搜题/AI 解题最长 270s，用户收起面板或返回上一页后
+   * 轮询若不停，既白烧后端配额，又会在已卸载组件上 setState。
+   */
+  const unmountedRef = useRef(false)
+  useEffect(() => {
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
   // 裁剪：进入编辑器前先记住目标，确认后写回**同一条** item
   const [cropSrc, setCropSrc] = useState('')
@@ -183,6 +196,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   // ---------- 图片：拍照/相册 → 裁剪 → 上传 ----------
   const pickImage = async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({ count: 1, mediaType: ['image'], sourceType: ['camera', 'album'] })
@@ -217,6 +232,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   // ---------- 文档：会话选文件 → 上传 ----------
   const pickDoc = async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择文件'))) return
     if (!(await guardPrivacy('选择文件'))) return
     try {
       const res = await Taro.chooseMessageFile({ count: 1 })
@@ -288,12 +305,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             Taro.showLoading({ title: `${searchLabel}中…已等待 ${sec}s`, mask: true })
           }
         },
+        shouldAbort: () => unmountedRef.current,
       })
       setCandidate(res)
       if (res.source === 'none') {
         Taro.showToast({ title: res.note || `${searchLabel}未成功`, icon: 'none' })
       }
     } catch (e) {
+      // 面板已卸载 ⇒ 不是失败，静默收尾（弹 toast 会出现在别的页面上）
+      if (isJobAborted(e) || unmountedRef.current) return
       console.error(`${searchLabel}失败`, e)
       const msg = e instanceof Error ? e.message : ''
       Taro.showToast({ title: msg.slice(0, 30) || `${searchLabel}失败，请稍后重试`, icon: 'none', duration: 2500 })

@@ -81,6 +81,12 @@ export default function IndexPage() {
    * 提前放行，另一个还没回就拿旧数据渲染。
    */
   const pendingLoadsRef = useRef(0)
+  /**
+   * 请求序号（GK-23-18）：只有**最新一次** load 有权把结果写回 state。
+   * 不加守卫时，连点两个学科胶囊会并发两次请求，谁先返回谁生效——
+   * 表现就是「点了数学，列表却是语文的」，且计数与列表对不上。
+   */
+  const loadSeqRef = useRef(0)
   const sel = useSelection()
 
   /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
@@ -123,6 +129,7 @@ export default function IndexPage() {
    * 由**最后一个**在途请求解除——用计数而非布尔，避免并发时先返回的那个提前放行。
    */
   const load = async (sid = subjectFilter, opts: { silent?: boolean; fresh?: boolean } = {}) => {
+    const seq = ++loadSeqRef.current
     pendingLoadsRef.current += 1
     setAuth(getAuthState())
     // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
@@ -156,6 +163,8 @@ export default function IndexPage() {
         fetchTimeline({ scope: 'recent', subjectId: sid || undefined, pageSize: 20 }),
         fetchSubjects().catch(() => [] as Subject[]),
       ])
+      // 期间用户又切了筛选 ⇒ 本次结果已过期，丢弃（缓存由新的那次负责回写）
+      if (seq !== loadSeqRef.current) return
       setInbox(list.list)
       setInboxTotal(list.total)
       setSubjects(subs)
@@ -169,6 +178,8 @@ export default function IndexPage() {
       // 失败就保留旧值/0，不影响列表——用户要看的是题目，不是三个数字。
       void fetchOverview()
         .then((ov) => {
+          // 同上：迟到的统计不能盖掉新筛选的结果
+          if (seq !== loadSeqRef.current) return
           setOverview(ov)
           cacheSet('tl:ov', ov)
         })
@@ -260,7 +271,29 @@ export default function IndexPage() {
     closePicker()
     try {
       await updateTimeline(item.id, { subject_id: sub ? sub.id : null })
-      Taro.showToast({ title: sub ? `已归为「${sub.name}」` : '已设为未分类', icon: 'none' })
+      // GK-23-17：学科筛选是**后端按 subjectId** 筛的，改完分类就不再属于当前筛选
+      // ⇒ 必须当场移出，否则「筛数学却躺着语文题」，且顶部计数与列表对不上。
+      // 未筛选（全部）时保留在原位——那条确实还在列表里，没必要让它跳走。
+      const nextSid = sub ? sub.id : ''
+      const stillMatches = !subjectFilter || nextSid === subjectFilter
+      if (!stillMatches) {
+        setInbox((p) => p.filter((it) => it.id !== item.id))
+        setInboxTotal((n) => Math.max(0, n - 1))
+      }
+      Taro.showToast({
+        title: `${sub ? `已归为「${sub.name}」` : '已设为未分类'}${stillMatches ? '' : '，已移出当前筛选'}`,
+        icon: 'none',
+      })
+      // 三个统计数字按学科聚合，改分类必须重算，否则停在旧值（GK-23-17 后半句）。
+      // 迟到结果用序号守卫挡掉：期间用户切了筛选，就不该被这次改分类的结果覆盖。
+      const seqAtCall = loadSeqRef.current
+      void fetchOverview()
+        .then((ov) => {
+          if (seqAtCall !== loadSeqRef.current) return
+          setOverview(ov)
+          cacheSet('tl:ov', ov)
+        })
+        .catch((e) => console.error('改分类后刷新统计失败', e))
     } catch (e) {
       // 失败回滚，并把服务端真实原因透出（修复「更新失败，请重试」无信息可查）
       setInbox(prev)

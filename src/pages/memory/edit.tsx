@@ -20,6 +20,7 @@ import {
 import type { Subject } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
+import { guardPolicy } from '@/services/policy-gate'
 
 interface DraftMedia {
   /** 临时标识（用于本地 key + 上传后映射） */
@@ -155,6 +156,8 @@ export default function MemoryEditPage() {
 
   // ---------- 添加媒体：图片 ----------
   const onPickImages = useCallback(async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
     try {
       const env = Taro.getEnv()
@@ -203,6 +206,8 @@ export default function MemoryEditPage() {
 
   // ---------- 添加媒体：视频 ----------
   const onPickVideo = useCallback(async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择视频'))) return
     if (!(await guardPrivacy('选择视频'))) return
     try {
       const env = Taro.getEnv()
@@ -261,6 +266,8 @@ export default function MemoryEditPage() {
     }
     // 录音（RecorderManager.start）在微信隐私清单里属「访问你的麦克风」，
     // 未授权时 start 不报错也不出声 —— 必须先过闸门。
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('录音'))) return
     if (!(await guardPrivacy('录音'))) return
     try {
       const r = Taro.getRecorderManager()
@@ -362,6 +369,8 @@ export default function MemoryEditPage() {
       Taro.showToast({ title: '请至少写点内容或添加媒体', icon: 'none' })
       return
     }
+    // GK-23-24：成长记忆是孩子最私密的内容，写入前必须已同意隐私政策
+    if (!(await guardPolicy('保存成长记忆'))) return
     setSaving(true)
     try {
       const uploaded = await uploadAll()

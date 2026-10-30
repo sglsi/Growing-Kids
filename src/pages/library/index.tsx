@@ -19,6 +19,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
+import { guardPolicy } from '@/services/policy-gate'
 
 /** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
 function getTypeLabel(mime: string | null, name: string): string {
@@ -49,11 +50,22 @@ export default function LibraryPage() {
   const [docs, setDocs] = useState<LibraryDoc[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [loading, setLoading] = useState(true)
+  /**
+   * 总条数与分页游标（GK-23-22）：原实现固定 `pageSize: 100` 单次拉完，
+   * 超过 100 份**静默截断**——界面写「共 100 份资料」却和实际不符，用户以为丢了。
+   * 现在按页取、滚到底追加，条数用后端 total（真实总数）。
+   */
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [busy, setBusy] = useState(false)
   const [renameTarget, setRenameTarget] = useState<LibraryDoc | null>(null)
   const [assignTarget, setAssignTarget] = useState<LibraryDoc | null>(null)
   const sel = useSelection()
+
+  /** 每页条数：滚到底追加，避免一次拉太多在慢网上白等 */
+  const PAGE_SIZE = 30
 
   /**
    * 加载资料库。
@@ -61,32 +73,53 @@ export default function LibraryPage() {
    * 删除/上传后缓存已失效，非 silent 的 load 会 setLoading(true) → 骨架屏替换列表 →
    * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
    */
-  const load = async (opts: { keyword?: string; subjectId?: string; silent?: boolean } = {}) => {
+  const load = async (opts: { keyword?: string; subjectId?: string; silent?: boolean; append?: boolean } = {}) => {
     // SWR（思傅 2026-10-21）：先同步读缓存渲染，再后台刷新回写
     const kw = (opts.keyword !== undefined ? opts.keyword : keyword) || undefined
     const sid = opts.subjectId || undefined
-    const listKey = cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', pageSize: 100 })
-    const cached = cacheGet<Paged<LibraryDoc>>(listKey)
-    if (cached) {
-      setDocs(cached.list)
-      setLoading(false)
-    } else if (!opts.silent) {
-      setLoading(true)
+    const append = opts.append === true
+    const nextPage = append ? page + 1 : 1
+    // 追加页不进缓存（key 会膨胀，且意义小），只缓存第一页
+    const listKey = append ? '' : cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', pageSize: PAGE_SIZE })
+    if (!append) {
+      const cached = listKey ? cacheGet<Paged<LibraryDoc>>(listKey) : null
+      if (cached) {
+        setDocs(cached.list)
+        setTotal(cached.total)
+        setPage(cached.page || 1)
+        setLoading(false)
+      } else if (!opts.silent) {
+        setLoading(true)
+      }
     }
+    if (append) setLoadingMore(true)
     try {
       const res = await fetchLibrary({
         keyword: kw,
         subjectId: sid,
-        pageSize: 100,
+        page: nextPage,
+        pageSize: PAGE_SIZE,
       })
-      setDocs(res.list)
-      cacheSet(listKey, res)
+      setDocs((prev) => (append ? [...prev, ...res.list] : res.list))
+      setTotal(res.total)
+      setPage(res.page || nextPage)
+      if (listKey) cacheSet(listKey, res)
     } catch (e) {
       console.error('加载资料库失败', e)
-      if (!cached) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
+      // 追加失败只说「加载更多失败」，不要把已有列表清成空态
+      if (append) Taro.showToast({ title: '加载更多失败，请重试', icon: 'none' })
+      else if (!opts.silent) Taro.showToast({ title: '加载失败，请稍后重试', icon: 'none' })
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
+  }
+
+  /** 滚到底追加下一页；没有更多时直接返回（不发空请求） */
+  const loadMore = () => {
+    if (loading || loadingMore) return
+    if (docs.length >= total) return
+    void load({ append: true })
   }
 
   useDidShow(() => {
@@ -171,6 +204,8 @@ export default function LibraryPage() {
   }
 
   const handleChooseDoc = async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择文档'))) return
     if (!(await guardPrivacy('选择文档'))) return
     try {
       const res = await Taro.chooseMessageFile({
@@ -186,6 +221,8 @@ export default function LibraryPage() {
   }
 
   const handleChooseImage = async () => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseImage({ count: 1, sourceType: ['album', 'camera'] })
@@ -301,9 +338,11 @@ export default function LibraryPage() {
         </View>
       </View>
 
-      <ScrollView scrollY style={{ height: '100vh', paddingTop: 110 }}>
+      <ScrollView scrollY style={{ height: '100vh', paddingTop: 110 }} onScrollToLower={loadMore} lowerThreshold={120}>
         <View className="px-4 pb-28 pt-3">
-          <Text className="block text-xs text-muted-foreground mb-3">共 {docs.length} 份资料</Text>
+          <Text className="block text-xs text-muted-foreground mb-3">
+            共 {total} 份资料{docs.length < total ? `（已显示 ${docs.length}）` : ''}
+          </Text>
           {loading ? (
             <View className="space-y-3">
               <Skeleton className="h-16 w-full rounded-2xl" />
@@ -363,6 +402,20 @@ export default function LibraryPage() {
               actionLabel="导入文件"
               onAction={handleUpload}
             />
+          )}
+          {/* 分页哨兵：滚到底自动追加；没有更多时给一句明确收尾，别让用户以为是没加载出来 */}
+          {docs.length > 0 && (
+            <View className="py-4 flex items-center justify-center">
+              {loadingMore ? (
+                <Text className="block text-xs text-muted-foreground">加载更多…</Text>
+              ) : docs.length < total ? (
+                <View className="px-4 py-2 rounded-full bg-muted" onClick={loadMore}>
+                  <Text className="block text-xs text-muted-foreground">加载更多（还有 {total - docs.length} 份）</Text>
+                </View>
+              ) : (
+                <Text className="block text-xs text-muted-foreground">已经到底了</Text>
+              )}
+            </View>
           )}
         </View>
       </ScrollView>

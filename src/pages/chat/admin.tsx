@@ -1,6 +1,6 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Plus, Pencil, Trash2 } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { EmptyCard } from '@/components/filter-header'
+import { fetchMe } from '@/services/auth'
 import {
   fetchKnowledgeList,
   createKnowledgeArticle,
@@ -69,6 +70,25 @@ export default function ChatAdminPage() {
       setLoading(false)
     }
   }
+
+  /**
+   * GK-23-23：非管理员**不该看到这个页面**。入口已在客服页按角色收起，
+   * 这里兜住「手动输路径 / 旧版入口缓存」——服务端本来就会 403，
+   * 但直接甩一个「无权限」空列表，用户只会当成页面坏了。
+   */
+  useEffect(() => {
+    let alive = true
+    fetchMe()
+      .then((u) => {
+        if (!alive || u.role === 'admin') return
+        void Taro.showModal({ title: '无访问权限', content: '「知识库管理」仅管理员可用', showCancel: false })
+          .then(() => Taro.navigateBack())
+      })
+      .catch((e) => console.error('[chat-admin] 角色校验失败', e))
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useDidShow(() => {
     load()

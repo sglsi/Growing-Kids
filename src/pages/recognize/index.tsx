@@ -24,9 +24,11 @@ import {
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
+import { isJobAborted } from '@/services/jobs'
 import { nudgeLoginIfAnonymous } from '@/services/auth'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, INK } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
+import { guardPolicy } from '@/services/policy-gate'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -91,6 +93,19 @@ const MAX_BOARD_ENTRIES = 30
 const MAX_ENTRY_IMAGES = 9
 
 export default function RecognizePage() {
+  /**
+   * 页面是否已卸载（GK-23-19）。
+   * 精准 OCR 是「提交任务 + 轮询」，最长 190s；用户识别一页就返回上一页时，
+   * 轮询会继续跑到底——白烧后端配额、并在已卸载的页面上 setState。
+   * 卸载瞬间置 true，runJob 每轮探一次即退出。
+   */
+  const unmountedRef = useRef(false)
+  useEffect(() => {
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
   const [mode, setMode] = useState<Mode>(() => (Taro.getStorageSync('recog_mode') || 'paper') as Mode)
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [defaultSubject, setDefaultSubject] = useState('')
@@ -183,6 +198,8 @@ export default function RecognizePage() {
   const chooseImage = async (slot: 'paper' | 'question' | 'answer') => {
     // 先过隐私闸门：未授权时 chooseMedia 会被基础库挂起（既不成功也不失败），
     // 表现为「点了没反应」。闸门会把这种情况变成明确提示。
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({
@@ -313,6 +330,8 @@ export default function RecognizePage() {
   // 目前入口：资料库选文档；图片识别走拍照/相册
 
   const pickDoc = async (cb: (path: string, name: string) => void) => {
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择文档'))) return
     if (!(await guardPrivacy('选择文档'))) return
     try {
       const res = await Taro.chooseMessageFile({
@@ -381,17 +400,31 @@ export default function RecognizePage() {
     setDrafts([])
     setSeqInput('')
     setUnmatched([])
+    // 多页文档现在走异步任务（GK-23-21），分钟级必须有等待反馈，否则用户以为卡死
+    Taro.showLoading({ title: '正在识别文档…', mask: true })
+    let docShownAt = 0
     try {
-      const result = await recognizeDocumentByUrl(docUrl, sid)
+      const result = await recognizeDocumentByUrl(docUrl, sid, {
+        shouldAbort: () => unmountedRef.current,
+        onProgress: ({ waitedMs }) => {
+          const sec = Math.round(waitedMs / 1000)
+          if (sec >= docShownAt + 10) {
+            docShownAt = sec
+            Taro.showLoading({ title: `识别文档中…已等待 ${sec}s`, mask: true })
+          }
+        },
+      })
       setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
+      if (isJobAborted(e) || unmountedRef.current) return
       console.error('文档识别失败', e)
       Taro.showToast({
         title: e instanceof Error ? e.message : '文档识别失败，请确认内容为文字',
         icon: 'none',
       })
     } finally {
+      Taro.hideLoading()
       setLoading(false)
     }
   }
@@ -683,6 +716,8 @@ export default function RecognizePage() {
       return
     }
     let files: { tempFilePath: string }[] = []
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
     try {
       const res = await Taro.chooseMedia({ count: room, mediaType: ['image'], sourceType: ['camera', 'album'] })
@@ -736,6 +771,7 @@ export default function RecognizePage() {
             Taro.showLoading({ title: `精准识别中…已等待 ${sec}s`, mask: true })
           }
         },
+        shouldAbort: () => unmountedRef.current,
       })
       setBoardPages((prev) =>
         prev.map((x) =>
@@ -762,6 +798,8 @@ export default function RecognizePage() {
         Taro.showToast({ title: `识别到 ${r.page_text.length} 段文字`, icon: 'success' })
       }
     } catch (e) {
+      // 用户已离开本页：不是失败，别把它写成 error 态（也没人看得见）
+      if (isJobAborted(e) || unmountedRef.current) return
       const msg = e instanceof Error ? e.message : '识别失败，请重试'
       console.error('全页 OCR 失败', e)
       setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const, err: msg, lastMode: ocrMode } : x)))
@@ -916,6 +954,7 @@ export default function RecognizePage() {
             Taro.showLoading({ title: `精准识别中…已等待 ${sec}s`, mask: true })
           }
         },
+        shouldAbort: () => unmountedRef.current,
       })
       setBoard((prev) =>
         prev.map((x, i) =>
@@ -930,6 +969,7 @@ export default function RecognizePage() {
         Taro.showToast({ title: `识别到 ${r.page_text.length} 段`, icon: 'success' })
       }
     } catch (err) {
+      if (isJobAborted(err) || unmountedRef.current) return
       const msg = err instanceof Error ? err.message : '识别失败，请重试'
       console.error('题目图 OCR 失败', err)
       setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'error', err: msg, lastMode: ocrMode } : x)))
@@ -1313,6 +1353,8 @@ export default function RecognizePage() {
       Taro.showToast({ title: '请先勾选要存入错题库的题目', icon: 'none' })
       return
     }
+    // GK-23-24：写入前必须已同意隐私政策（纯文本也是孩子的学习内容）
+    if (!(await guardPolicy('存入错题库'))) return
     setSaving(true)
     try {
       // parent_index 是「同批次内的数组下标」——部分保存时按选中子集重映射，

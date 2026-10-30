@@ -9,6 +9,7 @@ import {
   type ChatMessage,
 } from '@/services/api'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
+import { fetchMe, getAuthState } from '@/services/auth'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 
 const SESSION_KEY = 'chat:session_id'
@@ -38,6 +39,12 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false)
   const sessionRef = useRef<string>('')
   const scrollRef = useRef<any>(null)
+  /**
+   * 是否管理员（GK-23-23）：原先「管理」入口对所有人渲染，点进去被服务端 403 ——
+   * 服务端 fail-closed 不会越权，但普通用户看到一个自己永远用不了的按钮，
+   * 只会当成「功能坏了」。本地登录态先给首帧，再用 /me 校正（角色可能刚被改）。
+   */
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => getAuthState()?.role === 'admin')
 
   const loadHistory = async (sid: string) => {
     if (!sid) {
@@ -72,6 +79,19 @@ export default function ChatPage() {
     sessionRef.current = sid
     loadHistory(sid)
   })
+
+  // 角色每次进页面以服务端为准（提权/降权要立刻反映到入口显隐）
+  useEffect(() => {
+    let alive = true
+    fetchMe()
+      .then((u) => {
+        if (alive) setIsAdmin(u.role === 'admin')
+      })
+      .catch((e) => console.error('[chat] 读取用户角色失败，按非管理员处理', e))
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // 消息变化时滚到底部（小程序 ScrollView 提供 scrollToBottom）
   useEffect(() => {
@@ -147,19 +167,21 @@ export default function ChatPage() {
         <Text className="block text-base font-semibold text-foreground flex-1">
           智能客服
         </Text>
-        <View
-          onClick={goAdmin}
-          style={{
-            display: 'flex',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: '4px',
-            padding: '4px 8px',
-          }}
-        >
-          <Settings2 size={16} color="#9A948A" />
-          <Text className="block text-xs text-muted-foreground">管理</Text>
-        </View>
+        {isAdmin && (
+          <View
+            onClick={goAdmin}
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '4px 8px',
+            }}
+          >
+            <Settings2 size={16} color="#9A948A" />
+            <Text className="block text-xs text-muted-foreground">管理</Text>
+          </View>
+        )}
       </View>
 
       {/* 消息列表：留出顶部 56 + 底部 80 的内边距 */}
