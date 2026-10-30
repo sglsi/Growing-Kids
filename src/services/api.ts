@@ -1059,20 +1059,28 @@ export async function recropWrongBlock(params: {
 }
 
 // 文档导入识别
-export async function recognizeDocument(filePath: string, subjectId: string) {
+/**
+ * 文档（多页 PDF / Word / TXT）识别。
+ *
+ * ⚠️ GK-23-21：原先走**同步** `/api/ocr/recognize-doc` + `withTimeout(240s)`。
+ *    那是自欺——微信 `wx.request` 的超时上限就是 60s，写 240s 请求照样在 60s 被掐断，
+ *    所以「多页 PDF 必失败」不是后端慢，是**这条链路从设计上就跑不完**。
+ *    现在与精准 OCR 一样走 `POST /api/jobs` 202 + 轮询，每次请求都是毫秒级。
+ */
+export async function recognizeDocument(
+  filePath: string,
+  subjectId: string,
+  opts?: { shouldAbort?: () => boolean; onProgress?: (info: { stage: string; waitedMs: number }) => void },
+) {
   const { url } = await uploadFile(filePath)
-  const data = await unwrapResponse<{ items: RecognizeResult[] }>(
-    withTimeout(
-      Network.request({
-        url: '/api/ocr/recognize-doc',
-        method: 'POST',
-        data: { subject_id: subjectId, file_url: url },
-        header: authHeaders(),
-      }),
-      // #118：多页 PDF（文字层提取 + 扫描页逐页 OCR）远超微信默认 60s，显式放宽到 240s
-      240000,
-      '文档识别超时（240s），请减少页数或改用图片识别',
-    ),
+  const data = await runJob<{ items: RecognizeResult[]; rawText?: string }>(
+    'doc-recognize',
+    // subject_id 后端 recognizeDoc 不消费（归类由用户在结果页选），保留字段只为兼容旧报文
+    { file_url: url, subject_id: subjectId },
+    {
+      ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts?.shouldAbort ? { shouldAbort: opts.shouldAbort } : {}),
+    },
   )
   const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) {
@@ -1097,19 +1105,19 @@ export async function recognizePaperByUrl(url: string, subjectId: string) {
 }
 
 // 直接用对象存储 URL 走文档识别
-export async function recognizeDocumentByUrl(url: string, subjectId: string) {
-  const data = await unwrapResponse<{ items: RecognizeResult[] }>(
-    withTimeout(
-      Network.request({
-        url: '/api/ocr/recognize-doc',
-        method: 'POST',
-        data: { subject_id: subjectId, file_url: url },
-        header: authHeaders(),
-      }),
-      // #118：同上——多页 PDF 识别可能耗时数分钟，微信默认 60s 必被掐断
-      240000,
-      '文档识别超时（240s），请减少页数或改用图片识别',
-    ),
+export async function recognizeDocumentByUrl(
+  url: string,
+  subjectId: string,
+  opts?: { shouldAbort?: () => boolean; onProgress?: (info: { stage: string; waitedMs: number }) => void },
+) {
+  // 同上（GK-23-21）：同步端点必撞 60s 天花板，改异步任务
+  const data = await runJob<{ items: RecognizeResult[]; rawText?: string }>(
+    'doc-recognize',
+    { file_url: url, subject_id: subjectId },
+    {
+      ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts?.shouldAbort ? { shouldAbort: opts.shouldAbort } : {}),
+    },
   )
   const items = (data?.items || []).map(normalizeItem)
   if (items.length === 0) throw new Error('未识别到题目，请确认文档内容为文字')
@@ -1152,6 +1160,8 @@ export async function ocrPage(
     rectify?: boolean
     /** 进度回调（仅精准模式有：该模式慢到必须给用户反馈） */
     onProgress?: (info: { stage: string; waitedMs: number }) => void
+    /** 取消探针（页面卸载时置为 true，立刻停止轮询；见 services/jobs.ts GK-23-19） */
+    shouldAbort?: () => boolean
   },
 ) {
   const params = { image_url: imageUrl, mode, rectify: opts?.rectify !== false }
@@ -1165,7 +1175,10 @@ export async function ocrPage(
         page_text: PageTextSegment[]
         image_url: string
         orient_suspect?: boolean
-      }>('ocr-page', params, opts?.onProgress ? { onProgress: opts.onProgress } : {})
+      }>('ocr-page', params, {
+        ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
+        ...(opts?.shouldAbort ? { shouldAbort: opts.shouldAbort } : {}),
+      })
     : await unwrapResponse<{
         page: { w: number; h: number }
         page_text: PageTextSegment[]
@@ -1266,7 +1279,11 @@ export function searchAnswer(
   itemId: string,
   force = false,
   mode: 'search' | 'ai' | 'kb' = 'search',
-  opts?: { onProgress?: (info: { stage: string; waitedMs: number }) => void },
+  opts?: {
+    onProgress?: (info: { stage: string; waitedMs: number }) => void
+    /** 取消探针（组件卸载时置 true，立刻停止轮询；见 services/jobs.ts GK-23-19） */
+    shouldAbort?: () => boolean
+  },
 ) {
   // ⚠️ 走**异步任务**：扣子联网搜端到端实测 110~135s（bot 跑检索插件 ~100~115s
   //    + 提炼 ~10~60s），而微信 request 超时上限就是 60s —— 同步请求在真机上
@@ -1274,7 +1291,10 @@ export function searchAnswer(
   return runJob<AnswerSearchResult>(
     'answer-search',
     { item_id: itemId, force, mode },
-    opts?.onProgress ? { onProgress: opts.onProgress } : {},
+    {
+      ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts?.shouldAbort ? { shouldAbort: opts.shouldAbort } : {}),
+    },
   )
 }
 

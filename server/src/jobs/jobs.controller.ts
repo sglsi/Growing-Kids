@@ -8,7 +8,7 @@ interface SubmitBody {
   params?: Record<string, unknown>
 }
 
-const TABLE_OF_TYPE = new Set<JobType>(['ocr-page', 'answer-search', 'search-solve'])
+const TABLE_OF_TYPE = new Set<JobType>(['ocr-page', 'doc-recognize', 'answer-search', 'search-solve'])
 
 /**
  * 异步任务接口
@@ -36,7 +36,7 @@ export class JobsController {
     let userId = requireUserId(req)
     const type = String(body?.type || '') as JobType
     if (!TABLE_OF_TYPE.has(type)) {
-      throw new BadRequestException(`不支持的任务类型：${String(body?.type)}（可选：ocr-page / answer-search / search-solve）`)
+      throw new BadRequestException(`不支持的任务类型：${String(body?.type)}（可选：ocr-page / doc-recognize / answer-search / search-solve）`)
     }
     // ⚠️ **闸门必须在提交阶段拦，不能留到执行阶段**。
     //    `/api/search/solve` 与 `/api/answer-search` 都过 `requireAiEnabled`

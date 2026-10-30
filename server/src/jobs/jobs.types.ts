@@ -15,7 +15,7 @@
  *   - ⇒ 只适合单机部署。若将来多实例，须把执行器换成真正的队列。
  */
 
-export type JobType = 'ocr-page' | 'answer-search' | 'search-solve'
+export type JobType = 'ocr-page' | 'doc-recognize' | 'answer-search' | 'search-solve'
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
 
@@ -23,6 +23,8 @@ export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
 export const JOB_TTL_MS: Record<JobType, number> = {
   // 摆正 ~17s + PP-StructureV3 ~50s，实测 67s；留一倍余量给慢机
   'ocr-page': 180_000,
+  // 多页 PDF/Word：文字层提取 + 扫描页逐页 OCR，页数越多越久（GK-23-21 的根因）
+  'doc-recognize': 300_000,
   // 扣子 bot 跑检索插件 ~100~115s + 提炼 ~10~60s，实测最长 135s
   'answer-search': 260_000,
   // 联网检索 + 大模型，实测 60~90s
@@ -32,6 +34,7 @@ export const JOB_TTL_MS: Record<JobType, number> = {
 /** 提交时的阶段文案（面向用户；只给文字，不做假进度百分比） */
 export const JOB_STAGE: Record<JobType, { queue: string; run: string }> = {
   'ocr-page': { queue: '排队中', run: '识别中，精准模式较慢（约 1 分钟）' },
+  'doc-recognize': { queue: '排队中', run: '正在识别文档（多页较慢，可离开本页稍后回来）' },
   'answer-search': { queue: '排队中', run: '正在联网检索答案（约 1~2 分钟）' },
   'search-solve': { queue: '排队中', run: '正在检索并解题（约 1 分钟）' },
 }
@@ -73,6 +76,11 @@ export interface OcrPageJobParams {
   image_url: string
   mode?: 'fast' | 'precise'
   rectify?: boolean
+  force?: boolean
+}
+
+export interface DocRecognizeJobParams {
+  file_url: string
   force?: boolean
 }
 

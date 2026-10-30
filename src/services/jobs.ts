@@ -17,7 +17,7 @@ import { ApiError } from '@/services/api'
  * 因此本文件里**没有任何一个 timeout 大于 15s**——这是设计约束，不是懒。
  */
 
-export type JobType = 'ocr-page' | 'answer-search' | 'search-solve'
+export type JobType = 'ocr-page' | 'doc-recognize' | 'answer-search' | 'search-solve'
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
 
 export interface JobView {
@@ -37,6 +37,8 @@ export interface JobView {
 /** 轮询总时长上限：比后端 TTL 略宽，别让前端先放弃 */
 const POLL_MAX_MS: Record<JobType, number> = {
   'ocr-page': 190_000,
+  // 多页 PDF/Word：页数越多越久，与后端 JOB_TTL_MS 同步放宽（GK-23-21）
+  'doc-recognize': 310_000,
   'answer-search': 270_000,
   'search-solve': 160_000,
 }
@@ -108,6 +110,28 @@ export interface RunJobOptions {
   onProgress?: (info: { stage: string; waitedMs: number }) => void
   /** 轮询总时长上限（默认按 type 取） */
   maxWaitMs?: number
+  /**
+   * 取消探针（GK-23-19）：返回 true 即立刻停止轮询并释放 ticket。
+   *
+   * 为什么是回调而不是 AbortSignal：微信基础库对 `AbortController` 的支持
+   * 按版本残缺，页面卸载这种场景**不能指望它存在**；一个纯函数在所有端都成立。
+   * 识别页返回上一页后轮询仍会继续最长 190s（幽灵请求 + 白烧后端配额），
+   * 由页面在卸载时把 ref 置 true 即可。
+   */
+  shouldAbort?: () => boolean
+}
+
+/** 用户/页面主动放弃等待（区别于「超时」——这类不该弹错误提示） */
+export class JobAbortedError extends Error {
+  constructor() {
+    super('任务已取消')
+    this.name = 'AbortError'
+  }
+}
+
+/** 判断异常是否为「主动取消」；页面据此静默返回、不弹 toast */
+export function isJobAborted(e: unknown): boolean {
+  return e instanceof JobAbortedError || (e as { name?: string })?.name === 'AbortError'
 }
 
 /**
@@ -134,8 +158,22 @@ export async function runJob<T = Record<string, unknown>>(
   let last: JobView = { id, type, status, stage, error: null, result: null, created_at: '', started_at: null, finished_at: null, waited_ms: 0 }
   if (deduped) opts.onProgress?.({ stage: stage || '已在队列中', waitedMs: 0 })
 
+  const abandon = () => {
+    // 放弃等待（取消或超时）都把 ticket 删掉，避免表里留一条没人管的 running。
+    // best-effort：删不掉不影响本次放弃，但必须留下痕迹（工程规范第 7 章第 2 条）
+    void removeJob(id).catch((e) => console.warn('[jobs] 放弃等待后删除 ticket 失败', id, e))
+  }
+
   while (Date.now() < deadline) {
-    await sleep(gap)
+    if (opts.shouldAbort?.()) {
+      abandon()
+      throw new JobAbortedError()
+    }
+    await sleep(gap, opts.shouldAbort)
+    if (opts.shouldAbort?.()) {
+      abandon()
+      throw new JobAbortedError()
+    }
     last = await getJob(id)
     if (last.status === 'done') return last.result as T
     if (last.status === 'failed') {
@@ -148,12 +186,19 @@ export async function runJob<T = Record<string, unknown>>(
     gap = Math.min(POLL_MAX_GAP, Math.round(gap * POLL_GAP_FACTOR))
   }
 
-  // 前端先放弃：把 ticket 删掉，避免表里留一条没人管的 running
-  // best-effort：删不掉不影响本次放弃，但必须留下痕迹（工程规范第 7 章第 2 条）
-  void removeJob(id).catch((e) => console.warn('[jobs] 放弃等待后删除 ticket 失败', id, e))
+  // 前端先放弃
+  abandon()
   throw new Error('处理时间过长，已停止等待，请稍后重试')
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
+/**
+ * 可中断的 sleep：每 250ms 探一次取消条件。
+ * 不用 `setTimeout(ms)` 一次性等待——那样页面卸载后仍要睡满一轮（最长 3s）才退出。
+ */
+async function sleep(ms: number, shouldAbort?: () => boolean): Promise<void> {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (shouldAbort?.()) return
+    await new Promise<void>((r) => setTimeout(r, Math.min(250, Math.max(0, end - Date.now()))))
+  }
 }

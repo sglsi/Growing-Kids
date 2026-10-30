@@ -7,12 +7,13 @@ import {
 import { Cron } from '@nestjs/schedule'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { ImageService } from '../image/image.service'
+import { OcrService } from '../ocr/ocr.service'
 import { AnswerSearchService } from '../answer-search/answer-search.service'
 import { SearchService } from '../search/search.service'
 import {
   JOB_STAGE, JOB_TTL_MS,
   type JobRow, type JobStatus, type JobType, type JobView,
-  type OcrPageJobParams, type AnswerSearchJobParams, type SearchSolveJobParams,
+  type OcrPageJobParams, type DocRecognizeJobParams, type AnswerSearchJobParams, type SearchSolveJobParams,
 } from './jobs.types'
 
 const TABLE = 'async_jobs'
@@ -27,7 +28,7 @@ const MAX_RUNNING_TOTAL = 3
 /** 单用户并发：防止一人占满全局闸门 */
 const MAX_RUNNING_PER_USER = 2
 
-const JOB_TYPES: ReadonlyArray<JobType> = ['ocr-page', 'answer-search', 'search-solve']
+const JOB_TYPES: ReadonlyArray<JobType> = ['ocr-page', 'doc-recognize', 'answer-search', 'search-solve']
 
 /**
  * 异步任务服务
@@ -44,6 +45,7 @@ export class JobsService implements OnModuleInit {
 
   constructor(
     private readonly imageService: ImageService,
+    private readonly ocrService: OcrService,
     private readonly answerSearchService: AnswerSearchService,
     private readonly searchService: SearchService,
   ) {}
@@ -300,6 +302,11 @@ export class JobsService implements OnModuleInit {
         { image_url: p.image_url, mode: p.mode === 'fast' ? 'fast' : 'precise', rectify: p.rectify !== false, force: p.force },
         forwardHeaders,
       )
+    }
+    if (type === 'doc-recognize') {
+      const p = params as unknown as DocRecognizeJobParams
+      if (!p?.file_url) throw new BadRequestException('file_url 不能为空')
+      return this.ocrService.recognizeDoc(p.file_url, p.force)
     }
     if (type === 'answer-search') {
       const p = params as unknown as AnswerSearchJobParams
