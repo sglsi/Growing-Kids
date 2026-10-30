@@ -41,6 +41,25 @@ from typing import Any, Dict, List, Optional, Tuple
 os.environ.setdefault("PADDLE_PDX_CACHE_HOME", "/workspace/projects/.cache-paddlex")
 os.environ.setdefault("XDG_CACHE_HOME", "/workspace/projects/.cache-paddle-xdg")
 
+# ---------------------------------------------------------------------------
+# paddlepaddle 3.3.x 在 CPU 上的 oneDNN/PIR 回归（2026-10-31 定位并修复）
+#
+# 症状：只要走 paddle 分支，推理阶段必抛
+#   NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
+#   not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+#   (at paddle/fluid/framework/new_executor/instruction/onednn/onednn_instruction.cc:116)
+#
+# 根因（PaddlePaddle/Paddle#77340）：3.3.0 起 PIR 执行器默认开启且默认启用 oneDNN(MKLDNN)，
+# 两者的属性转换在 CPU 路径上有回归。官方修复 #77430 只合到了 develop，**从未回植到 3.3.x**。
+# 已证伪的三个开关（别再试）：FLAGS_use_mkldnn=0 / FLAGS_enable_pir_in_executor=0 /
+# FLAGS_enable_pir_api=0 —— 它们是 paddle 层的 FLAGS，管不到 PaddleX 自己默认打开的 oneDNN。
+#
+# 有效开关是 PaddleX 层的这一个（必须在 import paddleocr 之前设置，本文件是惰性导入，故放这里安全）。
+# 代价：oneDNN 关掉后推理变慢（社区实测比 3.2.2+oneDNN 慢 3~6 倍），换来的是「能用」。
+# 不降级到 3.2.x 的原因：3.3.1 才有的模型与能力（PP-OCRv6 等）要保留。
+# ---------------------------------------------------------------------------
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+
 # Web 框架依赖（fastapi/pydantic）惰性化：--once/--loop 工具模式不依赖 web 栈，
 # 缺包时用占位兜底——即使 Node 端把 python 误选到无 web 依赖的解释器，工具式调用与
 # 常驻循环也不会一启动就 ModuleNotFound 退出（服务模式另行显式报错，见 main()）。

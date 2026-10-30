@@ -28,6 +28,16 @@ const TOKEN_ERRNOS = new Set([111, -6, 2, 10])
 const REQ_TIMEOUT_MS = Number(env('BAIDU_TIMEOUT_MS', '30000'))
 const UPLOAD_TIMEOUT_MS = Number(env('BAIDU_UPLOAD_TIMEOUT_MS', '180000'))
 // 百度 superfile2 的约定：每片必须正好 4 MB（最后一片可不足）
+// 分片大小固定 4MB —— 这是百度网盘对**普通用户**的硬性规定，不是我们拍的：
+// 官方《创建文件》接口文档（错误码 31365「文件总大小超限」）原文：
+//   · 普通用户：单个分片大小**固定为 4MB**，单文件上限 4GB
+//   · 普通会员：分片上限 16MB，单文件 10GB
+//   · 超级会员：分片上限 32MB，单文件 20GB
+//   · 分片数量上限 1024
+// 踩过的坑：曾经把整个文件当一个分片上传（单片最大 = 文件本身），
+// 176KB 的数据库备份能过，66MB 的文件备份必返 `error_code: -1` 且**响应体为空**（排障抓瞎）。
+// 改成 4MB 分片后 66MB 文件 133 秒传完。若将来账号升级为会员，可放宽到 16/32MB 提速，
+// 但必须同步确认分片数不超 1024。
 const PART_SIZE = 4 * 1024 * 1024
 
 export class Netdisk {
