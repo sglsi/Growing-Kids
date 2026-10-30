@@ -157,7 +157,11 @@ export class AuthService {
   async me(userId: string): Promise<User> {
     const user = await this.usersService.findById(userId)
     if (!user) throw new BadRequestException('用户不存在')
-    return user
+    // GK-23-23：前端要按角色收起「管理」入口。role 不并进 SELECT_COLS（未跑 0017 的
+    // 环境会整条查询报错），这里单独取、单独降级，取不到按 `user`（fail-closed）。
+    // 这只是**体验层**收敛，真正的权限判定仍在服务端 requireAdmin。
+    const role = await this.usersService.findRole(userId)
+    return { ...user, role }
   }
 
   /** 退出：仅返回成功（身份由前端清除本地存储即可，无需服务端状态） */

@@ -14,6 +14,12 @@ export interface AuthUser {
   is_anonymous: boolean
   expire_at: string | null
   created_at: string
+  /**
+   * 角色（0017 users.role）。由 GET /api/auth/me 单独带出（GK-23-23）。
+   * 只用于**体验层**收起「管理」入口——真权限判定在服务端 requireAdmin，
+   * 前端改这个值拿不到任何越权能力。
+   */
+  role?: 'user' | 'admin'
 }
 
 /** 登录时匿名数据迁移结果 */
@@ -42,6 +48,8 @@ export interface AuthState {
   nickname: string
   avatarUrl: string
   isAnonymous: boolean
+  /** 本地缓存角色，供「管理」入口等体验判断秒开（缺省按 user） */
+  role?: 'user' | 'admin'
 }
 
 export const AUTH_STORAGE_KEY = 'gk_auth_state'

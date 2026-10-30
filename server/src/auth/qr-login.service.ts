@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
 import { code2Session } from './wechat-session'
+import { signAuthToken } from '../shared/auth-token'
 import type { User } from '../users/users.types'
 
 export type QrTicketStatus = 'pending' | 'authorized' | 'expired'
@@ -131,8 +132,15 @@ export class QrLoginService implements OnModuleDestroy {
     return { token, expires_in: TICKET_TTL_MS / 1000 }
   }
 
-  /** 查询票据状态（H5 轮询）；authorized 时附带 user 供落身份 */
-  async getStatus(token: string): Promise<{ status: QrTicketStatus; user?: User }> {
+  /**
+   * 查询票据状态（H5 轮询）。
+   *
+   * ⚠️ authorized 时必须**同时**回传 `auth_token`（GK-23-16）：H5 端拿到 user 只够
+   * 显示昵称，业务请求全走 `X-Auth-Token`（严格令牌化，裸 X-User-Id 一律 401），
+   * 少这张票就是「页面显示已登录、数据全是空的」。
+   * 与 `AuthController.input login / authorizeQrTicket` 同一签法，避免两套身份来源。
+   */
+  async getStatus(token: string): Promise<{ status: QrTicketStatus; user?: User; auth_token?: string }> {
     if (!token) return { status: 'expired' }
 
     if ((await this.store()) === 'db') {
@@ -150,7 +158,7 @@ export class QrLoginService implements OnModuleDestroy {
         if (status === 'pending' && new Date(row.expires_at).getTime() < Date.now()) status = 'expired'
         if (status === 'authorized' && row.user_id) {
           const user = await this.usersService.findById(row.user_id)
-          if (user) return { status: 'authorized', user }
+          if (user) return { status: 'authorized', user, auth_token: signAuthToken(user.id) }
           // 账号被清理：按过期处理，避免 H5 永远等一个不存在的身份
           return { status: 'expired' }
         }
@@ -165,7 +173,7 @@ export class QrLoginService implements OnModuleDestroy {
     if (t.status === 'pending' && Date.now() > t.expiresAt) t.status = 'expired'
     if (t.status === 'authorized' && t.userId) {
       const user = await this.usersService.findById(t.userId)
-      if (user) return { status: 'authorized', user }
+      if (user) return { status: 'authorized', user, auth_token: signAuthToken(user.id) }
       return { status: 'expired' }
     }
     return { status: t.status }

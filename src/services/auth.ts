@@ -68,6 +68,9 @@ export function toAuthState(user: AuthUser): AuthState {
     nickname: user.nickname || '',
     avatarUrl: user.avatar_url || '',
     isAnonymous: !!user.is_anonymous,
+    // 角色随登录态一起落盘（GK-23-23）：入口显隐可秒开，不必每次进页面都等 /me。
+    // 只做体验判断——越权由服务端 requireAdmin 兜底。
+    ...(user.role ? { role: user.role } : {}),
   }
 }
 

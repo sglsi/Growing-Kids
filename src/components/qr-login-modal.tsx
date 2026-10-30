@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
 import { applyLoginUser } from '@/services/auth'
-import { buildHeaders } from '@/services/net'
+import { buildHeaders, setAuthToken } from '@/services/net'
 import type { AuthUser } from '@/types/auth'
 import { BRAND_TEXT } from '@/lib/theme'
 
@@ -108,11 +108,15 @@ export default function QrLoginModal({ visible, onClose, onSuccess }: Props) {
         })
         const body = res.data as {
           code: number
-          data?: { status?: 'pending' | 'authorized' | 'expired'; user?: AuthUser }
+          data?: { status?: 'pending' | 'authorized' | 'expired'; user?: AuthUser; auth_token?: string }
         }
         const st = body?.data?.status
         if (st === 'authorized' && body.data?.user) {
           if (pollRef.current) clearInterval(pollRef.current)
+          // ⚠️ 必须**先落令牌再落身份**（GK-23-16）：业务请求只认 X-Auth-Token，
+          // 裸 X-User-Id 一律 401。原先只 applyLoginUser ⇒ 界面显示已登录、
+          // 每个接口都 401 ⇒ 列表全空，看着像「登录没生效」。
+          if (body.data.auth_token) setAuthToken(body.data.auth_token)
           applyLoginUser(body.data.user)
           setPhase('done')
           setTimeout(() => onSuccess(body.data!.user!), 800)
