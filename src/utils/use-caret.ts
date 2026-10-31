@@ -2,29 +2,34 @@ import { useCallback, useRef, useState } from 'react'
 import { decideBlurCursor, diffCursor } from './caret-decision'
 
 /**
- * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第十次重写，定性）
+ * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第十一轮重写）
  *
- * ## 定性结论（两条平台规则叠加，前九版全栽在这里）
+ * ## 定性（在微信开发者工具里实测得出，不是推理）
  *
- * 1. 微信 `textarea` 是**原生组件**：页面 setData 时它按虚拟 DOM 的 `value`
- *    重新应用文本，**光标落到末尾**；
- * 2. Taro 对表单元素有一条无条件规则：`@tarojs/react/dist/react.esm.js:372`
- *    `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
- *    —— 只要发生一次 commit，`value` 就必然进 setData。
+ * 前十轮都在回答"该下发什么 value"，全错。第十一轮用 Chromium 调试协议接进
+ * 开发者工具模拟器（`server/scripts/ide-caret-test.mjs`），真实打字并读回 selectionStart：
  *
- * ⇒ **页面在 onInput 里 setState，就是"每打一个字把光标重置一次"**。
- *   这是页面层的行为，改输入框组件永远治不到（前九轮的最大教训）。
- *   ⇒ 页面必须把实时文本放 ref、输入期间不 setState（detail 页已按此改）；
- *   ⇒ 组件保证下发的 value 永远等于用户眼前的文本（见 ui/textarea.tsx）。
+ *   · 实验（`ide-samevalue.mjs`）：把 `textarea.value` 重新赋**同样的字符串** ——
+ *     光标**纹丝不动**；赋**不同的字符串** —— 光标**立刻跳到末尾**。
+ *   · 抓栈（`ide-stack.mjs`）：改写来自 Taro commit → 微信 `defaultValueChange`。
  *
- * ## 本 hook 的职责：记录位置 + 程序化定位
- *   1. `track(cursor?, value?)`：onInput / onFocus 里调用。**只记录**光标，
+ * ⇒ 跳光标的条件只有一个：**下发的值与原生当前文本不一致**。
+ * ⇒ 所以根本不需要"钉光标"：让**页面 state 与输入框实时同步**（onInput 里当场 setState），
+ *   组件把 `props.value` 原样下发，每次 commit 下发的都是刚刚那个文本 ⇒ 相同 ⇒ 不动。
+ * ⇒ 反过来，"把实时文本藏进 ref、打字不 setState"（第十轮）会让 state 滞后，
+ *   任何一次 commit 都用旧值覆盖用户输入 —— 那正是"打不进字"。
+ *
+ * ⚠️ 本 hook 现在**不参与输入过程**：它只做三件事 ——
+ *   1. 记录光标位置（供"插入数学符号"决定插在哪）；
+ *   2. 程序化插入后请求一次定位（`request` + `refocus`）；
+ *   3. 失焦时把真实光标写下去，重新聚焦能落在用户离开的位置。
+ *   打字期间它一次 setState 都不做，正是为了不制造多余的 commit。
+ *
+ * ## 接口
+ *   1. `track(cursor?, value?)`：onInput / onFocus 里调用，**只记录**。
  *      用 `diffCursor(上一次文本, 这一次文本)` 算（`detail.cursor` 在中间输入时不可信）。
- *      不下发 cursor —— 输入期间写它无效，且一写就等于要求一次 commit。
  *   2. `request(pos, value?)`：程序化插入后调用（插入数学符号 / OCR 回填）。
- *      cursor 变化同时是"外部写入"的可靠信号（见 resolveDisplayText）。
- *   3. `blur(cursor?)`：onBlur 里调用 —— 记录并把真实光标写下去，
- *      让重新聚焦落在用户离开的位置。
+ *   3. `blur(cursor?)`：onBlur 里调用 —— 记录并把真实光标写下去。
  *   4. `position(len)`：当前可用的插入位置。
  */
 

@@ -1743,11 +1743,8 @@ export default function RecognizePage() {
                       value={e.text}
                       placeholder="点上方段落的「加入题干」自动填入，也可手动输入 / 长按粘贴"
                       maxlength={-1}
-                      // ⚠️ 打字只写原生、不 setState：Taro 对表单元素无条件下发 value，
-                      //    微信 textarea 一收到 setData 就重建文本、光标落末尾
-                      //    （思傅 2026-10-31 第十轮，见 工程教训录 L29）。
-                      //    失焦时把整段文本落进 state，中途的活体文本由原生和组件内部维护。
-                      onBlur={(ev) => setEntryText(idx, ev.detail.value)}
+                      // ⚠️ 必须当场 setState：下发的 value 只有等于原生文本，微信才不动光标
+                      onInput={(ev) => setEntryText(idx, ev.detail.value)}
                     />
                   </View>
                 </View>
@@ -1992,8 +1989,8 @@ export default function RecognizePage() {
                     value={d.question_content}
                     placeholder="题目内容（可手动修改）"
                     maxlength={-1}
-                    // 同上：打字不 setState，失焦才落 state（避免每打一个字 setData 一次）
-                    onBlur={(e) => updateDraft(idx, { question_content: e.detail.value })}
+                    // 同上：实时同步 state
+                    onInput={(e) => updateDraft(idx, { question_content: e.detail.value })}
                   />
                 </View>
 
@@ -2007,8 +2004,8 @@ export default function RecognizePage() {
                     value={d.answer_content}
                     placeholder="正确答案（可手动修改，无则留空后联网搜题）"
                     maxlength={-1}
-                    // 同上：打字不 setState，失焦才落 state
-                    onBlur={(e) => updateDraft(idx, { answer_content: e.detail.value, has_answer: !!e.detail.value })}
+                    // 同上：实时同步 state
+                    onInput={(e) => updateDraft(idx, { answer_content: e.detail.value, has_answer: !!e.detail.value })}
                   />
                 </View>
               </Card>

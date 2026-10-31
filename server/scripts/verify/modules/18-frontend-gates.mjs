@@ -230,8 +230,24 @@ m.test('🔴 前端：隐私同意存储键不得在 constants 之外硬编码',
 // 正确写法：打字只写 ref，onBlur（或程序化写入时）才同步进 state。
 // 这条门禁就是不让第 11 个人再把它改回去。
 // ---------------------------------------------------------------
-m.test('🔴 前端：多行输入框 onInput 里不得 setState（会每打一个字重置光标）', async (c) => {
-  /** 从 onInput= 起按花括号配平截出处理函数 */
+// ---------------------------------------------------------------
+// 11. 🔴 多行输入框的 onInput 里**必须**当场 setState（第十一轮实测反转）
+//
+// 第十轮这条门禁写的是反的（要求"打字只写 ref、不 setState"），代价是用户打不进字。
+// 第十一轮在微信开发者工具里做真实输入实验后定性：
+//   · 实验（scripts/ide-samevalue.mjs）：textarea.value 重新赋**同样的字符串** →
+//     光标纹丝不动；赋**不同的字符串** → 光标立刻跳到末尾。
+//   · 抓栈（scripts/ide-stack.mjs）：改写来自 Taro commit → 微信 defaultValueChange。
+// ⇒ 跳不跳光标只取决于「下发的值与原生当前文本是否一致」。
+//   页面 onInput 当场 setState，组件原样下发 props.value，每次 commit 下发的都是刚刚那个
+//   文本 ⇒ 与原生相同 ⇒ 不重建、不跳光标、不丢字。
+// ⇒ 反过来，把实时文本藏进 ref（第十轮的做法）会让 state 滞后：只要发生任何一次 commit，
+//   下发的就是旧值，把用户刚打的字**覆盖回去** —— 真机表现就是「打不进字」。
+//
+// 豁免：只做事件转发的包装组件（如 AnswerSolutionEditor 里的 `onInput(detail.value)`）。
+// ---------------------------------------------------------------
+m.test('🔴 前端：多行输入框 onInput 必须当场 setState（藏进 ref 会让下发值滞后）', async (c) => {
+  /** 从 `onInput=` 起按花括号配平截出处理函数 */
   const handlerOf = (src, at) => {
     const brace = src.indexOf('{', at)
     if (brace < 0) return ''
@@ -248,31 +264,32 @@ m.test('🔴 前端：多行输入框 onInput 里不得 setState（会每打一�
 
   const bad = []
   for (const f of walk(SRC)) {
-    // 组件自身不走页面语义（它内部只管把"用户眼前的文本"记进 ref）
+    // 组件自身不走页面语义（它只管把 props 原样发给原生）
     if (f.endsWith(path.join('ui', 'textarea.tsx'))) continue
     const src = fs.readFileSync(f, 'utf8')
-    // 多行输入框本身 + 转发 onInput 的自家包装（AnswerSolutionEditor）
     for (const tag of ['<Textarea', '<AnswerSolutionEditor']) {
-    let at = -1
-    while ((at = src.indexOf(tag, at + 1)) >= 0) {
-      // 只看这个元素自己的 props（到自闭合 /> 为止），别把后面 <Input> 的 onInput 算进来
-      const close = src.indexOf('/>', at)
-      const block = src.slice(at, close < 0 ? Math.min(at + 1600, src.length) : close + 2)
-      let i = -1
-      while ((i = block.indexOf('onInput=', i + 1)) >= 0) {
-        const body = handlerOf(block, i)
-        if (/\b(set[A-Z]\w*|updateDraft|updateEntry|updateForm)\s*\(/.test(body)) {
-          const line = src.slice(0, at).split('\n').length
-          bad.push(`${rel(f)}:${line}`)
+      let at = -1
+      while ((at = src.indexOf(tag, at + 1)) >= 0) {
+        const close = src.indexOf('/>', at)
+        const block = src.slice(at, close < 0 ? Math.min(at + 1600, src.length) : close + 2)
+        let i = -1
+        while ((i = block.indexOf('onInput=', i + 1)) >= 0) {
+          const body = handlerOf(block, i)
+          // 纯转发（把 detail.value 交给上层）不适用本规则
+          const isForward = /onInput\s*\(\s*e\.detail\.value/.test(body)
+          const hasSetState = /\b(set[A-Z]\w*|updateDraft|updateEntry|updateForm)\s*\(/.test(body)
+          if (!isForward && !hasSetState) {
+            const line = src.slice(0, at).split('\n').length
+            bad.push(rel(f) + ':' + line)
+          }
         }
       }
-    }
     }
   }
   c.eq(
     bad.length,
     0,
-    `以下多行输入框在打字时 setState（每打一个字重置一次光标，重了还会"打不进字"）：${bad.slice(0, 8).join('、')}`
+    `以下多行输入框的 onInput 没有当场 setState（下发值会滞后 ⇒ 覆盖用户刚打的字）：${bad.slice(0, 8).join('、')}`
   )
 })
 

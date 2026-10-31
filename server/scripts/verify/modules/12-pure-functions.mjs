@@ -149,89 +149,64 @@ m.test('answer-merge：纯文本无标记时整体归入答案', async (c) => {
 })
 
 let CARET = null
-let ECHO = null
 
-m.test('单编：src/utils/caret-decision.ts + textarea-echo.ts（零 import 契约）', async (c) => {
-  for (const f of ['src/utils/caret-decision.ts', 'src/utils/textarea-echo.ts']) {
-    try {
-      compile(f)
-    } catch (e) {
-      const out = `${e.stdout || ''}${e.stderr || ''}`
-      throw new Error(`${f} 单编失败（破坏了"零 import"契约）：${out.slice(0, 300)}`)
-    }
+m.test('单编：src/utils/caret-decision.ts（零 import 契约）', async (c) => {
+  const f = 'src/utils/caret-decision.ts'
+  try {
+    compile(f)
+  } catch (e) {
+    const out = `${e.stdout || ''}${e.stderr || ''}`
+    throw new Error(`${f} 单编失败（破坏了"零 import"契约）：${out.slice(0, 300)}`)
   }
   const pc = path.join(TMP, 'caret-decision.js')
-  const pe = path.join(TMP, 'textarea-echo.js')
   c.ok(fs.existsSync(pc), 'caret-decision 编译产物不存在')
-  c.ok(fs.existsSync(pe), 'textarea-echo 编译产物不存在')
   CARET = await import(`file://${pc.replace(/\\/g, '/')}`)
-  ECHO = await import(`file://${pe.replace(/\\/g, '/')}`)
   c.ok(typeof CARET.decideBlurCursor === 'function', '缺少 decideBlurCursor')
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
-  c.ok(typeof ECHO.resolveDisplayText === 'function', '缺少 resolveDisplayText')
-  c.ok(typeof ECHO.initDisplay === 'function', '缺少 initDisplay')
 })
 
-// 光标 / 吃字问题的最终定性（2026-10-31 第十轮，连报九次后）
+// 光标 / 吃字问题的最终定性（2026-10-31 第十一轮 · 在微信开发者工具里实测）
 //
-// 前九轮全在改「输入框组件怎么下发 value」，都没治住。真正的原因是**两条平台规则**，
-// 而且其中一条不在组件里：
-//   ① `@tarojs/react/dist/react.esm.js:372`
-//      `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
-//      —— 表单元素只要**发生一次 commit**，value 就必然进 setData；
-//   ② 微信 textarea 是原生组件：页面 setData 时按虚拟 DOM 的 value **重新应用文本**，
-//      **光标落到末尾**。
-// ⇒ 页面在 onInput 里 setState = 每打一个字 setData 一次 = 光标重置一次。
-//   若此时下发的 value 还是**旧值**（第 7/8 版为了"不下发"而让属性停在旧值/空串），
-//   就会把刚打的字覆盖掉 —— 真机表现「打不进字」。
+// 前十轮都在回答"输入框该下发什么 value"，第十轮还发明了"回声吸收 / 阻断渲染"，全部失败。
+// 第十一轮不再推理：用 Chromium 调试协议接进开发者工具模拟器（server/scripts/ide-*.mjs），
+// 真实地往输入框里打字，再读回 selectionStart。两个硬结论：
 //
-// 现行契约（两条缺一不可）：
-//   · 页面：输入期间只写 ref，**不 setState**（detail 页已按此改）；
-//   · 组件：下发的 value **永远等于用户眼前的文本**（本模块的 resolveDisplayText）。
-// 下面这组断言守住第二条 —— 它是"绝不丢字"的最后一道闸。
-m.test('🔴 resolveDisplayText：输入期间绝不用页面值覆盖原生，外部写入才采纳', async (c) => {
-  const R = ECHO.resolveDisplayText
-  const init = ECHO.initDisplay
+//   实验 1（ide-samevalue.mjs）：textarea.value 重新赋**同样的字符串** → 光标纹丝不动；
+//                              赋**不同的字符串** → 光标立刻跳到末尾。
+//   实验 2（ide-stack.mjs）：抓 value 被改写的调用栈 → Taro commit →
+//                            微信 defaultValueChange → updateValue。
+//
+// ⇒ 真规则是「**下发的值与原生当前文本不一致才跳**」，不是"带 value 就跳"。
+// ⇒ 治法极简：**让下发的 value 永远等于用户眼前的文本**。
+//   页面 onInput 当场 setState，组件把 props.value 原样下发 —— 每次 commit 下发的都是
+//   刚刚那个文本，与原生相同 ⇒ 不重建、不跳光标、不丢字。
+// ⇒ 反过来"不让 value 变化"（第 7/8/10 版）才最危险：属性停在旧值后，任何一次 commit
+//   都会把刚打的字**覆盖回旧值** —— 那正是"打不进字"。
+//
+// 下面这组断言守住实现别再退回旧路（纯函数层已被证明是多余的，所以只守源码契约）。
+m.test('🔴 ui/textarea 必须原样下发 value，focus/cursor 必须条件展开', async (c) => {
+  const src = fs.readFileSync(path.join(ROOT, 'src/components/ui/textarea.tsx'), 'utf8')
 
-  // ① 正在输入：页面值落后/回声 ⇒ 必须保持原生（否则就是"打不进字"）
-  c.eq(R({ text: 'abc' }, { value: 'ab', focused: true, cursorChanged: false }).text, 'abc',
-    '输入期间被页面旧值覆盖了 —— 这正是"打不进字"的成因')
-  c.eq(R({ text: 'abc' }, { value: '', focused: true, cursorChanged: false }).text, 'abc',
-    '输入期间被空串清空了')
-  c.eq(R({ text: 'abc' }, { value: 'abc', focused: true, cursorChanged: false }).text, 'abc',
-    '回声被重复采纳（会多一次 setData）')
-
-  // ② 失焦才采纳（装载数据 / 识别回填 / 失焦同步 state）
-  c.eq(R({ text: '' }, { value: '题目内容', focused: false, cursorChanged: false }).text, '题目内容',
-    '失焦时外部写入未采纳（异步数据到达会整框空白）')
-  c.eq(R({ text: 'abc' }, { value: '', focused: false, cursorChanged: false }).text, '',
-    '失焦时程序化清空未采纳')
-
-  // ③ cursor 变化是"程序化写入"的可靠信号（符号插入时输入框可能仍聚焦）
-  c.eq(R({ text: 'ab' }, { value: 'ab×', focused: true, cursorChanged: true }).text, 'ab×',
-    '符号插入未采纳（插不进去）')
-
-  // ④ 非受控：没有 value 就永远不动
-  c.eq(R({ text: 'abc' }, { focused: true, cursorChanged: false }).text, 'abc', '非受控被改了')
-  c.eq(R({ text: 'abc' }, { focused: false, cursorChanged: true }).text, 'abc', '非受控被 cursor 改了')
-
-  // 命根子不变式：返回的 text 永远是字符串，且**要么保持原样、要么等于调用方给的值**，
-  // 绝不可能凭空变成别的（尤其不可能是 undefined / null ⇒ 原生被清空）
-  for (const cur of ['', 'abc', '长文本内容'])
-    for (const v of [undefined, '', 'x', 'abc', '新内容'])
-      for (const focused of [true, false])
-        for (const cursorChanged of [true, false]) {
-          const r = R({ text: cur }, { value: v, focused, cursorChanged })
-          c.ok(typeof r.text === 'string', `返回值不是字符串：${JSON.stringify([cur, v, focused, cursorChanged])}`)
-          c.ok(r.text === cur || r.text === v, `返回值既不是原值也不是新值：${JSON.stringify([cur, v, focused, cursorChanged])}`)
-          if (focused && !cursorChanged && typeof v === 'string') {
-            c.eq(r.text, cur, `输入期间被改写了：${JSON.stringify([cur, v])}`)
-          }
-        }
-
-  // initDisplay：首帧就是受控值；非受控是空串（绝不能是 undefined）
-  c.eq(init('题目').text, '题目', 'initDisplay 丢了首帧值')
-  c.eq(init(undefined).text, '', 'initDisplay 非受控时不是空串')
+  c.ok(
+    src.includes('typeof value === "string" ? { value } : undefined'),
+    'value 必须原样条件下发（写成 undefined 也会留键 ⇒ 每帧下发空值）'
+  )
+  c.ok(
+    !src.includes('useState'),
+    '组件里出现了 useState —— 任何内部 state 变化都是一次 commit，都会把光标甩走'
+  )
+  c.ok(
+    !src.includes('displayRef') && !src.includes('resolveDisplayText') && !src.includes('textarea-echo'),
+    '又引入了"文本改写层"（第 10 版的失败方案），下发的值必须等于用户眼前的文本'
+  )
+  c.ok(
+    src.includes('focusProp ? { focus: true } : undefined'),
+    'focus 必须条件展开：微信里 focus={false} 是"强制失焦"（会收键盘），不是"不指定"'
+  )
+  c.ok(
+    src.includes('cursorProp !== null ? { cursor: cursorProp } : undefined'),
+    'cursor 必须条件展开：-1 在微信里是"置于末尾"，等于主动甩光标'
+  )
 })
 
 m.test('🔴 decideBlurCursor：失焦写下真实光标（重新聚焦落在用户离开处）', async (c) => {

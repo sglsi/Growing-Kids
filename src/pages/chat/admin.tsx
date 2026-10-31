@@ -346,11 +346,12 @@ export default function ChatAdminPage() {
                   value={form.content}
                   placeholder="客服将基于此内容回答用户"
                   maxlength={500}
-                  // ⚠️ 打字只写 ref、不 setState（每打一个字 setData 一次 ⇒ 光标落末尾）
-                  onInput={(e) => { contentRef.current = (e.detail as { value: string }).value || '' }}
-                  onBlur={(e) =>
-                    setForm({ ...form, content: (e.detail as { value: string }).value || '' })
-                  }
+                  // ⚠️ 必须当场 setState：下发的 value 只有等于原生文本，微信才不动光标
+                  onInput={(e) => {
+                    const v = (e.detail as { value: string }).value || ''
+                    contentRef.current = v
+                    setForm((f) => ({ ...f, content: v }))
+                  }}
                 />
               </View>
             </View>

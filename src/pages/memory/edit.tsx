@@ -587,9 +587,8 @@ export default function MemoryEditPage() {
           value={content}
           placeholder="写下今天的小发现 / 心得 / 感悟"
           maxlength={2000}
-          // ⚠️ 打字只写 ref、不 setState（每打一个字 setData 一次 ⇒ 光标落末尾）
-          onInput={(e) => { contentRef.current = e.detail.value }}
-          onBlur={(e) => setContent(e.detail.value)}
+          // ⚠️ 必须当场 setState：下发的 value 只有等于原生文本，微信才不重建文本、不动光标
+          onInput={(e) => { setContent(e.detail.value); contentRef.current = e.detail.value }}
           className="bg-muted rounded-xl p-3 text-sm"
           style={{ width: '100%', height: '160px' }}
         />

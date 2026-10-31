@@ -413,7 +413,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               focus={caret.focus}
               // ⚠️ 打字只写 ref，不 setState（否则每打一个字页面就 setData 一次，
               //    原生 textarea 按 value 重建文本、光标落末尾 —— 第十轮的根因）
-              onInput={(e) => { editingRef.current = e.detail.value; caret.track(e.detail.cursor, e.detail.value) }}
+              // ⚠️ 必须当场 setState：下发的 value 只有等于原生文本，微信才不动光标
+              onInput={(e) => { setEditing(e.detail.value); editingRef.current = e.detail.value; caret.track(e.detail.cursor, e.detail.value) }}
               // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
               // （否则符号会插到上一次打字处，思傅 2026-10-29）
               onBlur={(e) => {

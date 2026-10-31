@@ -575,7 +575,10 @@ export default function DetailPage() {
               maxlength={-1}
               cursor={qCaret.cursor}
               focus={qCaret.focus}
-              onInput={(e) => { qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
+              // ⚠️ 必须当场 setState（2026-10-31 第十一轮实测结论）：
+              //    下发的 value 只要等于原生文本，微信就不会重建文本、不会动光标；
+              //    藏进 ref 反而会让 state 滞后 ⇒ 下一次 commit 下发旧值 ⇒ 覆盖用户输入。
+              onInput={(e) => { setQContent(e.detail.value); qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
               // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
               // 失焦还要把受控 focus 一起落下，否则状态与原生不一致，用户会收不起键盘
@@ -628,7 +631,8 @@ export default function DetailPage() {
             value={answerDraft}
             cursor={aCaret.cursor}
             focus={aCaret.focus}
-            onInput={(v, c) => { aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
+            // ⚠️ 同上：实时同步 state，别藏 ref
+            onInput={(v, c) => { setAnswerDraft(v); aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
             onCaret={(c) => aCaret.track(c)}
             onBlurCaret={(c) => { setAnswerDraft(aDraftRef.current); aCaret.blur(c) }}
             onInsert={insertAnswerSymbol}
@@ -763,7 +767,10 @@ export default function DetailPage() {
             maxlength={-1}
             cursor={qCaret.cursor}
             focus={qCaret.focus}
-            onInput={(e) => { qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
+            // ⚠️ 必须当场 setState（2026-10-31 第十一轮实测结论）：
+              //    下发的 value 只要等于原生文本，微信就不会重建文本、不会动光标；
+              //    藏进 ref 反而会让 state 滞后 ⇒ 下一次 commit 下发旧值 ⇒ 覆盖用户输入。
+            onInput={(e) => { setQContent(e.detail.value); qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
             onBlur={(e) => { setQContent(qDraftRef.current); qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor) }}
             onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
           />
@@ -995,7 +1002,8 @@ export default function DetailPage() {
         <AnswerSolutionEditor
           value={answerDraft}
           cursor={aCaret.cursor}
-          onInput={(v, c) => { aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
+          // ⚠️ 同上：实时同步 state，别藏 ref
+          onInput={(v, c) => { setAnswerDraft(v); aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
           onCaret={(c) => aCaret.track(c)}
           onBlurCaret={(c) => { setAnswerDraft(aDraftRef.current); aCaret.blur(c) }}
           onInsert={insertAnswerSymbol}
