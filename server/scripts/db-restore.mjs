@@ -37,7 +37,7 @@ import {
   superUserUrl,
   withDatabase,
 } from './lib/gk-env.mjs'
-import { BACKUP_DIR, ensurePassphrase, open } from './lib/backup-format.mjs'
+import { BACKUP_DIR, diagnoseDecryptFailure, ensurePassphrase, open } from './lib/backup-format.mjs'
 import { Netdisk } from './lib/netdisk.mjs'
 
 const SERVER_ROOT_FOR_LOG = SERVER_ROOT
@@ -103,8 +103,26 @@ async function resolveSource() {
 }
 
 /** 解密 + 解压 + 解析成 { manifest, rows: Map<table, object[]> } */
-function parseDump(buf, passphrase) {
-  const plainGz = open(buf, passphrase)
+function parseDump(buf, passphrase, label = '') {
+  let plainGz
+  try {
+    plainGz = open(buf, passphrase)
+  } catch (e) {
+    // ⚠️ 「口令代次不对」与「文件损坏」的报错完全相同（都是 GCM 失败），必须补一句区分，
+    //    否则会重演 2026-10-31：把旧口令加密的可用备份误判成损坏而丢弃。
+    const isNetdisk = String(label).startsWith('netdisk:')
+    const name = isNetdisk ? String(label).slice(8) : label ? path.basename(String(label)) : ''
+    const dirs = [BACKUP_DIR]
+    if (label && !isNetdisk && fs.existsSync(String(label))) {
+      dirs.unshift(path.dirname(path.resolve(String(label))))
+    }
+    let hint = ''
+    for (const d of dirs) {
+      hint = name ? diagnoseDecryptFailure(name, passphrase, d) : ''
+      if (hint) break
+    }
+    throw new Error(`${e.message}${hint ? `\n  ${hint}` : ''}`)
+  }
   const ndjson = zlib.gunzipSync(plainGz).toString('utf8')
   const rows = new Map()
   let manifest = null
@@ -257,7 +275,7 @@ async function main() {
 
   let parsed
   try {
-    parsed = parseDump(buf, passphrase)
+    parsed = parseDump(buf, passphrase, label)
   } catch (e) {
     fail(`解析备份失败：${e.message}`)
   }

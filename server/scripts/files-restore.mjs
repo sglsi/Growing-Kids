@@ -19,7 +19,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { ensurePassphrase, open } from './lib/backup-format.mjs'
+import { diagnoseDecryptFailure, ensurePassphrase, open } from './lib/backup-format.mjs'
 
 const argv = process.argv.slice(2)
 const flags = new Set(argv.filter((a) => a.startsWith('--')))
@@ -56,7 +56,13 @@ let payload
 try {
   payload = open(sealed, passphrase)
 } catch (e) {
-  console.error(`❌ 解密失败：${e?.message || e}\n   口令不对，或文件被改过（GCM 完整性校验未通过）。`)
+  // 区分「旧口令加密」与「文件真损坏」——两者的 GCM 报错完全相同
+  const hint = diagnoseDecryptFailure(
+    path.basename(String(file)),
+    passphrase,
+    path.dirname(path.resolve(String(file))),
+  )
+  console.error(`❌ 解密失败：${e?.message || e}\n   ${hint || '口令不对，或文件被改过（GCM 完整性校验未通过）。'}`)
   process.exit(1)
 }
 console.log(`[files-restore] 解密成功，归档 ${(payload.length / 1024 / 1024).toFixed(1)} MB`)

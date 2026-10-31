@@ -26,19 +26,34 @@ const PCS_SUPERFILE = 'https://d.pcs.baidu.com/rest/2.0/pcs/superfile2'
 
 const TOKEN_ERRNOS = new Set([111, -6, 2, 10])
 const REQ_TIMEOUT_MS = Number(env('BAIDU_TIMEOUT_MS', '30000'))
-const UPLOAD_TIMEOUT_MS = Number(env('BAIDU_UPLOAD_TIMEOUT_MS', '180000'))
-// 百度 superfile2 的约定：每片必须正好 4 MB（最后一片可不足）
-// 分片大小固定 4MB —— 这是百度网盘对**普通用户**的硬性规定，不是我们拍的：
-// 官方《创建文件》接口文档（错误码 31365「文件总大小超限」）原文：
-//   · 普通用户：单个分片大小**固定为 4MB**，单文件上限 4GB
-//   · 普通会员：分片上限 16MB，单文件 10GB
-//   · 超级会员：分片上限 32MB，单文件 20GB
-//   · 分片数量上限 1024
-// 踩过的坑：曾经把整个文件当一个分片上传（单片最大 = 文件本身），
-// 176KB 的数据库备份能过，66MB 的文件备份必返 `error_code: -1` 且**响应体为空**（排障抓瞎）。
-// 改成 4MB 分片后 66MB 文件 133 秒传完。若将来账号升级为会员，可放宽到 16/32MB 提速，
-// 但必须同步确认分片数不超 1024。
-const PART_SIZE = 4 * 1024 * 1024
+// 32MB 单片在窄带宽下可能上到 1~2 分钟，给足 5 分钟；4MB 时根本用不满
+const UPLOAD_TIMEOUT_MS = Number(env('BAIDU_UPLOAD_TIMEOUT_MS', '300000'))
+/**
+ * 分片大小 —— 百度 superfile2 的硬规定，不是我们拍的。
+ * 官方《创建文件》接口文档（错误码 31365「文件总大小超限」）原文：
+ *   · 普通用户：单个分片大小**固定为 4MB**，单文件上限 4GB
+ *   · 普通会员：分片上限 16MB，单文件 10GB
+ *   · 超级会员：分片上限 32MB，单文件 20GB
+ *   · 分片数量上限 1024
+ *
+ * ⚠️ 2026-10-31 事故：曾经把整个文件当一个分片上传（单片最大 = 文件本身），
+ *    176KB 的数据库备份能过，66MB 的文件备份必返 `error_code: -1` 且**响应体为空**（排障抓瞎）。
+ *
+ * 现行策略（2026-10-31 调整）：账号确认为**超级会员**，默认取 32MB。
+ * 但会员失效/降级时 32MB 会被服务端拒绝，所以 upload() 内置**整轮降级**：
+ * 大分片失败 → 自动换 4MB 重传一遍，绝不让备份因为分片档位而失败。
+ */
+const MAX_PART_SIZE = 32 * 1024 * 1024 // 超级会员档上限
+const FLOOR_PART_SIZE = 4 * 1024 * 1024 // 普通用户档（兜底）
+const MAX_PARTS = 1024 // 百度硬上限：片数不能超过它
+
+/** 读 BAIDU_PART_SIZE_MB（默认 32），夹在 [64KB, 32MB] 之间；非法值回落 32MB */
+function configuredPartSize() {
+  const mb = Number(env('BAIDU_PART_SIZE_MB', '32'))
+  if (!Number.isFinite(mb) || mb <= 0) return MAX_PART_SIZE
+  const bytes = Math.round(mb * 1024 * 1024)
+  return Math.min(Math.max(bytes, 64 * 1024), MAX_PART_SIZE)
+}
 
 export class Netdisk {
   /** @param {string} root 绝对目录，默认 /apps/GrowingKids/GrowingKids备份 */
@@ -150,13 +165,36 @@ export class Netdisk {
    */
   async upload(fileName, buffer) {
     if (!this.enabled()) throw new Error(`百度网盘未启用（缺 ${this.missingKeys().join(' / ')}）`)
+    const partSize = configuredPartSize()
+    try {
+      return await this.uploadWithPartSize(fileName, buffer, partSize)
+    } catch (e) {
+      // 会员降级 / 大分片被拒时的兜底：换最小档重传一整轮，别让备份挂掉
+      if (partSize <= FLOOR_PART_SIZE) throw e
+      console.warn(
+        `[netdisk] ${(partSize / 1048576).toFixed(0)}MB 分片失败，降级 4MB 重传：` +
+          String(e?.message || e).slice(0, 160),
+      )
+      return await this.uploadWithPartSize(fileName, buffer, FLOOR_PART_SIZE)
+    }
+  }
+
+  async uploadWithPartSize(fileName, buffer, partSize) {
     await this.ensureDir(this.root)
     const absPath = `${this.root}/${fileName}`
     const size = buffer.length
+    const partCount = Math.ceil(size / partSize)
+    if (partCount > MAX_PARTS) {
+      throw new Error(
+        `分片数 ${partCount} 超过百度上限 ${MAX_PARTS}` +
+          `（文件 ${(size / 1048576).toFixed(1)}MB / 分片 ${(partSize / 1048576).toFixed(0)}MB）` +
+          `，请调大 BAIDU_PART_SIZE_MB 或拆分文件`,
+      )
+    }
 
     const parts = []
-    for (let off = 0; off < size; off += PART_SIZE) {
-      const chunk = buffer.subarray(off, Math.min(off + PART_SIZE, size))
+    for (let off = 0; off < size; off += partSize) {
+      const chunk = buffer.subarray(off, Math.min(off + partSize, size))
       parts.push({ seq: parts.length, md5: createHash('md5').update(chunk).digest('hex'), chunk })
     }
     const blockList = parts.map((p) => p.md5)

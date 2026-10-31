@@ -25,6 +25,8 @@
  *   node scripts/files-backup.mjs --keep 6          保留 6 份（默认 6）
  *   node scripts/files-backup.mjs --out /var/lib/gk/backups
  *   node scripts/files-backup.mjs --quiet           只输出一行 JSON（计划任务用）
+ *   node scripts/files-backup.mjs --new-passphrase  已有备份但口令确实丢了、确认弃旧时才用
+ *                                                   （自动生成新口令 = 让旧备份永久作废，故须显式确认）
  *
  * 退出码：0 成功 ｜ 1 致命失败 ｜ 2 本地成功但网盘上传失败（需人工关注）
  */
@@ -33,7 +35,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { env, SERVER_ROOT } from './lib/gk-env.mjs'
-import { ensurePassphrase, open, seal } from './lib/backup-format.mjs'
+import { ensurePassphrase, open, recordFingerprint, seal } from './lib/backup-format.mjs'
 import { Netdisk } from './lib/netdisk.mjs'
 
 const argv = process.argv.slice(2)
@@ -47,6 +49,8 @@ function opt(name, fallback) {
 
 const NO_UPLOAD = flag('no-upload')
 const QUIET = flag('quiet')
+// 与 db-backup 对齐：已有备份但口令确实丢了、且确认弃旧时，才允许换锁
+const NEW_PASSPHRASE = flag('new-passphrase')
 const KEEP = Math.max(1, Number(opt('keep', '6')) || 6)
 const OUT_DIR = path.resolve(opt('out', path.join(SERVER_ROOT, 'backups')))
 const SRC_DIR = path.resolve(opt('src', env('STORAGE_LOCAL_DIR', '/var/lib/gk/storage')))
@@ -129,7 +133,9 @@ function main() {
   log(`[files-backup] tar.gz 完成 ${(payload.length / 1024 / 1024).toFixed(1)} MB`)
 
   // ③ 加密（归档含全部用户上传的原始图片/文档，落消费级网盘前必须先加密）
-  const { passphrase } = ensurePassphrase(true, { extraDirs: [OUT_DIR] })
+  // ⚠️ 缺口令且已有历史备份时 ensurePassphrase 会**抛错**（防止静默换锁让旧备份全废），
+  //    确认弃旧才加 --new-passphrase。
+  const { passphrase } = ensurePassphrase(true, { extraDirs: [OUT_DIR], allowReplace: NEW_PASSPHRASE })
   const sealed = seal(payload, passphrase)
 
   // ④ 落盘：先 .tmp 再原子改名
@@ -141,6 +147,8 @@ function main() {
   fs.renameSync(tmpPath, filePath)
   tmpPath = ''
   log(`[files-backup] 已写入 ${filePath}（${(sealed.length / 1024 / 1024).toFixed(1)} MB）`)
+  // 口令代次指纹：解密失败时用来区分"旧口令"与"文件损坏"
+  recordFingerprint(fileName, passphrase, OUT_DIR)
 
   // ⑤ 读回自检：解密 → 让 tar 列出清单 → 文件数必须和源目录一致
   const unsealed = open(fs.readFileSync(filePath), passphrase)

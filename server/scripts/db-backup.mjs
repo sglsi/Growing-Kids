@@ -39,7 +39,7 @@ import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import pg from 'pg'
 import { backupDatabaseUrl, env, maskUrl, pgConfig, PROJECT_ROOT, SERVER_ROOT } from './lib/gk-env.mjs'
-import { BACKUP_DIR, ensurePassphrase, open, seal } from './lib/backup-format.mjs'
+import { BACKUP_DIR, ensurePassphrase, open, recordFingerprint, seal } from './lib/backup-format.mjs'
 import { Netdisk } from './lib/netdisk.mjs'
 
 // ---------------- 参数 ----------------
@@ -234,6 +234,8 @@ async function main() {
     fs.renameSync(tmpPath, filePath)
     tmpPath = ''
     log(`[backup] 已写入 ${filePath}（${(sealed.length / 1024).toFixed(1)} KB）`)
+    // 记下这份备份用的口令代次指纹：以后解密失败时能分清"口令不对"与"文件真坏了"
+    recordFingerprint(fileName, passphrase, OUT_DIR)
 
     // ⑥ 读回自检：解密 → 解压 → 比对 sha256。"有大小"不等于"能恢复"
     const unsealed = open(fs.readFileSync(filePath), passphrase)

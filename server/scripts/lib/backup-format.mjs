@@ -118,9 +118,80 @@ export function ensurePassphrase(allowCreate = true, options = {}) {
   return { passphrase, created: true }
 }
 
+/**
+ * 口令指纹：sha256(口令) 的前 12 位十六进制。
+ *
+ * 存在理由（2026-10-31 事故的直接教训）：口令被静默换掉后，老备份的解密报错是
+ * GCM 校验失败 —— 与「文件真的损坏」**完全同一个报错**，于是被误判成文件损坏，
+ * 白白丢掉 5 份本来可能救回的备份。
+ * 记下每份备份的口令指纹后，恢复时能一句话分清：
+ *   · 文件指纹 ≠ 当前口令指纹 ⇒ **口令代次不对**（找回旧口令即可恢复）
+ *   · 文件指纹 = 当前口令指纹 ⇒ 才是真的文件损坏
+ * 43 字符随机口令无法从 12 位指纹反推，指纹本身不含可用信息。
+ */
+export function passphraseFingerprint(passphrase) {
+  return crypto.createHash('sha256').update(String(passphrase)).digest('hex').slice(0, 12)
+}
+
+const FINGERPRINT_HEADER =
+  '# 备份文件\t口令指纹\t写入时间\n' +
+  '# 指纹 = sha256(口令) 前 12 位；恢复失败时用它区分「口令代次不对」与「文件真损坏」\n'
+
+/** 把「文件名 → 口令指纹」追加到 dir/KEY-FINGERPRINTS.txt；失败只告警，绝不影响备份 */
+export function recordFingerprint(fileName, passphrase, dir = BACKUP_DIR) {
+  try {
+    const file = path.join(dir, 'KEY-FINGERPRINTS.txt')
+    fs.mkdirSync(dir, { recursive: true })
+    if (!fs.existsSync(file)) fs.writeFileSync(file, FINGERPRINT_HEADER, 'utf8')
+    if (fs.readFileSync(file, 'utf8').includes(`\n${fileName}\t`)) return // 幂等
+    const line = `${fileName}\t${passphraseFingerprint(passphrase)}\t${new Date().toISOString()}\n`
+    fs.appendFileSync(file, line, 'utf8')
+  } catch (e) {
+    console.error('[backup] 记录口令指纹失败（不影响备份本身）', e?.message || e)
+  }
+}
+
+/** 查某份备份记录的口令指纹；无记录返回 '' */
+export function recordedFingerprint(fileName, dir = BACKUP_DIR) {
+  try {
+    const file = path.join(dir, 'KEY-FINGERPRINTS.txt')
+    if (!fs.existsSync(file)) return ''
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      if (!line || line.startsWith('#')) continue
+      const [name, fp] = line.split('\t')
+      if (name === fileName) return fp || ''
+    }
+  } catch {
+    /* 读不到就当没记录 */
+  }
+  return ''
+}
+
+/** 解密失败时的有区分度诊断；无指纹记录返回 ''（表示无法判断） */
+export function diagnoseDecryptFailure(fileName, passphrase, dir = BACKUP_DIR) {
+  const expected = recordedFingerprint(fileName, dir)
+  if (!expected) {
+    // 指纹台账是 2026-10-31 才加的，此前的备份没有登记 ⇒ 无法自动比对代次。
+    // 但「说不出一句话」本身就是坑：恢复脚本会把空串当成"没有额外信息"直接略过。
+    return (
+      '该文件未登记口令指纹（生成于指纹台账启用之前），无法自动判断代次。\n' +
+      '  ⇒ 若手头有历史口令副本（KEY-ESCROW.txt / 密码管理器 / 截图），可用\n' +
+      '    `node scripts/recover-export.mjs --file <该文件> --from-desktop` 逐个候选口令试解；\n' +
+      '    解开了会自动补登指纹，下次就不再靠猜。'
+    )
+  }
+  const actual = passphraseFingerprint(passphrase)
+  if (expected !== actual) {
+    return (
+      `口令代次不匹配：该备份用「${expected}」代口令加密，当前口令是「${actual}」代。\n` +
+      '  ⇒ 文件本身大概率完好，找回旧口令即可恢复（查 KEY-ESCROW.txt 历史副本 / 密码管理器）。'
+    )
+  }
+  return `口令指纹一致（${actual}）但 GCM 仍失败 ⇒ 这才是真的文件损坏或被改动过。`
+}
+
 /** 加密：返回完整文件 Buffer */
-export function seal(plainBuffer, passphrase) {
-  const salt = crypto.randomBytes(SALT_LEN)
+export function seal(plainBuffer, passphrase) {  const salt = crypto.randomBytes(SALT_LEN)
   const iv = crypto.randomBytes(IV_LEN)
   const key = deriveKey(passphrase, salt)
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
