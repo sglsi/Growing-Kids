@@ -161,8 +161,35 @@ export interface ToolOcrResult {
   stderr?: string
 }
 
+/**
+ * ppsv3 并发闸门（串行排队，不拒绝）。
+ *
+ * 每次 `--once` 都是全新 python 进程，峰值 RSS 实测：3.3.1 关 oneDNN ≈1333MB、
+ * **3.2.2 开 oneDNN ≈1790MB**。生产机总内存 3723MB，两路并发 ≈3.6GB ⇒ OOM Killer
+ * 出手（会挑最大的进程杀，可能连带打死同 cgroup 的 node）。故 ppsv3 强制串行，
+ * 与 rapid 常驻进程的串行队列同思路：单模型实例、排队而非并发。
+ *
+ * ⚠️ 链尾必须吞掉异常——否则一次失败会让整条 Promise 链变成 rejected，
+ *    后续所有请求全部秒失败（典型「一个坏请求冻死整条链路」）。
+ */
+let ppsv3Chain: Promise<unknown> = Promise.resolve()
+function withPpsv3Gate<T>(fn: () => Promise<T>): Promise<T> {
+  const run = ppsv3Chain.then(fn, fn)
+  ppsv3Chain = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
+
 /** 一次性工具式调用（每次独立子进程，崩/卡只影响当次，可被硬超时 SIGKILL 中断）。 */
 export function toolOcrOnce(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
+  // 仅 ppsv3 受闸门约束；legacy(rapid) 走常驻预热进程，不 spawn 一次性重型进程
+  if ((opts.engine ?? 'legacy') !== 'ppsv3') return toolOcrOnceInner(imageBuf, opts)
+  return withPpsv3Gate(() => toolOcrOnceInner(imageBuf, opts))
+}
+
+function toolOcrOnceInner(imageBuf: Buffer, opts: ToolOcrOpts): Promise<ToolOcrResult> {
   const t0 = Date.now()
   const engine: ToolEngine = opts.engine ?? 'legacy'
   const { dir, script } = resolveEngine(engine)
