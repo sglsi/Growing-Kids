@@ -69,7 +69,12 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
 
       <Card className="rounded-2xl border-border p-4 mb-2">
         <Textarea
-          className="min-h-32 border-0 ring-0 focus-within:ring-0 rounded-xl"
+          className="border-0 ring-0 focus-within:ring-0 rounded-xl"
+          // autoHeight：答案/解题过程动辄几十行，固定 128px 高度意味着长按选一段文字时
+          // 要靠在原生组件内部滚动，选择手柄和文字对不上（思傅 2026-10-31「选择很不方便」）。
+          // 改成随内容长高、滚动交给外层页面，手感与微信聊天输入框一致。
+          autoHeight
+          style={{ minHeight: 128 }}
           value={value}
           placeholder="先写答案，另起一行写「解析：」再写解题过程（长度不限，1/2、√3、x² 等写法都认）"
           maxlength={-1}

@@ -176,7 +176,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       const next = cur.slice(0, pos) + plain + cur.slice(pos)
       setEditing(next)
       if (mode !== 'edit') setMode('edit')
-      caret.request(marker >= 0 ? pos + marker : pos + plain.length)
+      caret.request(marker >= 0 ? pos + marker : pos + plain.length, next.length)
       // 插入后把输入态还回去，否则每插一个符号都要再点一次输入框（思傅 2026-10-29）
       caret.refocus()
     }, 60)
@@ -387,12 +387,18 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <Textarea
               className="w-full rounded-xl border border-border p-3 text-sm"
               style={{ minHeight: 72, backgroundColor: '#fff' }}
+              // 与 ui/textarea 保持同一套手机输入手感（思傅 2026-10-31）：
+              // 光标离键盘 24px、键盘上方留「完成」栏、键盘弹起时页面上推。
+              // 这里不启用 autoHeight —— 它挂在底部弹层里，长高会和弹层高度打架。
+              cursorSpacing={24}
+              showConfirmBar
+              adjustPosition
               placeholder="输入正确答案（1/2、√3、x² 等写法即可，或点上方符号面板）"
               value={editing}
               maxlength={-1}
               cursor={caret.cursor}
               focus={caret.focus}
-              onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor) }}
+              onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor, e.detail.value.length) }}
               // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
               // （否则符号会插到上一次打字处，思傅 2026-10-29）
               onBlur={(e) => { caret.track((e.detail as { cursor?: number } | undefined)?.cursor); caret.blur() }}
