@@ -83,6 +83,11 @@ export default function IndexPage() {
   const restoreItemIdRef = useRef<string>('')
   /** 用户在恢复过程中自己滚了一下 → 立刻放弃自动校正，别跟用户抢滚动条 */
   const restoreCancelledRef = useRef(false)
+  /**
+   * 离开首页去详情时，被点题目相对列表顶部的偏移（px）。
+   * 返回后按同一偏移还原 —— 还原的是"视觉位置"，不是"滚到顶部"（见 handleOpen 注释）。
+   */
+  const restoreAnchorRef = useRef(8)
   const [savingEdit, setSavingEdit] = useState(false)
   /**
    * 在途 load 计数（思傅 2026-10-29）：骨架屏由「最后一个请求」解除。
@@ -99,20 +104,26 @@ export default function IndexPage() {
   const sel = useSelection()
 
   /**
-   * 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位）。
+   * 按题目 id 把列表还原到「离开时这道题在屏幕上的位置」（Taro 受控 scrollTop：
+   * 值不变不触发滚动，故先偏移再归位）。
    *
-   * ⚠️ 为什么是「测量 → 定位 → 隔一会儿再测」的闭环，而不是一次算准（思傅 2026-10-31
-   * 「从详情返回后列表位置向上滑了约 2 个题」）：
+   * ⚠️ 锚点为什么是「相对偏移」而不是「滚到顶部」（思傅 2026-10-31 两次反馈）：
+   *   第一次报「返回后向上滑了约 2 个题」，修成闭环校正后变成「还滑 1 个题位」——
+   *   因为剩下的偏差不是抖动，而是**锚点选错了**：用户点的题通常在屏幕中部，
+   *   把它滚到顶部本身就让内容整体上移了"它原来离顶部那段距离"。
+   *   现在锚点取离开时的 `it.top - sv.top`（视觉位置），返回后还原同一个值，
+   *   用户的感受就是"没动过"。
+   *
+   * ⚠️ 为什么还要「测量 → 定位 → 隔一会儿再测」的闭环，而不是一次算准：
    *   一次测量算出的 scrollTop 只在「此刻的布局」下正确。而返回首页这一瞬间，列表里的
    *   缩略图还在解码、题面文字还在换行重算、状态徽标（已答/未答）可能刚从旧值刷成新值 ——
-   *   目标题上方的卡片会**继续变高**，于是定位完再回头看，目标题已经被顶到视口外，
-   *   屏幕上显示的是它前面那几题（看起来就是"位置往上滑了两道题"）。
+   *   目标题**上方**的卡片会继续变高，于是定位完再回头看，视觉位置又偏了。
    *   所以定位后隔 120ms 复测一次，偏差 > 2px 就再修一次，直到收敛或用尽次数。
    *
    * 另外两条：节点还没渲染出来（数据刚回、列表正在重建）时**重试**而不是直接放弃；
    * 用户一旦自己动了滚动条就立刻停手（restoreCancelledRef），不能跟用户抢。
    */
-  const scrollToItemById = (id: string, extra = 8, attempt = 0) => {
+  const scrollToItemById = (id: string, anchor = restoreAnchorRef.current, attempt = 0) => {
     if (restoreCancelledRef.current) return
     const q = Taro.createSelectorQuery()
     q.select('#list-scroll').scrollOffset()
@@ -125,12 +136,12 @@ export default function IndexPage() {
       const it = res?.[2] as { top: number } | null
       if (!so || !sv || !it) {
         if (attempt < RESTORE_MAX_ATTEMPTS) {
-          setTimeout(() => scrollToItemById(id, extra, attempt + 1), 120)
+          setTimeout(() => scrollToItemById(id, anchor, attempt + 1), 120)
         }
         return
       }
-      // 目标项相对 ScrollView 顶部的偏移，减去想留出的呼吸位
-      const delta = (it.top - sv.top) - extra
+      // 目标项当前相对容器顶部的偏移 vs 想还原的偏移（离开时的视觉位置）
+      const delta = (it.top - sv.top) - anchor
       if (Math.abs(delta) <= 2 || attempt >= RESTORE_MAX_ATTEMPTS) return
       const target = Math.max(0, so.scrollTop + delta)
       // 双帧：先偏移 1px 再归位，强制 Taro 认为 scrollTop 变了（值相同不触发滚动）
@@ -138,7 +149,7 @@ export default function IndexPage() {
       setTimeout(() => {
         if (restoreCancelledRef.current) return
         setScrollTop(target)
-        setTimeout(() => scrollToItemById(id, extra, attempt + 1), 120)
+        setTimeout(() => scrollToItemById(id, anchor, attempt + 1), 120)
       }, 40)
     })
   }
@@ -485,14 +496,40 @@ export default function IndexPage() {
   /**
    * 点列表（功能按键以外的区域）→ 进题目详情（思傅 2026-10-21 规则）。
    * 点图**片**的走 openEditor（打开图片并可编辑），不进详情。
+   *
+   * ⚠️ 返回后要还原的是「这道题当时在屏幕上的**位置**」，不是「滚到它顶部」
+   * （思傅 2026-10-31 第二次反馈「返回后还是向上滑了约 1 个题位」）：
+   * 用户点的题往往在屏幕中部，若返回时把它滚到顶部，内容整体上移 ——
+   * 偏差正好就是"它原来离顶部多远"，看起来就是"滑了 1~2 个题"。
+   * 所以离开前先量下它相对列表顶部的偏移，回来按同一个偏移还原。
    */
   const handleOpen = (item: TimelineItem) => {
     if (sel.selecting) { sel.toggle(item.id); return }
-    // 记录点的是哪道题，回来时按 id 锚回原题（而非像素偏移 → 列表重排也不跑偏）
+    // 记录点的是哪道题，回来时按 id 找回它（列表重排也不会找错题）
     restoreItemIdRef.current = item.id
     restoredRef.current = false
     restoreCancelledRef.current = false
-    Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
+
+    let navigated = false
+    const go = () => {
+      if (navigated) return
+      navigated = true
+      Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
+    }
+    const q = Taro.createSelectorQuery()
+    q.select('#list-scroll').boundingClientRect()
+    q.select(`#tl-item-${item.id}`).boundingClientRect()
+    q.exec((res: any) => {
+      const sv = res?.[0] as { top: number } | null
+      const it = res?.[1] as { top: number } | null
+      if (sv && it) {
+        // 夹到 >=0：点在列表最上面那道题时 it.top 可能略高于容器顶，负数没意义
+        restoreAnchorRef.current = Math.max(0, Math.round(it.top - sv.top))
+      }
+      go()
+    })
+    // 兜底：查询回调不返回也要能进详情，绝不能让点击失灵
+    setTimeout(go, 60)
   }
 
   /** 点列表里的图片 → 直接打开该图片（可编辑） */
