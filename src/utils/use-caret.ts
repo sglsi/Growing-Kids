@@ -14,7 +14,9 @@ import { decideBlurCursor, decideInputCursor } from './caret-decision'
  *   3. 这个 cursor **必须自己算**：`diffCursor(上一次文本, 这一次文本)`。
  *      `detail.cursor` 不可信（社区实证：中间输入时它报的就是错位置），
  *      而文本差值是确定的 —— "公共前缀之后、公共后缀之前"就是本次编辑点。
- *   4. **组词期间一个字都不写**（那时文本是拼音串，差值算的是拼音位置）。
+ *   4. **组词中不是整体跳过**：末尾追加不写（平台光标本来就在末尾），
+ *      中间编辑照写（否则 value 会把光标甩到末尾 —— 英文打标点/空格就栽在这）。
+ *      判据只看"位置是否在末尾"，不看 composition 标志的时序。
  *
  * ## 对外契约
  *   1. `track(cursor?, value?)`：onInput / onFocus 里调用。给了 value 就按差值
@@ -80,13 +82,18 @@ export function useCaret(): Caret {
    * "变了的属性"放进 setData（`dist/taro.js` 的 prepareUpdate），cursor 值不变
    * 就不会被下发 —— 而这一批里 value 变了，光标照样被甩到末尾，于是"中间插入一个字
    * 后光标跳到末尾"。所以先落到相邻位置，20ms 后归位；相邻一格用户看不见。
+   *
+   * @param quiet 组词中用的安静模式：值没变就**什么都不做**（不制造 ±1 抖动）。
+   *   组词期间每多一次 setData 都可能打断输入法候选，而那时平台自己维护的光标
+   *   本来就是对的，没必要为"制造变化"付这个代价。
    */
-  const applyShot = useCallback((pos: number, len?: number) => {
+  const applyShot = useCallback((pos: number, len?: number, quiet = false) => {
     let p = Math.round(pos)
     if (typeof len === 'number' && len >= 0) p = Math.min(p, len)
     p = Math.max(0, p)
 
     if (p === shotRef.current) {
+      if (quiet) return
       const stagger = p > 0 ? p - 1 : 1
       shotRef.current = stagger
       setShot(stagger)
@@ -117,11 +124,13 @@ export function useCaret(): Caret {
     // 组词期也更新基准：整段组词会被下一次差值当成一次编辑，位置依然算得对
     prevValueRef.current = value
 
-    const next = decideInputCursor(prev, value, cursor, live.current, composingRef.current)
-    // next === null：组词中 / 文本没变 / 无任何可用信息 —— 这一拍不动 cursor
+    const composing = composingRef.current
+    const next = decideInputCursor(prev, value, cursor, live.current, composing)
+    // next === null：文本没变 / 组词中的末尾追加 / 无任何可用信息 —— 这一拍不动 cursor
     if (next === null) return
     live.current = next
-    applyShot(next, value.length)
+    // 组词中走安静模式：值没变就不写，避免为"制造变化"多打两次 setData 打断输入法
+    applyShot(next, value.length, composing)
   }, [applyShot])
 
   const request = useCallback((pos: number, value?: string) => {
@@ -145,7 +154,14 @@ export function useCaret(): Caret {
 
   const blur = useCallback((cursor?: number) => {
     setFocused(false)
-    if (composingRef.current) return
+    /**
+     * ⚠️ 失焦时**强制清掉组词标志**（原来是 `if (composingRef.current) return`)。
+     *
+     * 有些输入法只发 `compositionstart` 不发 `compositionend`（英文键盘提交单词时
+     * 尤其常见）。标志一旦卡在 true，之后所有输入都会被判成"组词中"，
+     * 光标就再也纠不回来了 —— 而输入框已经失焦，物理上不可能还在组词。
+     */
+    composingRef.current = false
     if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
     // 失焦也要写：写下真实位置，重新聚焦才落在用户离开处
     const next = decideBlurCursor(live.current >= 0 ? live.current : undefined)

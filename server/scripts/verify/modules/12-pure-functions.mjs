@@ -165,11 +165,13 @@ m.test('单编：src/utils/caret-decision.ts（光标决策，零 import 契约�
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
 })
 
-// 光标规则连报五次（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 / 10-31 只补删除 /
-// 10-31 钉 detail.cursor 仍跳 / 10-31 不下发 value 导致真机输入失效）。
+// 光标规则连报六次（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 / 10-31 只补删除 /
+// 10-31 钉 detail.cursor 仍跳 / 10-31 不下发 value 导致真机输入失效 /
+// 10-31 组词期间整体跳过导致英文打标点空格后跳末尾）。
 // 现在钉死的口径：**cursor 必须自己按文本差值算**，不能信 detail.cursor；
-// 组词期间一律不写；任何分支不得返回 -1。每次退回这条老路都是一轮真机事故。
-m.test('🔴 decideInputCursor：按文本差值算光标，组词期间不写，任何分支不得返回 -1', async (c) => {
+// 组词中按"位置是否在末尾"分流（末尾追加不写、中间编辑必须写）；
+// 任何分支不得返回 -1。每次退回这条老路都是一轮真机事故。
+m.test('🔴 decideInputCursor：按文本差值算光标，组词中只放行中间编辑，任何分支不得返回 -1', async (c) => {
   const D = CARET.decideInputCursor
 
   // 无基准（首次输入）：只能用事件值兜底，并钳到长度
@@ -186,9 +188,21 @@ m.test('🔴 decideInputCursor：按文本差值算光标，组词期间不写�
   // 文本没变（纯光标移动）：不下发
   c.eq(D('ab', 'ab', 1, 1, false), null, '文本没变时不该写 cursor')
 
-  // 组词中：一律不写（写下去会拽走拼音光标）
-  c.eq(D('ab', 'abn', 3, 2, true), null, '组词中不该写 cursor')
+  // 组词中 · 末尾追加（拼音串、候选上屏）：不写 —— 平台光标本来就在末尾，
+  // 写只是多一次 setData，反而可能打断输入法（第 1 版"拽走组词光标"就是这类）
+  c.eq(D('ab', 'abn', 3, 2, true), null, '组词中的末尾追加不该写 cursor')
   c.eq(D(null, 'abc', 3, -1, true), null, '组词中即使无基准也不该写')
+
+  // 组词中 · 中间编辑：必须写 —— 英文输入法的"空格/标点提交当前词"走这条路，
+  // composition 边沿与 input 的先后顺序不可预期，靠标志判断必然漏（第 6 次事故）
+  c.eq(D('hello world', 'hello, world', 99, 5, true), 6, '组词中在中间打标点必须纠正光标')
+  c.eq(D('hello world', 'hello world ', 99, 11, true), null, '组词中末尾加空格不该写（末尾追加）')
+  c.eq(D('hello, world', 'hello world', 99, 6, true), 5, '组词中中间退格必须纠正光标')
+  c.eq(
+    D('teh cat', 'the cat', 99, 3, true),
+    3,
+    '组词中自动纠正（同长度替换）也必须纠正光标',
+  )
 
   // 不变式：任何分支都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
   for (const prev of [null, '', 'abc', 'aaaa'])
