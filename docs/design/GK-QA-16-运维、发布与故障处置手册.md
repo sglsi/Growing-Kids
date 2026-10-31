@@ -1058,6 +1058,21 @@ pnpm build:weapp && node scripts/release-check.mjs --prepare   # 构建 + 切发
 
 改用 DHCP 时，**真机后端地址会随局域网 IP 变化** ⇒ `.env.local` 的 `PROJECT_DOMAIN` 必须同步更新并**重建前端**。
 
+不要手改 `.env.local`（它是编译期常量，改了忘重建 = 打出来的包还是旧地址，且没有任何报错）。用脚本：
+
+```bash
+pnpm api:status      # 看当前指向（并说明是哪个预设）
+pnpm api:lan         # 局域网 192.168.3.242:3001（日常开发）
+pnpm api:cloud       # 腾讯云 42.192.36.120（备案前联调）
+pnpm build:weapp     # ⚠️ 切完必须重建，然后开发者工具「重新编译」+ 真机重扫码
+```
+
+也可以直接 `node scripts/switch-api.mjs https://deep-root.cn` 切任意地址（备案+证书下来后走这条）。
+
+⚠️ **云端 IP 这条路只用于调试**：微信域名白名单只接受 HTTPS 域名，**IP 永远填不进去** ⇒
+开发者工具要勾「详情 → 本地设置 → 不校验合法域名」，真机用「···→ 开发调试」放开；
+**体验版/正式版必须等 `https://deep-root.cn` 的备案 + 证书就绪**。
+
 ---
 
 ## 8. 回滚方案
