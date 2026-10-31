@@ -1,5 +1,5 @@
 import { View, Text, ScrollView } from '@tarojs/components'
-import Taro from '@tarojs/taro'
+import Taro, { useRouter } from '@tarojs/taro'
 import { useState } from 'react'
 import {
   POLICY_CONSENT_STORAGE_KEY,
@@ -12,12 +12,17 @@ import { hasAgreedPolicy, markPolicyAgreed } from '@/services/policy-gate'
 /**
  * 隐私政策页（OPS-18 R-合规-03）。
  *
- * 三个入口都指向这里：
+ * 四个入口都指向这里：
  *  - 首屏「查看隐私政策」链接（components/policy-consent）
  *  - 「我的 → 隐私与账号」
  *  - 注销账号前的二次确认
+ *  - **写操作被 `guardPolicy` 拦下时的「去同意」**（`?from=guard`，见 services/policy-gate）：
+ *    这一路要求「同意后自动返回」，否则用户得自己找到返回键，很容易以为流程断了。
  */
 export default function PrivacyPage() {
+  const router = useRouter()
+  /** 是不是被写操作闸门送上来的（决定同意后自动返回） */
+  const fromGuard = router.params?.from === 'guard'
   const [agreed, setAgreed] = useState(() => hasAgreedPolicy())
 
   const agree = () => {
@@ -28,6 +33,17 @@ export default function PrivacyPage() {
       return
     }
     setAgreed(true)
+    if (fromGuard) {
+      // 停在原页会让人以为「点了同意就该继续」，而闸门按设计不会自动重放操作，
+      // 所以先明确告知要再点一次，再退回原页（思傅 2026-10-31）
+      Taro.showToast({ title: '已同意，请重新点击刚才的按钮', icon: 'none', duration: 2500 })
+      setTimeout(() => {
+        Taro.navigateBack().catch(() => {
+          /* 直接从分享卡片进来时会退不动，留在本页即可 */
+        })
+      }, 900)
+      return
+    }
     Taro.showToast({ title: '已记录同意', icon: 'success' })
   }
 
