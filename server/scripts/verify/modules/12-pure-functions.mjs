@@ -149,71 +149,89 @@ m.test('answer-merge：纯文本无标记时整体归入答案', async (c) => {
 })
 
 let CARET = null
+let ECHO = null
 
-m.test('单编：src/utils/caret-decision.ts（光标决策，零 import 契约）', async (c) => {
-  try {
-    compile('src/utils/caret-decision.ts')
-  } catch (e) {
-    const out = `${e.stdout || ''}${e.stderr || ''}`
-    throw new Error(`caret-decision.ts 单编失败（破坏了"零 import"契约）：${out.slice(0, 300)}`)
+m.test('单编：src/utils/caret-decision.ts + textarea-echo.ts（零 import 契约）', async (c) => {
+  for (const f of ['src/utils/caret-decision.ts', 'src/utils/textarea-echo.ts']) {
+    try {
+      compile(f)
+    } catch (e) {
+      const out = `${e.stdout || ''}${e.stderr || ''}`
+      throw new Error(`${f} 单编失败（破坏了"零 import"契约）：${out.slice(0, 300)}`)
+    }
   }
-  const p = path.join(TMP, 'caret-decision.js')
-  c.ok(fs.existsSync(p), '编译产物不存在')
-  CARET = await import(`file://${p.replace(/\\/g, '/')}`)
-  c.ok(typeof CARET.decideInputCursor === 'function', '缺少 decideInputCursor')
+  const pc = path.join(TMP, 'caret-decision.js')
+  const pe = path.join(TMP, 'textarea-echo.js')
+  c.ok(fs.existsSync(pc), 'caret-decision 编译产物不存在')
+  c.ok(fs.existsSync(pe), 'textarea-echo 编译产物不存在')
+  CARET = await import(`file://${pc.replace(/\\/g, '/')}`)
+  ECHO = await import(`file://${pe.replace(/\\/g, '/')}`)
   c.ok(typeof CARET.decideBlurCursor === 'function', '缺少 decideBlurCursor')
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
+  c.ok(typeof ECHO.resolveEchoValue === 'function', '缺少 resolveEchoValue')
+  c.ok(typeof ECHO.recordNativeInput === 'function', '缺少 recordNativeInput')
 })
 
-// 光标规则连报六次（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 / 10-31 只补删除 /
-// 10-31 钉 detail.cursor 仍跳 / 10-31 不下发 value 导致真机输入失效 /
-// 10-31 组词期间整体跳过导致英文打标点空格后跳末尾）。
-// 现在钉死的口径：**cursor 必须自己按文本差值算**，不能信 detail.cursor；
-// 组词中按"位置是否在末尾"分流（末尾追加不写、中间编辑必须写）；
-// 任何分支不得返回 -1。每次退回这条老路都是一轮真机事故。
-m.test('🔴 decideInputCursor：按文本差值算光标，组词中只放行中间编辑，任何分支不得返回 -1', async (c) => {
-  const D = CARET.decideInputCursor
+// 光标问题连报六次的最终结论（2026-10-31 第七轮，由 server/scripts/repro-caret.mjs 复现）：
+//   微信 textarea 的 `value` 一被 setData 就重建文本、**光标落到末尾**；
+//   而 `cursor` 是「**指定 focus 时的光标位置**」—— 输入过程中写它**无效**。
+//   ⇒ 受控输入框每次输入都会把光标甩到末尾且无法纠正。
+//   末尾打字看不出（重置到末尾恰好正确），只有中间编辑暴露 ——
+//   这就是"标点/空格跳、从句尾删正常、中间删有时跳"的全部由来。
+//
+// 治法：**输入期间根本不下发 value**（回声吸收），光标完全交给平台。
+// 下面这组断言就是守住"用户输入的回声不许被下发"这条命根子。
+m.test('🔴 resolveEchoValue：用户输入的回声必须吸收，只有程序化写入才放行', async (c) => {
+  const R = ECHO.resolveEchoValue
+  const S = (native, last) => ({ native, last })
 
-  // 无基准（首次输入）：只能用事件值兜底，并钳到长度
-  c.eq(D(null, 'ab', 2, -1, false), 2, '首次输入应采信事件光标')
-  c.eq(D(null, 'ab', 99, -1, false), 2, '首次输入越界未钳制')
-  c.eq(D(null, 'ab', undefined, -1, false), null, '无任何位置信息时不许猜')
+  // 用户输入：真实顺序是「onInput 先把 native 推进到新值」→「页面 setState」→「渲染」。
+  // 渲染时 incoming 与 native 同值 ⇒ 判为回声 ⇒ 下发值仍是上一次的 last（属性不变）。
+  const afterInput = ECHO.recordNativeInput(S('abc', 'abc'), 'abcd')
+  const echo1 = R(afterInput, 'abcd')
+  c.eq(echo1.value, 'abc', '回声被下发了（这正是光标跳末尾的成因）')
+  c.eq(echo1.echo, true, '未判定为回声')
+  c.eq(echo1.state.native, 'abcd', '回声分支不该推进 native（由 onInput 负责）')
+  c.eq(echo1.state.last, 'abc', '回声分支不该动 last')
 
-  // 有基准：差值优先，事件光标是骗子也不听
-  c.eq(D('ab', 'ab,', 99, 2, false), 3, '末尾打标点应算到末尾，不能听事件报的 99')
-  c.eq(D('abc,xyzdef', 'abc,xyz,def', 99, 7, false), 8, '中间插标点应按差值算（detail.cursor 说谎场景）')
-  c.eq(D('abc,def', 'abc,ef', 99, 7, false), 4, '中间退格应按差值算')
-  c.eq(D('hello', 'hell', 99, 5, false), 4, '末尾退格应按差值算')
+  // 连续输入：last 一直停在最后一次真正下发的值，value 属性始终不动
+  let st = S('a', 'a')
+  for (const t of ['ab', 'abc', 'abcd']) {
+    st = ECHO.recordNativeInput(st, t)
+    const r = R(st, t)
+    c.eq(r.value, 'a', `连续输入时下发值变了（第 ${t.length} 步）`)
+    st = r.state
+  }
+  c.eq(st.last, 'a', '连续输入期间 last 应保持不变')
 
-  // 文本没变（纯光标移动）：不下发
-  c.eq(D('ab', 'ab', 1, 1, false), null, '文本没变时不该写 cursor')
+  // 程序化写入（符号插入 / OCR 回填 / 数据加载 / 清空）⇒ 必须放行
+  const insert = R(S('abc', 'abc'), 'ab×c')
+  c.eq(insert.value, 'ab×c', '程序化写入未放行')
+  c.eq(insert.echo, false, '程序化写入被误判为回声')
+  c.eq(insert.state.native, 'ab×c', '放行后 native 未推进')
+  c.eq(insert.state.last, 'ab×c', '放行后 last 未推进')
 
-  // 组词中 · 末尾追加（拼音串、候选上屏）：不写 —— 平台光标本来就在末尾，
-  // 写只是多一次 setData，反而可能打断输入法（第 1 版"拽走组词光标"就是这类）
-  c.eq(D('ab', 'abn', 3, 2, true), null, '组词中的末尾追加不该写 cursor')
-  c.eq(D(null, 'abc', 3, -1, true), null, '组词中即使无基准也不该写')
+  const clear = R(S('abc', 'abc'), '')
+  c.eq(clear.value, '', '程序化清空未放行')
+  c.eq(clear.echo, false, '程序化清空被误判为回声')
 
-  // 组词中 · 中间编辑：必须写 —— 英文输入法的"空格/标点提交当前词"走这条路，
-  // composition 边沿与 input 的先后顺序不可预期，靠标志判断必然漏（第 6 次事故）
-  c.eq(D('hello world', 'hello, world', 99, 5, true), 6, '组词中在中间打标点必须纠正光标')
-  c.eq(D('hello world', 'hello world ', 99, 11, true), null, '组词中末尾加空格不该写（末尾追加）')
-  c.eq(D('hello, world', 'hello world', 99, 6, true), 5, '组词中中间退格必须纠正光标')
-  c.eq(
-    D('teh cat', 'the cat', 99, 3, true),
-    3,
-    '组词中自动纠正（同长度替换）也必须纠正光标',
-  )
+  const load = R(S('', ''), '题目内容')
+  c.eq(load.value, '题目内容', '异步数据到达未放行（会整框空白）')
 
-  // 不变式：任何分支都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
-  for (const prev of [null, '', 'abc', 'aaaa'])
-    for (const next of ['', 'a', 'abc', 'abcd'])
-      for (const cur of [undefined, -1, 0, 3, 99])
-        for (const hint of [-1, 0, 3])
-          for (const comp of [false, true]) {
-            const r = D(prev, next, cur, hint, comp)
-            c.ok(r !== -1, `返回了 -1（等于命令光标去末尾）：${JSON.stringify({ prev, next, cur, hint, comp })}`)
-            if (r !== null) c.ok(r >= 0 && r <= next.length, `位置越界：${JSON.stringify({ prev, next, r })}`)
-          }
+  // 放行后再输入：必须重新回到回声，不能反复下发
+  const after = R(ECHO.recordNativeInput(insert.state, 'ab×cd'), 'ab×cd')
+  c.eq(after.value, 'ab×c', '放行后的首次输入未回到回声')
+
+  // 命根子不变式：echo 分支下发的值**永远是 last**，绝不可能是别的（尤其不能是空串）
+  for (const native of ['', 'a', 'abc', '长文本内容'])
+    for (const last of ['', 'x', 'abc', 'last 值']) {
+      const r = R(S(native, last), native)
+      c.eq(r.value, last, `回声分支下发的值不是 last：native=${native} last=${last}`)
+    }
+
+  // recordNativeInput：只推进 native，不许动 last
+  c.eq(ECHO.recordNativeInput(S('ab', 'ab'), 'abc').last, 'ab', 'recordNativeInput 动了 last')
+  c.eq(ECHO.recordNativeInput(S('ab', 'ab'), 'abc').native, 'abc', 'recordNativeInput 没推进 native')
 })
 
 m.test('🔴 decideBlurCursor：失焦写下真实光标（重新聚焦落在用户离开处）', async (c) => {

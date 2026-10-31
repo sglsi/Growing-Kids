@@ -549,7 +549,6 @@ export default function DetailPage() {
               maxlength={-1}
               cursor={qCaret.cursor}
               focus={qCaret.focus}
-              onComposingChange={qCaret.setComposing}
               onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
               // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
@@ -604,7 +603,6 @@ export default function DetailPage() {
             cursor={aCaret.cursor}
             focus={aCaret.focus}
             onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
-            onComposingChange={aCaret.setComposing}
             onCaret={(c) => aCaret.track(c)}
             onBlurCaret={(c) => aCaret.blur(c)}
             onInsert={insertAnswerSymbol}
@@ -737,7 +735,6 @@ export default function DetailPage() {
             maxlength={-1}
             cursor={qCaret.cursor}
             focus={qCaret.focus}
-            onComposingChange={qCaret.setComposing}
             onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
             onBlur={(e) => qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
             onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
@@ -971,7 +968,6 @@ export default function DetailPage() {
           value={answerDraft}
           cursor={aCaret.cursor}
           onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
-          onComposingChange={aCaret.setComposing}
           onCaret={(c) => aCaret.track(c)}
           onBlurCaret={(c) => aCaret.blur(c)}
           onInsert={insertAnswerSymbol}

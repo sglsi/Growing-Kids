@@ -2,6 +2,7 @@ import * as React from "react"
 import { Textarea as TaroTextarea, View } from "@tarojs/components"
 
 import { cn } from "@/lib/utils"
+import { recordNativeInput, resolveEchoValue, type EchoState } from "@/utils/textarea-echo"
 
 /**
  * 多行输入框（Taro 版 shadcn Textarea，2026-10-31 按微信输入习惯校准）
@@ -26,12 +27,6 @@ export interface TextareaProps
   extends React.ComponentPropsWithoutRef<typeof TaroTextarea> {
   className?: string
   autoFocus?: boolean
-  /**
-   * 输入法组词状态变化（拼音/手写中间态）。
-   * 由官方 `onKeyboardCompositionStart/End`（微信 2.25.0+，项目基线 3.17.4）驱动，
-   * 交给 `useCaret().setComposing` —— 组词期间记录的 live 光标不是最终位置。
-   */
-  onComposingChange?: (composing: boolean) => void
 }
 
 const Textarea = React.forwardRef<
@@ -46,10 +41,6 @@ const Textarea = React.forwardRef<
   // 去掉 iOS 原生内边距：壳已经给了 px-3 py-2，再叠一层原生 padding 会让
   // 文字起点与选区手柄位置对不上（"选字时手柄偏一截"的成因之一）
   disableDefaultPadding = true,
-  // 组词状态要转给 useCaret（见 TextareaProps.onComposingChange）
-  onComposingChange,
-  onKeyboardCompositionStart,
-  onKeyboardCompositionEnd,
   value: valueProp,
   onInput,
   ...props
@@ -58,14 +49,38 @@ const Textarea = React.forwardRef<
   const autoHeight = !!(props as any).autoHeight
 
   /**
-   * ⚠️ 这里**不做回声吸收**（2026-10-31 第五版试过，真机上输入直接失效：
-   * 中文英文都打不进、内容不显示，见 `工程教训录` L25 的订正）。
+   * 回声吸收（2026-10-31 第七轮，由 `server/scripts/repro-caret.mjs` 复现并定位）
    *
-   * 现在就是标准受控：`value` 老实下发，光标的稳定交给 `useCaret` ——
-   * 它每次都把**文本差值算出来的**正确位置与 value 同批写进 `cursor`。
-   * 关键分野：`detail.cursor` 不可信（社区实证中间输入时报错位），
-   * 而"上次文本 → 这次文本"的差值是确定的。
+   * ## 平台事实
+   * 微信 `textarea` 的 `value` 被 setData 就重建原生文本、**光标落到末尾**；
+   * 而 `cursor` 的官方定义是「**指定 focus 时的光标位置**」—— 输入过程中写它无效。
+   *
+   * 于是标准受控写法必然出事：页面 state 跟着输入走 ⇒ 每次输入 `props.value` 都变
+   * ⇒ 每次都下发 ⇒ 每次都重置光标，且没有任何生效的纠正手段。
+   * 末尾打字看不出来（重置到末尾恰好正确），只有**中间编辑**才暴露 ——
+   * 这就是"标点/空格/中间删除跳末尾、从句尾删却正常"的全部由来。
+   *
+   * ## 做法
+   * 用户输入期间**根本不下发 value**：页面 state 照常更新（保存、插入定位都不受影响），
+   * 只是不把它回灌给原生。原生文本本来就是用户打的，不需要我们重新设置。
+   * 只有程序化写入（符号插入 / OCR 回填 / 清空 / 数据加载）才放行。
+   *
+   * ## 为什么这次不会像第五版那样把输入搞坏
+   * 第五版用 `useState` 跟踪 native/pushed 两个量、渲染相位 setState 放行 + useEffect 兜底。
+   * 两个 state 的更新时机不确定，`pushed` 可能停在初值 `''` ⇒ 把空串下发给原生
+   * ⇒ 文本被清空、内容不显示。
+   * 本版**全用 ref**（同步、不参与渲染调度），下发值永远是确定字符串，不可能发出空串；
+   * 且回声分支直接返回"上一次下发过的值"，属性不变就不 setData，失败模式只剩
+   * "退化成普通受控"（= 本轮修复前的表现），绝不会让文本消失。
    */
+  const controlled = typeof valueProp === "string"
+  const incoming = controlled ? (valueProp as string) : ""
+  const echoRef = React.useRef<EchoState>({ native: incoming, last: incoming })
+  // 渲染中写 ref 是安全的（不参与 React 调度）；resolveEchoValue 幂等，
+  // 重复渲染（如严格模式双调用）第二次会落到 echo 分支，结果一致。
+  const resolved = controlled ? resolveEchoValue(echoRef.current, incoming) : null
+  if (resolved) echoRef.current = resolved.state
+  const outValue = resolved ? resolved.value : valueProp
 
   React.useEffect(() => {
     if (autoFocus || focus) setIsFocused(true)
@@ -118,9 +133,9 @@ const Textarea = React.forwardRef<
         showConfirmBar={showConfirmBar}
         adjustPosition={adjustPosition}
         disableDefaultPadding={disableDefaultPadding}
-        // 标准受控：value 照常下发（不下发的方案在真机上会让输入失效），
-        // 光标由 useCaret 与它同批写进 cursor 抵消"value 一变光标甩末尾"。
-        value={valueProp}
+        // 受控值经回声吸收后下发：用户输入期间它是"上一次真正下发的值"（不变），
+        // 只有程序化写入才变成页面新值。属性不变 ⇒ 不 setData ⇒ 光标零干预。
+        value={outValue}
         className="w-full self-stretch bg-transparent text-base text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm selection:bg-selection selection:text-selection-foreground"
         placeholderClass="text-muted-foreground"
         style={innerStyle}
@@ -134,18 +149,12 @@ const Textarea = React.forwardRef<
           setIsFocused(false)
           onBlur?.(e)
         }}
-        // 组词边界：只在"开始/结束"两个边沿通知，中间态不用逐字更新
-        onKeyboardCompositionStart={(e) => {
-          onComposingChange?.(true)
-          onKeyboardCompositionStart?.(e)
-        }}
-        onKeyboardCompositionEnd={(e) => {
-          onComposingChange?.(false)
-          onKeyboardCompositionEnd?.(e)
-        }}
         onInput={(e) => {
-          // 直接交给页面：让页面 setQContent 与 useCaret.track（内部 setShot）
-          // 尽量落进同一批渲染 ⇒ value 与 cursor 同批下发。
+          // 先记录"原生真相"（同步，早于页面 setState 触发的渲染），
+          // 再交给页面。页面回声回来的同值会被 resolveEchoValue 判为回声吸收掉。
+          if (controlled) {
+            echoRef.current = recordNativeInput(echoRef.current, e.detail.value)
+          }
           onInput?.(e)
         }}
         {...props}

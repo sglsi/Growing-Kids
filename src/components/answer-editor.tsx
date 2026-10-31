@@ -398,8 +398,6 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               maxlength={-1}
               cursor={caret.cursor}
               focus={caret.focus}
-              onKeyboardCompositionStart={() => caret.setComposing(true)}
-              onKeyboardCompositionEnd={() => caret.setComposing(false)}
               onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor, e.detail.value) }}
               // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
               // （否则符号会插到上一次打字处，思傅 2026-10-29）

@@ -44,8 +44,6 @@ interface Props {
    * 上一次打字的位置，点符号就插错地方。focus 事件的 detail 里带 cursor，补上即可。
    */
   onCaret?: (cursor?: number) => void
-  /** 输入法组词状态变化（交给 useCaret.setComposing，组词期间不更新 live） */
-  onComposingChange?: (composing: boolean) => void
   /**
    * 真实失焦（参数是离开时的光标位置）：页面的 useCaret.blur(cursor) 会记录它、
    * 并把它写进 cursor 属性（重新聚焦才落在用户离开处），同时让受控 focus 落下，
@@ -56,7 +54,7 @@ interface Props {
   onInsert: (snippet: string) => void
 }
 
-export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onComposingChange, onBlurCaret, onInsert }: Props) {
+export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onBlurCaret, onInsert }: Props) {
   // 预览是纯展示开关，放组件内部即可（不涉及入库）
   const [preview, setPreview] = useState(false)
 
@@ -84,7 +82,6 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
           maxlength={-1}
           cursor={cursor}
           focus={focus}
-          onComposingChange={onComposingChange}
           onInput={(e) => onInput(e.detail.value, e.detail.cursor)}
           // 失焦：把离开时的真实光标交给页面（useCaret.blur 会记下它并写进 cursor 属性，
           // 重新聚焦才落在用户离开处）；聚焦只补记位置（手指点选换位没有输入事件）
