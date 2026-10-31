@@ -1,5 +1,5 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
-import Taro, { useDidShow } from '@tarojs/taro'
+import Taro, { useDidShow, useDidHide } from '@tarojs/taro'
 import { useState, useRef } from 'react'
 import { Trash2, BookmarkPlus, BookmarkMinus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
@@ -32,11 +32,18 @@ const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[
 ]
 
 /**
- * 返回首页时「按 id 锚回原题」的最大复测次数。
- * 每次一轮约 160ms（40ms 落位 + 120ms 等待布局稳定），8 轮 ≈ 1.3s ——
- * 足够覆盖缩略图解码与文字换行重算，又不会在用户已经看列表时还在偷偷微调。
+ * 返回首页时「按 id 锚回原题」的闭环校正参数。
+ *
+ * ⚠️ 为什么不能"测一次没偏就收工"（思傅 2026-10-31 第三次反馈「返回后还是向上滑」）：
+ * 收敛的那一拍只是**当时**没偏。返回首页后布局还在沉降 —— 缩略图在解码、
+ * 题面文字在换行重算、在详情页答过的题徽标刚从旧值刷成新值，目标题**上方**的卡片
+ * 会继续变高。这些变化都发生在这之后，于是一次性收敛后目标题又被顶出视口，
+ * 看上去就是"还是往上滑了将近一个题位"。
+ * 所以：**连续稳定 N 轮才收工**，且总窗口拉到 ~4.5s 覆盖慢图解码。
  */
-const RESTORE_MAX_ATTEMPTS = 8
+const RESTORE_MAX_ATTEMPTS = 25      // 总窗口 ≈ 25 × 180ms ≈ 4.5s
+const RESTORE_STABLE_ROUNDS = 3      // 连续 3 轮偏差 ≤2px 才认为真的稳了
+const RESTORE_SETTLE_MS = 180        // 每轮间隔（留足布局沉降 + 一次 setData 落地）
 
 export default function IndexPage() {
   const [overview, setOverview] = useState<Overview | null>(null)
@@ -77,17 +84,18 @@ export default function IndexPage() {
   const [scrollTop, setScrollTop] = useState(0)
   const scrollRef = useRef(0) // 当前实际滚动位（onScroll 持续更新）
   const restoredRef = useRef(false) // 防止每次 show 都被强行拉回旧位置
-  /** 待恢复的题目 id（仅「从详情返回」路径写入；列表内操作不写 → 不会误滚） */
-  const pendingRestoreIdRef = useRef<string>('')
   /** 离开首页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
   const restoreItemIdRef = useRef<string>('')
   /** 用户在恢复过程中自己滚了一下 → 立刻放弃自动校正，别跟用户抢滚动条 */
   const restoreCancelledRef = useRef(false)
   /**
-   * 离开首页去详情时，被点题目相对列表顶部的偏移（px）。
+   * 离开首页去详情时，被点题目相对列表顶部的偏移（px；-1 = 没量到）。
    * 返回后按同一偏移还原 —— 还原的是"视觉位置"，不是"滚到顶部"（见 handleOpen 注释）。
+   * -1 时闭环退化为"保持返回后的位置不再乱跑"（见 scrollToItemById）。
    */
-  const restoreAnchorRef = useRef(8)
+  const restoreAnchorRef = useRef(-1)
+  /** 离开首页时的原始 scrollTop（px）。返回时先还原它，再跑闭环精修 */
+  const leaveScrollTopRef = useRef(0)
   const [savingEdit, setSavingEdit] = useState(false)
   /**
    * 在途 load 计数（思傅 2026-10-29）：骨架屏由「最后一个请求」解除。
@@ -120,10 +128,18 @@ export default function IndexPage() {
    *   目标题**上方**的卡片会继续变高，于是定位完再回头看，视觉位置又偏了。
    *   所以定位后隔 120ms 复测一次，偏差 > 2px 就再修一次，直到收敛或用尽次数。
    *
-   * 另外两条：节点还没渲染出来（数据刚回、列表正在重建）时**重试**而不是直接放弃；
-   * 用户一旦自己动了滚动条就立刻停手（restoreCancelledRef），不能跟用户抢。
+   * ⚠️ 为什么必须「连续稳定 N 轮」才收工，而不是测一次没偏就撤（思傅 2026-10-31
+   * 第三次反馈「返回后还是向上滑」）：
+   *   收敛的那一拍只是当时没偏。返回后布局还在沉降：缩略图在解码、题面在换行重算、
+   *   徽标（已答/未答）刚从旧值刷成新值，目标题**上方**的卡片会继续变高 ——
+   *   等这些变化落地，目标题又被顶出视口，看上去就是"还是往上滑了将近一个题位"。
+   *   8 轮 ≈ 1.3s 的旧窗口也盖不住慢图解码，已拉到 25 轮 ≈ 4.5s。
+   *
+   * 另外三条：节点还没渲染出来（数据刚回、列表正在重建）时**重试**而不是直接放弃；
+   * 用户一旦自己动了滚动条就立刻停手（restoreCancelledRef），不能跟用户抢；
+   * 锚点没量到时（-1）退化为"保持返回后的位置"，至少不再自己乱跑。
    */
-  const scrollToItemById = (id: string, anchor = restoreAnchorRef.current, attempt = 0) => {
+  const scrollToItemById = (id: string, anchor = restoreAnchorRef.current, attempt = 0, stable = 0) => {
     if (restoreCancelledRef.current) return
     const q = Taro.createSelectorQuery()
     q.select('#list-scroll').scrollOffset()
@@ -132,24 +148,35 @@ export default function IndexPage() {
     q.exec((res: any) => {
       if (restoreCancelledRef.current) return
       const so = res?.[0] as { scrollTop: number } | null
-      const sv = res?.[1] as { top: number } | null
-      const it = res?.[2] as { top: number } | null
-      if (!so || !sv || !it) {
+      const sv = res?.[1] as { top: number; height: number } | null
+      const it = res?.[2] as { top: number; height: number } | null
+      if (!so || !sv || !it || !(it.height > 0) || !(sv.height > 0)) {
         if (attempt < RESTORE_MAX_ATTEMPTS) {
-          setTimeout(() => scrollToItemById(id, anchor, attempt + 1), 120)
+          setTimeout(() => scrollToItemById(id, anchor, attempt + 1, 0), RESTORE_SETTLE_MS)
         }
+        return
+      }
+      // 锚点没量到（离开时的查询失败/回调迟到）：以返回后第一拍的位置为准，之后只防漂移
+      if (anchor < 0) {
+        restoreAnchorRef.current = Math.max(0, Math.round(it.top - sv.top))
+        setTimeout(() => scrollToItemById(id, restoreAnchorRef.current, attempt + 1, 0), RESTORE_SETTLE_MS)
         return
       }
       // 目标项当前相对容器顶部的偏移 vs 想还原的偏移（离开时的视觉位置）
       const delta = (it.top - sv.top) - anchor
-      if (Math.abs(delta) <= 2 || attempt >= RESTORE_MAX_ATTEMPTS) return
+      if (Math.abs(delta) <= 2) {
+        // 收敛也不是测一次就撤：布局还在沉降，连续稳定 N 轮才认为真的稳了
+        if (stable + 1 >= RESTORE_STABLE_ROUNDS || attempt >= RESTORE_MAX_ATTEMPTS) return
+        setTimeout(() => scrollToItemById(id, anchor, attempt + 1, stable + 1), RESTORE_SETTLE_MS)
+        return
+      }
       const target = Math.max(0, so.scrollTop + delta)
       // 双帧：先偏移 1px 再归位，强制 Taro 认为 scrollTop 变了（值相同不触发滚动）
       setScrollTop(Math.max(0, target - 1))
       setTimeout(() => {
         if (restoreCancelledRef.current) return
         setScrollTop(target)
-        setTimeout(() => scrollToItemById(id, anchor, attempt + 1), 120)
+        setTimeout(() => scrollToItemById(id, anchor, attempt + 1, 0), RESTORE_SETTLE_MS)
       }, 40)
     })
   }
@@ -243,12 +270,6 @@ export default function IndexPage() {
       // 失败路径同样走这里——宁可显示「暂无内容」也别让用户对着灰条干等。
       pendingLoadsRef.current = Math.max(0, pendingLoadsRef.current - 1)
       if (pendingLoadsRef.current === 0) setLoading(false)
-      // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（闭环校正，见 scrollToItemById）
-      const rid = pendingRestoreIdRef.current
-      if (rid) {
-        pendingRestoreIdRef.current = ''
-        setTimeout(() => scrollToItemById(rid), 60)
-      }
     }
   }
 
@@ -263,11 +284,28 @@ export default function IndexPage() {
     // 从详情页返回：回到「同一道题」（按 id 锚定），不回顶部。只恢复一次。
     // 仅靠 restoreItemIdRef 判断（handleOpen 写入）；列表内操作不写它 → 不会误滚。
     if (!restoredRef.current && restoreItemIdRef.current) {
-      pendingRestoreIdRef.current = restoreItemIdRef.current
       restoredRef.current = true
+      restoreCancelledRef.current = false
+      /**
+       * 先把离开时的原始滚动位还原（微信 navigateBack 一般会自己保留，这里双保险；
+       * 万一只怕不保留，表现为「回来先看到列表顶部再跳回去」）。
+       * 只修"scrollTop 没变"这一项 —— 布局漂移交给随后启动的闭环按 id 精修。
+       */
+      if (leaveScrollTopRef.current > 0) setScrollTop(leaveScrollTopRef.current)
+      /**
+       * 闭环校正**立刻**启动，不等 fresh 请求返回：返回瞬间布局就开始沉降了
+       * （旧代码在 load 的 finally 里才启动，晚一个网络来回）。
+       * 节点还没渲染出来时循环自己会重试（列表正在重建/骨架屏），不需要等数据。
+       */
+      setTimeout(() => scrollToItemById(restoreItemIdRef.current), 60)
     }
     // fresh：回到本页一律以服务端为准（新增题目/识别入库/别处改答案都要立刻可见）
     void load(subjectFilter, { silent: true, fresh: true })
+  })
+
+  /** 离开首页（再进详情/识别页等）：停掉闭环，别在后台页面里量布局 */
+  useDidHide(() => {
+    restoreCancelledRef.current = true
   })
 
   const goRecognize = () => {
@@ -509,6 +547,11 @@ export default function IndexPage() {
     restoreItemIdRef.current = item.id
     restoredRef.current = false
     restoreCancelledRef.current = false
+    // 锚点先置"没量到"：量失败了闭环会退化为"保持返回后的位置"，
+    // 而不是沿用上一道题的偏移（那会把列表拽到一个错位置）
+    restoreAnchorRef.current = -1
+    // 原始滚动位同步留下（useDidShow 里先还原它，再跑闭环精修）
+    leaveScrollTopRef.current = scrollRef.current
 
     let navigated = false
     const go = () => {
@@ -520,11 +563,16 @@ export default function IndexPage() {
     q.select('#list-scroll').boundingClientRect()
     q.select(`#tl-item-${item.id}`).boundingClientRect()
     q.exec((res: any) => {
-      const sv = res?.[0] as { top: number } | null
-      const it = res?.[1] as { top: number } | null
-      if (sv && it) {
-        // 夹到 >=0：点在列表最上面那道题时 it.top 可能略高于容器顶，负数没意义
-        restoreAnchorRef.current = Math.max(0, Math.round(it.top - sv.top))
+      const sv = res?.[0] as { top: number; height: number } | null
+      const it = res?.[1] as { top: number; height: number } | null
+      if (sv && it && sv.height > 0 && it.height > 0) {
+        const offset = it.top - sv.top
+        // 合法性守卫：用户刚点过这道题，它必然在视口内 ⇒ 偏移不该超出容器高度。
+        // 查询回调晚于兜底跳转落地时（页面已在转场）可能量到无效值，这时宁缺勿错。
+        if (offset >= -8 && offset <= sv.height + 50) {
+          // 夹到 >=0：点在列表最上面那道题时 it.top 可能略高于容器顶，负数没意义
+          restoreAnchorRef.current = Math.max(0, Math.round(offset))
+        }
       }
       go()
     })
