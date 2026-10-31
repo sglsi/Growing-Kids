@@ -1814,6 +1814,12 @@ export default function RecognizePage() {
             <Text className="block text-xs text-muted-foreground mb-3">
               支持 PDF / Word(.docx) / TXT：先「导入」文档，再「识别题目」；识别结果自行确认后，自选是否存入错题库
             </Text>
+            {/* 页数上限提醒（2026-10-31）：PDF 链路固定走 PP-StructureV3（paddle），单页约 26 秒，
+                受 300s 任务时长与 OCR_PDF_MAX_*_PAGES 双重约束，超出的页会被截断且不报错——
+                用户不提前知道就会以为"识别漏了"。文字层不耗 OCR，额度 50 页；扫描页额度 8 页。 */}
+            <Text className="block text-xs text-muted-foreground mb-3">
+              PDF 页数上限：有文字层的页最多 50 页（直接读文字，很快）；扫描页需逐页识别，约 26 秒/页，最多处理前 8 页，超出部分不会识别
+            </Text>
             {docName ? (
               <View className="w-full bg-muted rounded-xl px-4 py-4 mb-3" onClick={chooseDocFile}>
                 <Text className="block text-sm text-primary break-all">{docName}</Text>
