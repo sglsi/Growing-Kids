@@ -49,7 +49,10 @@ import { decideCursor } from './caret-decision'
  *   1. 光标位置记在 ref 里，不参与日常渲染，用户怎么打字都不干预；
  *   2. 只有**程序化插入**（数学符号、识别结果回填）时才 request(pos) 一次性定位，
  *      由紧随其后的第一次 onInput 消费掉；
- *   3. 插入位置取自最近一次真实输入/失焦事件的 cursor，越界自动退化为文本末尾。
+ *   3. 插入位置取自最近一次真实输入/失焦事件的 cursor，越界自动退化为文本末尾；
+ *   4. **每次输入都把真实光标钉住**（规则见 utils/caret-decision 规则 3），
+ *      唯一的例外是输入法组词中 —— 由 `setComposing` 标记（binding
+ *      `onKeyboardCompositionStart/End` 得到），组词期间完全不碰 cursor。
  */
 
 export interface Caret {
@@ -75,6 +78,12 @@ export interface Caret {
   refocus: () => void
   /** 真实失焦时调用：让受控 focus 与原生状态保持一致，避免用户收不起键盘 */
   blur: () => void
+  /**
+   * 标记「输入法正在组词」（拼音/手写中间态）。
+   * 组词期间不碰 cursor —— 事件给的 cursor 是拼音串里的位置，写下去会把组词光标拽走。
+   * 绑到 Textarea 的 `onKeyboardCompositionStart` / `onKeyboardCompositionEnd`（微信 2.25.0+）。
+   */
+  setComposing: (v: boolean) => void
   /** 当前可用的插入位置（未记录/越界时退化为 len） */
   position: (len: number) => number
 }
@@ -88,6 +97,8 @@ export function useCaret(): Caret {
   const pendingRef = useRef(false)
   /** 上一次已知的文本长度（事件没带 cursor 时用来推算新光标） */
   const lenRef = useRef(-1)
+  /** 输入法是否正在组词（组词期间一律不碰 cursor，见 caret-decision 规则 1） */
+  const composingRef = useRef(false)
   const [shot, setShot] = useState(-1)
   /** 受控聚焦态（见 Caret.refocus 的说明） */
   const [focused, setFocused] = useState(false)
@@ -107,28 +118,60 @@ export function useCaret(): Caret {
         shot: shotRef.current,
         live: live.current,
         pending: pendingRef.current,
+        composing: composingRef.current,
       },
       { cursor, valueLen },
     )
     if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
     if (pendingRef.current) pendingRef.current = false
-    // next === null 表示「这一拍不改动」（绝不等于写 -1，见 caret-decision 规则 1）
+    // next === null 表示「这一拍不改动」（绝不等于写 -1，见 caret-decision 规则 2）
     if (next !== null) applyShot(next)
     if (typeof valueLen === 'number' && valueLen >= 0) lenRef.current = valueLen
   }, [applyShot])
+
+  const setComposing = useCallback((v: boolean) => {
+    composingRef.current = v
+  }, [])
 
   const request = useCallback((pos: number, valueLen?: number) => {
     const p = pos >= 0 ? pos : 0
     live.current = p
     pendingRef.current = true
     if (typeof valueLen === 'number' && valueLen >= 0) lenRef.current = valueLen
+    if (p === shotRef.current) {
+      /**
+       * 目标位置与当前属性值相同时，Taro 的 diff 认为 `cursor` 没变、**不会把它放进
+       * 这一批 setData**，于是这一批只有 value 变化 ⇒ 微信按自己的规则把光标甩到末尾
+       * （「插入数学符号后光标跳到最后」，思傅 2026-10-31）。
+       * 先落到相邻位置、20ms 后归位，制造一次真实变化 —— 相邻一格的位移用户看不见。
+       */
+      const stagger = p > 0 ? p - 1 : 1
+      shotRef.current = stagger
+      setShot(stagger)
+      setTimeout(() => {
+        // 期间用户若已经输入过（applyShot 改过值），就不要抢回控制权
+        if (shotRef.current === stagger) {
+          shotRef.current = p
+          setShot(p)
+        }
+      }, 20)
+      return
+    }
     applyShot(p)
   }, [applyShot])
 
   const refocus = useCallback(() => {
     setFocused(false)
-    // 30ms：等这一次 value 更新的 setData 落地，再做 true 的边沿
-    setTimeout(() => setFocused(true), 30)
+    /**
+     * 60ms 才做 true 的边沿（原为 30ms）。
+     *
+     * 顺序必须是「value 的 setData 落地 → 再聚焦」：`cursor` 是"focus 时的光标位置"，
+     * 聚焦时微信按它定位；若 value 的 setData 晚于这次聚焦到达，光标又会被甩到末尾，
+     * 而此后再没有 cursor 变化去纠正它（思傅 2026-10-31「输入数学符号后光标跳到最后」）。
+     * 插入路径本身在 `request()` 里已经做了「相邻位 → 目标位」的强制变化，
+     * 这里多等 30ms 是给长文本 autoHeight 重排留余量。
+     */
+    setTimeout(() => setFocused(true), 60)
   }, [])
 
   const blur = useCallback(() => setFocused(false), [])
@@ -139,5 +182,5 @@ export function useCaret(): Caret {
     return Math.min(p, len)
   }, [])
 
-  return { cursor: shot, focus: focused, track, request, refocus, blur, position }
+  return { cursor: shot, focus: focused, track, request, refocus, blur, setComposing, position }
 }

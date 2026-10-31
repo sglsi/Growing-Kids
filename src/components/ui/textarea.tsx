@@ -26,6 +26,17 @@ export interface TextareaProps
   extends React.ComponentPropsWithoutRef<typeof TaroTextarea> {
   className?: string
   autoFocus?: boolean
+  /**
+   * 输入法组词状态变化（拼音/手写中间态）。
+   *
+   * 为什么要透出来（思傅 2026-10-31「输入字母后打标点，光标跑到结尾」）：
+   * 受控 textarea 的正解是**每次输入都把 `cursor` 跟着 value 同一批下发**，
+   * 否则微信按自己的规则把光标甩到末尾。但组词期间事件给的 `cursor` 是拼音串里的
+   * 位置，写下去会把组词光标拽走 —— 所以必须知道"现在是组词中吗"。
+   * 用官方 `onKeyboardCompositionStart/End`（微信基础库 2.25.0+，项目基线 3.17.4）判定，
+   * 交给 `useCaret().setComposing`。
+   */
+  onComposingChange?: (composing: boolean) => void
 }
 
 const Textarea = React.forwardRef<
@@ -40,10 +51,29 @@ const Textarea = React.forwardRef<
   // 去掉 iOS 原生内边距：壳已经给了 px-3 py-2，再叠一层原生 padding 会让
   // 文字起点与选区手柄位置对不上（"选字时手柄偏一截"的成因之一）
   disableDefaultPadding = true,
+  // 组词状态要转给 useCaret（见 TextareaProps.onComposingChange）
+  onComposingChange,
+  onKeyboardCompositionStart,
+  onKeyboardCompositionEnd,
+  onInput,
   ...props
 }, ref) => {
   const [isFocused, setIsFocused] = React.useState(false)
   const autoHeight = !!(props as any).autoHeight
+  /**
+   * 光标自托管（思傅 2026-10-31「输入字母后打标点，光标跑到结尾」）。
+   *
+   * 小程序 textarea 是半受控组件：**value 一变，渲染层就把光标重置到末尾**，
+   * 只有 `cursor` 能把它钉回去。所以「受控 value + 不动 cursor」这个组合本身就有坑 ——
+   * 之前只有详情页接了 `useCaret`，其余页面（记忆、识别、资料库、聊天管理）的框全是裸受控。
+   *
+   * 这里做一层兜底：**调用方没有自己传 `cursor` 时**，组件内部把每次输入的真实光标
+   * 写回 `cursor`（组词期间除外），让所有输入框自动获得正确的光标行为。
+   * 调用方传了 `cursor` 就完全交给它（详情页那条 `useCaret` 链路参与插入符号定位）。
+   */
+  const hasOwnCursor = Object.prototype.hasOwnProperty.call(props, 'cursor')
+  const [innerCursor, setInnerCursor] = React.useState(-1)
+  const composingRef = React.useRef(false)
 
   React.useEffect(() => {
     if (autoFocus || focus) setIsFocused(true)
@@ -96,6 +126,8 @@ const Textarea = React.forwardRef<
         showConfirmBar={showConfirmBar}
         adjustPosition={adjustPosition}
         disableDefaultPadding={disableDefaultPadding}
+        // 自托管光标（调用方没自己接管时才生效，见 managedCursor 注释）
+        {...(hasOwnCursor ? null : { cursor: innerCursor })}
         className="w-full self-stretch bg-transparent text-base text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm selection:bg-selection selection:text-selection-foreground"
         placeholderClass="text-muted-foreground"
         style={innerStyle}
@@ -108,6 +140,25 @@ const Textarea = React.forwardRef<
         onBlur={(e) => {
           setIsFocused(false)
           onBlur?.(e)
+        }}
+        // 组词边界：只在"开始/结束"两个边沿通知，中间态不用逐字更新
+        onKeyboardCompositionStart={(e) => {
+          composingRef.current = true
+          onComposingChange?.(true)
+          onKeyboardCompositionStart?.(e)
+        }}
+        onKeyboardCompositionEnd={(e) => {
+          composingRef.current = false
+          onComposingChange?.(false)
+          onKeyboardCompositionEnd?.(e)
+        }}
+        // 自托管光标：每次输入把真实光标写回 cursor，抵消 value 回写把光标甩到末尾
+        onInput={(e) => {
+          if (!hasOwnCursor && !composingRef.current) {
+            const c = (e.detail as { cursor?: number } | undefined)?.cursor
+            if (typeof c === 'number' && c >= 0) setInnerCursor(c)
+          }
+          onInput?.(e)
         }}
         {...props}
       />

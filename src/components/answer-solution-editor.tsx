@@ -46,13 +46,15 @@ interface Props {
    * 于是补上这一条链路即可让「插入位置 = 当前光标」。
    */
   onCaret?: (cursor?: number) => void
+  /** 输入法组词状态变化（交给 useCaret.setComposing，组词期间不碰 cursor） */
+  onComposingChange?: (composing: boolean) => void
   /** 真实失焦：让页面的受控 focus 一起落下，否则用户收不起键盘 */
   onBlurCaret?: () => void
   /** 点数学符号/模板：页面负责按光标位置插入并回请求光标 */
   onInsert: (snippet: string) => void
 }
 
-export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onBlurCaret, onInsert }: Props) {
+export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onComposingChange, onBlurCaret, onInsert }: Props) {
   // 预览是纯展示开关，放组件内部即可（不涉及入库）
   const [preview, setPreview] = useState(false)
 
@@ -80,6 +82,7 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
           maxlength={-1}
           cursor={cursor}
           focus={focus}
+          onComposingChange={onComposingChange}
           onInput={(e) => onInput(e.detail.value, e.detail.cursor)}
           // 失焦/聚焦补记光标位置：手指点选位置不产生 input 事件，只靠 blur/focus 拿得到
           onBlur={(e) => {
