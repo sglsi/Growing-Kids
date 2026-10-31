@@ -31,6 +31,13 @@ const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[
   { action: 'erase', label: '去手写', icon: Eraser },
 ]
 
+/**
+ * 返回首页时「按 id 锚回原题」的最大复测次数。
+ * 每次一轮约 160ms（40ms 落位 + 120ms 等待布局稳定），8 轮 ≈ 1.3s ——
+ * 足够覆盖缩略图解码与文字换行重算，又不会在用户已经看列表时还在偷偷微调。
+ */
+const RESTORE_MAX_ATTEMPTS = 8
+
 export default function IndexPage() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [loading, setLoading] = useState(true)
@@ -74,6 +81,8 @@ export default function IndexPage() {
   const pendingRestoreIdRef = useRef<string>('')
   /** 离开首页去详情前，记录点的是哪道题，回来时按 id 锚回原题 */
   const restoreItemIdRef = useRef<string>('')
+  /** 用户在恢复过程中自己滚了一下 → 立刻放弃自动校正，别跟用户抢滚动条 */
+  const restoreCancelledRef = useRef(false)
   const [savingEdit, setSavingEdit] = useState(false)
   /**
    * 在途 load 计数（思傅 2026-10-29）：骨架屏由「最后一个请求」解除。
@@ -89,20 +98,48 @@ export default function IndexPage() {
   const loadSeqRef = useRef(0)
   const sel = useSelection()
 
-  /** 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位） */
-  const scrollToItemById = (id: string, extra = 0) => {
+  /**
+   * 按题目 id 把列表滚到该题顶部附近（Taro 受控 scrollTop：值不变不触发滚动，故先偏移再归位）。
+   *
+   * ⚠️ 为什么是「测量 → 定位 → 隔一会儿再测」的闭环，而不是一次算准（思傅 2026-10-31
+   * 「从详情返回后列表位置向上滑了约 2 个题」）：
+   *   一次测量算出的 scrollTop 只在「此刻的布局」下正确。而返回首页这一瞬间，列表里的
+   *   缩略图还在解码、题面文字还在换行重算、状态徽标（已答/未答）可能刚从旧值刷成新值 ——
+   *   目标题上方的卡片会**继续变高**，于是定位完再回头看，目标题已经被顶到视口外，
+   *   屏幕上显示的是它前面那几题（看起来就是"位置往上滑了两道题"）。
+   *   所以定位后隔 120ms 复测一次，偏差 > 2px 就再修一次，直到收敛或用尽次数。
+   *
+   * 另外两条：节点还没渲染出来（数据刚回、列表正在重建）时**重试**而不是直接放弃；
+   * 用户一旦自己动了滚动条就立刻停手（restoreCancelledRef），不能跟用户抢。
+   */
+  const scrollToItemById = (id: string, extra = 8, attempt = 0) => {
+    if (restoreCancelledRef.current) return
     const q = Taro.createSelectorQuery()
     q.select('#list-scroll').scrollOffset()
     q.select('#list-scroll').boundingClientRect()
     q.select(`#tl-item-${id}`).boundingClientRect()
     q.exec((res: any) => {
-      const so = res[0] as { scrollTop: number } | null
-      const sv = res[1] as { top: number } | null
-      const it = res[2] as { top: number } | null
-      if (!so || !sv || !it) return
-      const target = Math.max(0, so.scrollTop + (it.top - sv.top) - extra)
-      setScrollTop(target - 1)
-      setTimeout(() => setScrollTop(target), 40)
+      if (restoreCancelledRef.current) return
+      const so = res?.[0] as { scrollTop: number } | null
+      const sv = res?.[1] as { top: number } | null
+      const it = res?.[2] as { top: number } | null
+      if (!so || !sv || !it) {
+        if (attempt < RESTORE_MAX_ATTEMPTS) {
+          setTimeout(() => scrollToItemById(id, extra, attempt + 1), 120)
+        }
+        return
+      }
+      // 目标项相对 ScrollView 顶部的偏移，减去想留出的呼吸位
+      const delta = (it.top - sv.top) - extra
+      if (Math.abs(delta) <= 2 || attempt >= RESTORE_MAX_ATTEMPTS) return
+      const target = Math.max(0, so.scrollTop + delta)
+      // 双帧：先偏移 1px 再归位，强制 Taro 认为 scrollTop 变了（值相同不触发滚动）
+      setScrollTop(Math.max(0, target - 1))
+      setTimeout(() => {
+        if (restoreCancelledRef.current) return
+        setScrollTop(target)
+        setTimeout(() => scrollToItemById(id, extra, attempt + 1), 120)
+      }, 40)
     })
   }
 
@@ -195,11 +232,11 @@ export default function IndexPage() {
       // 失败路径同样走这里——宁可显示「暂无内容」也别让用户对着灰条干等。
       pendingLoadsRef.current = Math.max(0, pendingLoadsRef.current - 1)
       if (pendingLoadsRef.current === 0) setLoading(false)
-      // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（双帧 + 先偏移再归位强制 Taro 触发滚动）
+      // 列表已渲染出来（loading 结束）→ 按 id 锚回原题（闭环校正，见 scrollToItemById）
       const rid = pendingRestoreIdRef.current
       if (rid) {
         pendingRestoreIdRef.current = ''
-        setTimeout(() => scrollToItemById(rid, 8), 60)
+        setTimeout(() => scrollToItemById(rid), 60)
       }
     }
   }
@@ -454,6 +491,7 @@ export default function IndexPage() {
     // 记录点的是哪道题，回来时按 id 锚回原题（而非像素偏移 → 列表重排也不跑偏）
     restoreItemIdRef.current = item.id
     restoredRef.current = false
+    restoreCancelledRef.current = false
     Taro.navigateTo({ url: `/pages/detail/index?id=${item.id}` })
   }
 
@@ -512,6 +550,9 @@ export default function IndexPage() {
         id="list-scroll"
         scrollY
         scrollTop={scrollTop}
+        // 用户手指一碰就放弃「返回后锚回原题」的自动校正：宁可他停在想看的
+        // 位置，也不要程序在他滚动时把列表拽回去（详见 scrollToItemById 注释）
+        onTouchStart={() => { restoreCancelledRef.current = true }}
         onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
         style={{ height: '100vh' }}
       >
