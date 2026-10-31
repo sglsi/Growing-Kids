@@ -58,55 +58,14 @@ const Textarea = React.forwardRef<
   const autoHeight = !!(props as any).autoHeight
 
   /**
-   * 回声吸收（2026-10-31 第三次重写光标方案的核心，治本的一版）
+   * ⚠️ 这里**不做回声吸收**（2026-10-31 第五版试过，真机上输入直接失效：
+   * 中文英文都打不进、内容不显示，见 `工程教训录` L25 的订正）。
    *
-   * ## 要解决什么
-   * 思傅连报四次：「插入符号后敲逗号跳末尾」「连续删除跳末尾」「输入字母后打标点
-   * 跳末尾」「快速删除还有」。前两版都在"把 cursor 钉准"上打转，全输了。
-   *
-   * ## 平台事实
-   * 小程序 textarea 是**半受控**组件：setData 里只要出现 value，渲染层就把光标
-   * 重置到末尾。而受控 value 的更新是跨帧链（onInput → setState → 渲染 → setData），
-   * 连续操作时回写值几乎必然与原生当前文本不一致 ⇒ 每次回写都是一次跳末尾的机会。
-   * 官方文档的原话：**不建议在多行文本上修改用户的输入**。
-   *
-   * ## 治法
-   * 用户输入期间**根本不下发 value**：页面照常 setState（受控写法不变），
-   * 但组件把这次"回声"吸收掉 —— 已核实 Taro 的 prepareUpdate 只 diff 出变化的属性、
-   * commitUpdate 只下发这些属性，所以属性值不变就不会进 setData，原生文本不动、
-   * 光标由平台自己维护。字母、标点、连续删除、拼音组词全部零干预。
-   *
-   * 只有**程序化写入**（数学符号插入 / OCR 回填 / 清空）才放行：此时 prop 既不是
-   * 原生真相、也不是上一拍下发过的值。放行时用**渲染相位派生状态**，保证这次 value
-   * 与页面同时下发的 cursor 落进**同一批** setData —— 分两批时后一批的 value 会把
-   * 前一批定位好的光标重置到末尾（"插入符号后跳末尾"的成因之一）。
-   *
-   * ## 三个量
-   *  - `nativeValue`：原生真实文本（每次 onInput 更新，先于页面 setState 的渲染）
-   *  - `pushed`：已经下发给原生的值（只有程序化写入才变）
-   *  - `valueProp`：页面受控 state 的值
+   * 现在就是标准受控：`value` 老实下发，光标的稳定交给 `useCaret` ——
+   * 它每次都把**文本差值算出来的**正确位置与 value 同批写进 `cursor`。
+   * 关键分野：`detail.cursor` 不可信（社区实证中间输入时报错位），
+   * 而"上次文本 → 这次文本"的差值是确定的。
    */
-  const [nativeValue, setNativeValue] = React.useState(valueProp ?? '')
-  const [pushed, setPushed] = React.useState(valueProp ?? '')
-  if (
-    typeof valueProp === 'string' &&
-    valueProp !== nativeValue &&   // 不是输入回声（页面把刚打的字 echo 回来了）
-    valueProp !== pushed           // 也不是"prop 没变"（页面没 echo 的输入框）
-  ) {
-    // 渲染相位派生状态（React 官方模式）：立即重渲染，与 cursor 同批落地
-    setPushed(valueProp)
-  }
-  React.useEffect(() => {
-    // 兜底：万一运行时没有采纳渲染相位派生（React 官方模式不会，防的是平台怪癖），
-    // 这里补一次。正常路径下三个值相等，条件恒 false，不会多一次 setData。
-    if (
-      typeof valueProp === 'string' &&
-      valueProp !== nativeValue &&
-      valueProp !== pushed
-    ) {
-      setPushed(valueProp)
-    }
-  }, [valueProp, nativeValue, pushed])
 
   React.useEffect(() => {
     if (autoFocus || focus) setIsFocused(true)
@@ -159,10 +118,9 @@ const Textarea = React.forwardRef<
         showConfirmBar={showConfirmBar}
         adjustPosition={adjustPosition}
         disableDefaultPadding={disableDefaultPadding}
-        // ⚠️ 下发的是 pushed 而不是 valueProp：用户输入的回声在这里被吸收，
-        //    不进 setData（原生文本不变 ⇒ 光标不会被重置到末尾）。
-        //    程序化写入由上面的渲染相位派生放行，且与 cursor 同批落地。
-        value={pushed}
+        // 标准受控：value 照常下发（不下发的方案在真机上会让输入失效），
+        // 光标由 useCaret 与它同批写进 cursor 抵消"value 一变光标甩末尾"。
+        value={valueProp}
         className="w-full self-stretch bg-transparent text-base text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm selection:bg-selection selection:text-selection-foreground"
         placeholderClass="text-muted-foreground"
         style={innerStyle}
@@ -186,9 +144,8 @@ const Textarea = React.forwardRef<
           onKeyboardCompositionEnd?.(e)
         }}
         onInput={(e) => {
-          // 先记原生真相（同步，早于页面 setState 触发的渲染），再交给页面。
-          // 页面 echo 回来的 value 会被上面的派生逻辑判为"回声"而吸收。
-          setNativeValue(e.detail.value)
+          // 直接交给页面：让页面 setQContent 与 useCaret.track（内部 setShot）
+          // 尽量落进同一批渲染 ⇒ value 与 cursor 同批下发。
           onInput?.(e)
         }}
         {...props}

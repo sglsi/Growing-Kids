@@ -160,43 +160,59 @@ m.test('单编：src/utils/caret-decision.ts（光标决策，零 import 契约�
   const p = path.join(TMP, 'caret-decision.js')
   c.ok(fs.existsSync(p), '编译产物不存在')
   CARET = await import(`file://${p.replace(/\\/g, '/')}`)
-  c.ok(typeof CARET.decideCursor === 'function', '缺少 decideCursor')
+  c.ok(typeof CARET.decideInputCursor === 'function', '缺少 decideInputCursor')
+  c.ok(typeof CARET.decideBlurCursor === 'function', '缺少 decideBlurCursor')
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
 })
 
-// 光标规则连出四次事故（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 逗号跳末尾 /
-// 10-31 只补删除不管增删 / 10-31 标点与快速删除照跳），最终确认「把 cursor 钉准」这条路
-// 走不通 —— 正解是输入期间根本不下发 value（ui/textarea 回声吸收，原生自管文本和光标）。
-// 这里把新规则钉死，防止有人再退回"钉 cursor"的老路（每次退回都是一轮真机事故）。
-m.test('🔴 光标决策：输入期间绝不下发 cursor（原生自管，任何分支都不得返回 -1）', async (c) => {
-  const D = CARET.decideCursor
+// 光标规则连报五次（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 / 10-31 只补删除 /
+// 10-31 钉 detail.cursor 仍跳 / 10-31 不下发 value 导致真机输入失效）。
+// 现在钉死的口径：**cursor 必须自己按文本差值算**，不能信 detail.cursor；
+// 组词期间一律不写；任何分支不得返回 -1。每次退回这条老路都是一轮真机事故。
+m.test('🔴 decideInputCursor：按文本差值算光标，组词期间不写，任何分支不得返回 -1', async (c) => {
+  const D = CARET.decideInputCursor
 
-  // 规则 A：输入事件一律 null。事件给的 cursor 不可信（中间输入时平台就说谎），
-  // 写了会把光标拽到错位置；不写也绝不会被甩末尾 —— 因为 value 压根没进 setData。
-  c.eq(D('input', 4, 9), null, '输入事件竟然下发了 cursor（会把光标拽到不可信的 detail.cursor 上）')
-  c.eq(D('input', 0, 9), null, '输入事件竟然下发了 cursor')
-  c.eq(D('input', undefined, 9), null, '输入事件竟然下发了 cursor')
-  c.eq(D('input', 99, 9), null, '输入事件竟然下发了 cursor')
-  c.eq(D('input', -1, 9), null, '输入事件竟然下发了 cursor')
+  // 无基准（首次输入）：只能用事件值兜底，并钳到长度
+  c.eq(D(null, 'ab', 2, -1, false), 2, '首次输入应采信事件光标')
+  c.eq(D(null, 'ab', 99, -1, false), 2, '首次输入越界未钳制')
+  c.eq(D(null, 'ab', undefined, -1, false), null, '无任何位置信息时不许猜')
+
+  // 有基准：差值优先，事件光标是骗子也不听
+  c.eq(D('ab', 'ab,', 99, 2, false), 3, '末尾打标点应算到末尾，不能听事件报的 99')
+  c.eq(D('abc,xyzdef', 'abc,xyz,def', 99, 7, false), 8, '中间插标点应按差值算（detail.cursor 说谎场景）')
+  c.eq(D('abc,def', 'abc,ef', 99, 7, false), 4, '中间退格应按差值算')
+  c.eq(D('hello', 'hell', 99, 5, false), 4, '末尾退格应按差值算')
+
+  // 文本没变（纯光标移动）：不下发
+  c.eq(D('ab', 'ab', 1, 1, false), null, '文本没变时不该写 cursor')
+
+  // 组词中：一律不写（写下去会拽走拼音光标）
+  c.eq(D('ab', 'abn', 3, 2, true), null, '组词中不该写 cursor')
+  c.eq(D(null, 'abc', 3, -1, true), null, '组词中即使无基准也不该写')
 
   // 不变式：任何分支都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
-  for (const k of ['input', 'blur']) {
-    for (const cur of [undefined, -1, -100, 0, 3, 99]) {
-      for (const len of [-1, 0, 5, 100]) {
-        c.ok(D(k, cur, len) !== -1, `返回了 -1（等于命令光标去末尾）：kind=${k} cursor=${cur} len=${len}`)
-      }
-    }
-  }
+  for (const prev of [null, '', 'abc', 'aaaa'])
+    for (const next of ['', 'a', 'abc', 'abcd'])
+      for (const cur of [undefined, -1, 0, 3, 99])
+        for (const hint of [-1, 0, 3])
+          for (const comp of [false, true]) {
+            const r = D(prev, next, cur, hint, comp)
+            c.ok(r !== -1, `返回了 -1（等于命令光标去末尾）：${JSON.stringify({ prev, next, cur, hint, comp })}`)
+            if (r !== null) c.ok(r >= 0 && r <= next.length, `位置越界：${JSON.stringify({ prev, next, r })}`)
+          }
 })
 
-m.test('🔴 光标决策：失焦是唯一还会写光标的时机（让重新聚焦落在用户离开处）', async (c) => {
-  const D = CARET.decideCursor
-  c.eq(D('blur', 4, 9), 4, '失焦未写下真实光标')
-  c.eq(D('blur', 0, 9), 0, '开头位置被误判')
-  c.eq(D('blur', 99, 9), 9, '越界光标未钳到文本长度')
-  c.eq(D('blur', 4, -1), 4, '长度未知时不该钳')
-  c.eq(D('blur', undefined, 9), null, '拿不到光标时不许猜（更不能写 -1）')
-  c.eq(D('blur', -5, 9), null, '负光标无效')
+m.test('🔴 decideBlurCursor：失焦写下真实光标（重新聚焦落在用户离开处）', async (c) => {
+  const D = CARET.decideBlurCursor
+  c.eq(D(4, 9), 4, '失焦未写下真实光标')
+  c.eq(D(0, 9), 0, '开头位置被误判')
+  c.eq(D(99, 9), 9, '越界光标未钳到文本长度')
+  c.eq(D(4, -1), 4, '长度未知时不该钳')
+  c.eq(D(undefined, 9), null, '拿不到光标时不许猜（更不能写 -1）')
+  c.eq(D(-5, 9), null, '负光标无效')
+  for (const cur of [undefined, -1, -100, 0, 3, 99])
+    for (const len of [-1, 0, 5, 100])
+      c.ok(D(cur, len) !== -1, `返回了 -1：cursor=${cur} len=${len}`)
 })
 
 m.test('🔴 diffCursor：从文本差值算真实插入点（detail.cursor 在中间输入时不可信）', async (c) => {

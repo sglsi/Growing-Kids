@@ -1,45 +1,40 @@
 import { useCallback, useRef, useState } from 'react'
-import { decideCursor, diffCursor } from './caret-decision'
+import { decideBlurCursor, decideInputCursor } from './caret-decision'
 
 /**
- * 输入框光标的「庇护所」（思傅 2026-10-26 起，2026-10-31 第三次重写）
+ * 输入框光标的「庇护所」（思傅 2026-10-26 起，2026-10-31 第五次重写）
  *
- * ## 一、这个 hook 现在**不**做什么（重要，前两版都错在这）
- * 它**不在用户输入期间写 `cursor` 属性**。连报四次事故后确认：
- * 小程序 textarea 是半受控组件，setData 里出现 value 就把光标重置到末尾；
- * 而受控 value 的回写是跨帧链，连续操作时必然过期 ⇒ 每次回写都是一次跳末尾的机会。
- * `detail.cursor` 在文本中间输入时本身不可信，钉它钉不准。
- * 正解是 **`components/ui/textarea.tsx` 的回声吸收**：输入期间不下发 value，
- * 原生组件自己管文本和光标。字母、标点、连续删除、拼音组词全部零干预。
+ * ## 这一版的核心变化
+ * 前四版要么「钉一个不可信的值」（第 2~4 版，钉 `detail.cursor`），
+ * 要么「干脆不下发 value」（第 5 版，真机上输入直接失效）。现在的口径：
  *
- * ## 二、这个 hook 还做什么
- * 1. **记录真实光标 `live`**（供"数学符号插哪"用）：
- *    用 `diffCursor(prev, next)` 从两次文本差值算 —— 不信 detail.cursor；
- *    文本没变时（focus 事件：手指点选换位）才退回事件给的 cursor。
- * 2. **程序化插入的定位 `request(pos, value)`**：页面 setState 新文本后调用，
- *    cursor 与 value 由 ui/textarea 保证落进同一批 setData；
- *    目标值与当前属性值相同时先落相邻位、20ms 后归位（Taro 的 diff 不把
- *    "没变的 cursor" 放进这批 setData，必须制造一次真实变化）。
- * 3. **失焦时写下真实光标 `blur(cursor)`**：唯一还会写光标的时机 ——
- *    让重新聚焦时 caret 停在用户离开的位置。输入期间绝不用它。
+ *   1. **value 照常受控下发**（不下发的话真机表现完全不可控）；
+ *   2. **每次输入把 `cursor` 一起下发**，与 `value` 同批 —— 抵消"value 一变
+ *      渲染层就把光标甩到末尾"；
+ *   3. 这个 cursor **必须自己算**：`diffCursor(上一次文本, 这一次文本)`。
+ *      `detail.cursor` 不可信（社区实证：中间输入时它报的就是错位置），
+ *      而文本差值是确定的 —— "公共前缀之后、公共后缀之前"就是本次编辑点。
+ *   4. **组词期间一个字都不写**（那时文本是拼音串，差值算的是拼音位置）。
  *
- * ## 三、对外契约
- *   1. `track(cursor?, value?)`：onInput / onFocus 里调用，**只记录，绝不写属性**；
- *   2. `request(pos, value?)`：程序化插入后调用，value 是插入后的完整文本；
- *   3. `blur(cursor?)`：onBlur 里调用，记录 + 写下真实光标 + 落下受控 focus；
- *   4. `position(len)`：当前可用的插入位置（未记录/越界时退化为 len）；
- *   5. `setComposing(v)`：组词期间不更新 live（那时文本是拼音串，差值算出来的是拼音位置）。
+ * ## 对外契约
+ *   1. `track(cursor?, value?)`：onInput / onFocus 里调用。给了 value 就按差值
+ *      算光标并下发；只给 cursor（focus 事件、手指点选换位）时只记录不发。
+ *   2. `request(pos, value?)`：程序化插入后调用（插入数学符号 / OCR 回填）。
+ *   3. `blur(cursor?)`：onBlur 里调用 —— 记录并把真实光标写下去，
+ *      让重新聚焦落在用户离开的位置。
+ *   4. `position(len)`：当前可用的插入位置。
+ *   5. `setComposing(v)`：组词标记，组词期间不下发 cursor。
  */
 
 export interface Caret {
   /** 传给 Textarea 的 cursor；-1 = 不指定（原生按自己的规则走） */
   cursor: number
-  /** 传给 Textarea  focus：插入符号后要把输入态还回去，否则得再点一次输入框 */
+  /** 传给 Textarea 的 focus：插入符号后要把输入态还回去，否则得再点一次输入框 */
   focus: boolean
   /**
-   * onInput / onFocus 里调用：记录真实光标（diff 优先），并**绝不写 cursor 属性**。
-   * @param cursor 事件 detail 里的光标位置（可能没有，也不一定可信）
-   * @param value  本次输入后的完整文本（给了才能用差值推算；不给视为纯光标移动）
+   * onInput / onFocus 里调用。
+   * @param cursor 事件 detail 里的光标位置（只在差值算不出时兜底）
+   * @param value  本次输入后的完整文本（给了才按差值算光标）
    */
   track: (cursor?: number, value?: string) => void
   /** 程序化插入文本后调用：请求把光标定位到 pos（与页面 setState 同批下发） */
@@ -49,7 +44,6 @@ export interface Caret {
    *
    * 微信原生 textarea 的 `focus` 是**边沿触发**：值一直是 true 时再设 true 不会做事。
    * 所以这里先落成 false、下一拍再置 true，制造一次真正的「重新聚焦」。
-   * 同时 `cursor` 只有**聚焦中**才会被采信，两步必须一起做。
    */
   refocus: () => void
   /**
@@ -59,7 +53,6 @@ export interface Caret {
   blur: (cursor?: number) => void
   /**
    * 标记「输入法正在组词」（拼音/手写中间态）。
-   * 组词期间不更新 live —— 那时的文本是拼音串，差值算出来的位置不是最终光标。
    * 绑到 Textarea 的 `onKeyboardCompositionStart` / `onKeyboardCompositionEnd`（微信 2.25.0+）。
    */
   setComposing: (v: boolean) => void
@@ -68,7 +61,7 @@ export interface Caret {
 }
 
 export function useCaret(): Caret {
-  /** 最近一次真实光标位置（-1 = 未知） */
+  /** 最近一次算出来的真实光标位置（-1 = 未知） */
   const live = useRef(-1)
   /** 当前下发给 `cursor` 属性的值（-1 = 不指定） */
   const shotRef = useRef(-1)
@@ -80,48 +73,25 @@ export function useCaret(): Caret {
   /** 受控聚焦态（见 Caret.refocus 的说明） */
   const [focused, setFocused] = useState(false)
 
-  /** 写 cursor 属性时先比对镜像值：相同则不动，避免白发一次 setData */
-  const applyShot = useCallback((pos: number) => {
-    if (pos < 0 || pos === shotRef.current) return
-    shotRef.current = pos
-    setShot(pos)
-  }, [])
+  /**
+   * 把光标位置下发给 `cursor` 属性。
+   *
+   * ⚠️ **目标值与当前值相同时必须制造一次真实变化**：Taro 的 props diff 只把
+   * "变了的属性"放进 setData（`dist/taro.js` 的 prepareUpdate），cursor 值不变
+   * 就不会被下发 —— 而这一批里 value 变了，光标照样被甩到末尾，于是"中间插入一个字
+   * 后光标跳到末尾"。所以先落到相邻位置，20ms 后归位；相邻一格用户看不见。
+   */
+  const applyShot = useCallback((pos: number, len?: number) => {
+    let p = Math.round(pos)
+    if (typeof len === 'number' && len >= 0) p = Math.min(p, len)
+    p = Math.max(0, p)
 
-  const track = useCallback((cursor?: number, value?: string) => {
-    if (typeof value === 'string') {
-      if (!composingRef.current) {
-        // 差值优先：detail.cursor 在文本中间输入时不可信（社区实证），
-        // 而"上一次文本 → 这一次文本"的差值是确定的。
-        const diffed = prevValueRef.current !== null ? diffCursor(prevValueRef.current, value) : null
-        if (diffed !== null) live.current = diffed
-        else if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
-      }
-      // 组词期也更新基准：整段组词会被下一次差值当成一次编辑，位置依然算得对
-      prevValueRef.current = value
-      return
-    }
-    // 只给了光标没给文本（focus 事件：手指点选换位，文本没变）
-    if (!composingRef.current && typeof cursor === 'number' && cursor >= 0) {
-      live.current = cursor
-    }
-    // ⚠️ 绝不在此处写 cursor 属性 —— 输入期间原生光标就是对的（见 caret-decision 规则 A）
-  }, [])
-
-  const request = useCallback((pos: number, value?: string) => {
-    const p = pos >= 0 ? pos : 0
-    live.current = p
-    if (typeof value === 'string') prevValueRef.current = value
     if (p === shotRef.current) {
-      /**
-       * 目标位置与当前属性值相同时，Taro 的 diff 认为 `cursor` 没变、**不会把它放进
-       * 这一批 setData**，于是这一批只有 value 变化 ⇒ 微信按自己的规则把光标甩到末尾。
-       * 先落到相邻位置、20ms 后归位，制造一次真实变化 —— 相邻一格的位移用户看不见。
-       */
       const stagger = p > 0 ? p - 1 : 1
       shotRef.current = stagger
       setShot(stagger)
       setTimeout(() => {
-        // 期间用户若已经输入过（applyShot 改过值），就不要抢回控制权
+        // 期间用户若已经输入过（别的调用改过 shotRef），就不要抢回控制权
         if (shotRef.current === stagger) {
           shotRef.current = p
           setShot(p)
@@ -129,6 +99,35 @@ export function useCaret(): Caret {
       }, 20)
       return
     }
+    shotRef.current = p
+    setShot(p)
+  }, [])
+
+  const track = useCallback((cursor?: number, value?: string) => {
+    // 只给了光标没给文本：focus 事件（手指点选换位，文本没变）。
+    // 只记录，不下发 —— 原生光标本来就是用户点的那儿，写反而可能写错。
+    if (typeof value !== 'string') {
+      if (!composingRef.current && typeof cursor === 'number' && cursor >= 0) {
+        live.current = cursor
+      }
+      return
+    }
+
+    const prev = prevValueRef.current
+    // 组词期也更新基准：整段组词会被下一次差值当成一次编辑，位置依然算得对
+    prevValueRef.current = value
+
+    const next = decideInputCursor(prev, value, cursor, live.current, composingRef.current)
+    // next === null：组词中 / 文本没变 / 无任何可用信息 —— 这一拍不动 cursor
+    if (next === null) return
+    live.current = next
+    applyShot(next, value.length)
+  }, [applyShot])
+
+  const request = useCallback((pos: number, value?: string) => {
+    const p = pos >= 0 ? pos : 0
+    live.current = p
+    if (typeof value === 'string') prevValueRef.current = value
     applyShot(p)
   }, [applyShot])
 
@@ -148,8 +147,8 @@ export function useCaret(): Caret {
     setFocused(false)
     if (composingRef.current) return
     if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
-    // 失焦是唯一还会写光标的时机：写下真实位置，重新聚焦才落在用户离开处
-    const next = decideCursor('blur', live.current >= 0 ? live.current : undefined)
+    // 失焦也要写：写下真实位置，重新聚焦才落在用户离开处
+    const next = decideBlurCursor(live.current >= 0 ? live.current : undefined)
     if (next !== null) applyShot(next)
   }, [applyShot])
 
