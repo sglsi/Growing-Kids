@@ -2,23 +2,27 @@ import { useCallback, useRef, useState } from 'react'
 import { decideBlurCursor, diffCursor } from './caret-decision'
 
 /**
- * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第七次重写，终于定性）
+ * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第八次重写，终于定性）
  *
- * ## 定性结论（由 `server/scripts/repro-caret.mjs` 复现验证）
+ * ## 定性结论（三条平台/框架规则叠加，前七版全栽在这里）
  *
- * 前面六版都在"输入时把 cursor 钉准"，全输。原因是平台规则：
- *   - `value` 被 setData ⇒ 原生文本重建、**光标落到末尾**；
- *   - `cursor` 的官方定义是「**指定 focus 时的光标位置**」⇒ 输入过程中写它**无效**。
- * 受控输入框每次输入 `props.value` 都在变 ⇒ 每次下发 ⇒ 每次重置光标，
- * 且没有任何生效的纠正手段。末尾打字看不出来，只有**中间编辑**才暴露。
+ * 1. 微信 `textarea` 的 `value` 被 setData ⇒ 原生文本重建、**光标落到末尾**；
+ * 2. `cursor` 的官方定义是「**指定 focus 时的光标位置**」⇒ 输入过程中写它**无效**；
+ * 3. Taro 那层还有一条：`@tarojs/react/dist/react.esm.js:366`
+ *    `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
+ *    —— 表单元素的 `value` **无条件下发**，跟值变没变毫无关系。
  *
- * 所以治法从"钉光标"改成"**别让 value 变**"（`ui/textarea` 的回声吸收）：
- * 用户输入期间 value 不回灌原生，光标完全由平台维护 ⇒ 任何输入法、任何操作序列都不跳。
+ * 所以"在输入时把 cursor 钉准"和"下发一个不变化的 value"都救不了：
+ * 只要这次渲染发生，value 就一定被塞进 setData，光标就一定落末尾。
+ *
+ * 治法因此落在渲染层（见 `components/ui/textarea.tsx`）：
+ * **用户输入期间根本不重建元素**（useMemo 缓存 ⇒ React bailout ⇒ 没有 commitUpdate
+ * ⇒ 没有 setData），光标完全由平台维护。
  *
  * ## 于是本 hook 的职责收窄为「记录位置 + 程序化定位」
  *   1. `track(cursor?, value?)`：onInput / onFocus 里调用。**只记录**光标，
  *      用 `diffCursor(上一次文本, 这一次文本)` 算（`detail.cursor` 在中间输入时不可信）。
- *      不再下发 cursor —— 输入期间写它无效，只会白多一次 setData 干扰输入法。
+ *      不下发 cursor —— 输入期间写它无效，且一旦写它就等于要求重建元素。
  *   2. `request(pos, value?)`：程序化插入后调用（插入数学符号 / OCR 回填）。
  *      配合 `refocus()` 造出 focus 边沿，那时 cursor 才真正生效。
  *   3. `blur(cursor?)`：onBlur 里调用 —— 记录并把真实光标写下去，
@@ -113,8 +117,8 @@ export function useCaret(): Caret {
     prevValueRef.current = value
 
     // 用文本差值算真实编辑点（`detail.cursor` 在中间输入时不可信），
-    // 但**只记录、不下发**：value 现在不回灌原生（见 ui/textarea 的回声吸收），
-    // 光标由平台自己维护，写 cursor 只是白白多一次 setData、干扰输入法。
+    // 但**只记录、不下发**：value 现在不回灌原生（见 ui/textarea 的渲染阻断），
+    // 光标由平台自己维护，写 cursor 只是白白要求重建一次元素、反而把光标甩到末尾。
     const diffed = prev === null ? null : diffCursor(prev, value, live.current)
     if (diffed !== null) live.current = diffed
     else if (typeof cursor === 'number' && cursor >= 0) live.current = cursor

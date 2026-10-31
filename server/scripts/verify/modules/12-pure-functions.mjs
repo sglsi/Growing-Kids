@@ -168,70 +168,81 @@ m.test('单编：src/utils/caret-decision.ts + textarea-echo.ts（零 import 契
   ECHO = await import(`file://${pe.replace(/\\/g, '/')}`)
   c.ok(typeof CARET.decideBlurCursor === 'function', '缺少 decideBlurCursor')
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
-  c.ok(typeof ECHO.resolveEchoValue === 'function', '缺少 resolveEchoValue')
-  c.ok(typeof ECHO.recordNativeInput === 'function', '缺少 recordNativeInput')
+  c.ok(typeof ECHO.reduceEcho === 'function', '缺少 reduceEcho')
+  c.ok(typeof ECHO.initEcho === 'function', '缺少 initEcho')
 })
 
-// 光标问题连报六次的最终结论（2026-10-31 第七轮，由 server/scripts/repro-caret.mjs 复现）：
+// 光标问题连报七次的最终结论（2026-10-31 第八轮）：
 //   微信 textarea 的 `value` 一被 setData 就重建文本、**光标落到末尾**；
 //   而 `cursor` 是「**指定 focus 时的光标位置**」—— 输入过程中写它**无效**。
-//   ⇒ 受控输入框每次输入都会把光标甩到末尾且无法纠正。
-//   末尾打字看不出（重置到末尾恰好正确），只有中间编辑暴露 ——
-//   这就是"标点/空格跳、从句尾删正常、中间删有时跳"的全部由来。
+//   更要命的是 Taro 那层：`@tarojs/react/dist/react.esm.js:366`
+//   `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
+//   —— 表单元素的 value **无条件下发**，跟值变没变毫无关系。
+//   ⇒ "受控"在 Taro 小程序端 = 每帧都重建原生文本 = 光标每帧落末尾，无解。
+//   ⇒ 第七轮的"回声吸收"（下发一个不变的值）既救不了光标，还会把用户刚打的字
+//     覆盖回旧值 —— 真机表现就是"打不进字"。已作废。
 //
-// 治法：**输入期间根本不下发 value**（回声吸收），光标完全交给平台。
-// 下面这组断言就是守住"用户输入的回声不许被下发"这条命根子。
-m.test('🔴 resolveEchoValue：用户输入的回声必须吸收，只有程序化写入才放行', async (c) => {
-  const R = ECHO.resolveEchoValue
-  const S = (native, last) => ({ native, last })
+// 现行治法：**输入期间根本不让元素更新**（useMemo 缓存元素 ⇒ React bailout ⇒
+// 没有 commitUpdate ⇒ 没有 setData）。下面这组断言守住这条命根子：
+//   用户输入的每一步都必须 push=false，只有外部写入才 push 一次。
+m.test('🔴 reduceEcho：用户输入零放行，只有外部写入才重建元素', async (c) => {
+  const { reduceEcho, initEcho } = ECHO
+  const native = (st, v) => reduceEcho(st, { kind: 'native', value: v })
+  const prop = (st, v) => reduceEcho(st, { kind: 'prop', value: v })
 
-  // 用户输入：真实顺序是「onInput 先把 native 推进到新值」→「页面 setState」→「渲染」。
-  // 渲染时 incoming 与 native 同值 ⇒ 判为回声 ⇒ 下发值仍是上一次的 last（属性不变）。
-  const afterInput = ECHO.recordNativeInput(S('abc', 'abc'), 'abcd')
-  const echo1 = R(afterInput, 'abcd')
-  c.eq(echo1.value, 'abc', '回声被下发了（这正是光标跳末尾的成因）')
-  c.eq(echo1.echo, true, '未判定为回声')
-  c.eq(echo1.state.native, 'abcd', '回声分支不该推进 native（由 onInput 负责）')
-  c.eq(echo1.state.last, 'abc', '回声分支不该动 last')
-
-  // 连续输入：last 一直停在最后一次真正下发的值，value 属性始终不动
-  let st = S('a', 'a')
-  for (const t of ['ab', 'abc', 'abcd']) {
-    st = ECHO.recordNativeInput(st, t)
-    const r = R(st, t)
-    c.eq(r.value, 'a', `连续输入时下发值变了（第 ${t.length} 步）`)
-    st = r.state
+  // 真实顺序：onInput 先把原生真相推进 → 页面 setState → 渲染（props.value 与之同值）
+  let st = initEcho('')
+  const typed = ['a', 'ab', 'abc', 'abc,', 'abc,d', 'abc,def']
+  for (const t of typed) {
+    const n = native(st, t)
+    c.eq(n.push, false, `onInput 竟然放行了（${t}）`)
+    st = n.state
+    const p = prop(st, t)
+    c.eq(p.push, false, `用户输入被当成外部写入放行了（${t}）—— 这正是光标跳末尾的成因`)
+    st = p.state
   }
-  c.eq(st.last, 'a', '连续输入期间 last 应保持不变')
+  c.eq(st.native, 'abc,def', '输入结束后原生真相与实际不符')
 
-  // 程序化写入（符号插入 / OCR 回填 / 数据加载 / 清空）⇒ 必须放行
-  const insert = R(S('abc', 'abc'), 'ab×c')
-  c.eq(insert.value, 'ab×c', '程序化写入未放行')
-  c.eq(insert.echo, false, '程序化写入被误判为回声')
-  c.eq(insert.state.native, 'ab×c', '放行后 native 未推进')
-  c.eq(insert.state.last, 'ab×c', '放行后 last 未推进')
+  // 中间删除：同样是回声，不许放行
+  for (const t of ['abc,de', 'abc,d', 'abc,', 'abc']) {
+    st = native(st, t).state
+    c.eq(prop(st, t).push, false, `删除操作被放行了（${t}）—— 连续退格会跳末尾`)
+  }
 
-  const clear = R(S('abc', 'abc'), '')
-  c.eq(clear.value, '', '程序化清空未放行')
-  c.eq(clear.echo, false, '程序化清空被误判为回声')
+  // 外部写入（插入数学符号 / OCR 回填 / 清空 / 异步加载）⇒ 必须放行一次
+  const insert = prop(st, 'ab×c')
+  c.eq(insert.push, true, '外部写入未放行（符号插不进去）')
+  c.eq(insert.state.native, 'ab×c', '放行后原生真相未推进（下次输入会被误判）')
 
-  const load = R(S('', ''), '题目内容')
-  c.eq(load.value, '题目内容', '异步数据到达未放行（会整框空白）')
+  // 幂等：React 严格模式 / 并发重放会把同一次渲染跑两遍，第二遍不许再放行
+  c.eq(prop(insert.state, 'ab×c').push, false, '同一外部写入被重复放行')
 
-  // 放行后再输入：必须重新回到回声，不能反复下发
-  const after = R(ECHO.recordNativeInput(insert.state, 'ab×cd'), 'ab×cd')
-  c.eq(after.value, 'ab×c', '放行后的首次输入未回到回声')
+  // 一次放行后，用户接着打字必须立刻回到零放行
+  const n2 = native(insert.state, 'ab×cd')
+  c.eq(n2.push, false, 'onInput 放行了')
+  c.eq(prop(n2.state, 'ab×cd').push, false, '放行后的首次输入未回到回声')
 
-  // 命根子不变式：echo 分支下发的值**永远是 last**，绝不可能是别的（尤其不能是空串）
-  for (const native of ['', 'a', 'abc', '长文本内容'])
-    for (const last of ['', 'x', 'abc', 'last 值']) {
-      const r = R(S(native, last), native)
-      c.eq(r.value, last, `回声分支下发的值不是 last：native=${native} last=${last}`)
+  // 清空与异步加载（首帧为空、数据后到）同样必须放行
+  c.eq(prop(initEcho('abc'), '').push, true, '程序化清空未放行')
+  c.eq(prop(initEcho(''), '题目内容').push, true, '异步数据到达未放行（会整框空白）')
+  c.eq(prop(initEcho('abc'), 'abc').push, false, '挂载首帧被误判为外部写入')
+
+  // 命根子不变式：凡是 push 的那一次，下发值必须**就是** incoming（绝不许是旧值）
+  for (const from of ['', 'a', 'abc', '长文本内容'])
+    for (const to of ['', 'x', 'ab×c', '新内容'])
+      if (from !== to) {
+        const r = prop(initEcho(from), to)
+        c.ok(r.push, `外部写入未放行：${JSON.stringify([from, to])}`)
+        c.eq(r.state.native, to, `放行时携带了旧值：${JSON.stringify([from, to])}`)
+      }
+
+  // native 步永远不放行（用户打的字原生已经有了，再下发只会甩光标）
+  for (const a of ['', 'abc', '题目'])
+    for (const b of ['', 'abcd', '题目，']) {
+      const r = native(initEcho(a), b)
+      c.eq(r.push, false, `onInput 放行了：${JSON.stringify([a, b])}`)
+      c.eq(r.state.native, b, `onInput 未推进原生真相：${JSON.stringify([a, b])}`)
     }
-
-  // recordNativeInput：只推进 native，不许动 last
-  c.eq(ECHO.recordNativeInput(S('ab', 'ab'), 'abc').last, 'ab', 'recordNativeInput 动了 last')
-  c.eq(ECHO.recordNativeInput(S('ab', 'ab'), 'abc').native, 'abc', 'recordNativeInput 没推进 native')
 })
 
 m.test('🔴 decideBlurCursor：失焦写下真实光标（重新聚焦落在用户离开处）', async (c) => {
