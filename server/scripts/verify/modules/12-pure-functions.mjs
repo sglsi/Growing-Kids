@@ -148,4 +148,45 @@ m.test('answer-merge：纯文本无标记时整体归入答案', async (c) => {
   c.ok(typeof back.answer === 'string', 'answer 缺失')
 })
 
+let CARET = null
+
+m.test('单编：src/utils/caret-decision.ts（光标决策，零 import 契约）', async (c) => {
+  try {
+    compile('src/utils/caret-decision.ts')
+  } catch (e) {
+    const out = `${e.stdout || ''}${e.stderr || ''}`
+    throw new Error(`caret-decision.ts 单编失败（破坏了"零 import"契约）：${out.slice(0, 300)}`)
+  }
+  const p = path.join(TMP, 'caret-decision.js')
+  c.ok(fs.existsSync(p), '编译产物不存在')
+  CARET = await import(`file://${p.replace(/\\/g, '/')}`)
+  c.ok(typeof CARET.decideCursor === 'function', '缺少 decideCursor')
+})
+
+// 光标规则在 2026-10-26 / 10-31 连出三次事故，每次都是「属性取值」而不是时序问题，
+// 所以这里把规则本身钉死（utils/caret-decision.ts 头部有每条规则对应的事故说明）。
+m.test('🔴 光标决策：删除须钉住真实位置，任何分支都不得返回 -1', async (c) => {
+  const S = (o) => ({ prevLen: 10, shot: -1, live: 5, pending: false, ...o })
+  const D = CARET.decideCursor
+
+  c.eq(D(S(), { cursor: 4, valueLen: 9 }), 4, '删除时未按真实光标定位')
+  c.eq(D(S(), { valueLen: 7 }), 2, '删除时未按长度差回推（live 5 删 3 字应到 2）')
+  c.eq(D(S({ live: -1 }), { valueLen: 7 }), null, '推不出位置时不该猜（猜 0 会钉到开头）')
+  c.eq(D(S(), { cursor: 11, valueLen: 11 }), null, '增字不该改 cursor（会拽走组词光标）')
+  c.eq(D(S(), { cursor: 5, valueLen: 10 }), null, '长度不变（组词中）不该改 cursor')
+
+  c.eq(D(S({ pending: true, shot: 3 }), { cursor: 4, valueLen: 11 }), 4, '撤销一次性定位时未跟随真实光标')
+  c.eq(D(S({ pending: true, shot: 3 }), { valueLen: 11 }), 4, '撤销一次性定位时未按长度差推算')
+  c.eq(D(S({ pending: true, shot: 3, prevLen: -1 }), {}), null, '拿不到位置信息时必须不许写值（不能是 -1）')
+
+  c.eq(D(S(), { cursor: 99, valueLen: 9 }), 9, '越界光标未钳到文本长度')
+
+  // 不变式：无论怎么组合，都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
+  for (const s of [{}, { pending: true }, { pending: true, shot: 5, prevLen: 3 }, { prevLen: 20, live: 0 }]) {
+    for (const i of [{}, { cursor: -1, valueLen: 0 }, { valueLen: 0 }, { valueLen: 3 }]) {
+      c.ok(D(S(s), i) !== -1, `返回了 -1（等于命令光标去末尾）：${JSON.stringify({ s, i })}`)
+    }
+  }
+})
+
 export default m

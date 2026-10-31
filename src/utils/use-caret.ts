@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { decideCursor } from './caret-decision'
 
 /**
  * 输入框光标的「庇护所」（思傅 2026-10-26 起，2026-10-31 重写）
@@ -27,7 +28,24 @@ import { useCallback, useRef, useState } from 'react'
  *   拿不到时用文本长度差推算），而不是 -1。属性值确实变了，但变到的是"原地"，
  *   微信据此重新定位的结果就是不动 —— 既撤销了定位，也不会把光标甩走。
  *
- * ## 三、对外契约
+ * ## 三、为什么删除时也必须同步 cursor（思傅 2026-10-31 报的第二个 bug）
+ * 症状：**连续按退格删前面的字**，删到一半光标突然跳到全文末尾，之后删的是末尾的字。
+ *
+ * 病因不是我们的 cursor，而是受控 `value` 的**回写时序**：
+ *   onInput → setState → React 渲染 → Taro 组 DOM 差异 → `setData(value)`。
+ *   这条链要跨若干个微任务/帧，而用户连续退格时原生文本**一直在变**。
+ *   于是这一次 setData 落地的 value 往往已经落后于原生当前文本
+ *   （用户又删掉了 1~2 个字），微信收到「value 被赋值」就把光标置到末尾。
+ *   打字时不易察觉（每次只增一个字、节奏慢），连续删时几乎必然撞上。
+ *   只在「删除」出现，还因为它让文本**变短**：变短意味着这次回写一定与
+ *   原生当前内容不一致 —— 增字时回写常常恰好等于原生值，等于没变化。
+ *
+ * 治法：删除（本次长度 < 上次长度）时，**同一次 setData 里把 cursor 一起下发**，
+ * 值取事件报告的真实光标。这样即使 value 被回写成落后值，微信按 cursor 重新定位，
+ * 光标仍在原处。注意这**不会加重干扰**：每次 onInput 本来就已经在 setData(value)，
+ * 只是同一批数据里多一个字段，不会额外多一次打断（长按连续退格照常）。
+ *
+ * ## 四、对外契约
  *   1. 光标位置记在 ref 里，不参与日常渲染，用户怎么打字都不干预；
  *   2. 只有**程序化插入**（数学符号、识别结果回填）时才 request(pos) 一次性定位，
  *      由紧随其后的第一次 onInput 消费掉；
@@ -82,24 +100,21 @@ export function useCaret(): Caret {
   }, [])
 
   const track = useCallback((cursor?: number, valueLen?: number) => {
-    const valid = typeof cursor === 'number' && cursor >= 0
-    if (valid) live.current = cursor
-    const len = typeof valueLen === 'number' ? valueLen : -1
-
-    if (pendingRef.current) {
-      // 优先用事件给的真实光标；事件没带（部分输入法/标点会这样）就用长度差推算
-      let target = valid ? (cursor as number) : -1
-      if (target < 0 && len >= 0 && lenRef.current >= 0) {
-        const grown = len - lenRef.current
-        target = Math.min(len, Math.max(0, shotRef.current + grown))
-      }
-      // ⚠️ 消费掉标记后**绝不**把 cursor 落回 -1（见文件头第二节）。
-      // target 仍 < 0 说明这一拍拿不到任何位置信息 —— 宁可保持原值不动，
-      // 也不能写 -1（那等于命令微信"把光标移到末尾"）。
-      pendingRef.current = false
-      if (target >= 0) applyShot(target)
-    }
-    if (len >= 0) lenRef.current = len
+    // 生效前先算：决策要用「上一拍」的 live / prevLen（见 utils/caret-decision 的规则）
+    const next = decideCursor(
+      {
+        prevLen: lenRef.current,
+        shot: shotRef.current,
+        live: live.current,
+        pending: pendingRef.current,
+      },
+      { cursor, valueLen },
+    )
+    if (typeof cursor === 'number' && cursor >= 0) live.current = cursor
+    if (pendingRef.current) pendingRef.current = false
+    // next === null 表示「这一拍不改动」（绝不等于写 -1，见 caret-decision 规则 1）
+    if (next !== null) applyShot(next)
+    if (typeof valueLen === 'number' && valueLen >= 0) lenRef.current = valueLen
   }, [applyShot])
 
   const request = useCallback((pos: number, valueLen?: number) => {
