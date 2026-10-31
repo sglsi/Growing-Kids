@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { View, Text, Textarea, Image as TaroImage } from '@tarojs/components'
+import { View, Text, Image as TaroImage } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { Plus, Trash2, Crop, Globe, FileText, Check, X, Bot, BookOpen } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
+import { Textarea } from '@/components/ui/textarea'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
@@ -74,6 +75,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     (item?.content?.answer || '').trim() ? 'view' : 'edit',
   )
   const [editing, setEditing] = useState('')
+  /**
+   * 输入中的实时文本（思傅 2026-10-31 第十轮，见 工程教训录 L29）
+   *
+   * 打字时**不能 setState**：Taro 对表单元素无条件把 value 塞进 setData
+   * （`react.esm.js:372` `isFormElement && i === 'value'`），而微信 textarea 是原生组件，
+   * 页面 setData 时按 value 重新应用文本、光标落末尾。⇒ 边打边 setState = 边打边把
+   * 光标甩到结尾。所以实时文本只放 ref，失焦/程序化写入（插符号、采纳搜题）时才同步进 state。
+   */
+  const editingRef = useRef('')
   const [saving, setSaving] = useState(false)
   // 当前正在进行的解题模式（null=空闲）：'search' 联网搜题 / 'kb' 知识库 / 'ai' AI 解题
   const [searching, setSearching] = useState<'search' | 'kb' | 'ai' | null>(null)
@@ -149,13 +159,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   /** 进入编辑：把库存 LaTeX 转成用户认识的可读形式——绝不是给用户看源码 */
   const startEdit = () => {
-    setEditing(latexToReadable(text))
+    const readable = latexToReadable(text)
+    editingRef.current = readable
+    setEditing(readable)
     setMode('edit')
   }
 
   /** 保存并回到预览：可读形式 → LaTeX 入库 */
   const saveEditing = async () => {
-    const latex = readableToLatex(editing)
+    const latex = readableToLatex(editingRef.current)
     setText(latex)
     setMode('view')
     await persistText(latex)
@@ -169,11 +181,12 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     // 延迟一拍：点 chip 会先让 textarea 失焦，带真实 cursor 的 blur 往往晚于
     // chip 的 tap 回调 ⇒ 抢在 blur 前插入会用到上一次打字的光标（思傅 2026-10-29）
     setTimeout(() => {
-      const cur = mode === 'edit' ? editing : latexToReadable(text)
+      const cur = mode === 'edit' ? editingRef.current : latexToReadable(text)
       const pos = caret.position(cur.length)
       const marker = snippet.indexOf('|')
       const plain = snippet.replace('|', '')
       const next = cur.slice(0, pos) + plain + cur.slice(pos)
+      editingRef.current = next
       setEditing(next)
       if (mode !== 'edit') setMode('edit')
       caret.request(marker >= 0 ? pos + marker : pos + plain.length, next)
@@ -398,10 +411,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               maxlength={-1}
               cursor={caret.cursor}
               focus={caret.focus}
-              onInput={(e) => { setEditing(e.detail.value); caret.track(e.detail.cursor, e.detail.value) }}
+              // ⚠️ 打字只写 ref，不 setState（否则每打一个字页面就 setData 一次，
+              //    原生 textarea 按 value 重建文本、光标落末尾 —— 第十轮的根因）
+              onInput={(e) => { editingRef.current = e.detail.value; caret.track(e.detail.cursor, e.detail.value) }}
               // 手指点选位置不产生 input 事件，靠 blur/focus 的 detail.cursor 补记
               // （否则符号会插到上一次打字处，思傅 2026-10-29）
-              onBlur={(e) => caret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onBlur={(e) => {
+                setEditing(editingRef.current)
+                caret.blur((e.detail as { cursor?: number } | undefined)?.cursor)
+              }}
               onFocus={(e) => caret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           )}

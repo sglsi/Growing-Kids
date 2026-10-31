@@ -2,29 +2,27 @@ import { useCallback, useRef, useState } from 'react'
 import { decideBlurCursor, diffCursor } from './caret-decision'
 
 /**
- * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第八次重写，终于定性）
+ * 输入框光标的「庇护所」（思傅 2026-10-26 起；2026-10-31 第十次重写，定性）
  *
- * ## 定性结论（三条平台/框架规则叠加，前七版全栽在这里）
+ * ## 定性结论（两条平台规则叠加，前九版全栽在这里）
  *
- * 1. 微信 `textarea` 的 `value` 被 setData ⇒ 原生文本重建、**光标落到末尾**；
- * 2. `cursor` 的官方定义是「**指定 focus 时的光标位置**」⇒ 输入过程中写它**无效**；
- * 3. Taro 那层还有一条：`@tarojs/react/dist/react.esm.js:366`
+ * 1. 微信 `textarea` 是**原生组件**：页面 setData 时它按虚拟 DOM 的 `value`
+ *    重新应用文本，**光标落到末尾**；
+ * 2. Taro 对表单元素有一条无条件规则：`@tarojs/react/dist/react.esm.js:372`
  *    `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
- *    —— 表单元素的 `value` **无条件下发**，跟值变没变毫无关系。
+ *    —— 只要发生一次 commit，`value` 就必然进 setData。
  *
- * 所以"在输入时把 cursor 钉准"和"下发一个不变化的 value"都救不了：
- * 只要这次渲染发生，value 就一定被塞进 setData，光标就一定落末尾。
+ * ⇒ **页面在 onInput 里 setState，就是"每打一个字把光标重置一次"**。
+ *   这是页面层的行为，改输入框组件永远治不到（前九轮的最大教训）。
+ *   ⇒ 页面必须把实时文本放 ref、输入期间不 setState（detail 页已按此改）；
+ *   ⇒ 组件保证下发的 value 永远等于用户眼前的文本（见 ui/textarea.tsx）。
  *
- * 治法因此落在渲染层（见 `components/ui/textarea.tsx`）：
- * **用户输入期间根本不重建元素**（useMemo 缓存 ⇒ React bailout ⇒ 没有 commitUpdate
- * ⇒ 没有 setData），光标完全由平台维护。
- *
- * ## 于是本 hook 的职责收窄为「记录位置 + 程序化定位」
+ * ## 本 hook 的职责：记录位置 + 程序化定位
  *   1. `track(cursor?, value?)`：onInput / onFocus 里调用。**只记录**光标，
  *      用 `diffCursor(上一次文本, 这一次文本)` 算（`detail.cursor` 在中间输入时不可信）。
- *      不下发 cursor —— 输入期间写它无效，且一旦写它就等于要求重建元素。
+ *      不下发 cursor —— 输入期间写它无效，且一写就等于要求一次 commit。
  *   2. `request(pos, value?)`：程序化插入后调用（插入数学符号 / OCR 回填）。
- *      配合 `refocus()` 造出 focus 边沿，那时 cursor 才真正生效。
+ *      cursor 变化同时是"外部写入"的可靠信号（见 resolveDisplayText）。
  *   3. `blur(cursor?)`：onBlur 里调用 —— 记录并把真实光标写下去，
  *      让重新聚焦落在用户离开的位置。
  *   4. `position(len)`：当前可用的插入位置。
@@ -117,8 +115,8 @@ export function useCaret(): Caret {
     prevValueRef.current = value
 
     // 用文本差值算真实编辑点（`detail.cursor` 在中间输入时不可信），
-    // 但**只记录、不下发**：value 现在不回灌原生（见 ui/textarea 的渲染阻断），
-    // 光标由平台自己维护，写 cursor 只是白白要求重建一次元素、反而把光标甩到末尾。
+    // 但**只记录、不下发**：输入期间写 cursor 无效，而且它一变化就等于
+    // 要求输入框 commit 一次（详情见本文件顶部定性）。
     const diffed = prev === null ? null : diffCursor(prev, value, live.current)
     if (diffed !== null) live.current = diffed
     else if (typeof cursor === 'number' && cursor >= 0) live.current = cursor

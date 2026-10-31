@@ -57,6 +57,14 @@ export default function MemoryEditPage() {
   // ---------- 表单状态 ----------
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  /**
+   * 输入中的实时文本（思傅 2026-10-31 第十轮，见 工程教训录 L29）
+   *
+   * 打字时**不能 setState**：Taro 对表单元素无条件把 value 塞进 setData
+   * （react.esm.js:372），而微信 textarea 是原生组件 —— 页面一 setData，
+   * 它就按 value 重建文本、光标落末尾。实时文本放 ref，失焦/保存时再同步。
+   */
+  const contentRef = useRef('')
   const [category, setCategory] = useState<MemoryCategory>('life')
   const [mood, setMood] = useState<MemoryMood | ''>('')
   const [subjectId, setSubjectId] = useState('')
@@ -95,6 +103,7 @@ export default function MemoryEditPage() {
         if (!alive || !data) return
         const mem = data.memory as Memory
         setTitle(mem.title || '')
+        contentRef.current = mem.content || ''
         setContent(mem.content || '')
         setCategory(mem.category || 'life')
         setMood(mem.mood || '')
@@ -128,6 +137,7 @@ export default function MemoryEditPage() {
           success: (r) => {
             if (r.confirm) {
               setTitle(draft.title || '')
+              contentRef.current = draft.content || ''
               setContent(draft.content || '')
               setCategory(draft.category || 'life')
               setMood(draft.mood || '')
@@ -365,7 +375,7 @@ export default function MemoryEditPage() {
 
   // ---------- 保存 ----------
   const onSave = useCallback(async () => {
-    if (!content.trim() && !title.trim() && media.length === 0) {
+    if (!contentRef.current.trim() && !title.trim() && media.length === 0) {
       Taro.showToast({ title: '请至少写点内容或添加媒体', icon: 'none' })
       return
     }
@@ -385,7 +395,7 @@ export default function MemoryEditPage() {
       // 一模一样的记忆，原条目永远不变。
       const payload = {
         title: title.trim() || undefined,
-        content: content.trim() || undefined,
+        content: contentRef.current.trim() || undefined,
         category,
         mood: mood || undefined,
         subject_id: category === 'study' ? (subjectId || undefined) : undefined,
@@ -577,7 +587,9 @@ export default function MemoryEditPage() {
           value={content}
           placeholder="写下今天的小发现 / 心得 / 感悟"
           maxlength={2000}
-          onInput={(e) => setContent(e.detail.value)}
+          // ⚠️ 打字只写 ref、不 setState（每打一个字 setData 一次 ⇒ 光标落末尾）
+          onInput={(e) => { contentRef.current = e.detail.value }}
+          onBlur={(e) => setContent(e.detail.value)}
           className="bg-muted rounded-xl p-3 text-sm"
           style={{ width: '100%', height: '160px' }}
         />

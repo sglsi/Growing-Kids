@@ -1,6 +1,6 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Plus, Pencil, Trash2 } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -56,6 +56,12 @@ export default function ChatAdminPage() {
   const [loading, setLoading] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
+  /**
+   * 话术内容的实时文本（思傅 2026-10-31 第十轮，见 工程教训录 L29）
+   * 打字时不能 setState：Taro 对表单元素无条件下发 value，微信 textarea 一收到
+   * setData 就重建文本、光标落末尾。放 ref，失焦/保存时再同步。
+   */
+  const contentRef = useRef('')
   const [busy, setBusy] = useState(false)
 
   const load = async () => {
@@ -95,11 +101,13 @@ export default function ChatAdminPage() {
   })
 
   const openCreate = () => {
+    contentRef.current = ''
     setForm(EMPTY_FORM)
     setDialogOpen(true)
   }
 
   const openEdit = (a: KnowledgeArticle) => {
+    contentRef.current = a.content || ''
     setForm({
       id: a.id,
       title: a.title,
@@ -114,7 +122,7 @@ export default function ChatAdminPage() {
 
   const handleSave = async () => {
     const title = form.title.trim()
-    const content = form.content.trim()
+    const content = contentRef.current.trim()
     if (!title || !content) {
       Taro.showToast({ title: '标题和内容不能为空', icon: 'none' })
       return
@@ -338,11 +346,10 @@ export default function ChatAdminPage() {
                   value={form.content}
                   placeholder="客服将基于此内容回答用户"
                   maxlength={500}
-                  onInput={(e) =>
-                    setForm({
-                      ...form,
-                      content: (e.detail as { value: string }).value || '',
-                    })
+                  // ⚠️ 打字只写 ref、不 setState（每打一个字 setData 一次 ⇒ 光标落末尾）
+                  onInput={(e) => { contentRef.current = (e.detail as { value: string }).value || '' }}
+                  onBlur={(e) =>
+                    setForm({ ...form, content: (e.detail as { value: string }).value || '' })
                   }
                 />
               </View>

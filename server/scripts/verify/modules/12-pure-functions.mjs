@@ -168,81 +168,70 @@ m.test('单编：src/utils/caret-decision.ts + textarea-echo.ts（零 import 契
   ECHO = await import(`file://${pe.replace(/\\/g, '/')}`)
   c.ok(typeof CARET.decideBlurCursor === 'function', '缺少 decideBlurCursor')
   c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
-  c.ok(typeof ECHO.reduceEcho === 'function', '缺少 reduceEcho')
-  c.ok(typeof ECHO.initEcho === 'function', '缺少 initEcho')
+  c.ok(typeof ECHO.resolveDisplayText === 'function', '缺少 resolveDisplayText')
+  c.ok(typeof ECHO.initDisplay === 'function', '缺少 initDisplay')
 })
 
-// 光标问题连报七次的最终结论（2026-10-31 第八轮）：
-//   微信 textarea 的 `value` 一被 setData 就重建文本、**光标落到末尾**；
-//   而 `cursor` 是「**指定 focus 时的光标位置**」—— 输入过程中写它**无效**。
-//   更要命的是 Taro 那层：`@tarojs/react/dist/react.esm.js:366`
-//   `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
-//   —— 表单元素的 value **无条件下发**，跟值变没变毫无关系。
-//   ⇒ "受控"在 Taro 小程序端 = 每帧都重建原生文本 = 光标每帧落末尾，无解。
-//   ⇒ 第七轮的"回声吸收"（下发一个不变的值）既救不了光标，还会把用户刚打的字
-//     覆盖回旧值 —— 真机表现就是"打不进字"。已作废。
+// 光标 / 吃字问题的最终定性（2026-10-31 第十轮，连报九次后）
 //
-// 现行治法：**输入期间根本不让元素更新**（useMemo 缓存元素 ⇒ React bailout ⇒
-// 没有 commitUpdate ⇒ 没有 setData）。下面这组断言守住这条命根子：
-//   用户输入的每一步都必须 push=false，只有外部写入才 push 一次。
-m.test('🔴 reduceEcho：用户输入零放行，只有外部写入才重建元素', async (c) => {
-  const { reduceEcho, initEcho } = ECHO
-  const native = (st, v) => reduceEcho(st, { kind: 'native', value: v })
-  const prop = (st, v) => reduceEcho(st, { kind: 'prop', value: v })
+// 前九轮全在改「输入框组件怎么下发 value」，都没治住。真正的原因是**两条平台规则**，
+// 而且其中一条不在组件里：
+//   ① `@tarojs/react/dist/react.esm.js:372`
+//      `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
+//      —— 表单元素只要**发生一次 commit**，value 就必然进 setData；
+//   ② 微信 textarea 是原生组件：页面 setData 时按虚拟 DOM 的 value **重新应用文本**，
+//      **光标落到末尾**。
+// ⇒ 页面在 onInput 里 setState = 每打一个字 setData 一次 = 光标重置一次。
+//   若此时下发的 value 还是**旧值**（第 7/8 版为了"不下发"而让属性停在旧值/空串），
+//   就会把刚打的字覆盖掉 —— 真机表现「打不进字」。
+//
+// 现行契约（两条缺一不可）：
+//   · 页面：输入期间只写 ref，**不 setState**（detail 页已按此改）；
+//   · 组件：下发的 value **永远等于用户眼前的文本**（本模块的 resolveDisplayText）。
+// 下面这组断言守住第二条 —— 它是"绝不丢字"的最后一道闸。
+m.test('🔴 resolveDisplayText：输入期间绝不用页面值覆盖原生，外部写入才采纳', async (c) => {
+  const R = ECHO.resolveDisplayText
+  const init = ECHO.initDisplay
 
-  // 真实顺序：onInput 先把原生真相推进 → 页面 setState → 渲染（props.value 与之同值）
-  let st = initEcho('')
-  const typed = ['a', 'ab', 'abc', 'abc,', 'abc,d', 'abc,def']
-  for (const t of typed) {
-    const n = native(st, t)
-    c.eq(n.push, false, `onInput 竟然放行了（${t}）`)
-    st = n.state
-    const p = prop(st, t)
-    c.eq(p.push, false, `用户输入被当成外部写入放行了（${t}）—— 这正是光标跳末尾的成因`)
-    st = p.state
-  }
-  c.eq(st.native, 'abc,def', '输入结束后原生真相与实际不符')
+  // ① 正在输入：页面值落后/回声 ⇒ 必须保持原生（否则就是"打不进字"）
+  c.eq(R({ text: 'abc' }, { value: 'ab', focused: true, cursorChanged: false }).text, 'abc',
+    '输入期间被页面旧值覆盖了 —— 这正是"打不进字"的成因')
+  c.eq(R({ text: 'abc' }, { value: '', focused: true, cursorChanged: false }).text, 'abc',
+    '输入期间被空串清空了')
+  c.eq(R({ text: 'abc' }, { value: 'abc', focused: true, cursorChanged: false }).text, 'abc',
+    '回声被重复采纳（会多一次 setData）')
 
-  // 中间删除：同样是回声，不许放行
-  for (const t of ['abc,de', 'abc,d', 'abc,', 'abc']) {
-    st = native(st, t).state
-    c.eq(prop(st, t).push, false, `删除操作被放行了（${t}）—— 连续退格会跳末尾`)
-  }
+  // ② 失焦才采纳（装载数据 / 识别回填 / 失焦同步 state）
+  c.eq(R({ text: '' }, { value: '题目内容', focused: false, cursorChanged: false }).text, '题目内容',
+    '失焦时外部写入未采纳（异步数据到达会整框空白）')
+  c.eq(R({ text: 'abc' }, { value: '', focused: false, cursorChanged: false }).text, '',
+    '失焦时程序化清空未采纳')
 
-  // 外部写入（插入数学符号 / OCR 回填 / 清空 / 异步加载）⇒ 必须放行一次
-  const insert = prop(st, 'ab×c')
-  c.eq(insert.push, true, '外部写入未放行（符号插不进去）')
-  c.eq(insert.state.native, 'ab×c', '放行后原生真相未推进（下次输入会被误判）')
+  // ③ cursor 变化是"程序化写入"的可靠信号（符号插入时输入框可能仍聚焦）
+  c.eq(R({ text: 'ab' }, { value: 'ab×', focused: true, cursorChanged: true }).text, 'ab×',
+    '符号插入未采纳（插不进去）')
 
-  // 幂等：React 严格模式 / 并发重放会把同一次渲染跑两遍，第二遍不许再放行
-  c.eq(prop(insert.state, 'ab×c').push, false, '同一外部写入被重复放行')
+  // ④ 非受控：没有 value 就永远不动
+  c.eq(R({ text: 'abc' }, { focused: true, cursorChanged: false }).text, 'abc', '非受控被改了')
+  c.eq(R({ text: 'abc' }, { focused: false, cursorChanged: true }).text, 'abc', '非受控被 cursor 改了')
 
-  // 一次放行后，用户接着打字必须立刻回到零放行
-  const n2 = native(insert.state, 'ab×cd')
-  c.eq(n2.push, false, 'onInput 放行了')
-  c.eq(prop(n2.state, 'ab×cd').push, false, '放行后的首次输入未回到回声')
+  // 命根子不变式：返回的 text 永远是字符串，且**要么保持原样、要么等于调用方给的值**，
+  // 绝不可能凭空变成别的（尤其不可能是 undefined / null ⇒ 原生被清空）
+  for (const cur of ['', 'abc', '长文本内容'])
+    for (const v of [undefined, '', 'x', 'abc', '新内容'])
+      for (const focused of [true, false])
+        for (const cursorChanged of [true, false]) {
+          const r = R({ text: cur }, { value: v, focused, cursorChanged })
+          c.ok(typeof r.text === 'string', `返回值不是字符串：${JSON.stringify([cur, v, focused, cursorChanged])}`)
+          c.ok(r.text === cur || r.text === v, `返回值既不是原值也不是新值：${JSON.stringify([cur, v, focused, cursorChanged])}`)
+          if (focused && !cursorChanged && typeof v === 'string') {
+            c.eq(r.text, cur, `输入期间被改写了：${JSON.stringify([cur, v])}`)
+          }
+        }
 
-  // 清空与异步加载（首帧为空、数据后到）同样必须放行
-  c.eq(prop(initEcho('abc'), '').push, true, '程序化清空未放行')
-  c.eq(prop(initEcho(''), '题目内容').push, true, '异步数据到达未放行（会整框空白）')
-  c.eq(prop(initEcho('abc'), 'abc').push, false, '挂载首帧被误判为外部写入')
-
-  // 命根子不变式：凡是 push 的那一次，下发值必须**就是** incoming（绝不许是旧值）
-  for (const from of ['', 'a', 'abc', '长文本内容'])
-    for (const to of ['', 'x', 'ab×c', '新内容'])
-      if (from !== to) {
-        const r = prop(initEcho(from), to)
-        c.ok(r.push, `外部写入未放行：${JSON.stringify([from, to])}`)
-        c.eq(r.state.native, to, `放行时携带了旧值：${JSON.stringify([from, to])}`)
-      }
-
-  // native 步永远不放行（用户打的字原生已经有了，再下发只会甩光标）
-  for (const a of ['', 'abc', '题目'])
-    for (const b of ['', 'abcd', '题目，']) {
-      const r = native(initEcho(a), b)
-      c.eq(r.push, false, `onInput 放行了：${JSON.stringify([a, b])}`)
-      c.eq(r.state.native, b, `onInput 未推进原生真相：${JSON.stringify([a, b])}`)
-    }
+  // initDisplay：首帧就是受控值；非受控是空串（绝不能是 undefined）
+  c.eq(init('题目').text, '题目', 'initDisplay 丢了首帧值')
+  c.eq(init(undefined).text, '', 'initDisplay 非受控时不是空串')
 })
 
 m.test('🔴 decideBlurCursor：失焦写下真实光标（重新聚焦落在用户离开处）', async (c) => {

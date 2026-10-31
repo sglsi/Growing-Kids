@@ -214,4 +214,66 @@ m.test('🔴 前端：隐私同意存储键不得在 constants 之外硬编码',
   c.eq(bad.length, 0, `以下文件硬编码了隐私同意键（应引 POLICY_CONSENT_STORAGE_KEY）：${bad.slice(0, 10).join('、')}`)
 })
 
+// ---------------------------------------------------------------
+// 11. 🔴 多行输入框的 onInput 里不得 setState（2026-10-31 第十轮，连报九次的根因）
+//
+// 机制（两条平台规则叠加，缺一不可）：
+//   ① Taro 对表单元素有一条无条件规则（@tarojs/react/dist/react.esm.js:372）：
+//      `if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`
+//      —— 只要发生一次 commit，`value` 就必然进 setData，值变没变都一样。
+//   ② 微信 `textarea` 是**原生组件**：页面 setData 时它按虚拟 DOM 的 `value`
+//      重新应用文本，**光标落到末尾**。
+//   ⇒ 在 onInput 里 setState = 每打一个字 setData 一次 = 光标每打一个字重置一次。
+//      这是**页面层**的行为，改输入框组件永远治不到（前九轮全部栽在这里）。
+//   ⇒ 若此时下发的还是旧值（曾为"不下发"而让属性停在旧值/空串），就是"打不进字"。
+//
+// 正确写法：打字只写 ref，onBlur（或程序化写入时）才同步进 state。
+// 这条门禁就是不让第 11 个人再把它改回去。
+// ---------------------------------------------------------------
+m.test('🔴 前端：多行输入框 onInput 里不得 setState（会每打一个字重置光标）', async (c) => {
+  /** 从 onInput= 起按花括号配平截出处理函数 */
+  const handlerOf = (src, at) => {
+    const brace = src.indexOf('{', at)
+    if (brace < 0) return ''
+    let depth = 0
+    for (let i = brace; i < src.length && i < brace + 800; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') {
+        depth--
+        if (depth === 0) return src.slice(brace, i + 1)
+      }
+    }
+    return src.slice(brace, brace + 300)
+  }
+
+  const bad = []
+  for (const f of walk(SRC)) {
+    // 组件自身不走页面语义（它内部只管把"用户眼前的文本"记进 ref）
+    if (f.endsWith(path.join('ui', 'textarea.tsx'))) continue
+    const src = fs.readFileSync(f, 'utf8')
+    // 多行输入框本身 + 转发 onInput 的自家包装（AnswerSolutionEditor）
+    for (const tag of ['<Textarea', '<AnswerSolutionEditor']) {
+    let at = -1
+    while ((at = src.indexOf(tag, at + 1)) >= 0) {
+      // 只看这个元素自己的 props（到自闭合 /> 为止），别把后面 <Input> 的 onInput 算进来
+      const close = src.indexOf('/>', at)
+      const block = src.slice(at, close < 0 ? Math.min(at + 1600, src.length) : close + 2)
+      let i = -1
+      while ((i = block.indexOf('onInput=', i + 1)) >= 0) {
+        const body = handlerOf(block, i)
+        if (/\b(set[A-Z]\w*|updateDraft|updateEntry|updateForm)\s*\(/.test(body)) {
+          const line = src.slice(0, at).split('\n').length
+          bad.push(`${rel(f)}:${line}`)
+        }
+      }
+    }
+    }
+  }
+  c.eq(
+    bad.length,
+    0,
+    `以下多行输入框在打字时 setState（每打一个字重置一次光标，重了还会"打不进字"）：${bad.slice(0, 8).join('、')}`
+  )
+})
+
 export default m

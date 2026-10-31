@@ -65,6 +65,22 @@ export default function DetailPage() {
    * 导出 Word/PDF 的「正确答案」「解析」两段标题不受影响。
    */
   const [answerDraft, setAnswerDraft] = useState('')
+  /**
+   * 输入的**实时真相**（思傅 2026-10-31 第十轮，见 工程教训录 L29）
+   *
+   * 为什么打字时不能 setState：
+   *   Taro 对表单元素有 `isFormElement && i === 'value'` 这条无条件规则 —— 组件只要
+   *   发生一次 commit，`value` 就一定进 setData；而微信 textarea 是原生组件，页面
+   *   setData 时它会按虚拟 DOM 的 `value` 重新应用文本、**光标落到末尾**。
+   *   ⇒ 在 onInput 里 setState = 每打一个字把光标重置一次。这是**页面**的行为，
+   *     改输入框组件永远治不到（前九轮全栽在这里）。
+   *
+   * 所以：打字期间只写 ref（不触发任何渲染、不产生任何 setData），
+   * 到**失焦 / 程序化写入（插符号、识别回填、采纳搜题）/ 保存**时才同步进 state。
+   * state 仍然保留，负责预览、导出、保存这些"需要值"的地方。
+   */
+  const qDraftRef = useRef('')
+  const aDraftRef = useRef('')
   const [saving, setSaving] = useState(false)
   const [mastered, setMastered] = useState(false)
   // P2-18 复习计划
@@ -91,11 +107,15 @@ export default function DetailPage() {
   const applyItem = (it: TimelineItem) => {
     setItem(it)
     setSubjectId(it.subject_id || '')
-    setQContent(it.content?.question || '')
-    setAnswerDraft(joinAnswerSolution(
+    const q = it.content?.question || ''
+    const a = joinAnswerSolution(
       latexToReadable(it.content?.answer || ''),
       latexToReadable(it.content?.solution || ''),
-    ))
+    )
+    qDraftRef.current = q
+    aDraftRef.current = a
+    setQContent(q)
+    setAnswerDraft(a)
     setMastered(it.mastered)
     setPlan(it.review_plan || null)
   }
@@ -146,7 +166,9 @@ export default function DetailPage() {
     }
     setSaving(true)
     try {
-      const parts = splitAnswerSolution(answerDraft)
+      // ⚠️ 读 ref 而不是 state：输入期间 state 是**故意不跟手**的（见 qDraftRef 的说明），
+      //    点「保存修改」会先让输入框失焦（触发一次同步），但抢在渲染前读 ref 才是稳的。
+      const parts = splitAnswerSolution(aDraftRef.current)
       // 没动过的那一段直接沿用库里的 LaTeX，不做「可读形式 → LaTeX」回转：
       // 回转对分数/根号/幂是等价的，但 cases/aligned 这类结构只能近似成纯文本，
       // 用户没改它就不该被降级（保存两次也能保持幂等）。
@@ -167,7 +189,7 @@ export default function DetailPage() {
          * 用户刚改的题干/答案全丢。空串在这里一律翻译成「未分类」。
          */
         subject_id: subjectId || null,
-        question_content: qContent,
+        question_content: qDraftRef.current,
         answer_content: answerLatex,
         solution: solutionLatex,
         status: answerLatex || solutionLatex ? 'answered' : 'pending',
@@ -208,11 +230,12 @@ export default function DetailPage() {
    */
   const insertAnswerSymbol = (snippet: string) => {
     setTimeout(() => {
-      const cur = answerDraft
+      const cur = aDraftRef.current
       const pos = aCaret.position(cur.length)
       const marker = snippet.indexOf('|')
       const plain = snippet.replace('|', '')
       const next = cur.slice(0, pos) + plain + cur.slice(pos)
+      aDraftRef.current = next
       setAnswerDraft(next)
       dirtyRef.current = true
       // 第二个参数是插入后的文本长度：万一输入法没在 onInput 里给 cursor，
@@ -229,10 +252,11 @@ export default function DetailPage() {
    */
   const insertQuestionSymbol = (snippet: string) => {
     setTimeout(() => {
-      const pos = qCaret.position(qContent.length)
+      const pos = qCaret.position(qDraftRef.current.length)
       const marker = snippet.indexOf('|')
       const plain = snippet.replace('|', '')
-      const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
+      const next = qDraftRef.current.slice(0, pos) + plain + qDraftRef.current.slice(pos)
+      qDraftRef.current = next
       setQContent(next)
       dirtyRef.current = true
       qCaret.request(marker >= 0 ? pos + marker : pos + plain.length, next)
@@ -329,7 +353,9 @@ export default function DetailPage() {
   const applyOcrResult = (mode: 'append' | 'replace') => {
     const t = ocrResult.trim()
     if (!t) return
-    const next = mode === 'replace' ? t : qContent.trim() ? `${qContent.trim()}\n${t}` : t
+    const cur = qDraftRef.current
+    const next = mode === 'replace' ? t : cur.trim() ? `${cur.trim()}\n${t}` : t
+    qDraftRef.current = next
     setQContent(next)
     // 整段写入后光标自然落在末尾（一次性定位；之后打字不再干预）
     qCaret.request(next.length, next)
@@ -549,11 +575,11 @@ export default function DetailPage() {
               maxlength={-1}
               cursor={qCaret.cursor}
               focus={qCaret.focus}
-              onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
+              onInput={(e) => { qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
               // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
               // 失焦还要把受控 focus 一起落下，否则状态与原生不一致，用户会收不起键盘
-              onBlur={(e) => qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onBlur={(e) => { setQContent(qDraftRef.current); qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor) }}
               onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           </Card>
@@ -602,9 +628,9 @@ export default function DetailPage() {
             value={answerDraft}
             cursor={aCaret.cursor}
             focus={aCaret.focus}
-            onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
+            onInput={(v, c) => { aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
             onCaret={(c) => aCaret.track(c)}
-            onBlurCaret={(c) => aCaret.blur(c)}
+            onBlurCaret={(c) => { setAnswerDraft(aDraftRef.current); aCaret.blur(c) }}
             onInsert={insertAnswerSymbol}
           />
 
@@ -614,7 +640,9 @@ export default function DetailPage() {
             onSaved={(updated) => setItem(updated)}
             onAdopt={(a, s) => {
               // 采纳搜题/AI 结果：刷进合并编辑框（用户再点「保存修改」才真正入库）
-              setAnswerDraft(joinAnswerSolution(latexToReadable(a), latexToReadable(s)))
+              const merged = joinAnswerSolution(latexToReadable(a), latexToReadable(s))
+              aDraftRef.current = merged
+              setAnswerDraft(merged)
               dirtyRef.current = true
             }}
           />
@@ -735,8 +763,8 @@ export default function DetailPage() {
             maxlength={-1}
             cursor={qCaret.cursor}
             focus={qCaret.focus}
-            onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
-            onBlur={(e) => qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
+            onInput={(e) => { qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
+            onBlur={(e) => { setQContent(qDraftRef.current); qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor) }}
             onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
           />
         </Card>
@@ -967,9 +995,9 @@ export default function DetailPage() {
         <AnswerSolutionEditor
           value={answerDraft}
           cursor={aCaret.cursor}
-          onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
+          onInput={(v, c) => { aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
           onCaret={(c) => aCaret.track(c)}
-          onBlurCaret={(c) => aCaret.blur(c)}
+          onBlurCaret={(c) => { setAnswerDraft(aDraftRef.current); aCaret.blur(c) }}
           onInsert={insertAnswerSymbol}
         />
 
@@ -980,7 +1008,9 @@ export default function DetailPage() {
             onSaved={(updated) => setItem(updated)}
             onAdopt={(a, s) => {
               // 采纳搜题/AI 结果：刷进合并编辑框（用户再点「保存修改」才真正入库）
-              setAnswerDraft(joinAnswerSolution(latexToReadable(a), latexToReadable(s)))
+              const merged = joinAnswerSolution(latexToReadable(a), latexToReadable(s))
+              aDraftRef.current = merged
+              setAnswerDraft(merged)
               dirtyRef.current = true
             }}
           />
