@@ -37,19 +37,21 @@ interface Props {
   /** 输入回调（第二个参数是原生事件给的光标位置，交给 useCaret.track） */
   onInput: (value: string, cursor?: number) => void
   /**
-   * 光标位置回调（失焦 / 聚焦时都会给一次）。
+   * 光标位置回调（聚焦时给一次）。
    *
    * 为什么需要（思傅 2026-10-29「符号插到上一次编辑的位置」）：
-   * 微信 textarea 只有 onInput 会带 `cursor`；用户**用手指点**到句子中间换位置
-   * 没有任何输入事件 ⇒ useCaret 记的还是上一次打字的位置，点符号就插错地方。
-   * 点符号 chip 会先让 textarea 失焦，而 blur 事件的 detail 里带真实 cursor，
-   * 于是补上这一条链路即可让「插入位置 = 当前光标」。
+   * 用户**用手指点**到句子中间换位置时没有任何输入事件 ⇒ useCaret 记的还是
+   * 上一次打字的位置，点符号就插错地方。focus 事件的 detail 里带 cursor，补上即可。
    */
   onCaret?: (cursor?: number) => void
-  /** 输入法组词状态变化（交给 useCaret.setComposing，组词期间不碰 cursor） */
+  /** 输入法组词状态变化（交给 useCaret.setComposing，组词期间不更新 live） */
   onComposingChange?: (composing: boolean) => void
-  /** 真实失焦：让页面的受控 focus 一起落下，否则用户收不起键盘 */
-  onBlurCaret?: () => void
+  /**
+   * 真实失焦（参数是离开时的光标位置）：页面的 useCaret.blur(cursor) 会记录它、
+   * 并把它写进 cursor 属性（重新聚焦才落在用户离开处），同时让受控 focus 落下，
+   * 否则用户收不起键盘。
+   */
+  onBlurCaret?: (cursor?: number) => void
   /** 点数学符号/模板：页面负责按光标位置插入并回请求光标 */
   onInsert: (snippet: string) => void
 }
@@ -84,10 +86,10 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
           focus={focus}
           onComposingChange={onComposingChange}
           onInput={(e) => onInput(e.detail.value, e.detail.cursor)}
-          // 失焦/聚焦补记光标位置：手指点选位置不产生 input 事件，只靠 blur/focus 拿得到
+          // 失焦：把离开时的真实光标交给页面（useCaret.blur 会记下它并写进 cursor 属性，
+          // 重新聚焦才落在用户离开处）；聚焦只补记位置（手指点选换位没有输入事件）
           onBlur={(e) => {
-            onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)
-            onBlurCaret?.()
+            onBlurCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)
           }}
           onFocus={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
         />

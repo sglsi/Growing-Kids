@@ -217,7 +217,7 @@ export default function DetailPage() {
       dirtyRef.current = true
       // 第二个参数是插入后的文本长度：万一输入法没在 onInput 里给 cursor，
       // useCaret 用「长度差」也能把光标跟到正确位置（而不是落回 -1 甩到末尾）
-      aCaret.request(marker >= 0 ? pos + marker : pos + plain.length, next.length)
+      aCaret.request(marker >= 0 ? pos + marker : pos + plain.length, next)
       aCaret.refocus()
     }, 60)
   }
@@ -235,7 +235,7 @@ export default function DetailPage() {
       const next = qContent.slice(0, pos) + plain + qContent.slice(pos)
       setQContent(next)
       dirtyRef.current = true
-      qCaret.request(marker >= 0 ? pos + marker : pos + plain.length, next.length)
+      qCaret.request(marker >= 0 ? pos + marker : pos + plain.length, next)
       qCaret.refocus()
     }, 60)
   }
@@ -332,7 +332,7 @@ export default function DetailPage() {
     const next = mode === 'replace' ? t : qContent.trim() ? `${qContent.trim()}\n${t}` : t
     setQContent(next)
     // 整段写入后光标自然落在末尾（一次性定位；之后打字不再干预）
-    qCaret.request(next.length, next.length)
+    qCaret.request(next.length, next)
     dirtyRef.current = true
     setOcrResult('')
     Taro.showToast({ title: mode === 'replace' ? '已替换题干' : '已追加到题干', icon: 'success' })
@@ -550,11 +550,11 @@ export default function DetailPage() {
               cursor={qCaret.cursor}
               focus={qCaret.focus}
               onComposingChange={qCaret.setComposing}
-              onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value.length); dirtyRef.current = true }}
+              onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
               // 失焦/聚焦补记光标：手指点选位置没有 input 事件，只有 blur/focus 的
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
               // 失焦还要把受控 focus 一起落下，否则状态与原生不一致，用户会收不起键盘
-              onBlur={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); qCaret.blur() }}
+              onBlur={(e) => qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
               onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
             />
           </Card>
@@ -603,10 +603,10 @@ export default function DetailPage() {
             value={answerDraft}
             cursor={aCaret.cursor}
             focus={aCaret.focus}
-            onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v.length); dirtyRef.current = true }}
+            onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
             onComposingChange={aCaret.setComposing}
             onCaret={(c) => aCaret.track(c)}
-            onBlurCaret={() => aCaret.blur()}
+            onBlurCaret={(c) => aCaret.blur(c)}
             onInsert={insertAnswerSymbol}
           />
 
@@ -738,8 +738,8 @@ export default function DetailPage() {
             cursor={qCaret.cursor}
             focus={qCaret.focus}
             onComposingChange={qCaret.setComposing}
-            onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value.length); dirtyRef.current = true }}
-            onBlur={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); qCaret.blur() }}
+            onInput={(e) => { setQContent(e.detail.value); qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
+            onBlur={(e) => qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor)}
             onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
           />
         </Card>
@@ -970,7 +970,10 @@ export default function DetailPage() {
         <AnswerSolutionEditor
           value={answerDraft}
           cursor={aCaret.cursor}
-          onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v.length); dirtyRef.current = true }}
+          onInput={(v, c) => { setAnswerDraft(v); aCaret.track(c, v); dirtyRef.current = true }}
+          onComposingChange={aCaret.setComposing}
+          onCaret={(c) => aCaret.track(c)}
+          onBlurCaret={(c) => aCaret.blur(c)}
           onInsert={insertAnswerSymbol}
         />
 

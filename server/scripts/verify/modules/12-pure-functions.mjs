@@ -161,39 +161,63 @@ m.test('单编：src/utils/caret-decision.ts（光标决策，零 import 契约�
   c.ok(fs.existsSync(p), '编译产物不存在')
   CARET = await import(`file://${p.replace(/\\/g, '/')}`)
   c.ok(typeof CARET.decideCursor === 'function', '缺少 decideCursor')
+  c.ok(typeof CARET.diffCursor === 'function', '缺少 diffCursor')
 })
 
-// 光标规则在 2026-10-26 / 10-31 连出四次事故，每次都是「属性取值」而不是时序问题，
-// 所以这里把规则本身钉死（utils/caret-decision.ts 头部有每条规则对应的事故说明）。
-m.test('🔴 光标决策：常规输入必须钉住真实光标，组词期间不干预，任何分支都不得返回 -1', async (c) => {
-  const S = (o) => ({ prevLen: 10, shot: -1, live: 5, pending: false, composing: false, ...o })
+// 光标规则连出四次事故（2026-10-26 逐字绑定拽走组词 / 10-31 撤销落回 -1 逗号跳末尾 /
+// 10-31 只补删除不管增删 / 10-31 标点与快速删除照跳），最终确认「把 cursor 钉准」这条路
+// 走不通 —— 正解是输入期间根本不下发 value（ui/textarea 回声吸收，原生自管文本和光标）。
+// 这里把新规则钉死，防止有人再退回"钉 cursor"的老路（每次退回都是一轮真机事故）。
+m.test('🔴 光标决策：输入期间绝不下发 cursor（原生自管，任何分支都不得返回 -1）', async (c) => {
   const D = CARET.decideCursor
 
-  // 常规输入（字母/标点/数字）：钉住真实光标 —— 这是「打标点后光标跳结尾」的正解
-  c.eq(D(S(), { cursor: 11, valueLen: 11 }), 11, '增字时未钉住真实光标')
-  c.eq(D(S(), { cursor: 5, valueLen: 10 }), 5, '长度不变时也应钉住真实光标')
-  c.eq(D(S(), { cursor: 4, valueLen: 9 }), 4, '删除时未按真实光标定位')
-  c.eq(D(S(), { cursor: 99, valueLen: 9 }), 9, '越界光标未钳到文本长度')
+  // 规则 A：输入事件一律 null。事件给的 cursor 不可信（中间输入时平台就说谎），
+  // 写了会把光标拽到错位置；不写也绝不会被甩末尾 —— 因为 value 压根没进 setData。
+  c.eq(D('input', 4, 9), null, '输入事件竟然下发了 cursor（会把光标拽到不可信的 detail.cursor 上）')
+  c.eq(D('input', 0, 9), null, '输入事件竟然下发了 cursor')
+  c.eq(D('input', undefined, 9), null, '输入事件竟然下发了 cursor')
+  c.eq(D('input', 99, 9), null, '输入事件竟然下发了 cursor')
+  c.eq(D('input', -1, 9), null, '输入事件竟然下发了 cursor')
 
-  // 组词中（拼音中间态）：一律不碰，否则会把组词光标拽走
-  c.eq(D(S({ composing: true }), { cursor: 6, valueLen: 12 }), null, '组词中不该改 cursor')
-  c.eq(D(S(), { cursor: 6, valueLen: 12, composing: true }), null, '输入自带 composing 时应优先不干预')
-  c.eq(D(S({ composing: true, pending: true, shot: 3 }), { cursor: 6, valueLen: 12 }), null, '组词中不消费定位也不写值')
-
-  // 事件没带 cursor 时的回退：删除按长度差回推，推不出来就不猜（不能是 0）
-  c.eq(D(S(), { valueLen: 7 }), 2, '删除无光标时未按长度差回推（live 5 删 3 字应到 2）')
-  c.eq(D(S({ live: -1 }), { valueLen: 7 }), null, '推不出位置时不该猜（猜 0 会钉到开头）')
-
-  // 一次性定位的撤销：跟随真实光标 / 按长度差推算，绝不回落到 -1
-  c.eq(D(S({ pending: true, shot: 3 }), { cursor: 4, valueLen: 11 }), 4, '撤销定位时未跟随真实光标')
-  c.eq(D(S({ pending: true, shot: 3 }), { valueLen: 11 }), 4, '撤销定位时未按长度差推算')
-  c.eq(D(S({ pending: true, shot: 3, prevLen: -1 }), {}), null, '拿不到位置信息时必须不许写值（不能是 -1）')
-
-  // 不变式：无论怎么组合，都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
-  for (const s of [{}, { pending: true }, { pending: true, shot: 5, prevLen: 3 }, { prevLen: 20, live: 0 }]) {
-    for (const i of [{}, { cursor: -1, valueLen: 0 }, { valueLen: 0 }, { valueLen: 3 }]) {
-      c.ok(D(S(s), i) !== -1, `返回了 -1（等于命令光标去末尾）：${JSON.stringify({ s, i })}`)
+  // 不变式：任何分支都不得返回 -1（-1 的语义是「把光标置于末尾」，不是"不指定"）
+  for (const k of ['input', 'blur']) {
+    for (const cur of [undefined, -1, -100, 0, 3, 99]) {
+      for (const len of [-1, 0, 5, 100]) {
+        c.ok(D(k, cur, len) !== -1, `返回了 -1（等于命令光标去末尾）：kind=${k} cursor=${cur} len=${len}`)
+      }
     }
+  }
+})
+
+m.test('🔴 光标决策：失焦是唯一还会写光标的时机（让重新聚焦落在用户离开处）', async (c) => {
+  const D = CARET.decideCursor
+  c.eq(D('blur', 4, 9), 4, '失焦未写下真实光标')
+  c.eq(D('blur', 0, 9), 0, '开头位置被误判')
+  c.eq(D('blur', 99, 9), 9, '越界光标未钳到文本长度')
+  c.eq(D('blur', 4, -1), 4, '长度未知时不该钳')
+  c.eq(D('blur', undefined, 9), null, '拿不到光标时不许猜（更不能写 -1）')
+  c.eq(D('blur', -5, 9), null, '负光标无效')
+})
+
+m.test('🔴 diffCursor：从文本差值算真实插入点（detail.cursor 在中间输入时不可信）', async (c) => {
+  const diff = CARET.diffCursor
+  c.eq(diff('abc', 'abcd'), 4, '末尾增字')
+  c.eq(diff('abc', 'abc,'), 4, '末尾标点')
+  c.eq(diff('abc,xyzdef', 'abc,xyz,def'), 8, '中间插标点（detail.cursor 会说谎的场景）')
+  c.eq(diff('hello', 'hell'), 4, '末尾退格')
+  c.eq(diff('hello', 'ello'), 0, '删第一个字')
+  c.eq(diff('abc,def', 'abc,ef'), 4, '中间退格（连续删除跳末尾的场景）')
+  c.eq(diff('abcdef', 'abc ef'), 4, '选中替换：前删后插，取插入末尾')
+  c.eq(diff('hello world', 'hello there'), 11, '整词替换')
+  c.eq(diff('', 'abc'), 3, '空文本插入')
+  c.eq(diff('abc', ''), 0, '全删')
+  c.eq(diff('abc', 'abc'), null, '文本没变（纯光标移动）没有可推算的编辑')
+  c.eq(diff('题目', '题目，'), 3, '中文标点（UTF-16 码元与微信 cursor 同基准）')
+  c.eq(diff('a😀b', 'a😀c'), 4, '代理对之后插入（emoji 占两个码元）')
+  // 不变式：位置必须落在 [0, next.length] 内
+  for (const [a, b] of [['', 'x'], ['xyz', ''], ['ab', 'ba'], ['abcd', 'abcd']]) {
+    const r = diff(a, b)
+    if (r !== null) c.ok(r >= 0 && r <= b.length, `差值位置越界：${JSON.stringify([a, b])} → ${r}`)
   }
 })
 

@@ -28,13 +28,8 @@ export interface TextareaProps
   autoFocus?: boolean
   /**
    * 输入法组词状态变化（拼音/手写中间态）。
-   *
-   * 为什么要透出来（思傅 2026-10-31「输入字母后打标点，光标跑到结尾」）：
-   * 受控 textarea 的正解是**每次输入都把 `cursor` 跟着 value 同一批下发**，
-   * 否则微信按自己的规则把光标甩到末尾。但组词期间事件给的 `cursor` 是拼音串里的
-   * 位置，写下去会把组词光标拽走 —— 所以必须知道"现在是组词中吗"。
-   * 用官方 `onKeyboardCompositionStart/End`（微信基础库 2.25.0+，项目基线 3.17.4）判定，
-   * 交给 `useCaret().setComposing`。
+   * 由官方 `onKeyboardCompositionStart/End`（微信 2.25.0+，项目基线 3.17.4）驱动，
+   * 交给 `useCaret().setComposing` —— 组词期间记录的 live 光标不是最终位置。
    */
   onComposingChange?: (composing: boolean) => void
 }
@@ -55,25 +50,63 @@ const Textarea = React.forwardRef<
   onComposingChange,
   onKeyboardCompositionStart,
   onKeyboardCompositionEnd,
+  value: valueProp,
   onInput,
   ...props
 }, ref) => {
   const [isFocused, setIsFocused] = React.useState(false)
   const autoHeight = !!(props as any).autoHeight
+
   /**
-   * 光标自托管（思傅 2026-10-31「输入字母后打标点，光标跑到结尾」）。
+   * 回声吸收（2026-10-31 第三次重写光标方案的核心，治本的一版）
    *
-   * 小程序 textarea 是半受控组件：**value 一变，渲染层就把光标重置到末尾**，
-   * 只有 `cursor` 能把它钉回去。所以「受控 value + 不动 cursor」这个组合本身就有坑 ——
-   * 之前只有详情页接了 `useCaret`，其余页面（记忆、识别、资料库、聊天管理）的框全是裸受控。
+   * ## 要解决什么
+   * 思傅连报四次：「插入符号后敲逗号跳末尾」「连续删除跳末尾」「输入字母后打标点
+   * 跳末尾」「快速删除还有」。前两版都在"把 cursor 钉准"上打转，全输了。
    *
-   * 这里做一层兜底：**调用方没有自己传 `cursor` 时**，组件内部把每次输入的真实光标
-   * 写回 `cursor`（组词期间除外），让所有输入框自动获得正确的光标行为。
-   * 调用方传了 `cursor` 就完全交给它（详情页那条 `useCaret` 链路参与插入符号定位）。
+   * ## 平台事实
+   * 小程序 textarea 是**半受控**组件：setData 里只要出现 value，渲染层就把光标
+   * 重置到末尾。而受控 value 的更新是跨帧链（onInput → setState → 渲染 → setData），
+   * 连续操作时回写值几乎必然与原生当前文本不一致 ⇒ 每次回写都是一次跳末尾的机会。
+   * 官方文档的原话：**不建议在多行文本上修改用户的输入**。
+   *
+   * ## 治法
+   * 用户输入期间**根本不下发 value**：页面照常 setState（受控写法不变），
+   * 但组件把这次"回声"吸收掉 —— 已核实 Taro 的 prepareUpdate 只 diff 出变化的属性、
+   * commitUpdate 只下发这些属性，所以属性值不变就不会进 setData，原生文本不动、
+   * 光标由平台自己维护。字母、标点、连续删除、拼音组词全部零干预。
+   *
+   * 只有**程序化写入**（数学符号插入 / OCR 回填 / 清空）才放行：此时 prop 既不是
+   * 原生真相、也不是上一拍下发过的值。放行时用**渲染相位派生状态**，保证这次 value
+   * 与页面同时下发的 cursor 落进**同一批** setData —— 分两批时后一批的 value 会把
+   * 前一批定位好的光标重置到末尾（"插入符号后跳末尾"的成因之一）。
+   *
+   * ## 三个量
+   *  - `nativeValue`：原生真实文本（每次 onInput 更新，先于页面 setState 的渲染）
+   *  - `pushed`：已经下发给原生的值（只有程序化写入才变）
+   *  - `valueProp`：页面受控 state 的值
    */
-  const hasOwnCursor = Object.prototype.hasOwnProperty.call(props, 'cursor')
-  const [innerCursor, setInnerCursor] = React.useState(-1)
-  const composingRef = React.useRef(false)
+  const [nativeValue, setNativeValue] = React.useState(valueProp ?? '')
+  const [pushed, setPushed] = React.useState(valueProp ?? '')
+  if (
+    typeof valueProp === 'string' &&
+    valueProp !== nativeValue &&   // 不是输入回声（页面把刚打的字 echo 回来了）
+    valueProp !== pushed           // 也不是"prop 没变"（页面没 echo 的输入框）
+  ) {
+    // 渲染相位派生状态（React 官方模式）：立即重渲染，与 cursor 同批落地
+    setPushed(valueProp)
+  }
+  React.useEffect(() => {
+    // 兜底：万一运行时没有采纳渲染相位派生（React 官方模式不会，防的是平台怪癖），
+    // 这里补一次。正常路径下三个值相等，条件恒 false，不会多一次 setData。
+    if (
+      typeof valueProp === 'string' &&
+      valueProp !== nativeValue &&
+      valueProp !== pushed
+    ) {
+      setPushed(valueProp)
+    }
+  }, [valueProp, nativeValue, pushed])
 
   React.useEffect(() => {
     if (autoFocus || focus) setIsFocused(true)
@@ -126,8 +159,10 @@ const Textarea = React.forwardRef<
         showConfirmBar={showConfirmBar}
         adjustPosition={adjustPosition}
         disableDefaultPadding={disableDefaultPadding}
-        // 自托管光标（调用方没自己接管时才生效，见 managedCursor 注释）
-        {...(hasOwnCursor ? null : { cursor: innerCursor })}
+        // ⚠️ 下发的是 pushed 而不是 valueProp：用户输入的回声在这里被吸收，
+        //    不进 setData（原生文本不变 ⇒ 光标不会被重置到末尾）。
+        //    程序化写入由上面的渲染相位派生放行，且与 cursor 同批落地。
+        value={pushed}
         className="w-full self-stretch bg-transparent text-base text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm selection:bg-selection selection:text-selection-foreground"
         placeholderClass="text-muted-foreground"
         style={innerStyle}
@@ -143,21 +178,17 @@ const Textarea = React.forwardRef<
         }}
         // 组词边界：只在"开始/结束"两个边沿通知，中间态不用逐字更新
         onKeyboardCompositionStart={(e) => {
-          composingRef.current = true
           onComposingChange?.(true)
           onKeyboardCompositionStart?.(e)
         }}
         onKeyboardCompositionEnd={(e) => {
-          composingRef.current = false
           onComposingChange?.(false)
           onKeyboardCompositionEnd?.(e)
         }}
-        // 自托管光标：每次输入把真实光标写回 cursor，抵消 value 回写把光标甩到末尾
         onInput={(e) => {
-          if (!hasOwnCursor && !composingRef.current) {
-            const c = (e.detail as { cursor?: number } | undefined)?.cursor
-            if (typeof c === 'number' && c >= 0) setInnerCursor(c)
-          }
+          // 先记原生真相（同步，早于页面 setState 触发的渲染），再交给页面。
+          // 页面 echo 回来的 value 会被上面的派生逻辑判为"回声"而吸收。
+          setNativeValue(e.detail.value)
           onInput?.(e)
         }}
         {...props}
