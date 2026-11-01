@@ -100,7 +100,11 @@ async function connectPage(name) {
   if (!pages.length) {
     throw new Error('没找到小程序页面 target，IDE 可能还没打开项目')
   }
-  const hit = name ? pages.find((t) => t.url.includes(`/pages/${name}/`)) : pages[0]
+  // 注意尾部：像 pages/chat/admin 这种两级页面 url 末尾**没有**斜杠，
+  // 早先写死 `/pages/${name}/` 会漏掉它们（报"没有页面"却明明在列表里）。
+  const hit = name
+    ? pages.find((t) => new RegExp(`/pages/${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/|$)`).test(t.url))
+    : pages[0]
   if (!hit) {
     throw new Error(`没有页面 ${name}；现有：${pages.map((p) => p.url).join(' , ')}`)
   }
