@@ -2122,6 +2122,14 @@ export default function RecognizePage() {
         visible={!!editor}
         src={editor?.src || ''}
         autoAction={editor?.autoAction || null}
+        // 思傅 2026-11-01：这个编辑器里只需要一个出口。
+        // ① 工具栏那只「保存图片」是「存进最近题目」，与主按钮的两个「保存」并排出现，
+        //    实测中我本人就在这里点错过（点了它以为图会回传，结果页面停在编辑器）；
+        //    页面上本来就有「以图片形式直接保存到最近题目」的入口，不依赖这只按钮。
+        // ② 底部的默认文案「保存并替换原图」与该动作完全不符：handleEditorConfirm
+        //    只是把图回填到 slot（不落库、也没有原图可替换），所以改成「用这张图」。
+        enableSaveToInbox={false}
+        confirmText="用这张图"
         onCancel={() => setEditor(null)}
         onConfirm={handleEditorConfirm}
       />
