@@ -1,6 +1,7 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { AGREEMENT_SECTIONS, AGREEMENT_TITLE, AGREEMENT_VERSION } from '@/constants/user-agreement'
+import { LegalText } from '@/components/legal-text'
 
 /**
  * 用户协议页（上线验收第 11 项）。
@@ -21,9 +22,11 @@ export default function AgreementPage() {
             <View key={s.heading} className="mt-4">
               <Text className="block text-[14px] font-semibold text-foreground">{s.heading}</Text>
               {s.paragraphs.map((p, i) => (
-                <Text key={i} className="mt-2 block text-[13px] leading-[21px] text-foreground">
-                  {p}
-                </Text>
+                <LegalText
+                  key={i}
+                  text={p}
+                  className="mt-2 block text-[13px] leading-[21px] text-foreground"
+                />
               ))}
             </View>
           ))}

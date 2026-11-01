@@ -8,6 +8,7 @@ import {
   PRIVACY_POLICY_VERSION,
 } from '@/constants/privacy-policy'
 import { hasAgreedPolicy, markPolicyAgreed } from '@/services/policy-gate'
+import { LegalText } from '@/components/legal-text'
 
 /**
  * 隐私政策页（OPS-18 R-合规-03）。
@@ -76,9 +77,11 @@ export default function PrivacyPage() {
             <View key={s.heading} className="mt-4">
               <Text className="block text-[14px] font-semibold text-foreground">{s.heading}</Text>
               {s.paragraphs.map((p, i) => (
-                <Text key={i} className="mt-2 block text-[13px] leading-[21px] text-foreground">
-                  {p}
-                </Text>
+                <LegalText
+                  key={i}
+                  text={p}
+                  className="mt-2 block text-[13px] leading-[21px] text-foreground"
+                />
               ))}
             </View>
           ))}
