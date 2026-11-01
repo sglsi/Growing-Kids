@@ -11,6 +11,7 @@ import { TimelineService } from '../timeline/timeline.service'
 import { LibraryService } from '../library/library.service'
 import { QuotaService } from '../quota/quota.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
+import { isOpaqueUploadName } from './upload-name'
 
 const IMAGE_MIME_PREFIX = 'image/'
 
@@ -37,21 +38,6 @@ function decodeUploadFileName(raw: string): string {
     } catch { /* 保留 */ }
   }
   return s.trim()
-}
-
-/**
- * 上传名是否为「机器临时名」，不该直接当标题展示。
- *
- * 微信 `wx.uploadFile` 在调用方没传 original_name 时，multipart 的 filename 头
- * 就是临时路径名（`tmp_a09aaa7ec36e4ff0b6.jpg`）。此前它被原样写进
- * `timeline_items.title`，首页卡片于是显示成一串 `tmp_xxx`（思傅 2026-10-29 反馈
- * 「新加进去的题目在列表里刷不出来/名字是乱码」——其实是这一条标题不可读）。
- */
-function isOpaqueUploadName(name: string): boolean {
-  const s = (name || '').trim()
-  if (!s) return true
-  const base = s.replace(/\.[a-z0-9]{1,5}$/i, '')
-  return /^(tmp_|wx_|file_|blob_|image_)/i.test(base) || /^[a-f0-9]{16,}$/i.test(base)
 }
 
 @Controller('upload')

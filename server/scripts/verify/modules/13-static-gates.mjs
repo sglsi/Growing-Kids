@@ -124,4 +124,30 @@ m.test('server 构建产物存在且非空', async (c) => {
   c.ok(fs.existsSync(path.join(d, 'main.js')), 'server/dist/main.js 缺失')
 })
 
+m.test('上传名判机器名：随机串不落成标题', async (c) => {
+  // 2026-11-01 在思傅真实账户里发现一条标题是
+  // `GkljMPoGQP2a8e0a7d51647c149a1c87f1a132b49ef1.jpg` —— 初版守卫只认
+  // `tmp_` 前缀与纯 hex，漏了这种 base62 串。这条断言把它钉住。
+  const { pathToFileURL } = await import('node:url')
+  const entry = path.join(SERVER, 'dist', 'upload', 'upload-name.js')
+  if (!fs.existsSync(entry)) throw new Error(`缺少构建产物 ${entry}（先跑 nest build）`)
+  const { isOpaqueUploadName } = await import(pathToFileURL(entry).href)
+
+  const machine = [
+    'GkljMPoGQP2a8e0a7d51647c149a1c87f1a132b49ef1.jpg',
+    'tmp_a09aaa7ec36e4ff0b6.jpg',
+    'wx_camera_1698000000000.jpg',
+    '9f8e7d6c5b4a39281706f5e4d3c2b1a0.png',
+    '',
+  ]
+  const human = [
+    'Unit3ReadingPractice.jpg',
+    'TestPaper2023Grade9.pdf',
+    '九年级上册英语阶段测试卷.jpg',
+    'Unit 3 Reading 练习.png',
+  ]
+  for (const n of machine) c.ok(isOpaqueUploadName(n), `应判为机器名却放行：${n || '(空)'}`)
+  for (const n of human) c.ok(!isOpaqueUploadName(n), `正常文件名被误判：${n}`)
+})
+
 export default m
