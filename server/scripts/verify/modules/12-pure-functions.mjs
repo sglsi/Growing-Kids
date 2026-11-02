@@ -183,13 +183,44 @@ m.test('单编：src/utils/caret-decision.ts（零 import 契约）', async (c) 
 // ⇒ 反过来"不让 value 变化"（第 7/8/10 版）才最危险：属性停在旧值后，任何一次 commit
 //   都会把刚打的字**覆盖回旧值** —— 那正是"打不进字"。
 //
-// ⚠️ 2026-11-02 补丁：上面那条治法只对了一半。真机仍有两个必现场景（按住删除键连删、
-//    输入法组合态直接上屏标点），因为 Taro 对表单元素**每次 commit 都无条件重发 value**，
-//    而逻辑层到渲染层有延迟 —— 只要 commit 落在"用户多敲了一下"之后，下发的就是旧文本。
-//    ⇒ 补的是"打字期间不 commit"：组件把最新文本攒在 ref 里，静默 120ms 才上抛一次；
-//      期间任何 commit 下发的也是 pending（= 原生当前文本），不是滞后的 state。
+// ⚠️ 2026-11-02 第十三轮：上面那条治法只对了一半，真正的病根不在"下发什么"，而在
+//    **Taro 什么时候恢复受控值**。
+//
+//    源码链条（@tarojs/react 4.1.9）：
+//      finishEventHandler() → TaroReconciler.flushSync() → restoreStateIfNeeded()
+//      → updateWrapper → setNodeValue(node, event.detail.value, props.value)
+//      判据：if (props.value != null && event.detail.value !== props.value) node.value = props.value
+//
+//    也就是说：**事件里的文本 ≠ fiber 上的 props.value 就把原生文本改回去**。
+//    而 React 18 对事件回调里的 setState 是批处理的 —— 在 flushSync 真正刷出来之前，
+//    props.value 还停在上一拍。于是刚打的字符被改回上一拍、光标甩到末尾、还丢字。
+//    中文一次上屏只发一次 input，两拍隔得远，所以侥幸没事；英文逐字符输入必然撞上。
+//
+// ⇒ 治法：**input 事件里当场把这次更新同步刷出去（flushSync）**，让 props.value 等于
+//   本次事件的文本 ⇒ 恢复逻辑判定"不需要恢复" ⇒ 文本与光标都不动。
+//
+//    ⛔ 别再试「延迟上抛」：属性停在旧串，恢复逻辑照样把文本改回旧串，实测连打 16 字
+//       只剩 1~2 个。⛔ 也别试「不传 value 做非受控」：Taro 的 textarea 直接打不进字；
+//       传 undefined 等价于下发空串。⛔ 更不要运行时改写 FormElement[Symbol.hasInstance]：
+//       会打断 Babel 的 _classCallCheck（它内部就是 instanceof），整个小程序白屏。
 //
 // 下面这组断言守住实现别再退回旧路（纯函数层已被证明是多余的，所以只守源码契约）。
+//
+// ⚠️ 2026-11-02 第十四轮补充：`flushSync` 只解决"恢复受控值"那一半，另一半在 **setData 时序**。
+//    实测（tmp-write-stack.mjs 抓调用栈 + setNodeValue 打点）：
+//      ① flushSync 是生效的 —— 每次 input 结束时 props.value 确实同步变成了本次文本；
+//      ② 真正冲掉字的是**视图层晚到的 setData**：逻辑层每次提交都把 value 塞进 payload，
+//         视图层（WAWebview defaultValueChange → updateValue）应用有延迟，后到的旧值
+//         把刚打的字覆盖回去、光标甩末尾；
+//      ③ `FormElement.dispatchEvent` 在 INPUT 里执行 `this.value = val`，而 setAttribute
+//         不做相等判断 ⇒ 每次按键**再多一次** setData，打字越快越容易晚到。
+//    ⇒ 两处依赖补丁 + 组件里一条守卫，断言见下：
+//      · patches/@tarojs__react@4.1.9.patch：payload 里与元素当前值相同的 value 要摘掉；
+//        ⚠️ payload 必须返回**非 null**（空数组也算），否则 commitUpdate 提前返回、
+//        元素上的 __reactProps$ 不更新，恢复受控值时读到旧值 ⇒ 整段文本写成空串。
+//      · patches/@tarojs__runtime@4.1.9.patch：INPUT 分支只同步 this.props.value，不再 setAttribute。
+//      · 组件：丢掉 `detail.value` 不是字符串的 input 事件（视图层应用 value 后的回声），
+//        否则会上抛空串 ⇒ 页面 setContent('') ⇒ 下一次提交把文本清空。
 m.test('🔴 ui/textarea 必须原样下发 value，focus/cursor 必须条件展开', async (c) => {
   const src = fs.readFileSync(path.join(ROOT, 'src/components/ui/textarea.tsx'), 'utf8')
 
@@ -202,24 +233,30 @@ m.test('🔴 ui/textarea 必须原样下发 value，focus/cursor 必须条件展
     '下发的值必须优先取「输入事件里记下的最新文本」，否则 commit 时会用滞后的 state 覆盖用户输入'
   )
   c.ok(
-    src.includes('if (typeof next === \'string\') latestRef.current = next'),
-    'input 事件里必须立刻把最新文本写进 latestRef —— 它必须比页面的 setState 早一拍'
+    src.includes("if (typeof next !== 'string') return"),
+    '没有 detail.value 的 input 事件必须丢弃：视图层应用 value 后会回抛一次空 detail 的 input，照常上抛就是 setContent(\'\') ⇒ 清空用户刚打的字'
   )
   c.ok(
     !src.includes('useState'),
     '组件里出现了 useState —— 任何内部 state 变化都是一次 commit，都会把光标甩走'
   )
-  // 2026-11-02：Taro 对表单元素**无条件重发 value**，所以"不下发"唯一的办法是"不 commit"。
-  // 这条断言钉住防抖上抛，别再改回"每次按键都 setState"。
-  // 2026-11-02：试过"延迟 120ms 上抛让打字期间不 commit"，实测把「甲乙丙」打成「甲丙」
-  // （延迟让 state 更旧，而 commit 照样发生）。结论：只要还有 commit，值就必须是最新的。
+  // 2026-11-02 第十三轮：病根是「Taro 在事件末尾 flushSync 后用 props.value 恢复受控值」，
+  // 而 React 18 的批处理让 props.value 停在上一拍。所以断言必须钉住「同步刷新」这一步。
   c.ok(
-    !src.includes('EMIT_DELAY'),
-    '又回到"延迟上抛"方案：实测会丢字，见 2026-11-02 的 _diag-input 记录'
+    src.includes('flushSync'),
+    '缺少 flushSync：input 事件里不把 setState 同步刷出去，Taro 恢复受控值时就会用上一拍的 props.value 覆盖刚打的字（英文逐字符输入必现）'
   )
   c.ok(
-    src.includes('const trustPage = !focusRef.current || cursorProp !== null'),
-    '缺少"聚焦期间只信原生"的判定 —— 否则页面滞后的 state 会把用户刚打的字写回去'
+    !src.includes('EMIT_DELAY') && !src.includes('pendingEventRef'),
+    '又回到"延迟上抛"方案：属性停在旧串时 Taro 照样会把文本改回旧串，实测连打 16 字只剩 1~2 个'
+  )
+  c.ok(
+    src.includes('const trustPage = !focusRef.current || cursorChanged'),
+    '缺少"聚焦期间只信原生"的判定（且 cursor 必须按"变化的那一刻"算请求，不能用 cursorProp !== null）'
+  )
+  c.ok(
+    src.includes('cursorProp !== null && cursorProp !== lastCursorRef.current'),
+    'cursor 必须按"变化"判定：useCaret 会把上次定位值一直挂着，恒真会让滞后 state 一路回写'
   )
   c.ok(
     !/delete\s+[^\n]*value/.test(src),
@@ -236,6 +273,36 @@ m.test('🔴 ui/textarea 必须原样下发 value，focus/cursor 必须条件展
   c.ok(
     src.includes('cursorProp !== null ? { cursor: cursorProp } : undefined'),
     'cursor 必须条件展开：-1 在微信里是"置于末尾"，等于主动甩光标'
+  )
+
+  // —— 依赖补丁（第十四轮）：没有它们，视图层仍会收到过时的 value，打字就被冲掉 ——
+  const pj = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+  const patched = (pj.pnpm && pj.pnpm.patchedDependencies) || {}
+  c.ok(
+    !!patched['@tarojs/react@4.1.9'],
+    'package.json 缺少 @tarojs/react 的 patchedDependencies 声明 —— 补丁文件存在但不会生效'
+  )
+  c.ok(
+    !!patched['@tarojs/runtime@4.1.9'],
+    'package.json 缺少 @tarojs/runtime 的 patchedDependencies 声明 —— dispatchEvent 那条回声没人管'
+  )
+  const reactPatch = fs.readFileSync(path.join(ROOT, 'patches/@tarojs__react@4.1.9.patch'), 'utf8')
+  c.ok(
+    reactPatch.includes('updatePayload.splice') && reactPatch.includes('_valueTracker'),
+    'react 补丁必须把「与元素当前值相同的 value」从 payload 里摘掉（否则视图层会收到过时的 value）'
+  )
+  c.ok(
+    reactPatch.includes('return updatePayload;') && !/updatePayload\s*=\s*null;?\s*\n\s*\}\s*\n\s*return/.test(reactPatch),
+    'react 补丁不许把 payload 清成 null —— commitUpdate 会提前返回，元素上的 __reactProps$ 不更新，恢复受控值读旧值会把文本写成空串'
+  )
+  const runtimePatch = fs.readFileSync(path.join(ROOT, 'patches/@tarojs__runtime@4.1.9.patch'), 'utf8')
+  c.ok(
+    runtimePatch.includes('this.props.value = val'),
+    'runtime 补丁必须让 INPUT 分支只同步 this.props.value（不再 setAttribute），否则每次按键多一次 setData'
+  )
+  c.ok(
+    !/^\+.*this\.value = val;/m.test(runtimePatch),
+    'runtime 补丁又把 INPUT 分支改回 this.value = val 了：setAttribute 不做相等判断，每次按键都会多下发一次 setData'
   )
 })
 

@@ -1,5 +1,6 @@
 import * as React from "react"
 import { Textarea as TaroTextarea, View } from "@tarojs/components"
+import { flushSync } from "@tarojs/react"
 
 import { cn } from "@/lib/utils"
 
@@ -44,38 +45,65 @@ import { cn } from "@/lib/utils"
  * ⇒ 反过来，"不让 value 变化"（第 7/8/10 版）才是最危险的做法：属性一旦停在旧值，
  *   任何一次 commit 都会把用户刚打的字**覆盖回旧值** —— 那就是"打不进字"。
  *
- * ## 第十一轮结论的补丁（2026-11-02，真机仍有残留故障后重做定性）
+ * ## 第十三轮：真正的病根在「Taro 恢复受控值的时机」（2026-11-02 晚，模拟器稳定复现）
  *
- * 第十一轮的定性没错（值≠原生的那一刻光标就被甩到末尾），但**漏了一半**：
- * 它假定"每次 commit 下发的 value 一定是最新的那一个文本"。这个假设在真机上不成立 ——
- * Taro 的 `getUpdatePayload` 对表单元素是**无条件重发 value**
- * （`if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`），
- * 而 React 的 setState 会批处理、逻辑层到渲染层还有延迟。于是只要有**任何**一次 commit
- * 落在"用户已经多敲了一下"之后，下发的就是旧文本 ⇒ 微信把文本改回旧值、光标甩到末尾
- * ⇒ 下一个 input 事件再把文本补回来。净效果正是用户看到的：
- * **文本对了，光标却跑到结尾**。
+ * 思傅反馈：中文已经好了，**英文逐字符输入时光标依旧跳到末尾**。用调试协议在模拟器里
+ * 能稳定重现 —— 16 个字母、15ms 间隔，最后一数只剩 13 个字符，光标在末尾。
  *
- * 对应两个真机必现场景（思傅 2026-11-02 复现）：
- *   · 按住删除键连删 —— input 事件密集，state 追不上；
- *   · 输入法组合态直接上屏标点（不选候选）—— 组合期间 detail.value 比原生文本旧。
+ * 读 `@tarojs/react` 源码就能看见完整链条：
+ *   1. 事件结束 → `finishEventHandler()` → **`TaroReconciler.flushSync()`** →
+ *      `restoreStateIfNeeded()`（第 757~767 行）；
+ *   2. 恢复时走 `updateWrapper` → `setNodeValue(node, event.detail.value, props.value)`，
+ *      判据是 `if (value != null && oldValue !== toString(value)) node.value = value`
+ *      —— 也就是「**事件里的文本 ≠ fiber 上的 props.value 就把原生文本改回去**」；
+ *   3. 而 React 18 对事件回调里的 setState 是**批处理**的，页面那次 `setContent(...)`
+ *      在 `flushSync()` 真正刷出来之前，`props.value` 还停在**上一拍**。
+ *      ⇒ `oldValue !== props.value` 成立 ⇒ 把刚打的字改回上一拍的文本 ⇒ 光标甩末尾。
  *
- * 治法：**下发的值永远取"已知最新的那份文本"，而不是页面的 state**。
- *   `onInput` 一来就把文本记进 `latestRef`（同一个事件里，比 setState 早），
- *   渲染时 `displayValue = latestRef ?? value`。这样即使 commit 是由**上一拍**的
- *   setState 触发的，下发的也是刚打出来的最新文本 —— 与原生一致 ⇒ 不动光标。
- *   页面主动改值（插符号、回填、清空）时，`value` 既不是我们上次交出去的、也不等于
- *   `latestRef`，于是反过来以页面为准（见下面 render 里的判定）。
+ * 中文为什么侥幸没事：一次上屏只发一次 input，两拍之间隔得远，props.value 早就跟上了。
+ * 英文逐字符输入时每拍都可能撞上，所以必然复现（也是"连删"必现的同一个原因）。
  *
- * ⚠️ 试过但**被实测否掉**的方案：把 onInput 延迟 120ms 再上抛（"打字期间不 commit"）。
- *    模拟器里打「甲乙丙」直接变成「甲丙」—— 延迟让 state 更旧，而 commit 照样发生，
- *    于是下发的是更旧的文本，连字都被覆盖。见 `server/scripts/ide-value-writes.mjs` 的
- *    `same:false` 记录。**只要还有 commit，value 就必须是最新的，不能靠"拖"**。
+ * ⇒ 治法：**在 input 事件里当场把这次更新同步刷出去**（`flushSync()`）。
+ *   刷完 `props.value` 就等于本次事件的文本，与 `oldValue` 相同 ⇒ 不恢复 ⇒
+ *   文本不动、光标不动、不丢字。这不是"让值更准"，而是**让恢复逻辑判定为"不需要恢复"**。
  *
- * ⚠️ 也不能用"把 value 从 props 里删掉"来实现"不下发"：Taro 的 payload 会把缺失的键
- *    记成 `[key, null]`，等于主动下发 `value: null` —— 那正是第 7/8/10 版"打不进字"。
+ * ## 第十四轮：`flushSync` 只解决了一半，另一半在 setData 的时序（2026-11-02 晚）
+ *
+ * 思傅复测："中文好了，英文故障依旧"。模拟器里重新跑 16 字连打，**又只剩 11 个**。
+ * 用调试协议把「谁改了原生 value」的调用栈抓出来（`scripts/tmp-write-stack.mjs`），
+ * 再在 `setNodeValue` 里打点，才看清完整链条：
+ *
+ *   1. `flushSync()` **是生效的** —— 打点显示每次 input 回调结束时
+ *      `props.value` 已经从 `a` 变成 `ab`（所以第十三轮的方向是对的）；
+ *   2. 真正把字冲掉的是**视图层晚到的 setData**：逻辑层每次提交都会把 `value`
+ *      塞进 payload，视图层（`WAWebview` 的 `defaultValueChange` → `updateValue`）
+ *      应用有延迟，后到的旧值把用户刚打的字覆盖掉、光标甩末尾；
+ *   3. 还有一条**每次 input 都多出来的 setData**：`FormElement.dispatchEvent`
+ *      在 INPUT 事件里执行 `this.value = val`，而 `setAttribute` 不做相等判断，
+ *      无条件 `enqueueUpdate`。打字越快，这条回声越容易晚一步到。
+ *
+ * ⇒ 两处补丁（`patches/@tarojs__react@4.1.9.patch`、`patches/@tarojs__runtime@4.1.9.patch`）：
+ *   · `getUpdatePayload`：表单元素的 `value` 若与元素当前值相同，就从 payload 里**摘掉**；
+ *     ⚠️ 但 payload **不能返回 null** —— `commitUpdate` 会提前返回，元素上的
+ *     `__reactProps$` 就不更新，Taro 恢复受控值时读到旧值 ⇒ 把整段文本写成空串
+ *     （实测连打 16 字最终长度 0）。返回空数组 `[]` 才是对的。
+ *   · `FormElement.dispatchEvent`：INPUT 分支改成 `this.props.value = val`，
+ *     只同步内部状态，不再额外发一次 setAttribute（setData）。
+ *
+ * ⇒ 组件这一侧还要**丢掉没有文本的 input 事件**：视图层应用 `value` 之后微信会
+ *   回抛一次 `detail` 里没有 value 的 input，照常上抛就是 `setContent('')` ⇒ 清空。
+ *
+ * ⚠️ 试过但**被实测否掉**的几条路（别再走一遍）：
+ *    · **把 onInput 延迟上抛**（"打字期间不 commit"）：属性值停在旧串 ⇒ 恢复逻辑照样把文本
+ *      改回旧串 ⇒ 模拟器里打「甲乙丙」变「甲丙」，连打 16 字只剩 1~2 个。
+ *    · **完全不传 value**（想做成非受控）：Taro 的 textarea 直接**打不进字**；
+ *      传 `undefined` 等价于下发空串，会把内容清空。
+ *    · **运行时改写 `FormElement[Symbol.hasInstance]`**：会连带打断 Babel 的
+ *      `_classCallCheck`（它内部就是 `instanceof`），整个小程序白屏。
+ *    · **把值从 payload 里 `continue` 掉、不摘除**：payload 变 null ⇒ 见上，清空文本。
  *
  * ## 两条纪律
- * 1. 页面：`onInput` 里必须 `setState` 实时同步（state 仍要跟上，只是不作为下发来源）。
+ * 1. 页面：`onInput` 里照常 `setState`（不要自己再防抖）—— 同步刷新由本组件负责。
  * 2. 组件：`value` / `cursor` / `focus` 只在**有明确含义时**出现 ——
  *    `cursor={-1}` 在微信里是"置于末尾"，`focus={false}` 是"强制失焦"，
  *    写成 `undefined` 也仍会留下键（Taro 的 diff 走 `for (i in newProps)`），
@@ -119,23 +147,61 @@ const Textarea = React.forwardRef<
 
   /**
    * 用户在原生里打出来的**最新**文本。
-   * input 事件到达时立刻写入 —— 比页面的 setState 早一拍，这就是它能救命的原因：
-   * 由上一拍 setState 触发的那次 commit，下发的会是它，而不是更旧的 state。
+   * input 事件到达时立刻写入（同步，一个字都不丢）—— 它就是"下发给原生的值"。
    */
   const latestRef = React.useRef<string | null>(null)
-  /** 上一次交给原生的 value：用来判断"页面这次给的值是不是新东西" */
-  const appliedRef = React.useRef<string | null>(null)
   /** 是否处于聚焦态（不触发渲染，只用来判断该不该听页面的话） */
   const focusRef = React.useRef(false)
+  /** 最新的 onInput：同步渲染里要用"这一次 render 的那一个"，不能闭包住旧的 */
+  const onInputRef = React.useRef<typeof onInput>(onInput)
+  onInputRef.current = onInput
 
   const handleInput = React.useCallback(
-    (e: { detail?: { value?: string } } & Record<string, unknown>) => {
+    (e: { detail?: { value?: string; cursor?: number } } & Record<string, unknown>) => {
       const next = e?.detail?.value
-      if (typeof next === 'string') latestRef.current = next
-      // 立即上抛：页面的 state 必须保持实时（它还要用来判断空态/脏标记/保存）
-      onInput?.(e as never)
+      /**
+       * ⚠️ 没有文本的 input 事件一律丢掉。
+       *
+       * 视图层把 `value` 应用到原生 textarea 之后，微信还会回抛一次 input，
+       * 但那次事件的 `detail` 里**没有 value**（它不是用户输入）。若照常上抛，
+       * 页面收到的是空串 ⇒ `setContent('')` ⇒ 下一次提交下发 `value: ''`
+       * ⇒ **把用户刚打的字整段清空**（第十四轮实测：连打 16 字最终长度 0）。
+       */
+      if (typeof next !== 'string') return
+      // ① 同步记最新文本：下发的值用它，绝不会落后于"逻辑层已知的最新"
+      latestRef.current = next
+      // ② 快照：Taro / 微信会复用事件对象，后续再读 `e.detail.value` 可能已被清空
+      const snapshot = {
+        detail: {
+          value: next,
+          cursor: typeof e?.detail?.cursor === 'number' ? e.detail.cursor : undefined,
+        },
+      }
+      /**
+       * ③ **同步渲染**（`flushSync`）—— 这是不打字丢字的关键。
+       *
+       * Taro 处理完 input 事件后会 `TaroReconciler.flushSync()` 再走
+       * `restoreStateIfNeeded`（`@tarojs/react` 的 `finishEventHandler`）：
+       * 那里拿 **fiber 上的 props.value** 和本次事件的文本比，不等就把原生文本改回去。
+       *
+       * 而 React 18 对事件里的 setState 是批处理的，页面那次 setState 尚未落地时
+       * `props.value` 还停在上一拍 —— 于是"改回上一拍文本"，用户看到的就是
+       * **光标跳到末尾、偶尔还丢字**（英文逐字符输入时必然发生）。
+       *
+       * 在这里强制同步渲染一次，能让 `props.value` 在 Taro 恢复之前就变成
+       * "本次事件的文本"，两边一致 ⇒ 不重建、不动光标、不丢字。
+       * 中英文都走这一条路径，不再区分输入法。
+       */
+      const emit = () => onInputRef.current?.(snapshot as never)
+      emit()
+      try {
+        // 先把页面 setState 排上，再强制把这次更新刷出（空回调也能冲出 pending 更新）
+        flushSync()
+      } catch {
+        // 某些时机（render 期间）不允许同步刷新，退化为普通上抛
+      }
     },
-    [onInput],
+    [],
   )
 
   const handleFocus = React.useCallback(
@@ -163,25 +229,26 @@ const Textarea = React.forwardRef<
   /**
    * 该不该听页面给的 `value`？
    *
-   * - 用户正在这个框里打字（聚焦中）且没有要求定位光标 ⇒ 页面给的只可能是
-   *   **滞后的 state**（哪怕它看起来"变了"），一律不听；只有 native 才是真相。
-   * - 失焦时，或调用方带着 `cursor` 明确要求定位（插符号 / 回填 / 清空）⇒ 以页面为准。
+   * - 用户正在这个框里打字（聚焦中）且**没有新的定位请求** ⇒ 页面给的只可能是
+   *   一拍前的 state，一律不听；只有原生才是真相。
+   * - 失焦时（页面加载/切换题目），或调用方**刚刚**带着 `cursor` 要求定位
+   *   （插数学符号 / OCR 回填 / 清空）⇒ 以页面为准。
    *
-   * 这条判定就是整个补丁的核心：它让"下发的值"永远是**原生当前文本**，
-   * 而不是"上一次 setState 留下的旧文本"。
+   * ⚠️ `cursor` 必须是**变化的那一刻**才算请求：`useCaret` 会把上次定位的值一直挂着，
+   *    若把"cursor 非空"当成请求，打字全程都会被判定为"听页面的"，滞后值就会回写。
    */
-  const trustPage = !focusRef.current || cursorProp !== null
-  if (typeof value === "string") {
-    if (latestRef.current === null || (trustPage && value !== appliedRef.current)) {
-      latestRef.current = value
-    }
+  const lastCursorRef = React.useRef<number | null>(null)
+  const cursorChanged = cursorProp !== null && cursorProp !== lastCursorRef.current
+  lastCursorRef.current = cursorProp
+  const trustPage = !focusRef.current || cursorChanged
+  if (typeof value === "string" && (latestRef.current === null || trustPage)) {
+    latestRef.current = value
   }
   /**
    * 下发给原生的文本。
    * ⚠️ 这个键**永远不能省**（见文件顶部：省掉等于下发 `value: null`）。
    */
   const displayValue = latestRef.current ?? value
-  if (typeof displayValue === "string") appliedRef.current = displayValue
   /**
    * ⚠️ `focus` 同理：`false` 在微信里是"**强制失焦**"（会收键盘），
    *    不是"不指定"。用户正在打字时每帧下发一次 false，表现就是"一打字就退出输入"。

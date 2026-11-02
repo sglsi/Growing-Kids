@@ -1,0 +1,37 @@
+diff --git a/dist/react.esm.js b/dist/react.esm.js
+index 9978543..a93932a 100644
+--- a/dist/react.esm.js
++++ b/dist/react.esm.js
+@@ -363,7 +363,7 @@ function getUpdatePayload(dom, oldProps, newProps) {
+     }
+     const isFormElement = dom instanceof FormElement;
+     for (i in newProps) {
+-        if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value')) {
++        if (oldProps[i] !== newProps[i]) {
+             // 如果都是 style，且 style 里面的值相等，则无需记录到 payload 中
+             if (i === 'style' && isObject(oldProps[i]) && isObject(newProps[i]) && isEqual(oldProps[i], newProps[i]))
+                 continue;
+@@ -373,6 +373,23 @@ function getUpdatePayload(dom, oldProps, newProps) {
+             (updatePayload = updatePayload || []).push(i, newProps[i]);
+         }
+     }
++    // [GK-PATCH] 表单元素：value 若与元素当前值一致，就从 payload 里摘掉。
++    // 写进 payload 会让视图层再收一次 setData；视图层应用有延迟，后到的旧值
++    // 会把用户刚打的字覆盖回去、光标甩到末尾（实测：连打 16 字只剩 11 个）。
++    // ⚠️ payload 不能返回 null —— commitUpdate 会因此提前返回，元素上的 props
++    // 就不更新了；Taro 恢复受控值读的正是它，读到旧值 ⇒ 把文本写回旧串/空串。
++    if (updatePayload && isFormElement) {
++        for (let k = 0; k < updatePayload.length; k += 2) {
++            if (updatePayload[k] !== 'value')
++                continue;
++            const tracker = dom._valueTracker;
++            const current = tracker ? tracker.getValue() : dom.value;
++            if (String(updatePayload[k + 1]) === String(current)) {
++                updatePayload.splice(k, 2);
++            }
++            break;
++        }
++    }
+     return updatePayload;
+ }
+ // function eventProxy (e: CommonEvent) {
