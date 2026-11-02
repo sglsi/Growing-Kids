@@ -41,6 +41,22 @@ export interface Memory {
   created_at: string
   updated_at: string
   deleted_at?: string | null
+
+  // ---- 列表专用聚合字段（2026-11-02 新增）----
+  // 列表接口原本只给 `cover_key`（对象存储 key），而小程序 `<Image src>` /
+  // `<Video poster>` 只能吃 URL 且**不发任何头部** ⇒ 前端拿 key 拼不出可用地址，
+  // 卡片上的图片/视频/音频缩略图整片空白。这里由服务端用 getPublicUrl() 直接给 URL，
+  // 前端不必知道存储驱动（local 拼后端地址、supabase 给公开/签名直链）。
+  cover_url?: string | null
+  cover_thumb_url?: string | null
+  /** 该记忆的媒体种类（去重、按 sort_order 出现顺序），列表卡片据此决定画什么格 */
+  media_kinds?: MemoryKind[]
+  /** 各类型媒体数量，例：{ image: 3, video: 1, audio: 2 }（卡片右下角显示计数） */
+  media_counts?: Partial<Record<MemoryKind, number>>
+  /** 首个视频时长（秒）：卡片上要显示 "▶ 0:32" */
+  video_duration?: number | null
+  /** 首个视频的首帧图 URL（卡片缩略图；为空时前端画黑底播放图标） */
+  video_thumb_url?: string | null
 }
 
 export interface MemoryMedia {

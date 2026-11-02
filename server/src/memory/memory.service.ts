@@ -64,8 +64,80 @@ export class MemoryService {
       .range(from, to)
     if (error) throw new Error(error.message)
 
+    const rows = (data || []) as unknown as Memory[]
+
+    /**
+     * 一次性把本页所有媒体取回来聚合，**不逐条查**（否则 50 条 = 50 次往返）。
+     * 需要它是因为列表卡片要直接画缩略图：图片封面、视频时长、音频时长。
+     * 这些字段在 `memories` 表里只有 `cover_key`（key 不是 URL），且没有视频时长列。
+     */
+    const briefs = new Map<string, {
+      kinds: MemoryKind[]
+      counts: Partial<Record<MemoryKind, number>>
+      coverKey?: string
+      coverThumbKey?: string
+      videoDuration?: number
+      videoThumbKey?: string
+    }>()
+    if (rows.length) {
+      const { data: mediaRows, error: mediaErr } = await client
+        .from(MEDIA_TABLE)
+        .select('memory_id, kind, file_key, thumb_key, duration_sec, sort_order')
+        .eq('user_id', userId)
+        .in('memory_id', rows.map((r) => r.id))
+        .order('sort_order', { ascending: true })
+      if (mediaErr) throw new Error(mediaErr.message)
+      const briefRows = (mediaRows || []) as Array<{
+        memory_id: string
+        kind: MemoryKind
+        file_key: string
+        thumb_key: string | null
+        duration_sec: number | null
+      }>
+      for (const m of briefRows) {
+        const b = briefs.get(m.memory_id) || { kinds: [], counts: {} }
+        if (!b.kinds.includes(m.kind)) b.kinds.push(m.kind)
+        b.counts[m.kind] = (b.counts[m.kind] || 0) + 1
+        // 首图（sort_order 已经升序）既做封面也做缩略图，有 thumb_key 就优先用小的
+        if (m.kind === 'image' && !b.coverKey) {
+          b.coverKey = m.file_key
+          b.coverThumbKey = m.thumb_key || undefined
+        }
+        if (m.kind === 'video' && b.videoDuration === undefined) {
+          b.videoDuration = m.duration_sec || undefined
+        }
+        // 首个视频的首帧图：列表卡片直接拿它当缩略图（没有就退化成黑底播放图标）
+        if (m.kind === 'video' && !b.videoThumbKey && m.thumb_key) {
+          b.videoThumbKey = m.thumb_key
+        }
+        briefs.set(m.memory_id, b)
+      }
+    }
+
+    const list = await Promise.all(rows.map(async (r) => {
+      const b = briefs.get(r.id)
+      // 兜底：媒体表没数据但 memories.cover_key 有值（老数据 / 媒体被删过）
+      const coverKey = b?.coverKey || r.cover_key || undefined
+      const coverUrl = coverKey ? await this.storageService.getPublicUrl(coverKey) : null
+      const coverThumbUrl = b?.coverThumbKey
+        ? await this.storageService.getPublicUrl(b.coverThumbKey)
+        : coverUrl
+      const videoThumbUrl = b?.videoThumbKey
+        ? await this.storageService.getPublicUrl(b.videoThumbKey)
+        : null
+      return {
+        ...r,
+        media_kinds: b?.kinds ?? [],
+        media_counts: b?.counts ?? {},
+        cover_url: coverUrl,
+        cover_thumb_url: coverThumbUrl,
+        video_thumb_url: videoThumbUrl,
+        video_duration: b?.videoDuration ?? null,
+      }
+    }))
+
     return {
-      list: (data || []) as unknown as Memory[],
+      list,
       total: count || 0,
       page,
       page_size: pageSize,

@@ -16,6 +16,18 @@ const MIME: Record<string, string> = {
   json: 'application/json',
   txt: 'text/plain; charset=utf-8',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  // ---- 成长记忆的音视频（2026-11-02）----
+  // 之前只有图片/PDF，录音与视频一律落到 `application/octet-stream`。
+  // 微信 <Video> / InnerAudioContext 拿到 octet-stream 时不报错也不播（黑屏/静音），
+  // 是「录音点了没反应、视频看不到」的第二个成因（第一个是用了原生标签）。
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  wav: 'audio/wav',
 }
 
 /**
