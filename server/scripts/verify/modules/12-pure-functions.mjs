@@ -183,17 +183,47 @@ m.test('单编：src/utils/caret-decision.ts（零 import 契约）', async (c) 
 // ⇒ 反过来"不让 value 变化"（第 7/8/10 版）才最危险：属性停在旧值后，任何一次 commit
 //   都会把刚打的字**覆盖回旧值** —— 那正是"打不进字"。
 //
+// ⚠️ 2026-11-02 补丁：上面那条治法只对了一半。真机仍有两个必现场景（按住删除键连删、
+//    输入法组合态直接上屏标点），因为 Taro 对表单元素**每次 commit 都无条件重发 value**，
+//    而逻辑层到渲染层有延迟 —— 只要 commit 落在"用户多敲了一下"之后，下发的就是旧文本。
+//    ⇒ 补的是"打字期间不 commit"：组件把最新文本攒在 ref 里，静默 120ms 才上抛一次；
+//      期间任何 commit 下发的也是 pending（= 原生当前文本），不是滞后的 state。
+//
 // 下面这组断言守住实现别再退回旧路（纯函数层已被证明是多余的，所以只守源码契约）。
 m.test('🔴 ui/textarea 必须原样下发 value，focus/cursor 必须条件展开', async (c) => {
   const src = fs.readFileSync(path.join(ROOT, 'src/components/ui/textarea.tsx'), 'utf8')
 
   c.ok(
-    src.includes('typeof value === "string" ? { value } : undefined'),
-    'value 必须原样条件下发（写成 undefined 也会留键 ⇒ 每帧下发空值）'
+    src.includes('typeof displayValue === "string" ? { value: displayValue } : undefined'),
+    'value 必须条件下发，且来源是 displayValue（有未上抛输入时=原生当前文本，否则=页面值）'
+  )
+  c.ok(
+    src.includes('const displayValue = latestRef.current ?? value'),
+    '下发的值必须优先取「输入事件里记下的最新文本」，否则 commit 时会用滞后的 state 覆盖用户输入'
+  )
+  c.ok(
+    src.includes('if (typeof next === \'string\') latestRef.current = next'),
+    'input 事件里必须立刻把最新文本写进 latestRef —— 它必须比页面的 setState 早一拍'
   )
   c.ok(
     !src.includes('useState'),
     '组件里出现了 useState —— 任何内部 state 变化都是一次 commit，都会把光标甩走'
+  )
+  // 2026-11-02：Taro 对表单元素**无条件重发 value**，所以"不下发"唯一的办法是"不 commit"。
+  // 这条断言钉住防抖上抛，别再改回"每次按键都 setState"。
+  // 2026-11-02：试过"延迟 120ms 上抛让打字期间不 commit"，实测把「甲乙丙」打成「甲丙」
+  // （延迟让 state 更旧，而 commit 照样发生）。结论：只要还有 commit，值就必须是最新的。
+  c.ok(
+    !src.includes('EMIT_DELAY'),
+    '又回到"延迟上抛"方案：实测会丢字，见 2026-11-02 的 _diag-input 记录'
+  )
+  c.ok(
+    src.includes('const trustPage = !focusRef.current || cursorProp !== null'),
+    '缺少"聚焦期间只信原生"的判定 —— 否则页面滞后的 state 会把用户刚打的字写回去'
+  )
+  c.ok(
+    !/delete\s+[^\n]*value/.test(src),
+    '禁止把 value 从 props 里删掉：Taro 的 payload 会记成 [key, null]，等于下发 value:null（打不进字）'
   )
   c.ok(
     !src.includes('displayRef') && !src.includes('resolveDisplayText') && !src.includes('textarea-echo'),

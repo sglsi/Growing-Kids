@@ -44,8 +44,38 @@ import { cn } from "@/lib/utils"
  * ⇒ 反过来，"不让 value 变化"（第 7/8/10 版）才是最危险的做法：属性一旦停在旧值，
  *   任何一次 commit 都会把用户刚打的字**覆盖回旧值** —— 那就是"打不进字"。
  *
+ * ## 第十一轮结论的补丁（2026-11-02，真机仍有残留故障后重做定性）
+ *
+ * 第十一轮的定性没错（值≠原生的那一刻光标就被甩到末尾），但**漏了一半**：
+ * 它假定"每次 commit 下发的 value 一定是最新的那一个文本"。这个假设在真机上不成立 ——
+ * Taro 的 `getUpdatePayload` 对表单元素是**无条件重发 value**
+ * （`if (oldProps[i] !== newProps[i] || (isFormElement && i === 'value'))`），
+ * 而 React 的 setState 会批处理、逻辑层到渲染层还有延迟。于是只要有**任何**一次 commit
+ * 落在"用户已经多敲了一下"之后，下发的就是旧文本 ⇒ 微信把文本改回旧值、光标甩到末尾
+ * ⇒ 下一个 input 事件再把文本补回来。净效果正是用户看到的：
+ * **文本对了，光标却跑到结尾**。
+ *
+ * 对应两个真机必现场景（思傅 2026-11-02 复现）：
+ *   · 按住删除键连删 —— input 事件密集，state 追不上；
+ *   · 输入法组合态直接上屏标点（不选候选）—— 组合期间 detail.value 比原生文本旧。
+ *
+ * 治法：**下发的值永远取"已知最新的那份文本"，而不是页面的 state**。
+ *   `onInput` 一来就把文本记进 `latestRef`（同一个事件里，比 setState 早），
+ *   渲染时 `displayValue = latestRef ?? value`。这样即使 commit 是由**上一拍**的
+ *   setState 触发的，下发的也是刚打出来的最新文本 —— 与原生一致 ⇒ 不动光标。
+ *   页面主动改值（插符号、回填、清空）时，`value` 既不是我们上次交出去的、也不等于
+ *   `latestRef`，于是反过来以页面为准（见下面 render 里的判定）。
+ *
+ * ⚠️ 试过但**被实测否掉**的方案：把 onInput 延迟 120ms 再上抛（"打字期间不 commit"）。
+ *    模拟器里打「甲乙丙」直接变成「甲丙」—— 延迟让 state 更旧，而 commit 照样发生，
+ *    于是下发的是更旧的文本，连字都被覆盖。见 `server/scripts/ide-value-writes.mjs` 的
+ *    `same:false` 记录。**只要还有 commit，value 就必须是最新的，不能靠"拖"**。
+ *
+ * ⚠️ 也不能用"把 value 从 props 里删掉"来实现"不下发"：Taro 的 payload 会把缺失的键
+ *    记成 `[key, null]`，等于主动下发 `value: null` —— 那正是第 7/8/10 版"打不进字"。
+ *
  * ## 两条纪律
- * 1. 页面：`onInput` 里必须 `setState` 实时同步（别再往 ref 里藏，藏了就会滞后）。
+ * 1. 页面：`onInput` 里必须 `setState` 实时同步（state 仍要跟上，只是不作为下发来源）。
  * 2. 组件：`value` / `cursor` / `focus` 只在**有明确含义时**出现 ——
  *    `cursor={-1}` 在微信里是"置于末尾"，`focus={false}` 是"强制失焦"，
  *    写成 `undefined` 也仍会留下键（Taro 的 diff 走 `for (i in newProps)`），
@@ -74,6 +104,9 @@ const Textarea = React.forwardRef<
     cursor,
     style,
     value,
+    onInput,
+    onFocus,
+    onBlur,
     // 微信输入习惯的三件套：给默认值，调用方显式传则覆盖
     cursorSpacing = 24,
     showConfirmBar = true,
@@ -85,10 +118,70 @@ const Textarea = React.forwardRef<
   } = props
 
   /**
+   * 用户在原生里打出来的**最新**文本。
+   * input 事件到达时立刻写入 —— 比页面的 setState 早一拍，这就是它能救命的原因：
+   * 由上一拍 setState 触发的那次 commit，下发的会是它，而不是更旧的 state。
+   */
+  const latestRef = React.useRef<string | null>(null)
+  /** 上一次交给原生的 value：用来判断"页面这次给的值是不是新东西" */
+  const appliedRef = React.useRef<string | null>(null)
+  /** 是否处于聚焦态（不触发渲染，只用来判断该不该听页面的话） */
+  const focusRef = React.useRef(false)
+
+  const handleInput = React.useCallback(
+    (e: { detail?: { value?: string } } & Record<string, unknown>) => {
+      const next = e?.detail?.value
+      if (typeof next === 'string') latestRef.current = next
+      // 立即上抛：页面的 state 必须保持实时（它还要用来判断空态/脏标记/保存）
+      onInput?.(e as never)
+    },
+    [onInput],
+  )
+
+  const handleFocus = React.useCallback(
+    (e: unknown) => {
+      focusRef.current = true
+      onFocus?.(e as never)
+    },
+    [onFocus],
+  )
+
+  const handleBlur = React.useCallback(
+    (e: unknown) => {
+      focusRef.current = false
+      onBlur?.(e as never)
+    },
+    [onBlur],
+  )
+
+  /**
    * ⚠️ 只在真正要定位时才把 cursor 传下去：`-1` 在微信里的语义是"置于末尾"，
    *    不是"不指定"。写 -1 等于主动把光标甩到结尾。
    */
   const cursorProp = typeof cursor === "number" && cursor >= 0 ? cursor : null
+
+  /**
+   * 该不该听页面给的 `value`？
+   *
+   * - 用户正在这个框里打字（聚焦中）且没有要求定位光标 ⇒ 页面给的只可能是
+   *   **滞后的 state**（哪怕它看起来"变了"），一律不听；只有 native 才是真相。
+   * - 失焦时，或调用方带着 `cursor` 明确要求定位（插符号 / 回填 / 清空）⇒ 以页面为准。
+   *
+   * 这条判定就是整个补丁的核心：它让"下发的值"永远是**原生当前文本**，
+   * 而不是"上一次 setState 留下的旧文本"。
+   */
+  const trustPage = !focusRef.current || cursorProp !== null
+  if (typeof value === "string") {
+    if (latestRef.current === null || (trustPage && value !== appliedRef.current)) {
+      latestRef.current = value
+    }
+  }
+  /**
+   * 下发给原生的文本。
+   * ⚠️ 这个键**永远不能省**（见文件顶部：省掉等于下发 `value: null`）。
+   */
+  const displayValue = latestRef.current ?? value
+  if (typeof displayValue === "string") appliedRef.current = displayValue
   /**
    * ⚠️ `focus` 同理：`false` 在微信里是"**强制失焦**"（会收键盘），
    *    不是"不指定"。用户正在打字时每帧下发一次 false，表现就是"一打字就退出输入"。
@@ -143,13 +236,16 @@ const Textarea = React.forwardRef<
         adjustPosition={adjustPosition}
         disableDefaultPadding={disableDefaultPadding}
         /**
-         * ⚠️ `value` 原样下发（标准受控）。任何一次 commit 都会把它塞进 setData，
-         * 只要它等于用户眼前的文本，微信就不会重建文本、不会动光标（见文件顶部实验 1）。
-         * 非受控调用方（没传 value）时压根不出现这个键。
+         * ⚠️ `value` 必须**一直出现**（非受控调用方则整键不出现）。
+         * 省掉这个键 = Taro 下发 `value: null` = 清空用户刚打的字。
+         * `displayValue` 在有未上抛的输入时本身就是原生当前文本，见上。
          */
-        {...(typeof value === "string" ? { value } : undefined)}
+        {...(typeof displayValue === "string" ? { value: displayValue } : undefined)}
         {...(cursorProp !== null ? { cursor: cursorProp } : undefined)}
         {...(focusProp ? { focus: true } : undefined)}
+        onInput={handleInput as never}
+        onFocus={handleFocus as never}
+        onBlur={handleBlur as never}
         className={INNER_CLASS}
         placeholderClass="text-muted-foreground"
         style={innerStyle}
