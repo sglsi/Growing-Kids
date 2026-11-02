@@ -1,7 +1,7 @@
-diff --git a/dom/form.js b/dom/form.js
+diff --git a/dist/dom/form.js b/dist/dom/form.js
 index 6ec4e26..82de2e1 100644
---- a/dom/form.js
-+++ b/dom/form.js
+--- a/dist/dom/form.js
++++ b/dist/dom/form.js
 @@ -27,7 +27,7 @@ class FormElement extends TaroElement {
                  // Web 规范中表单组件的 value 应该跟着输入改变
                  // 只是改 this.props.value 的话不会进行 setData，因此这里修改 this.value。
@@ -11,10 +11,10 @@ index 6ec4e26..82de2e1 100644
              }
          }
          return super.dispatchEvent(event);
-diff --git a/runtime.esm.js b/runtime.esm.js
+diff --git a/dist/runtime.esm.js b/dist/runtime.esm.js
 index 573886d..859e551 100644
---- a/runtime.esm.js
-+++ b/runtime.esm.js
+--- a/dist/runtime.esm.js
++++ b/dist/runtime.esm.js
 @@ -3542,7 +3542,7 @@ class FormElement extends TaroElement {
                  // Web 规范中表单组件的 value 应该跟着输入改变
                  // 只是改 this.props.value 的话不会进行 setData，因此这里修改 this.value。
@@ -24,10 +24,10 @@ index 573886d..859e551 100644
              }
          }
          return super.dispatchEvent(event);
-diff --git a/index.cjs.js b/index.cjs.js
+diff --git a/dist/index.cjs.js b/dist/index.cjs.js
 index a6ed84e..294721a 100644
---- a/index.cjs.js
-+++ b/index.cjs.js
+--- a/dist/index.cjs.js
++++ b/dist/index.cjs.js
 @@ -3543,7 +3543,7 @@ class FormElement extends TaroElement {
                  // Web 规范中表单组件的 value 应该跟着输入改变
                  // 只是改 this.props.value 的话不会进行 setData，因此这里修改 this.value。

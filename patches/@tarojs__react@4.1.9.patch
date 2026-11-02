@@ -1,8 +1,8 @@
 diff --git a/dist/react.esm.js b/dist/react.esm.js
-index 9978543..a93932a 100644
+index 5fc7dd8..82ced21 100644
 --- a/dist/react.esm.js
 +++ b/dist/react.esm.js
-@@ -363,7 +363,7 @@ function getUpdatePayload(dom, oldProps, newProps) {
+@@ -363,13 +363,30 @@ function getUpdatePayload(dom, oldProps, newProps) {
      }
      const isFormElement = dom instanceof FormElement;
      for (i in newProps) {
@@ -11,7 +11,6 @@ index 9978543..a93932a 100644
              // 如果都是 style，且 style 里面的值相等，则无需记录到 payload 中
              if (i === 'style' && isObject(oldProps[i]) && isObject(newProps[i]) && isEqual(oldProps[i], newProps[i]))
                  continue;
-@@ -373,6 +373,23 @@ function getUpdatePayload(dom, oldProps, newProps) {
              (updatePayload = updatePayload || []).push(i, newProps[i]);
          }
      }
