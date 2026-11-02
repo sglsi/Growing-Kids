@@ -117,7 +117,7 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
                   <View className="flex-1 min-w-0">
                     <Text className="block text-sm text-foreground truncate">{d.name}</Text>
                     <Text className="block text-xs text-muted-foreground mt-1">
-                      {/pdf/i.test(d.mime_type || '') ? 'PDF' : '文档'} · {formatTime(d.created_at)}
+                      {/pdf/i.test(d.mime_type || '') ? 'PDF' : '资料'} · {formatTime(d.created_at)}
                     </Text>
                   </View>
                 </View>

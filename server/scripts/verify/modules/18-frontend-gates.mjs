@@ -161,7 +161,7 @@ m.test('🔴 前端：禁止完全空的 catch（best-effort 也要留痕）', a
 //    这里只做弱检：出现 `pendingLoads`/`pending` 计数式命名的页面必须 finally 解锁
 // ---------------------------------------------------------------
 m.test('🔴 前端：列表页 loading 必须在 finally 无条件解除', async (c) => {
-  const pages = ['pages/index/index.tsx', 'pages/subject/index.tsx', 'pages/library/index.tsx', 'pages/document/index.tsx', 'pages/memory/index.tsx']
+  const pages = ['pages/index/index.tsx', 'pages/subject/index.tsx', 'pages/library/index.tsx', 'pages/summary/index.tsx', 'pages/memory/index.tsx']
   const bad = []
   for (const p of pages) {
     const f = path.join(SRC, p)

@@ -453,7 +453,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                     <View className="w-full h-full flex flex-col items-center justify-center bg-muted">
                       <FileText size={18} color={INK} />
                       <Text className="block text-xs mt-1 px-1 text-center" numberOfLines={1}>
-                        {a.name || '文档'}
+                        {a.name || '资料'}
                       </Text>
                     </View>
                   )}
@@ -480,7 +480,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         </View>
         <View className={btn} onClick={() => void pickDoc()}>
           <Plus size={12} color={INK} />
-          <Text className="block text-xs">文档</Text>
+          <Text className="block text-xs">资料</Text>
         </View>
         <View className={btn} onClick={() => setPickerOpen(true)}>
           <FileText size={12} color={INK} />

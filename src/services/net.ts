@@ -104,7 +104,7 @@ export function isPdfFile(mimeOrUrl: string): boolean {
  *   无 key 才直连原 URL。复制兜底始终用原公网 URL（浏览器可开）。
  */
 export function openStorageFile(url: string, isPdf = false, fileKey?: string) {
-  Taro.showLoading({ title: '打开文档…' })
+  Taro.showLoading({ title: '打开资料…' })
   const dlUrl = fileKey ? `/api/storage/files/${fileKey}` : url
   // ⚠️ 必须显式 timeout：微信 downloadFile 默认 60s，跨境/慢网下干等太久。
   // 30s 失败后走「复制链接」兜底，比干等 60s 体验好；失败时打 URL 便于后续诊断。

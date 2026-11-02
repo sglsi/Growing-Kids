@@ -21,8 +21,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const ROUTES = [
   { key: 'index', name: '首页', url: '/pages/index/index', expect: ['成长学童'] },
   { key: 'subject', name: '学科', url: '/pages/subject/index', expect: ['学科'] },
-  { key: 'document', name: '文档', url: '/pages/document/index', expect: [] },
-  { key: 'library', name: '资料库', url: '/pages/library/index', expect: [] },
+  // 2026-11-02：「文档」tab 改为「资料」（落地页=资料库），汇总导出移到复习本下的二级页
+  { key: 'library', name: '资料', url: '/pages/library/index', expect: [] },
+  { key: 'summary', name: '汇总导出', url: '/pages/summary/index', expect: [] },
   { key: 'profile', name: '我的', url: '/pages/profile/index', expect: [] },
   { key: 'privacy', name: '隐私政策', url: '/pages/privacy/index', expect: ['隐私'] },
   { key: 'agreement', name: '用户协议', url: '/pages/agreement/index', expect: ['协议'] },

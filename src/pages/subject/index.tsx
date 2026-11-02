@@ -1,7 +1,7 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState, useRef } from 'react'
-import { FileSearch, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Eraser, Tag } from 'lucide-react-taro'
+import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Eraser, Tag } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import ReviewItemCard from '@/components/review-item-card'
@@ -467,6 +467,16 @@ export default function SubjectPage() {
     })
   }
 
+  /**
+   * 汇总导出（2026-11-02 从「文档」tab 移入复习本）。
+   *
+   * 思傅的判断：按时间段把题目汇总成卷、导出练习卷/答疑版，本质是**复习动作**，
+   * 单独占一个 tab 反而让「复习」和「出卷」分成两处。现在入口在复习本，页面独立
+   * （/pages/summary/index）——这里本页头部已经很挤（学科 + 搜索 + 标签 + 时间范围），
+   * 再塞一整块汇总面板会让人找不到主列表。
+   */
+  const goSummary = () => Taro.navigateTo({ url: '/pages/summary/index' })
+
   const canLoadMore = items.length < total
   const goRecognize = () => Taro.navigateTo({ url: '/pages/recognize/index' })
 
@@ -485,7 +495,21 @@ export default function SubjectPage() {
           onClear={() => { setKeyword(''); resetAndLoad({ keyword: '' }) }}
           countText={`复习本 · 共 ${total} 条`}
           placeholder="搜索题干 / 答案关键词，回车确认"
-          right={<SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />}
+          right={(
+            <View className="flex flex-row items-center gap-2">
+              {!sel.selecting && (
+                <View
+                  className="flex flex-row items-center gap-1 rounded-lg px-2 py-1"
+                  style={{ border: `1px solid ${BRAND}`, backgroundColor: 'rgba(16, 185, 129, 0.06)' }}
+                  onClick={goSummary}
+                >
+                  <FileText size={13} color={BRAND_TEXT} />
+                  <Text className="block text-sm" style={{ color: BRAND_TEXT }}>汇总导出</Text>
+                </View>
+              )}
+              <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
+            </View>
+          )}
         >
           <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
           <View className="mt-2">

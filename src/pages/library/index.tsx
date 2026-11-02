@@ -28,7 +28,8 @@ function getTypeLabel(mime: string | null, name: string): string {
   if (isPdfFile(m || name)) return 'PDF'
   if (m.includes('word') || /\.docx?$/i.test(name)) return 'Word'
   if (m.includes('text') || /\.txt$/i.test(name)) return 'TXT'
-  return '文档'
+  // 2026-11-02：「文档」这个词在产品文案里统一改称「资料」
+  return '资料'
 }
 
 function isImageDoc(mime: string | null): boolean {
@@ -306,8 +307,8 @@ export default function LibraryPage() {
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
       {/* 固定顶部 */}
       <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', borderBottom: '1px solid #ecefe3', padding: '12px 16px 0' }}>
-        <View className="flex flex-row items-center justify-between mb-2">
-          <Text className="block text-base font-semibold text-foreground">资料库</Text>
+        {/* 本页已是 tabBar 页（导航栏标题「资料」），页内不再重复写标题 */}
+        <View className="flex flex-row items-center justify-end mb-2">
           <View className="flex flex-row items-center gap-3">
             <SelectionBar selection={sel} enterLabel="批量选择" />
             {!sel.selecting && (
@@ -338,7 +339,7 @@ export default function LibraryPage() {
         </View>
       </View>
 
-      <ScrollView scrollY style={{ height: '100vh', paddingTop: 110 }} onScrollToLower={loadMore} lowerThreshold={120}>
+      <ScrollView scrollY style={{ height: '100vh', paddingTop: 92 }} onScrollToLower={loadMore} lowerThreshold={120}>
         <View className="px-4 pb-28 pt-3">
           <Text className="block text-xs text-muted-foreground mb-3">
             共 {total} 份资料{docs.length < total ? `（已显示 ${docs.length}）` : ''}

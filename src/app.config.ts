@@ -31,7 +31,8 @@ export default defineAppConfig({
   pages: [
     'pages/index/index',
     'pages/subject/index',
-    'pages/document/index',
+    // 汇总导出（2026-11-02 从「文档」tab 移到复习本：按时间段成卷 + 导出资料归档）
+    'pages/summary/index',
     'pages/memory/index',
     'pages/recognize/index',
     'pages/detail/index',
@@ -72,8 +73,10 @@ export default defineAppConfig({
         selectedIconPath: './assets/tabbar/notebook-pen-active.png'
       },
       {
-        pagePath: 'pages/document/index',
-        text: '文档',
+        // 2026-11-02：原「文档」tab 改为「资料」，落地页就是资料库本身
+        //（自己导入的 PDF/Word/TXT/图片）；汇总导出已移到复习本。
+        pagePath: 'pages/library/index',
+        text: '资料',
         iconPath: './assets/tabbar/file-text.png',
         selectedIconPath: './assets/tabbar/file-text-active.png'
       },

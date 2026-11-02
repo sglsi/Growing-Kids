@@ -18,10 +18,25 @@ import {
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { formatTime } from '@/types'
 import { openStorageFile, isPdfFile } from '@/services/net'
-import { FileText, FolderOpen, Ellipsis } from 'lucide-react-taro'
+import { FileText, Ellipsis, Trash2 } from 'lucide-react-taro'
 import RenameDialog from '@/components/rename-dialog'
 import { INK } from '@/lib/theme'
 
+/**
+ * 汇总导出（2026-11-02 从「文档」tab 搬到复习本）
+ *
+ * 思傅的判断：**按时间段汇总成卷、把导出过的资料归档，本质都是复习动作**，
+ * 放在「文档」这个 tab 里，等于把复习流程拆成两个入口；而那个 tab 又同时塞着
+ * 「导入的 PDF/Word/图片」——两件事搅在一起。
+ *
+ * 所以拆成：
+ *   · 复习本（tab）= 待复习题目 + 本页入口（顶部「汇总导出」）；
+ *   · 资料（tab）= 资料库（自己导入的文件）；
+ *   · 本页（二级页，从复习本进）= 汇总生成 + 导出过的资料列表。
+ *
+ * 页面内容是原 `pages/document/index.tsx` 的两段，去掉了「跳资料库」按钮
+ * （已经在另一个 tab 里），其余逻辑一字未改。
+ */
 type Range = RangeValue
 type Tab = 'generate' | 'library'
 
@@ -32,8 +47,8 @@ function getDateRange(r: Range, latestTimestamp?: string | null): { start: strin
   return { start: since, end }
 }
 
-export default function DocumentPage() {
-  const [tab, setTab] = useState<Tab>('library')
+export default function SummaryPage() {
+  const [tab, setTab] = useState<Tab>('generate')
 
   // —— 生成相关 ——
   const [range, setRange] = useState<Range>('week')
@@ -46,7 +61,7 @@ export default function DocumentPage() {
   const [previewed, setPreviewed] = useState(false)
   const [includeMastered, setIncludeMastered] = useState(false)
 
-  // —— 文档库 ——
+  // —— 导出资料列表 ——
   const [docs, setDocs] = useState<DocItem[]>([])
   const [docsLoading, setDocsLoading] = useState(true)
   const [docFilter, setDocFilter] = useState<'all' | 'docx' | 'pdf'>('all')
@@ -64,20 +79,20 @@ export default function DocumentPage() {
           if (s.length) cacheSet('subj:list', s)
         })
         // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）
-        .catch((e) => console.error('[document] 学科列表加载失败', e))
+        .catch((e) => console.error('[summary] 学科列表加载失败', e))
     }
     sel.exit()
     loadDocs()
   })
 
   /**
-   * 加载文档列表。
+   * 加载导出资料列表。
    * ⚠️ silent（思傅 2026-10-23：与首页/复习本/资料库/记忆同一规则）：
    * 导出/删除后缓存已失效，非 silent 会 setDocsLoading(true) → 骨架屏替换列表 →
    * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
    */
   const loadDocs = async (opts: { silent?: boolean } = {}) => {
-    // SWR（思傅 2026-10-21）：文档列表先读缓存，后台刷新回写
+    // SWR（思傅 2026-10-21）：先读缓存，后台刷新回写
     const listKey = cacheListKey('doc', { pageSize: 100 })
     const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
     if (cached) {
@@ -91,9 +106,9 @@ export default function DocumentPage() {
       setDocs(res.list)
       cacheSet(listKey, res)
     } catch (e) {
-      console.error('加载文档失败', e)
-      // ⚠️ 不能静默（2026-10-29 分模块测试发现并修复，缺陷 P2-I）：后端不通时列表显示
-      // 「暂无文档」，用户以为资料丢了。只有后台静默刷新（silent）才不打扰用户。
+      console.error('加载导出资料失败', e)
+      // ⚠️ 不能静默：后端不通时列表显示「暂无资料」，用户以为资料丢了。
+      // 只有后台静默刷新（silent）才不打扰用户。
       if (!opts.silent) Taro.showToast({ title: '加载失败，请下拉重试', icon: 'none' })
     } finally {
       setDocsLoading(false)
@@ -135,9 +150,9 @@ export default function DocumentPage() {
   }
 
   /**
-   * 导出 Word（2026-10-28 起两种用途分开，默认练习卷）。
+   * 导出 Word/PDF（2026-10-28 起两种用途分开，默认练习卷）。
    *
-   * 背景：本页是全站唯一的「按时间段汇总成 Word」入口，此前不传 `include_answers`
+   * 背景：本页是全站唯一的「按时间段汇总成卷」入口，此前不传 `include_answers`
    * 而后端默认含答案 ⇒ 家长想打一份空白练习卷，拿到的却是答案纸
    * （而复习本合成 PDF 的默认恰好相反，同一产品两套默认）。
    * 现在按钮把用途写明：**打印练习卷 = 不含答案**，另一颗按钮才是答疑解惑。
@@ -188,7 +203,7 @@ export default function DocumentPage() {
   }
 
   const handleSingleDelete = async (d: DocItem) => {
-    const ok = await confirmDelete(1, '份文档')
+    const ok = await confirmDelete(1, '份资料')
     if (!ok) return
     try {
       await deleteDocument(d.id)
@@ -209,14 +224,14 @@ export default function DocumentPage() {
       Taro.showToast({ title: '已重命名', icon: 'success' })
       loadDocs({ silent: true })
     } catch (e) {
-      console.error('[document] 重命名失败', e)
+      console.error('[summary] 重命名失败', e)
       Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
     }
   }
 
   const handleDelete = async () => {
-    if (sel.isEmpty) { Taro.showToast({ title: '请先选择文档', icon: 'none' }); return }
-    const ok = await confirmDelete(sel.count, '份文档')
+    if (sel.isEmpty) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
+    const ok = await confirmDelete(sel.count, '份资料')
     if (!ok) return
     setBusy(true)
     try {
@@ -232,31 +247,21 @@ export default function DocumentPage() {
     }
   }
 
-  const goLibrary = () => Taro.navigateTo({ url: '/pages/library/index' })
+  /** 空态引导：回复习本挑题（本页已从复习本进入） */
+  const backToReview = () => Taro.navigateBack({ delta: 1 })
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
       {/* 固定顶部标签 */}
       <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', padding: '12px 16px', borderBottom: '1px solid #ecefe3' }}>
-        <View className="flex flex-row items-center gap-2">
-          <View className="flex-1">
-            <SegmentedTabs<Tab>
-              value={tab}
-              onValueChange={setTab}
-              options={[
-                { value: 'generate', label: '汇总生成' },
-                { value: 'library', label: '导出文档' },
-              ]}
-            />
-          </View>
-          <View
-            className="flex flex-row items-center gap-1 rounded-xl border border-border bg-background px-3 h-9"
-            onClick={goLibrary}
-          >
-            <FolderOpen size={14} color={INK} />
-            <Text className="block text-sm text-foreground whitespace-nowrap">资料库</Text>
-          </View>
-        </View>
+        <SegmentedTabs<Tab>
+          value={tab}
+          onValueChange={setTab}
+          options={[
+            { value: 'generate', label: '汇总生成' },
+            { value: 'library', label: '导出资料' },
+          ]}
+        />
       </View>
 
       {tab === 'generate' ? (
@@ -327,7 +332,7 @@ export default function DocumentPage() {
           </View>
 
           <View style={{
-            position: 'fixed', bottom: 50, left: 0, right: 0,
+            position: 'fixed', bottom: 0, left: 0, right: 0,
             display: 'flex', flexDirection: 'row', gap: '12px',
             padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
           }}
@@ -344,7 +349,7 @@ export default function DocumentPage() {
         <>
           <View style={{ position: 'fixed', top: 70, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
-              <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份文档</Text>
+              <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份资料</Text>
               <SelectionBar selection={sel} enterLabel="批量选择" />
             </View>
             <View className="mt-2">
@@ -403,10 +408,10 @@ export default function DocumentPage() {
                 </View>
               ) : (
                 <EmptyCard
-                  title="暂无文档"
-                  hint="在「汇总生成」导出 Word，或在复习本合成 PDF/Word，都会自动归档到这里"
-                  actionLabel="去资料库"
-                  onAction={goLibrary}
+                  title="还没有导出过资料"
+                  hint="在「汇总生成」按时间段汇总成卷，或在复习本里选中题目「合成 PDF/Word」，成品都会归档到这里"
+                  actionLabel="回复习本挑题"
+                  onAction={backToReview}
                 />
               )}
             </View>
@@ -416,7 +421,7 @@ export default function DocumentPage() {
             <BottomActionBar>
               <View style={{ flex: 1 }}>
                 <ActionBtn
-                  icon={<FolderOpen size={16} color="#fff" />}
+                  icon={<Trash2 size={16} color="#fff" />}
                   label="删除选中"
                   danger
                   disabled={sel.isEmpty || busy}
@@ -428,7 +433,7 @@ export default function DocumentPage() {
 
           {renameTarget && (
             <RenameDialog
-              title="重命名文档"
+              title="重命名资料"
               initialValue={renameTarget.title}
               onCancel={() => setRenameTarget(null)}
               onConfirm={handleRenameConfirm}

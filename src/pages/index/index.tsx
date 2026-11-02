@@ -324,7 +324,9 @@ export default function IndexPage() {
     Taro.setStorageSync('filter_subject_id', '')
     Taro.switchTab({ url: '/pages/subject/index' })
   }
-  const goLibrary = () => Taro.navigateTo({ url: '/pages/library/index' })
+  // 2026-11-02：资料库升级为 tab 页（原「文档」tab 改名「资料」）
+  // ⇒ 必须 switchTab；navigateTo 到 tabBar 页会被微信直接拒绝（点了没反应）
+  const goLibrary = () => Taro.switchTab({ url: '/pages/library/index' })
   const goProfile = () => Taro.navigateTo({ url: '/pages/profile/index' })
 
   /** 顶部登录入口：未登录点一下直接微信一键登录；已登录进入「我的」 */
@@ -709,7 +711,7 @@ export default function IndexPage() {
               </View>
               <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goDocImport}>
                 <FileText size={14} color="#5C5750" />
-                <Text className="block text-sm text-foreground">导入文档</Text>
+                <Text className="block text-sm text-foreground">导入资料</Text>
               </View>
               <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goLibrary}>
                 <BookmarkPlus size={14} color="#5C5750" />
@@ -804,7 +806,7 @@ export default function IndexPage() {
               ) : (
                 <EmptyCard
                   title="收件箱还是空的"
-                  hint="拍下第一张试卷，或导入文档开始整理吧"
+                  hint="拍下第一张试卷，或导入资料开始整理吧"
                   actionLabel="去拍照识别"
                   onAction={goRecognize}
                 />
