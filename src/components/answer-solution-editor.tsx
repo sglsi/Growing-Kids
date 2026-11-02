@@ -52,14 +52,20 @@ interface Props {
   onBlurCaret?: (cursor?: number) => void
   /** 点数学符号/模板：页面负责按光标位置插入并回请求光标 */
   onInsert: (snippet: string) => void
+  /**
+   * 聚焦时通知页面（2026-11-02）：这个框在页面最下端，手机键盘一弹就把它盖住。
+   * 页面接 `useKeyboardAvoid().reveal('#answer-box')` 把它滚到键盘上方。
+   */
+  onBoxFocus?: () => void
 }
 
-export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onBlurCaret, onInsert }: Props) {
+export default function AnswerSolutionEditor({ value, cursor, focus, onInput, onCaret, onBlurCaret, onInsert, onBoxFocus }: Props) {
   // 预览是纯展示开关，放组件内部即可（不涉及入库）
   const [preview, setPreview] = useState(false)
 
   return (
-    <View className="mt-4">
+    // id 供 useKeyboardAvoid.reveal('#answer-box') 定位：键盘弹出时把这一整块滚到键盘上方
+    <View className="mt-4" id="answer-box">
       <View className="flex flex-row items-center justify-between mb-2">
         <Text className="block text-sm font-semibold text-foreground">答案与解题过程</Text>
         <View className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => setPreview((v) => !v)}>
@@ -88,7 +94,10 @@ export default function AnswerSolutionEditor({ value, cursor, focus, onInput, on
           onBlur={(e) => {
             onBlurCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)
           }}
-          onFocus={(e) => onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)}
+          onFocus={(e) => {
+            onCaret?.((e.detail as { cursor?: number } | undefined)?.cursor)
+            onBoxFocus?.()
+          }}
         />
         <Text className="block text-xs text-muted-foreground mt-2">
           「解析：」之后的内容会单独存为解题过程，导出 Word/PDF 时分「正确答案」「解析」两段；不写这一行就整段当答案。

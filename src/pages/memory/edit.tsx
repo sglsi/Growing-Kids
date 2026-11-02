@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useKeyboardAvoid } from '@/lib/use-keyboard-avoid'
 import {
   fetchMemoryDetail, createMemory, updateMemory,
   addMemoryMedia, deleteMemoryMedia,
@@ -53,6 +54,12 @@ const DRAFT_KEY_PREFIX = 'memory_edit_draft_'
 const DRAFT_DEBOUNCE_MS = 5000
 
 export default function MemoryEditPage() {
+  /**
+   * 键盘避让（思傅 2026-11-02）：本页是固定高度 ScrollView 内部滚动，
+   * 微信 textarea 的 adjustPosition 只上推页面、对 scroll-view 无效，
+   * 内容框靠下时会被输入法盖住。详见 lib/use-keyboard-avoid.ts。
+   */
+  const kb = useKeyboardAvoid()
   const isEdit = false as never
   // 兼容旧代码（下方 hooks 不要使用 isEdit）
   void isEdit
@@ -477,7 +484,7 @@ export default function MemoryEditPage() {
   const canPickVideo = videoMedia.length < 3
 
   return (
-    <ScrollView scrollY className="flex-1 bg-background" enhanced>
+    <ScrollView scrollY className="flex-1 bg-background" enhanced scrollTop={kb.scrollTop} onScroll={kb.onScroll} style={{ paddingBottom: kb.bottomPadding }}>
       {/* 时间 + 分类 + 心情 */}
       <View className="px-4 pt-4">
         <Text className="block text-xs text-muted-foreground mb-1">发生时间</Text>
@@ -603,15 +610,18 @@ export default function MemoryEditPage() {
           已在组件里修掉（style 落壳、内层同步同一份高度、壳改 min-h-20）。
           这里保持显式高度是**故意**的：内容框固定 160px，页面滚动范围稳定。
         */}
+        <View id="memory-content-box">
         <Textarea
           value={content}
           placeholder="写下今天的小发现 / 心得 / 感悟"
           maxlength={2000}
+          onFocus={() => kb.reveal('#memory-content-box')}
           // ⚠️ 必须当场 setState：下发的 value 只有等于原生文本，微信才不重建文本、不动光标
           onInput={(e) => { setContent(e.detail.value); contentRef.current = e.detail.value }}
           className="bg-muted rounded-xl p-3 text-sm"
           style={{ width: '100%', height: '160px' }}
         />
+        </View>
       </View>
 
       {/* 媒体 */}

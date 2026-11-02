@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import SegmentedTabs from '@/components/segmented-tabs'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
+import { useKeyboardAvoid } from '@/lib/use-keyboard-avoid'
 import { CheckDot } from '@/components/selection-bar'
 import WrongqBoxEditor, { type BoxEditorItem, type PageBox } from '@/components/wrongq-box-editor'
 import WrongqTextPanel, { type TextPanelDraft } from '@/components/wrongq-text-panel'
@@ -93,6 +94,12 @@ const MAX_BOARD_ENTRIES = 30
 const MAX_ENTRY_IMAGES = 9
 
 export default function RecognizePage() {
+  /**
+   * 键盘避让（思傅 2026-11-02）：本页固定高度 ScrollView 内部滚动，
+   * 微信 textarea 的 adjustPosition 只上推页面 ⇒ 识别结果卡片靠下时被输入法盖住。
+   * 见 lib/use-keyboard-avoid.ts。`160` = 原有的 pb-40。
+   */
+  const kb = useKeyboardAvoid(160)
   /**
    * 页面是否已卸载（GK-23-19）。
    * 精准 OCR 是「提交任务 + 轮询」，最长 190s；用户识别一页就返回上一页时，
@@ -1455,8 +1462,8 @@ export default function RecognizePage() {
   const curPage = boardPages[activePage]
 
   return (
-    <ScrollView scrollY className="h-full bg-background">
-      <View className="px-4 pt-4 pb-40">
+    <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
+      <View className="px-4 pt-4 pb-40" style={{ paddingBottom: kb.bottomPadding }}>
         {/* 模式切换 */}
         <SegmentedTabs<Mode>
           className="mb-4"
@@ -1737,9 +1744,10 @@ export default function RecognizePage() {
                     </View>
                   ) : null}
 
-                  <View className="bg-muted rounded-xl p-2">
+                  <View className="bg-muted rounded-xl p-2" id={`ocr-entry-${idx}`}>
                     <Textarea
                       className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                      onFocus={() => kb.reveal(`#ocr-entry-${idx}`)}
                       value={e.text}
                       placeholder="点上方段落的「加入题干」自动填入，也可手动输入 / 长按粘贴"
                       maxlength={-1}
@@ -1983,9 +1991,10 @@ export default function RecognizePage() {
                   </View>
                 </View>
 
-                <View className="bg-muted rounded-xl p-3 mb-2">
+                <View className="bg-muted rounded-xl p-3 mb-2" id={`ocr-q-${idx}`}>
                   <Textarea
                     className="min-h-24 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                    onFocus={() => kb.reveal(`#ocr-q-${idx}`)}
                     value={d.question_content}
                     placeholder="题目内容（可手动修改）"
                     maxlength={-1}
@@ -1998,9 +2007,10 @@ export default function RecognizePage() {
                   <Text className="block text-xs text-muted-foreground mb-2 line-through">原错答：{d.wrong_answer}</Text>
                 ) : null}
 
-                <View className="rounded-xl p-3 mb-1 border" style={{ borderColor: 'rgba(16, 185, 129,0.25)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}>
+                <View className="rounded-xl p-3 mb-1 border" id={`ocr-a-${idx}`} style={{ borderColor: 'rgba(16, 185, 129,0.25)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}>
                   <Textarea
                     className="min-h-20 border-0 ring-0 focus-within:ring-0 rounded-lg"
+                    onFocus={() => kb.reveal(`#ocr-a-${idx}`)}
                     value={d.answer_content}
                     placeholder="正确答案（可手动修改，无则留空后联网搜题）"
                     maxlength={-1}

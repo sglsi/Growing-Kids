@@ -19,6 +19,7 @@ import MathSymbolBar from '@/components/math-symbol-bar'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { splitAnswerSolution, joinAnswerSolution } from '@/utils/answer-merge'
 import { useCaret } from '@/utils/use-caret'
+import { useKeyboardAvoid } from '@/lib/use-keyboard-avoid'
 import { getSubjectColor, formatTime, truncate, type SimilarItem, type ReviewPlan } from '@/types'
 import { openStorageFile } from '@/services/net'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
@@ -65,6 +66,17 @@ export default function DetailPage() {
    * 导出 Word/PDF 的「正确答案」「解析」两段标题不受影响。
    */
   const [answerDraft, setAnswerDraft] = useState('')
+  /**
+   * 键盘避让（思傅 2026-11-02：手机弹出输入法后「答案与解题过程」被整片盖住）。
+   *
+   * 本页内容是 ScrollView 内部滚动（`h-full`），微信 textarea 的 `adjustPosition`
+   * 只上推**页面**、对 scroll-view 无效 ⇒ 靠近底部的输入框必然被键盘遮挡。
+   * 这里改成：聚焦时量一次位置，把越界高度加进 scrollTop，并给内容留出键盘等高的底部空白
+   * （否则滚到底也差一截）。详见 lib/use-keyboard-avoid.ts。
+   *
+   * `128` = 原本的 `pb-32`（128px），保留它再加键盘高度。
+   */
+  const kb = useKeyboardAvoid(128)
   /**
    * 输入的**实时真相**（思傅 2026-10-31 第十轮，见 工程教训录 L29）
    *
@@ -504,8 +516,8 @@ export default function DetailPage() {
   // 图片资料（kind=image）：只展示图片 + 归属学科，不做题目编辑
   if (item && item.kind === 'image') {
     return (
-      <ScrollView scrollY className="h-full bg-background">
-        <View className="px-4 pt-4 pb-32">
+      <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
+        <View className="px-4 pt-4 pb-32" style={{ paddingBottom: kb.bottomPadding }}>
           <View className="flex flex-row items-center gap-2 mb-4">
               <View className={`flex flex-row items-center gap-2 rounded-full border px-3 py-1 ${color.badge}`}>
                 <View className={`w-2 h-2 rounded-full ${color.dot}`} />
@@ -563,7 +575,7 @@ export default function DetailPage() {
             <Text className="block text-xs text-muted-foreground">识别或手动输入题干</Text>
           </View>
           <MathSymbolBar onInsert={insertQuestionSymbol} />
-          <Card className="rounded-2xl border-border p-4 mb-4">
+          <Card className="rounded-2xl border-border p-4 mb-4" id="question-box">
             <Textarea
               className="border-0 ring-0 focus-within:ring-0 rounded-xl"
               // autoHeight + 同一个 minHeight 写给内层：框随内容长高（长按选文字不用在
@@ -583,7 +595,7 @@ export default function DetailPage() {
               // detail 带 cursor（否则符号会插到上一次打字的位置，思傅 2026-10-29）
               // 失焦还要把受控 focus 一起落下，否则状态与原生不一致，用户会收不起键盘
               onBlur={(e) => { setQContent(qDraftRef.current); qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor) }}
-              onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+              onFocus={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); kb.reveal('#question-box') }}
             />
           </Card>
 
@@ -710,8 +722,8 @@ export default function DetailPage() {
 
   return (
     <>
-    <ScrollView scrollY className="h-full bg-background">
-      <View className="px-4 pt-4 pb-32">
+    <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
+      <View className="px-4 pt-4 pb-32" style={{ paddingBottom: kb.bottomPadding }}>
         {item && (
           <View className="flex flex-row items-center justify-between mb-4">
             <View className="flex flex-row items-center gap-2">
@@ -743,7 +755,7 @@ export default function DetailPage() {
         <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
           <View className="flex-1">
             <Text className="block text-sm font-medium text-foreground">已掌握</Text>
-            <Text className="block text-xs text-muted-foreground">标记后默认不进入汇总，可在文档页开启开关重新纳入</Text>
+            <Text className="block text-xs text-muted-foreground">标记后默认不进入汇总，可在复习本「汇总导出」里开启开关重新纳入</Text>
           </View>
           <Switch checked={mastered} onCheckedChange={(v) => setMastered(v)} />
         </View>
@@ -757,7 +769,7 @@ export default function DetailPage() {
           ) : null}
         </View>
         <MathSymbolBar onInsert={insertQuestionSymbol} />
-        <Card className="rounded-2xl border-border p-4 mb-4">
+        <Card className="rounded-2xl border-border p-4 mb-4" id="question-box">
           <Textarea
             className="border-0 ring-0 focus-within:ring-0 rounded-xl"
             autoHeight
@@ -772,7 +784,7 @@ export default function DetailPage() {
               //    藏进 ref 反而会让 state 滞后 ⇒ 下一次 commit 下发旧值 ⇒ 覆盖用户输入。
             onInput={(e) => { setQContent(e.detail.value); qDraftRef.current = e.detail.value; qCaret.track(e.detail.cursor, e.detail.value); dirtyRef.current = true }}
             onBlur={(e) => { setQContent(qDraftRef.current); qCaret.blur((e.detail as { cursor?: number } | undefined)?.cursor) }}
-            onFocus={(e) => qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor)}
+            onFocus={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); kb.reveal('#question-box') }}
           />
         </Card>
 
@@ -1001,6 +1013,7 @@ export default function DetailPage() {
             回归引入于 d3e4e98）。 */}
         <AnswerSolutionEditor
           value={answerDraft}
+          onBoxFocus={() => kb.reveal('#answer-box')}
           cursor={aCaret.cursor}
           // ⚠️ 同上：实时同步 state，别藏 ref
           onInput={(v, c) => { setAnswerDraft(v); aDraftRef.current = v; aCaret.track(c, v); dirtyRef.current = true }}
