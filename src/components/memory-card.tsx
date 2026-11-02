@@ -1,5 +1,5 @@
 import { View, Text, Image } from '@tarojs/components'
-import { Camera, Music, Film, Ellipsis } from 'lucide-react-taro'
+import { Camera, Music, Film, Ellipsis, Play } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { CheckDot } from '@/components/selection-bar'
@@ -21,6 +21,20 @@ interface Props {
   onMore?: (memory: Memory) => void
 }
 
+/** 缩略图右下角的小角标（数量 / 时长）：半透明黑底白字，压在图上也看得清 */
+const BADGE_STYLE = {
+  position: 'absolute',
+  right: '4px',
+  bottom: '4px',
+  height: '18px',
+  padding: '0 6px',
+  borderRadius: '9px',
+  backgroundColor: 'rgba(0,0,0,0.55)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+} as const
+
 /**
  * 记忆卡（公用组件）
  * - 紧凑模式：列表项（标题 + 内容截断 + 媒体预览行 + 标签 + 操作）
@@ -37,16 +51,29 @@ export default function MemoryCard({
   const moodLabel = getMemoryMoodLabel(memory.mood)
   const time = formatDate(memory.occurredAt || memory.createdAt || '')
 
-  // 媒体预览：图片优先首张；视频/音频显示角标
+  // 媒体预览：图片封面 + 视频/音频格（2026-11-02 改）
+  // ⚠️ 以前只用 `media` prop（只有详情页传），列表页**永远拿不到** ⇒ 无缩略图；
+  //    现在服务端在列表里直接给 cover_thumb_url / media_kinds / media_counts。
   const firstImage = media?.find((m) => m.kind === 'image')
   const cover = memory.thumbUrl
     || memory.coverUrl
-    || firstImage?.url
     || firstImage?.thumbUrl
+    || firstImage?.url
     || ''
-  const imageMediaCount = media?.filter((m) => m.kind === 'image').length ?? 0
-  const audioMediaCount = media?.filter((m) => m.kind === 'audio').length ?? 0
-  const videoMediaCount = media?.filter((m) => m.kind === 'video').length ?? 0
+  const counts = memory.mediaCounts || {}
+  const imageCount = media
+    ? media.filter((m) => m.kind === 'image').length
+    : (counts.image || (cover ? 1 : 0))
+  const videoCount = media
+    ? media.filter((m) => m.kind === 'video').length
+    : (counts.video || 0)
+  // 兜底：老后端只回 `audio_duration` / `media_count`，没有 media_counts。
+  // 有音频时长就说明这条里有录音，至少画一格 —— 否则列表上看不出"这条是录音"。
+  const audioCount = media
+    ? media.filter((m) => m.kind === 'audio').length
+    : (counts.audio || (memory.audioDuration ? 1 : 0))
+  const videoDuration = memory.videoDuration || 0
+  const hasMediaRow = !!cover || videoCount > 0 || audioCount > 0
 
   // 内容（3 行截断）
   const contentText = (memory.content || memory.title || '').trim()
@@ -111,33 +138,65 @@ export default function MemoryCard({
             </Text>
           ) : null}
 
-          {/* 媒体预览 */}
-          {cover ? (
-            <View className="flex flex-row gap-1.5 mb-2">
-              <View className="w-24 h-24 rounded-lg overflow-hidden bg-muted">
-                <Image src={cover} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
-              </View>
-              {imageMediaCount > 1 && (
-                <View className="w-24 h-24 rounded-lg bg-muted bg-opacity-40 flex items-center justify-center">
-                  <Text className="block text-sm text-muted-foreground">+{imageMediaCount - 1} 张</Text>
+          {/* 媒体预览：图片 / 视频 / 音频各一格，右下角叠数量 */}
+          {hasMediaRow ? (
+            <View className="flex flex-row gap-2 mb-2">
+              {cover ? (
+                <View className="w-24 h-24 rounded-xl overflow-hidden bg-muted" style={{ position: 'relative' }}>
+                  <Image src={cover} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                  {imageCount > 1 ? (
+                    <View style={BADGE_STYLE}>
+                      <Text className="block text-xs" style={{ color: '#fff' }}>{`+${imageCount - 1}`}</Text>
+                    </View>
+                  ) : null}
                 </View>
-              )}
-              {videoMediaCount > 0 && (
-                <View className="w-24 h-24 rounded-lg bg-muted bg-opacity-40 flex items-center justify-center gap-1">
-                  <Film size={20} color="#6B635C" />
-                  <Text className="block text-xs text-muted-foreground">{videoMediaCount}</Text>
+              ) : null}
+
+              {videoCount > 0 ? (
+                <View
+                  className="w-24 h-24 rounded-xl overflow-hidden flex items-center justify-center"
+                  style={{ position: 'relative', backgroundColor: '#211F1C' }}
+                >
+                  {/* 有首帧图就用它当封面，否则黑底 + 播放图标兜底 */}
+                  {memory.videoThumbUrl ? (
+                    <Image
+                      src={memory.videoThumbUrl}
+                      mode="aspectFill"
+                      style={{ width: '100%', height: '100%' }}
+                    />
+                  ) : null}
+                  <View
+                    className="w-8 h-8 rounded-full flex items-center justify-center"
+                    style={{
+                      position: 'absolute',
+                      backgroundColor: 'rgba(0,0,0,0.42)',
+                    }}
+                  >
+                    <Play size={16} color="#fff" />
+                  </View>
+                  {videoDuration > 0 ? (
+                    <View style={BADGE_STYLE}>
+                      <Text className="block text-xs" style={{ color: '#fff' }}>{formatDurationShort(videoDuration)}</Text>
+                    </View>
+                  ) : null}
                 </View>
-              )}
-              {audioMediaCount > 0 && (
-                <View className="w-24 h-24 rounded-lg bg-muted bg-opacity-40 flex items-center justify-center gap-1">
-                  <Music size={20} color="#6B635C" />
-                  <Text className="block text-xs text-muted-foreground">{audioMediaCount}</Text>
+              ) : null}
+
+              {audioCount > 0 ? (
+                <View
+                  className="w-24 h-24 rounded-xl flex flex-col items-center justify-center gap-1"
+                  style={{ position: 'relative', backgroundColor: '#E8F1EC' }}
+                >
+                  <Music size={22} color="#0B7A55" />
+                  <Text className="block text-xs" style={{ color: '#0B7A55' }}>
+                    {memory.audioDuration ? formatDurationShort(memory.audioDuration) : `录音 ${audioCount}`}
+                  </Text>
                 </View>
-              )}
+              ) : null}
             </View>
           ) : null}
 
-          {/* 标签 + 媒体计数 */}
+          {/* 标签 + 媒体计数（没有任何媒体格时才用纯计数兜底） */}
           <View className="flex flex-row items-center justify-between flex-wrap gap-1">
             <View className="flex flex-row items-center gap-1 flex-wrap">
               {memory.tags.slice(0, 3).map((t) => (
@@ -145,16 +204,16 @@ export default function MemoryCard({
               ))}
             </View>
             <View className="flex flex-row items-center gap-2 text-muted-foreground">
-              {memory.mediaCount > 0 && !cover && (
+              {memory.mediaCount > 0 && !hasMediaRow && (
                 <View className="flex flex-row items-center gap-1">
                   <Camera size={12} color="#9A948A" />
                   <Text className="block text-xs">{memory.mediaCount}</Text>
                 </View>
               )}
-              {memory.audioDuration ? (
+              {hasMediaRow && videoCount > 0 ? (
                 <View className="flex flex-row items-center gap-1">
-                  <Music size={12} color="#9A948A" />
-                  <Text className="block text-xs">{formatDurationShort(memory.audioDuration)}</Text>
+                  <Film size={12} color="#9A948A" />
+                  <Text className="block text-xs">{videoCount}</Text>
                 </View>
               ) : null}
             </View>

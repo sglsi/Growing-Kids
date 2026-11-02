@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { View, Text } from '@tarojs/components'
-import Taro from '@tarojs/taro'
-import { Plus, Trash2 } from 'lucide-react-taro'
+import Taro, { useDidShow } from '@tarojs/taro'
+import { Plus, Trash2, ChevronRight, NotebookPen } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import MemoryCard from '@/components/memory-card'
@@ -13,7 +13,7 @@ import {
   type Memory, type MemoryCategory, MEMORY_CATEGORIES,
 } from '@/services/memory'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
-import { BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
 type CatValue = MemoryCategory | 'all'
 
@@ -78,6 +78,26 @@ export default function MemoryHomePage() {
   }, [category, activeKeyword])
 
   useEffect(() => { load() }, [load])
+
+  /**
+   * 从新增/编辑页返回时**必须刷新**（2026-11-02 思傅反馈）。
+   *
+   * 原因：列表页一直留在页面栈里，`navigateBack` 回来不会重新 mount ⇒
+   * `useEffect` 不会重跑 ⇒ 新记录看不到，必须切到别的页面再切回来（重新 mount）
+   * 才会重新拉。写操作已经 `invalidateDomain('mem')` 清了缓存，只差这一次调用。
+   *
+   * 用 `silent`：旧列表继续留屏，后台替换，不闪骨架屏、不把滚动位置钳回顶部。
+   */
+  const loadRef = useRef(load)
+  loadRef.current = load
+  const firstShowRef = useRef(true)
+  useDidShow(() => {
+    if (firstShowRef.current) {
+      firstShowRef.current = false
+      return
+    }
+    void loadRef.current({ silent: true })
+  })
 
   const onSearch = useCallback(() => {
     setActiveKeyword(keyword)
@@ -164,9 +184,9 @@ export default function MemoryHomePage() {
         />
       </View>
 
-      {/* 搜索 + 新增 */}
-      <View className="flex flex-row items-center gap-2 px-4 pt-3">
-        <View className="flex-1 flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9">
+      {/* 搜索 */}
+      <View className="px-4 pt-3">
+        <View className="flex-1 flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-10">
           <View className="block text-xs text-muted-foreground" onClick={onSearch}>🔍</View>
           <View className="flex-1">
             <input
@@ -184,16 +204,35 @@ export default function MemoryHomePage() {
             </View>
           ) : null}
         </View>
-        {!sel.selecting && (
-          <Button
-            className="h-9 px-3 rounded-xl"
+      </View>
+
+      {/* 主行动「记录此刻」（2026-11-02 放大）：原来是搜索框右边一个 h-9 的小按钮，
+          思傅反馈看不出这是"新增"的主入口 —— 改成整条品牌色卡片，图标 + 标题 + 副标题 + 箭头。 */}
+      {!sel.selecting && (
+        <View className="px-4 pt-3">
+          <View
+            className="flex flex-row items-center gap-3 rounded-2xl px-4 py-3"
+            style={{ backgroundColor: BRAND, boxShadow: '0 6px 16px rgba(16,185,129,0.28)' }}
             onClick={onCreate}
           >
-            <Plus size={16} color={BRAND_FOREGROUND} />
-            <Text className="block text-sm ml-1">新增</Text>
-          </Button>
-        )}
-      </View>
+            <View
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ backgroundColor: 'rgba(255,255,255,0.35)' }}
+            >
+              <NotebookPen size={20} color={BRAND_FOREGROUND} />
+            </View>
+            <View className="flex-1">
+              <Text className="block text-base font-semibold" style={{ color: BRAND_FOREGROUND }}>
+                记录此刻
+              </Text>
+              <Text className="block text-xs mt-1" style={{ color: BRAND_FOREGROUND, opacity: 0.78 }}>
+                写点什么，或加照片、录音、视频
+              </Text>
+            </View>
+            <ChevronRight size={18} color={BRAND_FOREGROUND} />
+          </View>
+        </View>
+      )}
 
       {/* 批量操作条 */}
       {sel.selecting && (

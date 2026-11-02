@@ -33,6 +33,13 @@ interface DraftMedia {
   /** 上传后的 server key（成功后回填） */
   serverKey?: string
   thumbKey?: string
+  /**
+   * 视频封面帧的本地临时路径（2026-11-02）。
+   * `Taro.chooseMedia` 选视频时会一并给出 `thumbTempFilePath`（首帧图）。
+   * 不带上它，记忆列表里的视频卡只能画一个黑底播放图标 —— 思傅反馈"看不到视频记录"。
+   * 保存时会作为独立文件上传，key 写进 `memory_media.thumb_key`。
+   */
+  thumbTempPath?: string
   mimeType: string
   sizeBytes?: number
   width?: number
@@ -257,6 +264,8 @@ export default function MemoryEditPage() {
         width: f.width,
         height: f.height,
         durationSec: f.duration,
+        // 首帧图：列表卡片的视频缩略图就靠它（H5 分支没有这个字段）
+        thumbTempPath: (f as unknown as { thumbTempFilePath?: string }).thumbTempFilePath,
       }])
     } catch (e) {
       reportChooseFail(e, '选择视频')
@@ -335,11 +344,22 @@ export default function MemoryEditPage() {
     setUploading((c) => c + 1)
     try {
       const data = await uploadFile(m.tempPath, { purpose: 'memory' } as any)
+      let thumbKey = (data as any).thumb_key as string | undefined
+      // 视频：把 chooseMedia 给的首帧图也传上去当缩略图。
+      // 失败不影响主文件（列表卡退化成黑底播放图标），所以单独包一层不抛。
+      if (m.kind === 'video' && m.thumbTempPath && !thumbKey) {
+        try {
+          const thumb = await uploadFile(m.thumbTempPath, { purpose: 'memory' } as any)
+          thumbKey = (thumb as any).key
+        } catch (err) {
+          console.warn('[memory] 视频封面帧上传失败，列表将显示占位图标', err)
+        }
+      }
       return {
         ...m,
         status: 'done',
         serverKey: (data as any).key,
-        thumbKey: (data as any).thumb_key,
+        thumbKey,
         mimeType: m.mimeType || (data as any).type || m.mimeType,
       }
     } catch (e) {

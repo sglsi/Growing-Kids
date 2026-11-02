@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback } from 'react'
-import { View, Text, Image, ScrollView } from '@tarojs/components'
-import Taro from '@tarojs/taro'
-import { Pencil, Trash2, Music, Play as PlayIcon } from 'lucide-react-taro'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { View, Text, Image, ScrollView, Video } from '@tarojs/components'
+import Taro, { useDidShow, useDidHide } from '@tarojs/taro'
+import { Pencil, Trash2, Music, Play as PlayIcon, Pause } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import {
   fetchMemoryDetail, deleteMemory, deleteMemoryMedia,
@@ -10,7 +10,24 @@ import {
 } from '@/services/memory'
 import { cacheGet, cacheSet } from '@/services/cache'
 import { getSubjectColor, formatDate } from '@/types'
-import { BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
+import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
+
+/** 秒 → "1:32" */
+function formatSec(sec: number): string {
+  const s = Math.max(0, Math.round(sec))
+  return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`
+}
+
+/**
+ * 视频展示高度：按宽高比换算（卡片可用宽约 340px），夹在 160~440 之间。
+ * `<Video>` 在小程序里**必须有确定高度**，给 `width:100%` 不带高度等于 0 高 ⇒ 看起来"没有视频"。
+ */
+function videoHeight(m: MemoryMedia): number {
+  const w = m.width || 0
+  const h = m.height || 0
+  if (w > 0 && h > 0) return Math.min(Math.max(Math.round((340 * h) / w), 160), 440)
+  return 220
+}
 
 export default function MemoryDetailPage() {
   const [params] = useState(() => Taro.getCurrentInstance().router?.params || {})
@@ -18,7 +35,10 @@ export default function MemoryDetailPage() {
   const [memory, setMemory] = useState<Memory | null>(null)
   const [media, setMedia] = useState<MemoryMedia[]>([])
   const [loading, setLoading] = useState(true)
-  const [currentAudio, setCurrentAudio] = useState<MemoryMedia | null>(null)
+  /** 正在播放的媒体 id（null=没在播） */
+  const [playingId, setPlayingId] = useState<string | null>(null)
+  const [playPos, setPlayPos] = useState(0)
+  const audioCtxRef = useRef<Taro.InnerAudioContext | null>(null)
 
   const load = useCallback(async () => {
     if (!id) return
@@ -46,6 +66,69 @@ export default function MemoryDetailPage() {
   }, [id])
 
   useEffect(() => { load() }, [load])
+
+  /**
+   * 从编辑页返回时**必须重新拉一次**（2026-11-02 思傅反馈）：
+   * 详情页挂在页面栈里，navigateBack 回来不会重新 mount ⇒ useEffect 不跑 ⇒
+   * 改完标题/正文/媒体，返回来还是旧内容，必须切到别的页面再进来才刷新。
+   */
+  const firstShowRef = useRef(true)
+  useDidShow(() => {
+    if (firstShowRef.current) {
+      firstShowRef.current = false
+      return
+    }
+    void load()
+  })
+
+  // ---------- 音频播放 ----------
+  // ⚠️ 原来用的是原生 `<audio controls>` 标签：Taro 只把小写标签当自定义元素下发，
+  //    小程序渲染层没有对应组件 ⇒ 点播放**没有任何反应**（思傅反馈）。
+  //    正解是小程序原生能力 `InnerAudioContext`，配自绘播放/暂停按钮。
+  const stopAudio = useCallback(() => {
+    const ctx = audioCtxRef.current
+    audioCtxRef.current = null
+    setPlayingId(null)
+    setPlayPos(0)
+    if (!ctx) return
+    try {
+      ctx.stop()
+      ctx.destroy()
+    } catch (e) {
+      console.warn('[memory] 释放音频实例失败', e)
+    }
+  }, [])
+
+  const toggleAudio = useCallback((m: MemoryMedia) => {
+    if (!m.url) {
+      Taro.showToast({ title: '音频地址缺失', icon: 'none' })
+      return
+    }
+    // 再点同一个：暂停并释放（避免多实例叠着播）
+    if (playingId === m.id) {
+      stopAudio()
+      return
+    }
+    stopAudio()
+    const ctx = Taro.createInnerAudioContext()
+    ctx.src = m.url
+    ctx.onPlay(() => setPlayingId(m.id))
+    ctx.onEnded(() => { setPlayingId(null); setPlayPos(0) })
+    ctx.onTimeUpdate(() => setPlayPos(Math.floor(ctx.currentTime || 0)))
+    ctx.onError((err) => {
+      console.warn('[memory] 音频播放失败', err)
+      Taro.showToast({ title: '播放失败，试试重新进入', icon: 'none' })
+      setPlayingId(null)
+    })
+    audioCtxRef.current = ctx
+    ctx.play()
+  }, [playingId, stopAudio])
+
+  // 离开页面就释放实例（否则退出后声音还在响）
+  // ⚠️ 用 useDidHide 而不是 useUnloadEffect：后者不在 @tarojs/taro 的类型导出里，
+  //    且 navigateBack 时页面先 hide、真卸载要等 Taro 回收，光靠卸载时机太晚。
+  useDidHide(() => { stopAudio() })
+  useEffect(() => () => { stopAudio() }, [stopAudio])
 
   const onEdit = useCallback(() => {
     Taro.navigateTo({ url: `/pages/memory/edit?id=${id}` })
@@ -80,6 +163,8 @@ export default function MemoryDetailPage() {
       success: async (r) => {
         if (r.confirm) {
           try {
+            // 正在播这条就先停掉，否则声音会继续响而卡片已消失
+            if (playingId === mid) stopAudio()
             await deleteMemoryMedia(id, mid)
             setMedia((prev) => prev.filter((m) => m.id !== mid))
             Taro.showToast({ title: '已删除', icon: 'success' })
@@ -89,7 +174,7 @@ export default function MemoryDetailPage() {
         }
       },
     })
-  }, [id])
+  }, [id, playingId, stopAudio])
 
   const previewImage = useCallback((m: MemoryMedia) => {
     if (!m.url) return
@@ -178,28 +263,31 @@ export default function MemoryDetailPage() {
                       />
                     </View>
                   ) : m.kind === 'audio' ? (
-                    <View className="flex flex-row items-center gap-3 bg-muted rounded-xl px-4 py-3">
+                    <View
+                      className="flex flex-row items-center gap-3 rounded-xl px-4 py-3"
+                      style={{ backgroundColor: playingId === m.id ? '#D9E9E0' : '#EFEAE2' }}
+                    >
                       <View
-                        className="w-10 h-10 rounded-full bg-brand flex items-center justify-center"
-                        onClick={() => setCurrentAudio(m)}
+                        className="w-11 h-11 rounded-full flex items-center justify-center"
+                        style={{ backgroundColor: BRAND }}
+                        onClick={() => toggleAudio(m)}
                       >
-                        <PlayIcon size={18} color={BRAND_FOREGROUND} />
+                        {playingId === m.id
+                          ? <Pause size={18} color={BRAND_FOREGROUND} />
+                          : <PlayIcon size={18} color={BRAND_FOREGROUND} />}
                       </View>
                       <View className="flex-1">
                         <View className="flex flex-row items-center gap-2">
-                          <Music size={14} color="#6B635C" />
+                          <Music size={13} color="#6B635C" />
                           <Text className="block text-sm text-foreground">
-                            录音 · {m.durationSec ? `${m.durationSec}s` : ''}
+                            录音{m.durationSec ? ` · ${formatSec(m.durationSec)}` : ''}
                           </Text>
                         </View>
-                        {currentAudio?.id === m.id && m.url && (
-                          <audio
-                            src={m.url}
-                            controls
-                            autoPlay
-                            className="mt-2 w-full"
-                          />
-                        )}
+                        <Text className="block text-xs text-muted-foreground mt-1">
+                          {playingId === m.id
+                            ? `播放中 ${formatSec(playPos)}${m.durationSec ? ` / ${formatSec(m.durationSec)}` : ''}`
+                            : '点击左侧按钮播放'}
+                        </Text>
                       </View>
                       <View
                         className="w-8 h-8 rounded-full flex items-center justify-center"
@@ -210,13 +298,20 @@ export default function MemoryDetailPage() {
                     </View>
                   ) : (
                     <View>
-                      <video
+                      {/* ⚠️ 必须用 @tarojs/components 的 <Video>：原生小写 <video> 在小程序端
+                          不会被渲染成播放器 ⇒ 视频"看不到"（思傅反馈） */}
+                      <Video
                         src={m.url || ''}
+                        poster={m.thumbUrl || ''}
                         controls
-                        className="w-full rounded-2xl bg-black"
-                        style={{ width: '100%' }}
+                        showCenterPlayBtn
+                        objectFit="contain"
+                        style={{ width: '100%', height: `${videoHeight(m)}px`, borderRadius: '16px' }}
                       />
-                      <View className="flex flex-row items-center justify-end mt-1">
+                      <View className="flex flex-row items-center justify-between mt-1">
+                        <Text className="block text-xs text-muted-foreground">
+                          {m.durationSec ? `视频 · ${formatSec(m.durationSec)}` : '视频'}
+                        </Text>
                         <View
                           className="px-3 py-1 rounded-full bg-muted"
                           onClick={() => onRemoveMedia(m.id)}

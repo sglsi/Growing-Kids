@@ -25,6 +25,23 @@ async function unwrap<T>(p: Promise<any>): Promise<T> {
   return body.data as T
 }
 
+/**
+ * 对象存储 key → 可直接喂给 `<Image src>` / `<Video poster>` 的绝对地址。
+ *
+ * 为什么前端也要有一份（服务端已经给 `cover_url` 了）：
+ *  · 兼容旧后端 / 缓存里的历史响应（那里只有 `cover_key`）；
+ *  · 图片、视频缩略图在**列表卡片**上渲染，`<Image>` 不发任何请求头，
+ *    所以只能走公开读路由 `/api/storage/files/*`（已在后端 PUBLIC_ROUTES 白名单）。
+ * key 本身是内容寻址哈希，不含用户文档系数。
+ */
+export function storageFileUrl(key?: string | null): string | undefined {
+  const k = (key || '').trim()
+  if (!k) return undefined
+  if (/^https?:\/\//i.test(k)) return k
+  const base = PROJECT_DOMAIN || (TARO_ENV === 'h5' ? '' : 'http://127.0.0.1:3001')
+  return `${base}/api/storage/files/${k}`
+}
+
 /** 写操作收口：成功后失效 mem 缓存域（与 api.ts 的 invalidateAfter 同义） */
 function invalidateAfter<T>(p: Promise<T>, ...domains: string[]): Promise<T> {
   if (!domains.length) return p
@@ -57,6 +74,14 @@ export interface Memory {
   coverMime?: string | null
   coverUrl?: string | null
   thumbUrl?: string | null
+  /** 媒体种类（去重，按 sort_order 出现顺序）：列表卡片据此决定画图片/视频/音频格 */
+  mediaKinds?: MemoryKind[]
+  /** 各类型媒体数量，例：{ image: 3, video: 1 } */
+  mediaCounts?: Partial<Record<MemoryKind, number>>
+  /** 首个视频时长（秒） */
+  videoDuration?: number | null
+  /** 首个视频的首帧图 URL（卡片缩略图） */
+  videoThumbUrl?: string | null
   mediaCount: number
   audioDuration?: number | null
   occurredAt: string
@@ -268,6 +293,7 @@ export function getMemoryMoodEmoji(v: string | null | undefined): string {
 /** 把后端 snake_case 字段映射为前端驼峰（统一在 service 层完成） */
 export function normalizeMemory(raw: Record<string, unknown>): Memory {
   const subjects = raw.subjects as { id: string; name: string; color?: string } | undefined
+  const coverKey = (raw.cover_key as string | null) ?? null
   return {
     id: String(raw.id),
     userId: String(raw.user_id || ''),
@@ -280,8 +306,25 @@ export function normalizeMemory(raw: Record<string, unknown>): Memory {
       ? { id: subjects.id, name: subjects.name, color: subjects.color }
       : null,
     tags: (raw.tags as string[]) || [],
-    coverKey: (raw.cover_key as string | null) ?? null,
+    coverKey,
     coverMime: (raw.cover_mime as string | null) ?? null,
+    // 🔴 封面 URL（2026-11-02）：原先这里**完全没映射** cover_url / thumb_url，
+    //    而列表接口只给 cover_key ⇒ `memory-card` 的 `thumbUrl || coverUrl` 恒为空
+    //    ⇒ 记忆列表永远没有缩略图（详情页有媒体数组，所以详情能显示）。
+    //    服务端现在直接给 URL；万一拿到的是旧后端（只给 key），用 storageFileUrl 兜底。
+    coverUrl:
+      (raw.cover_url as string | null)
+      ?? storageFileUrl(coverKey)
+      ?? null,
+    thumbUrl:
+      (raw.cover_thumb_url as string | null)
+      ?? (raw.thumb_url as string | null)
+      ?? storageFileUrl(coverKey)
+      ?? null,
+    mediaKinds: Array.isArray(raw.media_kinds) ? (raw.media_kinds as MemoryKind[]) : [],
+    mediaCounts: (raw.media_counts as Partial<Record<MemoryKind, number>> | undefined) ?? {},
+    videoDuration: (raw.video_duration as number | null) ?? null,
+    videoThumbUrl: (raw.video_thumb_url as string | null) ?? null,
     mediaCount: (raw.media_count as number) || 0,
     audioDuration: (raw.audio_duration as number | null) ?? null,
     occurredAt: (raw.occurred_at as string) || '',
@@ -301,12 +344,14 @@ export function normalizeMemoryListResp(raw: Record<string, unknown>): MemoryLis
 }
 
 export function normalizeMemoryMedia(raw: Record<string, unknown>): MemoryMedia {
+  const fileKey = String(raw.file_key || '')
+  const thumbKey = (raw.thumb_key as string | null) ?? null
   return {
     id: String(raw.id),
     memoryId: String(raw.memory_id || ''),
     kind: raw.kind as MemoryKind,
-    fileKey: String(raw.file_key || ''),
-    thumbKey: (raw.thumb_key as string | null) ?? null,
+    fileKey,
+    thumbKey,
     mimeType: String(raw.mime_type || ''),
     width: (raw.width as number | null) ?? null,
     height: (raw.height as number | null) ?? null,
@@ -314,7 +359,9 @@ export function normalizeMemoryMedia(raw: Record<string, unknown>): MemoryMedia 
     durationSec: (raw.duration_sec as number | null) ?? null,
     transcript: (raw.transcript as string | null) ?? null,
     sortOrder: (raw.sort_order as number) || 0,
-    url: (raw.url as string | undefined) ?? undefined,
-    thumbUrl: (raw.thumb_url as string | undefined) ?? undefined,
+    // 后端 `withMediaUrls` 会给 url/thumb_url；缺失时按 key 兜底，
+    // 否则详情页的 <Image>/<Video>/InnerAudioContext 全部拿到空串（点了没反应）
+    url: (raw.url as string | undefined) ?? storageFileUrl(fileKey),
+    thumbUrl: (raw.thumb_url as string | undefined) ?? storageFileUrl(thumbKey),
   }
 }
