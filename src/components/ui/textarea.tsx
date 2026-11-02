@@ -238,7 +238,7 @@ const Textarea = React.forwardRef<
         /**
          * ⚠️ `value` 必须**一直出现**（非受控调用方则整键不出现）。
          * 省掉这个键 = Taro 下发 `value: null` = 清空用户刚打的字。
-         * `displayValue` 在有未上抛的输入时本身就是原生当前文本，见上。
+         * `displayValue` 优先取输入事件里记下的最新文本，见上。
          */
         {...(typeof displayValue === "string" ? { value: displayValue } : undefined)}
         {...(cursorProp !== null ? { cursor: cursorProp } : undefined)}
