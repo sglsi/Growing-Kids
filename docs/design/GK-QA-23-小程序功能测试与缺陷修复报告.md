@@ -30,7 +30,7 @@
 | F01 | 首页（收件箱） | `pages/index/index` | 骨架卡死、筛选并发乱序、分页缺失 |
 | F02 | 复习本 | `pages/subject/index` | 排程显示、搜索清空、聚合阻塞列表 |
 | F03 | 错题详情与编辑 | `pages/detail/index` | 长文本截断、加入复习本、删除、图片识别 |
-| F04 | 文档 Tab | `pages/document/index` | 打开文档（令牌）、重命名静默失败、汇总 |
+| F04 | 文档 Tab（2026-11-02 起改为「资料」Tab = 资料库；汇总导出移入复习本 `pages/summary`） | `pages/document/index` | 打开文档（令牌）、重命名静默失败、汇总 |
 | F05 | 识别（OCR / 错题提取） | `pages/recognize/index` | 60s 天花板、异步任务轮询、题号错位 |
 | F06 | 成长记忆 | `pages/memory/*` | 字段契约、编辑变新建、媒体增删 |
 | F07 | 资料库 | `pages/library/index` | 搜索、重命名、学科、100 条截断 |

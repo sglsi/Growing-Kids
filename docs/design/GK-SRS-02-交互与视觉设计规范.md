@@ -37,8 +37,8 @@
 | Tab | 页面 | 用途 |
 |---|---|---|
 | 首页 | `pages/index` | 最近录入（收件箱全量流 + 筛选 + 批量） |
-| 复习本 | `pages/subject` | 复习本条目（学科/标签/时间筛选，合成 PDF/Word） |
-| 文档 | `pages/document` | 生成 + 文档库两页签，导出与查看 |
+| 复习本 | `pages/subject` | 复习本条目（学科/标签/时间筛选、合成 PDF/Word、进「汇总导出」） |
+| 资料 | `pages/library` | 资料库本体（导入、搜索、打开、改名、归类、删除） |
 | 记忆 | `pages/memory` | 成长记忆列表 |
 | 我的 | `pages/profile` | 登录、资料、配额与统计 |
 
@@ -46,8 +46,8 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
 
 ### 2.2 页面树（13 个）
 
-**一级（Tab）**：index、subject、document、memory、profile
-**二级（从列表/我的进入）**：detail（题目详情）、recognize（识别导入）、library（资料库）、chat（智能客服）、chat/admin（知识库管理）、memory/edit、memory/detail、scan-login（H5 扫码登录落地页）
+**一级（Tab）**：index、subject、library（资料）、memory、profile
+**二级（从列表/我的进入）**：detail（题目详情）、recognize（识别导入）、summary（汇总导出）、chat（智能客服）、chat/admin（知识库管理）、memory/edit、memory/detail、scan-login（H5 扫码登录落地页）
 
 ### 2.3 跳转关系
 
@@ -56,10 +56,11 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
        ├─▶ 识别导入（拍照录入）
        └─▶ 图片编辑器（cropOnly 裁剪入题）
 复习本 ─┬─▶ 详情
-        └─▶ 合成 PDF/WORD → 文档页产物
-文档 ───▶ 生成 / 文档库（打开、改名、删除）
+        ├─▶ 合成 PDF/WORD（批量选中）
+        └─▶ 汇总导出（二级页：汇总生成 + 导出资料列表）
+资料 ───▶ 资料库本身（导入、搜索、打开、改名、归类、删除）
 记忆 ───▶ 记忆详情 / 记忆编辑
-我的 ───▶ 登录、资料库、客服、知识库管理
+我的 ───▶ 登录、客服、知识库管理
 ```
 
 ### 2.4 页面参数约定
@@ -225,8 +226,8 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
 | `math-text` | 数学文本渲染 | 详情、卡片 |
 | `qr-login-modal` | 扫码登录弹层（票据 5 分钟续期） | 我的 / H5 |
 | `range-picker` | 时间范围选择 + `getSinceFromRange` | 首页、复习本、记忆 |
-| `rename-dialog` | 重命名弹层 | 资料库、文档 |
-| `segmented-tabs` | 分段切换器 | 文档页等 |
+| `rename-dialog` | 重命名弹层 | 资料库、导出资料 |
+| `segmented-tabs` | 分段切换器 | 汇总导出页等 |
 | `selection-bar` | 批量底栏 + `CheckDot` | 各列表页 |
 | `subject-badge` | 学科胶囊 | 全局 |
 | `wrongq-box-editor` | 错题圈定叠加编辑器 | 识别导入 |

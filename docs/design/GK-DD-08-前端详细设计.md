@@ -91,7 +91,7 @@ TabBar 四项：首页 / 复习本 / 文档 / 记忆。
 |---|---|---|---|---|---|
 | **index** | `pages/index/index` | ✅ 首页 | 统一收件箱（最近题目）：筛选、搜索、加复习本、删除、跳详情 | — | 从详情返回**按 id 锚回**原位 |
 | **subject** | `pages/subject/index` | ✅ 复习本 | 复习本列表 + 学科管理 + 合成 PDF/Word 四选弹层 | — | 同上 |
-| **document** | `pages/document/index` | ✅ 文档 | 导出物列表（docx/pdf）、导出打印、打开/分享 | — | 列表内操作 `silent` |
+| **summary** | `pages/summary/index` | ✅ 汇总导出（复习本内入口） | 汇总生成 + 导出物列表（docx/pdf）、打开/重命名/删除 | — | 列表内操作 `silent` |
 | **memory** | `pages/memory/index` | ✅ 记忆 | 成长记忆列表（分类/时间筛选） | — | 同上 |
 | **detail** | `pages/detail/index` | — | 题目详情：题干/答案/解析编辑、图片管理、错因、AI 讲解 | `id` | 返回时写 `restoreItemIdRef` |
 | **recognize** | `pages/recognize/index` | — | **错题提取主流程**（三种模式：整卷 / 分栏 / 文档） | — | 最大页面（2080 行） |
