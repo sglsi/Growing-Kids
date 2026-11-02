@@ -2,3 +2,6 @@
 # 否则容器内 dash/sh 解析 install-ocr-env.sh 会失败（精准 OCR venv 自愈挂掉）。
 *.sh text eol=lf
 *.py text eol=lf
+
+# pnpm 补丁必须是 LF：git apply 要按字节匹配目标文件，CRLF 会让补丁打不上。
+patches/*.patch text eol=lf
