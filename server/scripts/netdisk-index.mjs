@@ -20,9 +20,10 @@
  *
  * 可选参数：
  *   --root /学生          覆盖索引根目录（默认取 NETDISK_SEARCH_ROOT 或 /学生）
- *   --max-requests 5000   请求数上限（防止跑飞）
- *   --budget-ms 600000    时间预算（默认 10 分钟）
- *   --gap-ms 80           每请求间隔（限流，默认 80ms ≈ 12 req/s）
+ *   --max-requests 20000  请求数上限（防止跑飞）
+ *   --budget-ms 900000    时间预算（默认 15 分钟）
+ *   --concurrency 4       一次并发列几个目录（默认 4，上限 6；串行会慢到走不完）
+ *   --gap-ms 60           每批之间的间隔（限流，默认 60ms）
  *   --full-clean          遍历完整时，把本轮没见到的旧记录删掉（对应网盘已删除的文件）
  *
  * 安全：
@@ -44,8 +45,8 @@ const arg = (name, fallback = '') => {
 const USER_ID = arg('--user')
 const ROOT = arg('--root') || (process.env.NETDISK_SEARCH_ROOT || '/学生')
 const MAX_REQUESTS = Number(arg('--max-requests', '5000'))
-const BUDGET_MS = Number(arg('--budget-ms', '600000'))
-const GAP_MS = Number(arg('--gap-ms', '80'))
+const BUDGET_MS = Number(arg('--budget-ms', '900000'))
+const GAP_MS = Number(arg('--gap-ms', '60'))
 const PAGE = 1000
 
 if (!USER_ID) {
@@ -127,8 +128,32 @@ async function main() {
     }
   }
 
+  // 一次并发列几个目录。
+  // ⚠️ 串行实测 0.43s/目录，/学生 有 6000+ 个目录 ⇒ 30 分钟都走不完。
+  //    4 并发把有效速率提到 ~9 QPS（百度网盘个人号的常见上限附近），别再往上加。
+  const CONCURRENCY = Math.max(1, Math.min(6, Number(arg('--concurrency', '4'))))
+
+  /** 列完一个目录（自动翻页），返回该目录下的原始条目 */
+  const listDir = async (dir) => {
+    const items = []
+    for (let start = 0; ; start += PAGE) {
+      if (requests >= MAX_REQUESTS) break
+      requests++
+      let page = []
+      try {
+        page = await netdisk.list(dir, PAGE, start)
+      } catch (e) {
+        console.warn(`  ⚠️ 列目录失败，跳过：${dir} — ${e instanceof Error ? e.message : e}`)
+        return items
+      }
+      items.push(...page)
+      if (page.length < PAGE) break
+    }
+    return items
+  }
+
   try {
-    while (queue.length > 0) {
+    for (;;) {
       if (Date.now() - startedAt > BUDGET_MS) {
         complete = false
         stopReason = `超出时间预算 ${BUDGET_MS}ms（队列还剩 ${queue.length} 个目录）`
@@ -139,25 +164,24 @@ async function main() {
         stopReason = `超出请求上限 ${MAX_REQUESTS}（队列还剩 ${queue.length} 个目录）`
         break
       }
+      if (queue.length === 0) break
 
-      const dir = queue.shift()
-      if (!dir || seenDirs.has(dir)) continue
-      seenDirs.add(dir)
-      dirs++
+      // 取一批目录并发列
+      const batch = []
+      while (batch.length < CONCURRENCY && queue.length > 0) {
+        const d = queue.shift()
+        if (!d || seenDirs.has(d)) continue
+        seenDirs.add(d)
+        batch.push(d)
+      }
+      if (batch.length === 0) break
 
-      // 分页把一个目录读全（大目录可能上千项）
-      for (let start = 0; ; start += PAGE) {
-        if (requests >= MAX_REQUESTS) break
-        requests++
-        await sleep(GAP_MS)
-        let items = []
-        try {
-          items = await netdisk.list(dir, PAGE, start)
-        } catch (e) {
-          console.warn(`  ⚠️ 列目录失败，跳过：${dir} — ${e instanceof Error ? e.message : e}`)
-          break
-        }
-        for (const it of items) {
+      const results = await Promise.all(batch.map((d) => listDir(d)))
+      dirs += batch.length
+
+      for (let i = 0; i < batch.length; i++) {
+        const dir = batch[i]
+        for (const it of results[i]) {
           const name = String(it.server_filename || '')
           const abs = String(it.path || `${dir}/${name}`)
           if (Number(it.isdir) === 1) {
@@ -176,12 +200,12 @@ async function main() {
             mtime: it.server_mtime ? new Date(Number(it.server_mtime) * 1000).toISOString() : null,
           })
         }
-        if (pending.length >= 200) await flush()
-        if (items.length < PAGE) break
       }
+      if (pending.length >= 200) await flush()
 
-      if (dirs % 20 === 0) {
-        console.log(`  … 已列 ${dirs} 个目录 / 见 ${files} 个文件 / ${requests} 次请求`)
+      if (GAP_MS > 0) await sleep(GAP_MS)
+      if (dirs % 40 < CONCURRENCY) {
+        console.log(`  … 已列 ${dirs} 个目录 / 见 ${files} 个文件 / ${requests} 次请求 / 队列 ${queue.length}`)
       }
     }
     await flush()

@@ -361,25 +361,32 @@ export class NetdiskSearchService {
     const client = getSupabaseClient()
     // 文件名与路径都参与粗筛（目录名往往比文件名更有信息量）
     const ors = clean.flatMap((k) => [`name.ilike.%${k}%`, `path.ilike.%${k}%`]).join(',')
-    const [pageRes, countRes] = await Promise.all([
-      client
-        .from(TABLE)
-        .select('fs_id, name, path, size_bytes')
-        .eq('user_id', userId)
-        .eq('is_dir', false)
-        .or(ors)
-        .limit(LOCAL_CANDIDATE_LIMIT),
-      client
-        .from(TABLE)
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('is_dir', false),
-    ])
+    const pageRes = await client
+      .from(TABLE)
+      .select('fs_id, name, path, size_bytes')
+      .eq('user_id', userId)
+      .eq('is_dir', false)
+      .or(ors)
+      .limit(LOCAL_CANDIDATE_LIMIT)
     if (pageRes.error) {
       this.logger.warn(`[netdisk] 本地索引读取失败: ${pageRes.error.message}`)
       return { hits: [], total: 0 }
     }
     const rows = (pageRes.data || []) as { fs_id: number; name: string; path: string; size_bytes: number }[]
+
+    // ⚠️ 只在「一条都没命中」时才数总数：这一次 count 只为区分
+    //    「索引是空的（得走实时兜底）」与「索引有货但没匹配上（直接返回空）」。
+    //    正常路径少一次查询——3 万行的 count 也要几百毫秒，白花。
+    let total = -1
+    if (rows.length === 0) {
+      const countRes = await client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('is_dir', false)
+      total = countRes.count ?? 0
+    }
+
     const hits = rows.map((r) => {
       const name = r.name || ''
       const path = r.path || ''
@@ -394,7 +401,7 @@ export class NetdiskSearchService {
         keyHits,
       }
     })
-    return { hits, total: countRes.count ?? rows.length }
+    return { hits, total }
   }
 
   /**
