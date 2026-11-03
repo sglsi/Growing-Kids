@@ -17,6 +17,7 @@
  * 用法（在 server/ 下）：
  *   node scripts/netdisk-index.mjs --user <uuid>              # 干跑：只遍历+统计，不写库
  *   node scripts/netdisk-index.mjs --user <uuid> --apply      # 真写
+ *   node scripts/netdisk-index.mjs --user <uuid> --apply --full   # 强制全量重扫（默认是增量）
  *
  * 可选参数：
  *   --root /学生          覆盖索引根目录（默认取 NETDISK_SEARCH_ROOT 或 /学生）
@@ -25,11 +26,23 @@
  *   --concurrency 4       一次并发列几个目录（默认 4，上限 6；串行会慢到走不完）
  *   --gap-ms 60           每批之间的间隔（限流，默认 60ms）
  *   --full-clean          遍历完整时，把本轮没见到的旧记录删掉（对应网盘已删除的文件）
+ *   --full                **关掉增量**，强制递归走完每一层（首次建库不需要，它是天然全量）
+ *
+ * 增量原理（思傅 2026-11-03 要求「只在内容变化时才同步变化的部分」）：
+ *   网盘没有全量清单接口（`multimedia?method=listall` 实测 errno 20020 = 该接口要单独申请），
+ *   也没有 webhook，所以「有没有变」只能靠列目录时返回的 `server_mtime` 判断：
+ *   · 目录的 mtime 会在**其直接子项增删改名**时更新，且这个变化会逐层向上反映；
+ *   · 所以父目录列表里那条子目录的 mtime，就是这棵子树「有没有动过」的免费信号。
+ *   做法：把每个目录的 mtime 也存进 netdisk_files（`is_dir = true`），下次扫描时
+ *   父目录一列出来就能比对 —— mtime 相同就**整棵子树都不发请求**，只把它的旧记录
+ *   在清理阶段豁免掉（不能因为「没走到」就把它们当已删除）。
+ *   实测 /学生 顶层只有 12 个条目，稳定期一次同步通常是「根 1 次请求 + 少数变化子树」。
  *
  * 安全：
  *   · 默认干跑，必须 --apply 才写库；
  *   · 只写 netdisk_files，不碰其它表；
- *   · 遍历被预算打断（complete=false）时**不做**删除，避免把「没走到」当成「已删除」。
+ *   · 遍历被预算打断（complete=false）时**不做**删除，避免把「没走到」当成「已删除」；
+ *   · 被增量剪枝跳过的子树，清理时按路径前缀豁免，绝不会误删。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -38,6 +51,10 @@ import dotenv from 'dotenv'
 
 const APPLY = process.argv.includes('--apply')
 const FULL_CLEAN = process.argv.includes('--full-clean')
+/** 清理量超过一半时，必须显式加 --force-clean 才真的删（防网盘侧抽风/权限掉导致误删） */
+const FORCE_CLEAN = process.argv.includes('--force-clean')
+/** 默认增量（按目录 mtime 剪枝）；`--full` 强制递归走完每一层 */
+const INCREMENTAL = !process.argv.includes('--full')
 const arg = (name, fallback = '') => {
   const i = process.argv.indexOf(name)
   return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback
@@ -51,6 +68,16 @@ const PAGE = 1000
 
 if (!USER_ID) {
   console.error('缺少 --user <uuid>：netdisk_files 按 user_id 隔离，必须指明索引归属')
+  process.exit(2)
+}
+
+// 🔴 护栏一：根目录必须是网盘绝对路径。
+//    踩过：在 Git Bash 里传 `--root /学生/最新`，MSYS 会把 `/学生/最新` 转成
+//    `D:/Program Files/.../学生/最新`，list 一个不存在的目录返回 0 条 ⇒
+//    脚本判定「完整遍历」⇒ --full-clean 把整张表删光（本地 65890 行）。
+if (!ROOT.startsWith('/') || ROOT.includes(':') || ROOT.includes('\\')) {
+  console.error(`根目录不合法：${ROOT}`)
+  console.error('必须是网盘绝对路径（如 /学生）。Windows 下用 MSYS_NO_PATHCONV=1 或 //学生 规避路径转换。')
   process.exit(2)
 }
 
@@ -92,12 +119,29 @@ async function main() {
   let dirs = 0
   let files = 0
   let upserted = 0
+  let removed = 0
   let complete = true
   let stopReason = ''
 
   const queue = [ROOT.replace(/\/+$/, '') || '/']
   const seenDirs = new Set()
   let pending = []
+  /** 被剪枝跳过的子树根：清理阶段按前缀豁免，否则它们的旧记录会被当成「已删除」 */
+  const skippedRoots = []
+  let skippedDirs = 0
+
+  /** path → 上次看到的 mtime（父目录列出来时记的那个），增量剪枝的依据 */
+  const knownDirMtime = new Map()
+  if (INCREMENTAL) {
+    const { rows } = await client.query(
+      `select path, mtime from netdisk_files where user_id = $1 and is_dir = true`,
+      [USER_ID],
+    )
+    for (const r of rows) {
+      if (r.path && r.mtime) knownDirMtime.set(String(r.path), new Date(r.mtime).toISOString())
+    }
+    console.log(`  增量模式：库内有 ${knownDirMtime.size} 个目录的 mtime 快照（--full 可强制全量）`)
+  }
 
   /** 落库（批量 upsert）。dry-run 时只累计 */
   const flush = async () => {
@@ -109,19 +153,22 @@ async function main() {
     for (let i = 0; i < rows.length; i += 200) {
       const chunk = rows.slice(i, i + 200)
       const { error } = await client.query(
+        // ⚠️ 每行 9 个参数（含 is_dir），占位符步长必须是 9：步长写错会报
+        //    `could not determine data type of parameter $N`（踩过）。
         `insert into netdisk_files
            (user_id, fs_id, path, dir_path, name, ext, is_dir, size_bytes, mtime, last_seen_at, synced_at)
-         values ${chunk.map((_, k) => `($${k * 8 + 1},$${k * 8 + 2},$${k * 8 + 3},$${k * 8 + 4},$${k * 8 + 5},$${k * 8 + 6},false,$${k * 8 + 7},$${k * 8 + 8}::timestamptz,now(),now())`).join(',')}
+         values ${chunk.map((_, k) => `($${k * 9 + 1},$${k * 9 + 2},$${k * 9 + 3},$${k * 9 + 4},$${k * 9 + 5},$${k * 9 + 6},$${k * 9 + 7},$${k * 9 + 8},$${k * 9 + 9}::timestamptz,now(),now())`).join(',')}
          on conflict (user_id, fs_id) do update set
            path = excluded.path,
            dir_path = excluded.dir_path,
            name = excluded.name,
            ext = excluded.ext,
+           is_dir = excluded.is_dir,
            size_bytes = excluded.size_bytes,
            mtime = excluded.mtime,
            last_seen_at = now(),
            synced_at = now()`,
-        chunk.flatMap((r) => [r.user_id, r.fs_id, r.path, r.dir_path, r.name, r.ext, r.size_bytes, r.mtime]),
+        chunk.flatMap((r) => [r.user_id, r.fs_id, r.path, r.dir_path, r.name, r.ext, r.is_dir, r.size_bytes, r.mtime]),
       )
       if (error) throw new Error(`写入失败：${error.message}`)
       upserted += chunk.length
@@ -184,7 +231,27 @@ async function main() {
         for (const it of results[i]) {
           const name = String(it.server_filename || '')
           const abs = String(it.path || `${dir}/${name}`)
+          const mtimeIso = it.server_mtime ? new Date(Number(it.server_mtime) * 1000).toISOString() : null
           if (Number(it.isdir) === 1) {
+            // 目录本身也入库：它就是下一轮剪枝的依据
+            pending.push({
+              user_id: USER_ID,
+              fs_id: Number(it.fs_id),
+              path: abs,
+              dir_path: dir,
+              name,
+              ext: '',
+              is_dir: true,
+              size_bytes: 0,
+              mtime: mtimeIso,
+            })
+            // mtime 一致 ⇒ 这棵子树自上次扫描以来没动过（增删改名都会更新目录 mtime，
+            // 且逐层向上反映），一条请求都不用发。
+            if (INCREMENTAL && mtimeIso && knownDirMtime.get(abs) === mtimeIso) {
+              skippedRoots.push(abs)
+              skippedDirs++
+              continue
+            }
             queue.push(abs)
             continue
           }
@@ -196,8 +263,9 @@ async function main() {
             dir_path: dir,
             name,
             ext: extOf(name),
+            is_dir: false,
             size_bytes: Number(it.size) || 0,
-            mtime: it.server_mtime ? new Date(Number(it.server_mtime) * 1000).toISOString() : null,
+            mtime: mtimeIso,
           })
         }
       }
@@ -211,14 +279,39 @@ async function main() {
     await flush()
 
     // 完整遍历才清理：把本轮没见到的旧记录删掉（对应网盘侧已删除的文件）
-    let removed = 0
     if (APPLY && complete && FULL_CLEAN) {
-      const { rowCount } = await client.query(
-        `delete from netdisk_files
-          where user_id = $1 and is_dir = false and last_seen_at < $2`,
-        [USER_ID, startedIso],
-      )
-      removed = rowCount || 0
+      // ⚠️ 被剪枝跳过的子树必须按前缀豁免：它们压根没被走过，
+      //    不豁免就会把「没走到」当成「已删除」，一次误删几千行。
+      const keepPatterns = skippedRoots.flatMap((p) => [p, `${p}/%`])
+      const where = `user_id = $1 and last_seen_at < $2 and not (path like any($3::text[]))`
+      const args = [USER_ID, startedIso, keepPatterns]
+
+      // 护栏二：一个文件都没列到，说明 root 写错或网盘异常 —— 这时「没见到」
+      // 不代表「已删除」，绝不许清库。
+      if (files === 0) {
+        console.warn('  ⚠️ 本轮一个文件都没列到，已拒绝执行 --full-clean（root 写错？网盘异常？）')
+      } else {
+        // 护栏三：一次要删掉超过一半 ⇒ 大概率是网盘侧抽风/权限掉了，
+        // 破坏性太大，改为要求显式 --force-clean。
+        const pre = await client.query(
+          `select count(*)::int as total,
+                  (count(*) filter (where last_seen_at < $2
+                                      and not (path like any($3::text[]))))::int as gone
+             from netdisk_files where user_id = $1`,
+          args,
+        )
+        const gone = Number(pre.rows[0]?.gone ?? 0)
+        const totalRows = Number(pre.rows[0]?.total ?? 0)
+        if (gone > totalRows * 0.5 && !FORCE_CLEAN) {
+          console.warn(
+            `  ⚠️ 本轮要删 ${gone}/${totalRows} 行（超过一半），已拒绝执行 --full-clean。` +
+              `确认网盘侧真的删了这么多，再加 --force-clean 重跑。`,
+          )
+        } else {
+          const { rowCount } = await client.query(`delete from netdisk_files where ${where}`, args)
+          removed = rowCount || 0
+        }
+      }
     }
   } finally {
     const tookMs = Date.now() - startedAt
@@ -235,11 +328,16 @@ async function main() {
     console.log('\n================ 索引结果 ================')
     console.log(`模式        ${APPLY ? '真写' : '干跑（未写库）'}`)
     console.log(`根目录      ${ROOT}`)
+    console.log(`扫描方式    ${INCREMENTAL ? `增量（mtime 未变而整棵跳过的子树：${skippedDirs} 棵）` : '全量（--full）'}`)
     console.log(`遍历        ${dirs} 个目录 / 见到 ${files} 个文件 / ${requests} 次请求`)
-    console.log(`写入        ${upserted} 行`)
+    console.log(`写入        ${upserted} 行（文件 + 目录 mtime 快照）`)
+    if (APPLY && FULL_CLEAN) console.log(`清理        删除 ${removed} 行（网盘侧已不存在的）`)
     console.log(`耗时        ${(tookMs / 1000).toFixed(1)}s`)
     console.log(`完整性      ${complete ? '完整' : `未完成：${stopReason}`}`)
-    console.log(`库内现状    共 ${s.total ?? 0} 个文件，其中本轮见到 ${s.seen_now ?? 0} 个，已抽正文 ${s.with_text ?? 0} 个`)
+    console.log(`库内现状    共 ${s.total ?? 0} 个文件，其中本轮列到 ${s.seen_now ?? 0} 个，已抽正文 ${s.with_text ?? 0} 个`)
+    if (INCREMENTAL && skippedDirs > 0) {
+      console.log(`            （被剪枝的子树沿用上次记录，本轮没有重复列它们）`)
+    }
     console.log('==========================================')
     if (!complete) {
       console.log('\n⚠️ 未完整遍历 ⇒ 不删除任何旧记录（避免把「没走到」当成「已删除」）。')
