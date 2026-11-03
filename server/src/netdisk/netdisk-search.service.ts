@@ -479,7 +479,13 @@ export class NetdiskSearchService {
         timeoutMs: 60_000,
       })
       if (!out.ok || !out.data) {
-        // 抽取失败按「无正文」缓存，但状态记 none 以便将来人工重试
+        // ⚠️ 环境类失败（没装 python / 脚本缺失 / 超时）**不写缓存**：
+        //    写成 none 等于永久判死，环境修好后也再不会重试。保持未抽状态即可。
+        if (out.reason === 'no-python' || out.reason === 'no-script' || out.reason === 'timeout') {
+          this.logger.warn(`[netdisk] 抽正文环境不可用（${out.reason}）：${cand.name}，本次跳过且不缓存`)
+          return ''
+        }
+        // 内容类失败（解析不了）才按「无正文」缓存，避免每次检索都白下载一遍
         await this.saveCache(userId, cand, '', 'none')
         return ''
       }

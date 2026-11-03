@@ -191,6 +191,13 @@ export class LibraryService {
         })
         if (!out.ok || !out.data) {
           this.logger.warn(`[library] 抽正文失败（${out.reason}）：${name} ${out.detail || ''}`)
+          // 🔴 环境类失败（没装 python / 脚本缺失 / 超时）**不许**记 none：
+          //    none 的意思是「确认这份文档没有文字层」，记错了就再也不会重试，
+          //    等于把一份好文档永久判成没法搜。这类失败保持 pending，下次重试。
+          if (out.reason === 'no-python' || out.reason === 'no-script' || out.reason === 'timeout') {
+            await update({ text_status: 'pending' })
+            return
+          }
           await update({ text_status: 'none', text_content: null })
           return
         }
@@ -205,10 +212,11 @@ export class LibraryService {
       }
       await update({ text_status: 'ok', text_content: text.slice(0, MAX_TEXT_CHARS) })
     } catch (e) {
-      // best-effort 但不许静默：抽不到正文要留痕，否则「搜不到」永远查不出原因
+      // best-effort 但不许静默：抽不到正文要留痕，否则「搜不到」永远查不出原因。
+      // 状态保持 pending（可重试），不要记 none —— 异常多半是环境问题，不是文档没字。
       this.logger.warn(`[library] 抽正文异常：${name} — ${e instanceof Error ? e.message : e}`)
       try {
-        await update({ text_status: 'none', text_content: null })
+        await update({ text_status: 'pending' })
       } catch { /* 状态回写失败不影响入库结果 */ }
     }
   }
