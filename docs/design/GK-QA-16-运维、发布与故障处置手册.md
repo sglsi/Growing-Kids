@@ -942,8 +942,35 @@ node server/scripts/deploy-pack.mjs status     # 查看当前在架/挪出状态
 - 同时把 OCR 引擎等依赖**复制进 `server/`** 一起上传（`restore` 时清理，不入库）；
 - ⚠️ `pack` 前会检查暂存区是否残留（残留 ⇒ 报错终止）；`pack` 后必须 `restore`，否则本地 OCR 引擎被清理。
 
-### 6.2 `encrypt-env.mjs` / `decrypt-env.mjs`
+### 6.1.1 ⚠️ 手工部署时，`dist` 不是全部（2026-11-03 实测踩坑）
 
+当前生产是按下面的手工流程发布的（`deploy-pack.mjs` 是给打包路线用的）。**只换 `dist` 会漏文件**：
+
+```bash
+# 本地
+cd server && npx nest build && cd ..
+tar czf /tmp/gk-dist.tgz -C server dist
+scp /tmp/gk-dist.tgz ubuntu@42.192.36.120:/tmp/
+# 远程（ubuntu 对 /opt/gk 无写权限，必须 sudo -n）
+cd /opt/gk/server && sudo -n mv dist dist.bak-$(date +%Y%m%d%H%M) \
+  && sudo -n tar xzf /tmp/gk-dist.tgz && sudo -n chown -R gk:gk dist \
+  && sudo -n systemctl restart gk-api
+```
+
+🔴 **凡是改了 `ocr-engine/*.py`，必须单独同步**（`dist` 里没有它）：
+
+```bash
+scp ocr-engine/pdf_tool.py ubuntu@42.192.36.120:/tmp/
+ssh ... "sudo -n cp /opt/gk/ocr-engine/pdf_tool.py /tmp/pdf_tool.py.bak-$(date +%H%M) \
+  && sudo -n cp /tmp/pdf_tool.py /opt/gk/ocr-engine/pdf_tool.py \
+  && sudo -n chown gk:gk /opt/gk/ocr-engine/pdf_tool.py"
+```
+
+**为什么这条要单独写**：漏传时接口**不报错**——`pdf_tool.py` 只是不认识新参数（`unrecognized arguments: --text-only`），后端抽正文失败后静默降级为「按文件名匹配」，`/api/netdisk/search` 照样 200。判据只能看两处：① `journalctl -u gk-api | grep pdf-tool` 有无报错；② 返回里 `hits[].hit` 是否出现 `content`（全是 `name` 就是没抽到正文）。
+
+同批要一起搬的还有：`migrations/NNNN_*.sql` → `/opt/gk/migrations/`（先跑迁移、再换代码，新表向后兼容）。
+
+### 6.2 `encrypt-env.mjs` / `decrypt-env.mjs`
 ```
 .env.secrets --[AES-256-GCM, scrypt(AppID|用途串, 随机盐)]--> .env.secrets.enc
 容器 startCmd: node scripts/decrypt-env.mjs && npm run start
