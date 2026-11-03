@@ -6,18 +6,23 @@ import { extractDocContent } from '../ocr/pdf-tool'
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
  *
- * ## 为什么是「两级检索」而不是「全量建索引」
- * 思傅 2026-11-03 实测 /学生 目录：采样 120 次列举就见 1318 个文件 / 252GB，
- * 其中 PDF 623 个且大量是扫描版。按 OCR 26s/页算，全量正文索引既跑不完也存不下。
- * 所以：
- *   L1 网盘原生 `method=search`（**只匹配文件名与路径**）→ 秒级圈出候选；
- *   L2 只对排名靠前的少数候选下载 + 抽文字层 → 做正文匹配。
- * 抽过的正文落 `netdisk_files.text_content` 缓存，同一本不重复下载。
+ * ## 架构：索引在前，网盘在后（思傅 2026-11-03 定）
+ * 一句话：**搜索只在本库做，要看内容才去网盘读。**
+ *   ① 先由 `scripts/netdisk-index.mjs` 递归列一遍 /学生，把文件名/路径/大小落进
+ *      `netdisk_files`（只列目录、不下载任何文件，万级文件约十几分钟，可增量重跑）；
+ *   ② 检索时只查这张表：纯 SQL + 内存排序，**毫秒级**，结果稳定；
+ *   ③ 命中候选要正文时，才按 `fs_id` 去网盘下载并抽文字层，抽过的落 `text_content`。
+ *
+ * 为什么不再每次实时搜网盘（上一版的做法）：
+ * 网盘 `method=search` 每次返回的候选子集不稳定，同一道题连搜两次排在前面的
+ * 文件会变（R-工程-10），而且一次 3~7s。索引化之后这两个问题一起消失。
  *
  * ## 已知边界（别对用户承诺过头）
- * - 扫描版 PDF（无文字层）抽不到正文 ⇒ 只能靠文件名命中；
- * - 正文匹配只在 L1 候选里做，题干关键词完全不出现在任何文件名里时会漏；
- * - 网盘 search 是「包含」匹配，key 太长必然 0 命中 ⇒ 先提学科词，再退回滑窗。
+ * - 扫描版 PDF（无文字层）抽不到正文 ⇒ 只能靠文件名/路径命中；
+ * - 正文匹配只在候选里做（`NETDISK_DEEP_FILES` 控制抽几份），题干关键词不出现在
+ *   任何文件名里时会漏；
+ * - 索引是**快照**：网盘新增的文件要重跑脚本才进得来；删除的文件在
+ *   `--full-clean` 完整遍历后才清理。
  */
 
 const TABLE = 'netdisk_files'
@@ -39,6 +44,12 @@ const MAX_TEXT_BYTES = Number(process.env.NETDISK_TEXT_MAX_BYTES ?? 40 * 1024 * 
 const MAX_TEXT_CHARS = Number(process.env.NETDISK_TEXT_MAX_CHARS ?? 200_000)
 /** 单次检索最多并发几个 search key */
 const MAX_KEYS = 6
+/**
+ * 本地索引粗筛的候选上限。
+ * 索引里同一个词可能命中几百份（「体积」这种），取太多只会拖慢内存排序；
+ * 真正决定排序质量的是 keyHits 与覆盖度，不在候选数量。
+ */
+const LOCAL_CANDIDATE_LIMIT = Number(process.env.NETDISK_LOCAL_LIMIT ?? 500)
 /**
  * 单个 search key 返回条数。
  * ⚠️ 别调小：网盘 search **没有稳定排序**，同一 key 两次调用返回的子集可能不同
@@ -201,62 +212,70 @@ export class NetdiskSearchService {
     const limit = Math.min(20, opts.limit ?? 8)
     const deep = opts.deep !== false
 
-    if (!this.available()) {
-      return {
-        hits: [], keys: [], tookMs: 0,
-        note: `网盘未配置（缺 ${this.missingKeys().join(' / ')}）：请在服务器 .env.secrets 填入 BAIDU_APP_KEY / BAIDU_SECRET_KEY / BAIDU_REFRESH_TOKEN 后重启后端`,
-      }
-    }
+    // ⚠️ 这里**不**先判 available()：搜索只查本库索引，网盘凭证失效/过期
+    //    不该让「搜自己索引过的资料」跟着失灵。只有走实时兜底时才要求凭证可用。
 
     const keys = extractKeys(question)
     if (keys.length === 0) {
       return { hits: [], keys, note: '题干太短，提不出可用的检索词', tookMs: Date.now() - started }
     }
 
-    // ---------- L1：网盘原生搜索（只匹配文件名/路径） ----------
-    const root = searchRoot()
     const qSet = bigrams(question)
     const pool = new Map<number, NetdiskHit>()
-    /** 每个候选被几个不同搜索词命中——这是比 bigram 覆盖度更强的信号 */
+    /** 每个候选被几个不同检索词命中——这是比 bigram 覆盖度更强的信号 */
     const keyCount = new Map<number, number>()
 
-    // ---------- L0：本地已沉淀的候选（先于实时搜索）----------
-    // 网盘 search 每次返回的子集不稳定，同一题两次排序会变。把命中过的候选落库，
-    // 下次先读本地，既稳住排序，也让「网盘临时抽风」时仍有结果可用。
-    for (const h of await this.searchLocal(userId, keys, qSet)) {
-      if (pool.has(h.fsId)) continue
+    // ---------- L0：搜索只在**本库索引**里做（思傅 2026-11-03 定） ----------
+    // 以前每次都实时搜网盘：3~7s，且网盘 search 返回的候选子集不稳定
+    // ⇒ 同一道题连搜两次排序会变（R-工程-10）。现在文件清单已经预先落库
+    // （scripts/netdisk-index.mjs），检索是纯 SQL：毫秒级、结果稳定、网盘抽风也能用。
+    const { hits: localHits, total: indexSize } = await this.searchLocal(userId, keys, qSet)
+    for (const h of localHits) {
       pool.set(h.fsId, h)
-      keyCount.set(h.fsId, 1)
+      keyCount.set(h.fsId, h.keyHits)
     }
 
-    for (const key of keys) {
-      let items: Record<string, unknown>[] = []
-      try {
-        items = await this.netdisk.search(key, root, KEY_LIMIT)
-      } catch (e) {
-        this.logger.warn(`[netdisk] search "${key}" 失败: ${e instanceof Error ? e.message : e}`)
-        continue
+    // 索引还没建（首次使用 / 换机 / 清过表）时，实时兜底补一次，
+    // 免得功能在「索引未建」状态下直接空转。索引一旦有了就永不回落到实时检索。
+    let liveFallback = false
+    if (localHits.length === 0 && indexSize === 0) {
+      if (!this.available()) {
+        return {
+          hits: [], keys, tookMs: Date.now() - started,
+          note: `本库还没有资料索引，且网盘未配置（缺 ${this.missingKeys().join(' / ')}）：请先在服务器填 BAIDU_APP_KEY / BAIDU_SECRET_KEY / BAIDU_REFRESH_TOKEN，再跑 scripts/netdisk-index.mjs 建索引`,
+        }
       }
-      for (const it of items) {
-        if (Number(it.isdir) === 1) continue
-        const fsId = Number(it.fs_id)
-        if (!fsId) continue
-        if (pool.has(fsId)) {
-          keyCount.set(fsId, (keyCount.get(fsId) || 1) + 1)
+      liveFallback = true
+      const root = searchRoot()
+      for (const key of keys) {
+        let items: Record<string, unknown>[] = []
+        try {
+          items = await this.netdisk.search(key, root, KEY_LIMIT)
+        } catch (e) {
+          this.logger.warn(`[netdisk] 实时兜底 search "${key}" 失败: ${e instanceof Error ? e.message : e}`)
           continue
         }
-        const name = String(it.server_filename || '')
-        const path = String(it.path || '')
-        const score = Math.max(coverage(qSet, name), coverage(qSet, path) * 0.6)
-        keyCount.set(fsId, 1)
-        pool.set(fsId, {
-          fsId,
-          name,
-          path,
-          sizeBytes: Number(it.size) || 0,
-          hit: 'name',
-          score: Number(score.toFixed(3)),
-        })
+        for (const it of items) {
+          if (Number(it.isdir) === 1) continue
+          const fsId = Number(it.fs_id)
+          if (!fsId) continue
+          if (pool.has(fsId)) {
+            keyCount.set(fsId, (keyCount.get(fsId) || 1) + 1)
+            continue
+          }
+          const name = String(it.server_filename || '')
+          const path = String(it.path || '')
+          const score = Math.max(coverage(qSet, name), coverage(qSet, path) * 0.6)
+          keyCount.set(fsId, 1)
+          pool.set(fsId, {
+            fsId,
+            name,
+            path,
+            sizeBytes: Number(it.size) || 0,
+            hit: 'name',
+            score: Number(score.toFixed(3)),
+          })
+        }
       }
     }
 
@@ -269,8 +288,8 @@ export class NetdiskSearchService {
     )
     const l1 = ranked.slice(0, Math.max(limit, L1_POOL))
 
-    // 沉淀本次候选：下次同一题先用本地，排序不再随网盘抖动（失败不影响本次结果）
-    void this.upsertMeta(userId, l1)
+    // 实时兜底才需要沉淀（正常路径本来就来自索引，写回去纯属浪费）
+    if (liveFallback) void this.upsertMeta(userId, l1)
 
     // ---------- L2：对头部候选抽正文，补「文件名没写但正文里有」的情况 ----------
     const deepDone: NetdiskHit[] = []
@@ -304,53 +323,78 @@ export class NetdiskSearchService {
 
     let note = ''
     if (hits.length === 0) {
-      note = `网盘里没有搜到与这道题相关的资料（按 ${keys.join(' / ')} 检索）`
+      note = liveFallback
+        ? `网盘里没有搜到与这道题相关的资料（按 ${keys.join(' / ')} 检索）`
+        : `本库索引里没有匹配的资料（按 ${keys.join(' / ')} 检索）。若网盘里确实有，先跑一次 netdisk-index.mjs 更新索引`
     } else if (!deep) {
-      note = '按文件名匹配（未深入正文）'
+      note = '按文件名/路径匹配（未读取正文）'
     } else if (deepDone.length === 0) {
       note = '文件名命中，正文未进一步匹配（可能是扫描版 PDF，无文字层）'
     } else {
       note = `文件名 + 正文匹配（正文命中 ${deepDone.length} 份）`
     }
+    if (liveFallback) note += '；⚠️ 索引尚未建立，本次是实时检索网盘'
 
     return { hits, keys, note, tookMs: Date.now() - started }
   }
 
   /**
-   * 本地已沉淀的候选（按关键词模糊匹配文件名）。
-   * 目的只有一个：稳住排序。网盘 search 每次给的子集不同，靠「用过就记住」收敛。
+   * 在**本库索引**里检索（唯一检索面）：SQL 粗筛 + 内存精排。
+   *
+   * 粗筛：`name ilike` 或 `path ilike` 命中任一检索词。目录名也算——
+   * 「/浮力专题/第3讲.docx」这种，光看文件名看不出是浮力，靠路径才认得出来。
+   * 精排：命中几个检索词（强信号）→ bigram 覆盖度 → 名字长度。
+   *
+   * 为什么要自己算 keyHits：只靠 SQL 的话每行都是「命中」，多词同时命中这个
+   * 最有价值的信息就丢了（以前实时检索时用 keyCount 记，现在本地一次查全，直接算）。
+   *
+   * @returns hits 候选；total 该用户索引里的文件总数（0 = 索引还没建）
    */
   private async searchLocal(
     userId: string,
     keys: string[],
     qSet: Set<string>,
-  ): Promise<NetdiskHit[]> {
+  ): Promise<{ hits: (NetdiskHit & { keyHits: number })[]; total: number }> {
     // PostgREST 的 or 表达式里逗号/括号/百分号是语法字符，必须剔干净
     const clean = keys.map((k) => k.replace(/[%,()]/g, '')).filter((k) => k.length >= 2)
-    if (clean.length === 0) return []
+    if (clean.length === 0) return { hits: [], total: 0 }
     const client = getSupabaseClient()
-    const ors = clean.map((k) => `name.ilike.%${k}%`).join(',')
-    const { data, error } = await client
-      .from(TABLE)
-      .select('fs_id, name, path, size_bytes')
-      .eq('user_id', userId)
-      .eq('is_dir', false)
-      .or(ors)
-      .limit(200)
-    if (error) {
-      this.logger.warn(`[netdisk] 本地候选读取失败: ${error.message}`)
-      return []
+    // 文件名与路径都参与粗筛（目录名往往比文件名更有信息量）
+    const ors = clean.flatMap((k) => [`name.ilike.%${k}%`, `path.ilike.%${k}%`]).join(',')
+    const [pageRes, countRes] = await Promise.all([
+      client
+        .from(TABLE)
+        .select('fs_id, name, path, size_bytes')
+        .eq('user_id', userId)
+        .eq('is_dir', false)
+        .or(ors)
+        .limit(LOCAL_CANDIDATE_LIMIT),
+      client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('is_dir', false),
+    ])
+    if (pageRes.error) {
+      this.logger.warn(`[netdisk] 本地索引读取失败: ${pageRes.error.message}`)
+      return { hits: [], total: 0 }
     }
-    return ((data || []) as { fs_id: number; name: string; path: string; size_bytes: number }[]).map(
-      (r) => ({
+    const rows = (pageRes.data || []) as { fs_id: number; name: string; path: string; size_bytes: number }[]
+    const hits = rows.map((r) => {
+      const name = r.name || ''
+      const path = r.path || ''
+      const keyHits = clean.filter((k) => name.includes(k) || path.includes(k)).length
+      return {
         fsId: Number(r.fs_id),
-        name: r.name,
-        path: r.path,
+        name,
+        path,
         sizeBytes: Number(r.size_bytes) || 0,
         hit: 'name' as const,
-        score: Number(Math.max(coverage(qSet, r.name), coverage(qSet, r.path) * 0.6).toFixed(3)),
-      }),
-    )
+        score: Number(Math.max(coverage(qSet, name), coverage(qSet, path) * 0.6).toFixed(3)),
+        keyHits,
+      }
+    })
+    return { hits, total: countRes.count ?? rows.length }
   }
 
   /**
