@@ -159,7 +159,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `user_id` | varchar(36) | FK → users, cascade | 隔离键 |
 | `subject_id` | varchar(36) | FK → subjects, **set null** | NULL = 未分类（前端哨兵 `'none'`，见 5.3） |
 | `kind` | varchar(16) | not null | `image` \| `question` |
-| `title` | text | | 题目兜底标题「图片题目」（允许"无题干只有图"） |
+| `title` | text | | 题目标题：`kind=question` 由服务端生成 **`科目 日期 第N题`**（2026-11-03 起，东八区自然日、同学科当日递增）；`kind=image` 为「图片素材」（允许"无题干只有图"） |
 | `file_key` | text | | 图片主文件对象 key |
 | `thumb_key` | text | | 缩略图 key（WebP，宽 ≤400） |
 | `mime_type` | varchar(64) | | ⚠️ 0013 只放宽了 documents/library_docs，本表仍为 64（图片 MIME 均 < 20 字符，无风险） |
@@ -355,7 +355,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 1. **老 `images` → `question_images` / `answer_images`**：早期题面图与答题卡图混在一个数组，无法区分。拆分后老字段**已无消费者，仅保留兜底渲染与删除清理**，不要再往里写。
 2. **合并语义（重要隐式依赖）**：`PUT /api/timeline/:id` 是**局部合并**——未传的字段不清空。这正是"只删图片不清题干"功能的实现基础。**若改成整体覆盖，删除图片会连带清空题干**。
-3. **允许"无题干只有图"**：校验已放宽，`title` 兜底为「图片题目」。
+3. **允许"无题干只有图"**：校验已放宽，缺题干不再 400（早期 `title` 兜底为「图片题目」）。**2026-11-03 起标题不再取题干前 40 字**：同一张卷子的题看起来几乎一样，列表里分不清；改由 `timeline.service.ts` 的 `nextTitle()` 生成 `科目 日期 第N题`（序号按「用户 + 学科 + 东八区自然日」递增，含软删条目，避免删一条再存一条撞号；批量入库用内存分配器递增）。存量数据用 `server/scripts/backfill-titles.mjs` 回填（默认干跑，`--apply` 才写）。
 4. **答案与题目同记录**：不独立建表、不靠外键 ⇒ 从物理上杜绝答案错挂（见 `题目答案功能-设计方案.md` §1.2）。
 
 ---

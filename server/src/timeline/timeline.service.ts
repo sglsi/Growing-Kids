@@ -40,6 +40,18 @@ const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
 
 /**
+ * 东八区自然日的 `YYYY-MM-DD`（标题命名用）。
+ *
+ * ⚠️ 不能用 `getFullYear()` 那一套：服务器可能是 UTC，中国用户在晚上 8 点之后
+ * 录入的题会被算成「昨天」，序号也跟着落到昨天那一档。
+ */
+function localDateString(at: Date = new Date()): string {
+  const t = new Date(at.getTime() + 8 * 60 * 60 * 1000)
+  const p = (n: number) => (n < 10 ? `0${n}` : String(n))
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}`
+}
+
+/**
  * 学科外键的**唯一**落库口径（create / createBatch / update 共用）。
  *
  * 为什么必须有这一层（思傅 2026-10-29 报「保存失败 … violates foreign key
@@ -390,59 +402,121 @@ export class TimelineService {
   }
 
   /**
-   * 批量取「确实属于该用户」的学科 id 集合。
-   * 批量创建时先一次性查好，避免每题一次跨境查询（一页卷子 30 题就是 30 次 RTT）。
+   * 批量取「确实属于该用户」的学科：id → 名称。
+   * 批量创建时先一次性查好，避免每题一次跨境查询（一页卷子 30 题就是 30 次 RTT）；
+   * 名称顺带给标题命名用（见 nextTitle）。
    */
-  private async ownedSubjectIds(userId: string, ids: unknown[]): Promise<Set<string>> {
+  private async ownedSubjects(userId: string, ids: unknown[]): Promise<Map<string, string>> {
     const uniq = Array.from(new Set(ids.map(normalizeSubjectId).filter((v): v is string => !!v)))
-    if (!uniq.length) return new Set()
+    if (!uniq.length) return new Map()
     const client = getSupabaseClient()
     const { data, error } = await client
       .from('subjects')
-      .select('id')
+      .select('id, name')
       .eq('user_id', userId)
       .in('id', uniq)
     if (error) throw new Error(error.message)
-    return new Set(((data || []) as { id: string }[]).map((r) => r.id))
+    return new Map(((data || []) as { id: string; name: string }[]).map((r) => [r.id, r.name]))
   }
 
   /**
-   * 学科外键落地值：'' / 无效 / 越权 / 已删除 ⇒ null（详见 normalizeSubjectId 注释）。
+   * 学科落地值（id + 名称）：'' / 无效 / 越权 / 已删除 ⇒ id=null（详见 normalizeSubjectId 注释）。
    * `owned` 传入时不再单查（批量创建已一次性查好）。
    */
+  private async resolveSubject(
+    userId: string,
+    raw: unknown,
+    owned?: Map<string, string>,
+  ): Promise<{ id: string | null; name: string }> {
+    const sid = normalizeSubjectId(raw)
+    if (!sid) return { id: null, name: '' }
+    const map = owned ?? (await this.ownedSubjects(userId, [sid]))
+    const name = map.get(sid)
+    if (name === undefined) {
+      // 陈旧/越权 id：降级为「未分类」，绝不让整次保存失败（见 normalizeSubjectId 注释）
+      this.logger.warn(`[timeline] 学科 id 不可用，降级为未分类：user=${userId} subject=${sid}`)
+      return { id: null, name: '' }
+    }
+    return { id: sid, name }
+  }
+
+  /** 只要外键值时的薄封装（update 等不需要学科名的地方用） */
   private async resolveSubjectId(
     userId: string,
     raw: unknown,
-    owned?: Set<string>,
+    owned?: Map<string, string>,
   ): Promise<string | null> {
-    const sid = normalizeSubjectId(raw)
-    if (!sid) return null
-    const set = owned ?? (await this.ownedSubjectIds(userId, [sid]))
-    if (!set.has(sid)) {
-      // 陈旧/越权 id：降级为「未分类」，绝不让整次保存失败（见 normalizeSubjectId 注释）
-      this.logger.warn(`[timeline] 学科 id 不可用，降级为未分类：user=${userId} subject=${sid}`)
-      return null
+    return (await this.resolveSubject(userId, raw, owned)).id
+  }
+
+  /**
+   * 标题命名（思傅 2026-11-03）：`科目 日期 第N题`，例如「数学 2026-11-03 第3题」。
+   *
+   * 序号 = 当天该学科（未分类单独一档）已有条目数 + 1。**软删的也计数**
+   * （不过滤 deleted_at），否则删掉一条再存一条就会撞号。
+   * `seqCache` 是同一请求内的分配器：批量入库的这几条此时都还没落库，
+   * 只能靠内存递增，否则一页卷子 20 题会全叫「第1题」。
+   */
+  private async nextTitle(
+    userId: string,
+    subjectId: string | null,
+    subjectName: string,
+    seqCache?: Map<string, number>,
+  ): Promise<string> {
+    const day = localDateString()
+    const key = `${day}|${subjectId || ''}`
+    let used = seqCache?.get(key)
+    if (used === undefined) {
+      used = await this.countItemsOn(userId, subjectId, day)
     }
-    return sid
+    const seq = used + 1
+    seqCache?.set(key, seq)
+    return `${subjectName || '未分类'} ${day} 第${seq}题`
+  }
+
+  /** 当天（东八区自然日）该用户该学科已落库条目数；含软删条目，理由见 nextTitle */
+  private async countItemsOn(
+    userId: string,
+    subjectId: string | null,
+    day: string,
+  ): Promise<number> {
+    try {
+      const client = getSupabaseClient()
+      const base = client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .gte('created_at', `${day}T00:00:00+08:00`)
+      const q = subjectId ? base.eq('subject_id', subjectId) : base.is('subject_id', null)
+      const { count, error } = await q
+      if (error) throw new Error(error.message)
+      return count || 0
+    } catch (e) {
+      // 数不出来就按 0 处理：宁可出现重号，也不能因为一个「好不好看」的问题把保存打回去
+      console.error('[timeline] 标题序号统计失败，按第 1 题处理:', e)
+      return 0
+    }
   }
 
   /** 组装单条插入 payload（create 与 createBatch 共用）；async：含 tmp/ 临时对象固化 */
   private async buildPayload(
     userId: string,
     dto: CreateTimelineDto,
-    ownedSubjects?: Set<string>,
+    ownedSubjects?: Map<string, string>,
+    seqCache?: Map<string, number>,
   ): Promise<Record<string, unknown>> {
+    // ⚠️ 绝不能直接写 dto.subject_id：空串会撞外键约束（见 normalizeSubjectId）
+    const subject = await this.resolveSubject(userId, dto.subject_id, ownedSubjects)
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
-      // ⚠️ 绝不能直接写 dto.subject_id：空串会撞外键约束（见 normalizeSubjectId）
-      subject_id: await this.resolveSubjectId(userId, dto.subject_id, ownedSubjects),
-      // ⚠️ 允许「只有图、没文字」的题目（思傅 2026-10-21：裁剪后不识别，只把图存入错题库）——
-      //    此时题干为空，title 兜底为「图片题目」，否则列表里是一条空白标题。
+      subject_id: subject.id,
+      // 标题口径（思傅 2026-11-03）：`科目 日期 第N题`，不再拿题干前 40 字当标题
+      // —— 同一张卷子十道题看起来全一样，列表里根本分不清。
+      // ⚠️ 图片条目（kind=image）保持「图片素材」：它是整页照片，不是某一道题。
       title: dto.title ?? (dto.kind === 'image'
         ? '图片素材'
-        : ((dto.content?.question || '').slice(0, 40)
-          || (((dto.content?.question_images || []).length || (dto.content?.answer_images || []).length) ? '图片题目' : ''))),
+        : await this.nextTitle(userId, subject.id, subject.name, seqCache)),
       source: dto.source ?? '',
       tags: dto.tags ?? [],
     }
@@ -499,8 +573,10 @@ export class TimelineService {
   async createBatch(userId: string, dtos: CreateTimelineDto[]): Promise<TimelineItem[]> {
     if (!Array.isArray(dtos) || !dtos.length) return []
     const client = getSupabaseClient()
-    // 学科归属一次性查好（整批共用），避免逐题跨境查询
-    const ownedSubjects = await this.ownedSubjectIds(userId, dtos.map((d) => d.subject_id))
+    // 学科归属一次性查好（整批共用），避免逐题跨境查询；也供标题命名取学科名
+    const ownedSubjects = await this.ownedSubjects(userId, dtos.map((d) => d.subject_id))
+    // 标题序号分配器（同一批内递增，见 nextTitle）
+    const seqCache = new Map<string, number>()
     const payloads: Record<string, unknown>[] = []
     for (const dto of dtos) {
       if (dto.kind !== 'image' && dto.kind !== 'question') {
@@ -520,7 +596,7 @@ export class TimelineService {
           || !!((c2.images || []).length)
         if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
-      payloads.push(await this.buildPayload(userId, dto, ownedSubjects))
+      payloads.push(await this.buildPayload(userId, dto, ownedSubjects, seqCache))
     }
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
