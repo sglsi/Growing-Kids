@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Portal } from '@/components/ui/portal';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { toast } from '@/components/ui/toast';
+import Taro from '@tarojs/taro';
 import { cn } from '@/lib/utils';
 import { IS_H5_ENV } from './env';
 
@@ -276,17 +276,11 @@ const H5ErrorOverlayHost = () => {
                           onClick={async () => {
                             const copied = await copyText(store.report);
                             if (copied) {
-                              toast.success('已复制错误信息', {
-                                description: '可发送给 Agent 进行自动修复',
-                                position: 'top-center',
-                              });
+                              Taro.showToast({ title: '已复制错误信息', icon: 'none', duration: 2000 });
                               return;
                             }
 
-                            toast.warning('复制失败', {
-                              description: '请直接选中文本后手动复制。',
-                              position: 'top-center',
-                            });
+                            Taro.showToast({ title: '复制失败，请手动选中复制', icon: 'none', duration: 2500 });
                           }}
                         >
                           <Copy size={15} color="inherit" />

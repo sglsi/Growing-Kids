@@ -2,8 +2,6 @@ import { PropsWithChildren, useEffect } from 'react';
 import { hooks } from '@tarojs/shared';
 import { LucideTaroProvider } from 'lucide-react-taro';
 import '@/app.css';
-import { Toaster } from '@/components/ui/toast';
-import PrivacyGate from '@/components/privacy-gate';
 import { ensureAuthToken } from '@/services/auth-bootstrap';
 import { ensureAiSetting } from '@/services/ai-settings';
 import { installAppRuntime } from '@/services/app-runtime';
@@ -57,15 +55,19 @@ const App = ({ children }: PropsWithChildren) => {
   return (
     <LucideTaroProvider defaultColor="#000" defaultSize={24}>
       <Preset>{children}</Preset>
-      <Toaster />
-      {/* 平台级隐私授权：微信端触发隐私接口时由基础库回调唤起，平时不渲染 */}
-      <PrivacyGate />
       {/*
-        ⚠️ 业务级隐私同意（PolicyConsent）**不能挂在这里**（思傅 2026-11-03 实测）：
+        ⚠️ 这里**只允许**放 App 自身的生命周期与 Provider，不要再往这层加 UI。
         Taro 4.1.9 的 AppWrapper 是 `h(App, props, elements)` —— App 渲染出来的
         **兄弟节点不会挂到页面上**（实测：这里加的 fixed 定位标记节点在 DOM 里根本不存在，
-        同样的标记放进 pages/index 就正常）。所以它挂在 App 根等于死代码。
-        现在挂在真正需要它的页面里：`pages/index/index.tsx`（首屏）。
+        同样的标记放进 pages/index 就正常）。挂在这里的 UI 一律是死代码。
+
+        已按此结论清理（2026-11-03）：
+        · `PolicyConsent`（业务级隐私同意）→ 移到 `pages/index/index.tsx` 首屏
+        · `PrivacyGate`（平台级隐私授权）→ 移入 `backup/unused-components/`，
+          原因：从未生效（`__usePrivacyCheck__` 默认关，基础库平时不回调），
+          真要用必须挂到页面内，做法参考 policy-consent
+        · `Toaster`（自绘轻提示）→ 移入 `backup/unused-components/`，全仓零业务调用；
+          提示一律用 `Taro.showToast`
       */}
     </LucideTaroProvider>
   );
