@@ -711,9 +711,7 @@ export default function IndexPage() {
               </View>
               <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goDocImport}>
                 <FileText size={14} color="#5C5750" />
-                {/* ⚠️ 不要叫「导入资料」：右边紧邻那颗就是「资料库」，
-                    而这颗动作是「从聊天选 PDF/Word 文件去识别提题」，叫试卷更准 */}
-                <Text className="block text-sm text-foreground">导入试卷</Text>
+                <Text className="block text-sm text-foreground">导入文档</Text>
               </View>
               <View className="flex-1 flex flex-row items-center justify-center gap-1 h-10 rounded-xl border border-border bg-background" onClick={goLibrary}>
                 <BookmarkPlus size={14} color="#5C5750" />
