@@ -1003,12 +1003,27 @@ node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean
 
 ### 6.3.2 多久跑一次
 
-索引是**快照**：网盘里新加的文件，不重跑就搜不到。建议每天一次（业务低峰）：
+索引是**快照**：网盘里新加的文件，不重跑就搜不到。**已装 systemd timer 每日一次**（04:23，排在 03:17 数据库备份、03:47 文件备份之后）：
 
-```cron
-# 每天 04:20 更新资料索引（按实际 uuid 替换）
-20 4 * * * cd /opt/gk/server && /usr/bin/node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean >> /var/log/gk-netdisk-index.log 2>&1
+```bash
+systemctl list-timers gk-netdisk-index.timer    # 看下次触发时间
+systemctl start gk-netdisk-index.service        # 立即跑一次（前台等它结束）
+journalctl -u gk-netdisk-index -n 80 --no-pager # 看上次结果
 ```
+
+单元定义（`/etc/systemd/system/gk-netdisk-index.{service,timer}`）：
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| 运行账号 | `gk`（`EnvironmentFile=/etc/gk/index.env` 提供 `NETDISK_INDEX_USER`） | 与备份服务同账号；鉴权文件 `.env*` 都是 `gk:gk` |
+| 预算 | `--budget-ms 5400000`（90 分钟）、`TimeoutStartSec=6000` | 🔴 **别按「一次跑多久」给预算**：BFS 每次都从根重来，预算给小了每次都停在同一个位置，**尾部目录永远索引不到**。实测 `/学生` 6000+ 目录需 30~40 分钟，必须留足余量 |
+| 清理 | `--full-clean` | 网盘里删掉的文件要能消失；脚本只在**完整遍历**后才删，被打断就不删（安全） |
+| 并发 | `--concurrency 4` | 个人号网盘约 10 QPS 上限，实测 4 并发 ≈ 5 目录/秒，别再往上加 |
+| 第二个 ExecStart | `library-index-text.mjs --apply` | 顺带把 `library_docs` 里 `text_status=pending` 的存量抽掉（幂等、只捞 pending） |
+
+⚠️ **定时任务与隐私政策是绑定的**：政策第四节写的是「每日一次同步目录与文件名」，停掉 timer 就等于书面承诺不兑现。真要停，必须同时改政策文案。
+
+脚本里 `--user` 仍是必填（`netdisk_files` 按 `user_id` 隔离）；多用户场景下每个账号各有一份物理网盘，timer 需要按人拆成多个 unit。
 
 ### 6.3.3 判据（搜不到东西时按这个顺序查）
 
@@ -1031,6 +1046,16 @@ curl -X POST https://<host>/api/library/index-text -H "X-Auth-Token: <token>" \
 ```
 
 返回 `{processed, ok, none, skipped, remaining}`。`force=true` 连已抽过的也重抽（换了解析器时用）。
+
+服务器上没有令牌时不要用 curl，直接跑脚本（与端点同一份实现，且能直连库与存储）：
+
+```bash
+cd /opt/gk/server && sudo -u gk node scripts/library-index-text.mjs --user <uuid> --apply [--force]
+```
+
+`gk-netdisk-index.timer` 每天已经顺带跑一次（不带 `--force`），存量通常不需要手工补。
+
+⚠️ 脚本开跑前会自检 `OCR_PYTHON`：缺了会 warn。**别忽略这个 warn**——抽正文失败分两类，环境类（`no-python`/`no-script`/`timeout`）保持 `pending` 可重试，内容类才记 `none`（永久判死）。曾经因为漏带 `OCR_PYTHON` 把 6 条正常 docx 洗成了 `none`。
 
 ---
 
