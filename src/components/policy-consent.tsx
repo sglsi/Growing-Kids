@@ -1,4 +1,4 @@
-import { View, Text, ScrollView } from '@tarojs/components'
+import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { POLICY_CONSENT_TEXT } from '@/constants/privacy-policy'
@@ -9,7 +9,7 @@ import {
 } from '@/services/policy-gate'
 
 /**
- * 《隐私政策》首屏同意闸门（OPS-18 `R-合规-03` 第 2 点：监护人同意流程）。
+ * 《隐私政策》首屏同意弹窗（OPS-18 `R-合规-03` 第 2 点：监护人同意流程）。
  *
  * 与 `components/privacy-gate.tsx` 的分工，别混：
  *  - `privacy-gate` = 微信**平台级**隐私授权（相册/摄像头），由基础库在调用隐私接口时
@@ -17,20 +17,27 @@ import {
  *  - `policy-consent`（本组件）= **业务级**隐私政策同意，管的是「我们有没有得到监护人
  *    对数据处理方式的同意」。两者都必要，互不替代。
  *
- * 交互取舍：不采用「不点同意就锁死」的强制拦截（会被平台判为强制授权），
- * 而是**每次启动提示 + 可继续浏览**；但涉及上传/写入的操作仍需先同意。
- * 数据主体是未成年人，因此文案写成监护人第一人称，并要求勾选而非默认勾选。
+ * 交互（思傅 2026-11-03 定，改成和主流应用一致）：
+ *  - 居中弹窗，**正文只放一段摘要**，不在这里铺政策全文；
+ *  - 下方给《用户协议》《隐私政策》两个链接，点开是独立整页，用户想读就读；
+ *  - 勾选框在文字前面，勾上点「同意并继续」即完成授权，**不要求先滚完/读完**；
+ *  - 仍不采用「不点同意就锁死」的强制拦截（会被平台判为强制授权）：
+ *    可以先「暂不同意」，浏览已有内容不受影响，但上传/写入前仍会再问一次。
+ *
+ * 数据主体是未成年人 ⇒ 勾选文案里保留了「我是该学习账号的监护人」这层意思。
  */
 export default function PolicyConsent() {
-  const [visible, setVisible] = useState(false)
+  // ⚠️ 初始值直接读存储，**不要**在 useEffect 里 setVisible(true)（思傅 2026-11-03 实测踩到）：
+  //    本组件挂在 App 根，effect 跑在页面根还没就绪的时刻，那一次 setState 会被丢掉
+  //    ⇒ 弹窗永远不出现（日志有、DOM 没有）。放进 useState 初始值就等于「首帧就画出来」，
+  //    不依赖任何后续更新。
+  const [visible, setVisible] = useState(() => !hasAgreedPolicy())
   const [checked, setChecked] = useState(false)
 
   /** 这次弹出是不是被写操作拦下来的（决定关掉后要不要提示「请重试刚才的操作」） */
   const forcedRef = useRef(false)
 
   useEffect(() => {
-    // 版本号变化后重新征求同意（政策更新是实质变更，不能沿用旧同意）
-    if (!hasAgreedPolicy()) setVisible(true)
     // GK-23-24：写操作被 guardPolicy 拦下时会唤起本层，用户点「去同意」才走到这里
     return onPolicyConsentRequest(() => {
       forcedRef.current = true
@@ -40,6 +47,10 @@ export default function PolicyConsent() {
   }, [])
 
   if (!visible) return null
+
+  const openAgreement = () => {
+    Taro.navigateTo({ url: '/pages/agreement/index' })
+  }
 
   const openPolicy = () => {
     Taro.navigateTo({ url: '/pages/privacy/index' })
@@ -69,46 +80,57 @@ export default function PolicyConsent() {
       Taro.showToast({ title: '未同意，本次操作已取消', icon: 'none', duration: 2500 })
       return
     }
-    Taro.showToast({ title: '可随时在「我的 → 隐私与账号」中同意', icon: 'none', duration: 2500 })
+    Taro.showToast({ title: '可先浏览，上传前会再问你一次', icon: 'none', duration: 2500 })
   }
 
   return (
-    <View className="fixed inset-0 z-[300] flex items-end bg-black bg-opacity-40">
-      <View className="w-full rounded-t-2xl bg-background px-4 pb-6 pt-4">
-        <Text className="block text-[16px] font-semibold text-foreground">开始前请确认</Text>
+    <View
+      className="fixed inset-0 z-[300] flex items-center justify-center px-6"
+      style={{ backgroundColor: 'rgba(0,0,0,0.45)' }}
+    >
+      <View className="w-full rounded-2xl bg-background px-5 pb-5 pt-5" style={{ maxWidth: 620 }}>
+        <Text className="block text-[16px] font-semibold text-foreground">隐私保护提示</Text>
 
-        <ScrollView scrollY className="mt-3 max-h-[36vh]">
-          <Text className="block text-[13px] leading-[21px] text-foreground">{POLICY_CONSENT_TEXT}</Text>
-          {/* ⚠️ Taro 4.1.9：Text 上绑 onClick 不生效（见 app.tsx 顶部遗留 bug 说明），
-              可点击元素一律用 View —— 否则「查看完整《隐私政策》」点了没反应。 */}
-          <View className="mt-2" onClick={openPolicy}>
-            <Text className="block text-[13px] leading-[21px] text-brand-text">查看完整《隐私政策》›</Text>
+        <Text className="mt-3 block text-[13px] leading-[21px] text-foreground">{POLICY_CONSENT_TEXT}</Text>
+
+        {/* 声明入口放在下部：点开是独立整页，读多细由用户自己决定 */}
+        <View className="mt-3 flex flex-row flex-wrap items-center">
+          <View onClick={openAgreement}>
+            <Text className="block text-[13px] leading-[22px] text-brand-text">《用户协议》</Text>
           </View>
-          <Text className="mt-3 block text-[12px] leading-[19px] text-muted-foreground">
-            要点：数据保存在云端（含境外区域）；检索与讲解会把题干发给第三方服务方；我们不会收集孩子的姓名、学校、位置；
-            可随时在「我的」中删除数据或注销账号。
-          </Text>
-        </ScrollView>
+          <Text className="block text-[13px] leading-[22px] text-muted-foreground"> 和 </Text>
+          <View onClick={openPolicy}>
+            <Text className="block text-[13px] leading-[22px] text-brand-text">《隐私政策》</Text>
+          </View>
+        </View>
 
-        <View className="mt-3 flex flex-row items-start gap-2" onClick={() => setChecked((v) => !v)}>
+        {/* 勾选框在文字前面（主流样式）；整行可点，别让人去瞄准那个小方块 */}
+        <View
+          className="mt-4 flex flex-row items-start gap-2"
+          onClick={() => setChecked((v) => !v)}
+        >
           <View
-            className={`mt-[2px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border ${
+            className={`mt-[3px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border ${
               checked ? 'border-brand bg-brand' : 'border-border bg-background'
             }`}
           >
             {checked ? <Text className="text-[12px] text-[color:var(--brand-foreground)]">✓</Text> : null}
           </View>
           <Text className="text-[12px] leading-[19px] text-foreground">
-            我已阅读并同意《隐私政策》，且我是该学习账号的监护人
+            我已阅读并同意《用户协议》与《隐私政策》（我是该学习账号的监护人）
           </Text>
         </View>
+
+        <Text className="mt-2 block text-[11px] leading-[18px] text-muted-foreground">
+          可随时在「我的 → 隐私与账号」中查看全文或撤回同意。
+        </Text>
 
         <View className="mt-4 flex flex-row gap-3">
           <View
             className="flex h-11 flex-1 items-center justify-center rounded-xl border border-border"
             onClick={later}
           >
-            <Text className="text-[14px] text-muted-foreground">稍后再说</Text>
+            <Text className="text-[14px] text-muted-foreground">暂不同意</Text>
           </View>
           <View
             className={`flex h-11 flex-[1.4] items-center justify-center rounded-xl ${checked ? 'bg-brand' : 'bg-muted'}`}

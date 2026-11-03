@@ -20,6 +20,7 @@ import {
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
+import PolicyConsent from '@/components/policy-consent'
 import { BUILD_META } from '@/build-meta'
 import { BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
@@ -624,6 +625,12 @@ export default function IndexPage() {
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
+      {/*
+        业务级隐私同意弹窗（思傅 2026-11-03）：必须挂在**页面**里，不能挂 App 根
+        —— Taro 4.1.9 不渲染 App 的兄弟节点（见 app.tsx 里的说明）。
+        首页是启动落地页，放这儿等于「首次进入就问一次」。
+      */}
+      <PolicyConsent />
       <QrLoginModal
         visible={qrVisible}
         onClose={() => setQrVisible(false)}

@@ -4,7 +4,6 @@ import { LucideTaroProvider } from 'lucide-react-taro';
 import '@/app.css';
 import { Toaster } from '@/components/ui/toast';
 import PrivacyGate from '@/components/privacy-gate';
-import PolicyConsent from '@/components/policy-consent';
 import { ensureAuthToken } from '@/services/auth-bootstrap';
 import { ensureAiSetting } from '@/services/ai-settings';
 import { installAppRuntime } from '@/services/app-runtime';
@@ -61,8 +60,13 @@ const App = ({ children }: PropsWithChildren) => {
       <Toaster />
       {/* 平台级隐私授权：微信端触发隐私接口时由基础库回调唤起，平时不渲染 */}
       <PrivacyGate />
-      {/* 业务级隐私政策同意（监护人）：政策版本变化会重新征求同意 */}
-      <PolicyConsent />
+      {/*
+        ⚠️ 业务级隐私同意（PolicyConsent）**不能挂在这里**（思傅 2026-11-03 实测）：
+        Taro 4.1.9 的 AppWrapper 是 `h(App, props, elements)` —— App 渲染出来的
+        **兄弟节点不会挂到页面上**（实测：这里加的 fixed 定位标记节点在 DOM 里根本不存在，
+        同样的标记放进 pages/index 就正常）。所以它挂在 App 根等于死代码。
+        现在挂在真正需要它的页面里：`pages/index/index.tsx`（首屏）。
+      */}
     </LucideTaroProvider>
   );
 };
