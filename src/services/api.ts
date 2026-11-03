@@ -1251,8 +1251,11 @@ export function searchSolution(question: string) {
 
 /** 联网搜答案的返回（与后端 answer-search.service 对齐） */
 export interface AnswerSearchResult {
-  /** search = 有真实网络来源；kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用 */
-  source: 'search' | 'kb' | 'llm' | 'none'
+  /**
+   * search = 联网检索到真实来源；netdisk = 命中百度网盘里的自有资料（先于 kb）；
+   * kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用
+   */
+  source: 'search' | 'netdisk' | 'kb' | 'llm' | 'none'
   /** 是否经过核实（检索类=true；纯模型推理=false） */
   verified: boolean
   answer: string

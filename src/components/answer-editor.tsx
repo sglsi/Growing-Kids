@@ -351,7 +351,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         solution: candidate.solution,
         attachments: atts,
         refs: candidate.refs,
-        source: candidate.source === 'search' || candidate.source === 'kb' ? 'search' : 'mixed',
+        // netdisk 命中自己网盘里的资料 ⇒ 记 library（与「从我的资料库插入」同源），
+        // 不要落到 mixed：mixed 是「检索+手工混合」的意思，会造成来源统计失真
+        source:
+          candidate.source === 'netdisk'
+            ? 'library'
+            : candidate.source === 'search' || candidate.source === 'kb'
+              ? 'search'
+              : 'mixed',
       })
       setText(candidate.answer)
       setCandidate(null)
@@ -492,7 +499,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
-        {/* 资料库搜题：只检索**你自己的** ima 知识库，不生成内容、不喂给 AI。
+        {/* 资料库搜题：先查**你自己的**百度网盘资料（文件名+正文两级），未命中再查 ima 知识库；
+            全程只检索、不生成内容、不喂给 AI。
             ⚠️ 不受 AI_PUBLIC_ENTRY 约束（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
             它跟「AI 解题」不是一回事，被一起收起属于误伤。 */}
         <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
@@ -534,9 +542,11 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND_TEXT }}>
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
-                : candidate.source === 'kb'
-                  ? `资料库检索结果（${candidate.refs.length} 条）`
-                  : candidate.source === 'llm'
+                : candidate.source === 'netdisk'
+                  ? `网盘资料检索结果（${candidate.refs.length} 份）`
+                  : candidate.source === 'kb'
+                    ? `资料库检索结果（${candidate.refs.length} 条）`
+                    : candidate.source === 'llm'
                     // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
                     // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写
                     // 「AI 推理结果」，未落到「生成内容」这一法定表述。
@@ -561,7 +571,11 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           {candidate.refs.length ? (
             <View className="mb-2">
               <Text className="block text-xs text-muted-foreground mb-1">
-                {candidate.source === 'kb' ? '相关知识库条目' : '参考来源（点击复制链接）'}
+                {candidate.source === 'kb'
+                  ? '相关知识库条目'
+                  : candidate.source === 'netdisk'
+                    ? '相关资料文件（网盘路径见上方）'
+                    : '参考来源（点击复制链接）'}
               </Text>
               {candidate.refs.map((r, i) => (
                 <View
