@@ -1077,9 +1077,29 @@ curl -X POST https://<host>/api/library/index-text -H "X-Auth-Token: <token>" \
 cd /opt/gk/server && sudo -u gk node scripts/library-index-text.mjs --user <uuid> --apply [--force]
 ```
 
-`gk-netdisk-index.timer` 每天已经顺带跑一次（不带 `--force`），存量通常不需要手工补。
+`gk-netdisk-index.timer` 每周已经顺带跑一次（不带 `--force`），存量通常不需要手工补。
 
 ⚠️ 脚本开跑前会自检 `OCR_PYTHON`：缺了会 warn。**别忽略这个 warn**——抽正文失败分两类，环境类（`no-python`/`no-script`/`timeout`）保持 `pending` 可重试，内容类才记 `none`（永久判死）。曾经因为漏带 `OCR_PYTHON` 把 6 条正常 docx 洗成了 `none`。
+
+### 6.3.5 改了 note 文案但用户还看到旧的？那是答案缓存
+
+`answer_cache` 把**整个 `AnswerSearchResult`**（含 `note` 这个字符串）按 `(user_id, q_hash, mode)` 永久存着，命中就原样返回。所以：
+
+> build 了、部署了、重启了，用户搜题仍显示旧文案 —— 十有八九是缓存命中，不是部署失败。
+
+2026-11-03 实际踩过：把 `来自百度网盘资料` 改成 `来自你的资料库`，前三步都做了，接口还返回旧串。
+
+**规矩**：改了 `note` 或 result 字段结构 ⇒ **bump `answer-search.service.ts` 里的 `CACHE_VERSION`**（它参与 `qHash`），旧缓存自然不再命中。只是换措辞、字段没变时，记住这条能省半小时排查。
+
+bump 之后旧行会变成孤儿（`q_hash` 不再被查询到），按需清掉：
+
+```sql
+-- 只清带旧文案的（保守），或按 created_at 清更早的
+delete from answer_cache
+ where mode = 'kb' and coalesce(result->>'note','') like '%百度网盘%';
+```
+
+代价：这些题下次会重新消耗一次 ima / 联网配额，清理范围别超过实际改动的模式（`search` / `kb` / `ai` 分开看）。
 
 ---
 

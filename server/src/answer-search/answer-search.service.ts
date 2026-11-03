@@ -32,6 +32,15 @@ import type { AnswerSearchResult, WebItem } from './answer-search.types'
  */
 
 const CACHE_PREFIX = 'ans:srch:'
+/**
+ * 缓存结构版本。**改了 note 这类用户可见文案、或改了 result 的字段结构，必须 bump**。
+ *
+ * 踩过（2026-11-03）：把 note 里「来自百度网盘资料」改成「来自你的资料库」，
+ * build + 部署 + 重启都做了，用户搜题却还显示旧文案——因为 `answer_cache`
+ * 把整个 result（含 note 字符串）按题干哈希永久存着，命中即原样返回。
+ * 版本参与 qHash ⇒ bump 一次，旧缓存自然不再命中（旧行成为孤儿，见 QA-16 §6.3.5）。
+ */
+const CACHE_VERSION = 'v2'
 const QUOTA_PREFIX = 'ans:q:'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
@@ -233,7 +242,8 @@ export class AnswerSearchService {
     // ③ 缓存（按题干内容哈希；⚠️ key 必须带 mode——检索结果与推理结果不能混用，
     //    否则先调过联网搜题再点 AI 解题，会拿到检索缓存冒充 AI 结果）
     //    两级：进程内存（24h，扛同一会话内的重复点击）→ 数据库（默认永久，扛重启与跨天）
-    const qHash = createHash('sha256').update(question).digest('hex').slice(0, 32)
+    // ⚠️ CACHE_VERSION 参与哈希：改文案/结果结构后 bump，旧的缓存自然失效（否则用户会继续看到旧文案）
+    const qHash = createHash('sha256').update(`${CACHE_VERSION}:${question}`).digest('hex').slice(0, 32)
     const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`
     if (!opts.force) {
       const cached = await cacheGet<AnswerSearchResult>(cacheKey)
