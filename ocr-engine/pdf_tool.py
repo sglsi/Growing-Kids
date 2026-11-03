@@ -52,14 +52,23 @@ def _render_scale(page, want_scale):
     return want_scale
 
 
-def extract_pdf(path, min_text, scale):
+def extract_pdf(path, min_text, scale, text_only=False, max_pages=0):
+    """抽 PDF。
+
+    text_only=True 时**只取文字层**，不渲染扫描页（image_base64 恒 None）：
+    网盘资料库检索只需要正文做关键词匹配，渲染成 base64 图会把一本书撑到几百 MB，
+    白白吃内存和 IPC 带宽。扫描页在 text_only 下直接记空文本，由上游按
+    text_status=none 标记「无文字层」。
+    """
     import pypdfium2 as pdfium
 
     # 空密码打开；加密 PDF 会抛异常，由调用方转成友好错误
     pdf = pdfium.PdfDocument(path)
     try:
         pages = []
-        for i in range(len(pdf)):
+        total = len(pdf)
+        limit = total if max_pages <= 0 else min(total, max_pages)
+        for i in range(limit):
             page = pdf[i]
             try:
                 text = ""
@@ -78,7 +87,7 @@ def extract_pdf(path, min_text, scale):
                     "width": int(page.get_width()),
                     "height": int(page.get_height()),
                 }
-                if len(text) < min_text:
+                if len(text) < min_text and not text_only:
                     # 无文字层 → 渲染整页交后端 OCR
                     bitmap = page.render(scale=_render_scale(page, scale))
                     image = bitmap.to_pil()
@@ -90,7 +99,7 @@ def extract_pdf(path, min_text, scale):
                 pages.append(entry)
             finally:
                 page.close()
-        return {"page_count": len(pdf), "pages": pages}
+        return {"page_count": total, "extracted_pages": limit, "pages": pages}
     finally:
         pdf.close()
 
@@ -141,6 +150,10 @@ def main():
     ap.add_argument("--min-text", type=int, default=DEFAULT_MIN_TEXT,
                     help="单页文字少于此值视为扫描页（渲染交 OCR）")
     ap.add_argument("--scale", type=float, default=DEFAULT_SCALE, help="扫描页渲染倍率")
+    ap.add_argument("--text-only", action="store_true",
+                    help="只抽文字层，不渲染扫描页（网盘资料库检索用，省内存）")
+    ap.add_argument("--max-pages", type=int, default=0,
+                    help="最多处理前 N 页（0=全部）；整本书抽正文时用来兜住极端大文件")
     args = ap.parse_args()
 
     if not os.path.isfile(args.file):
@@ -148,7 +161,7 @@ def main():
         sys.exit(2)
     try:
         if args.kind == "pdf":
-            out = extract_pdf(args.file, args.min_text, args.scale)
+            out = extract_pdf(args.file, args.min_text, args.scale, args.text_only, args.max_pages)
         else:
             out = extract_docx(args.file)
         _emit(out)

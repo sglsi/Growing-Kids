@@ -112,11 +112,24 @@ export interface PdfToolResult {
 export interface PdfToolOpts {
   kind: 'pdf' | 'docx'
   /** 云端 URL（http/https）——下载到临时文件后提取 */
-  url: string
+  url?: string
+  /**
+   * 直接给二进制（网盘检索用：内容已经在内存里，再走 URL 下载是白跑一趟）。
+   * 与 url 二选一，content 优先。
+   */
+  content?: Buffer
   /** 单页文字少于此值视为扫描页（渲染交 OCR），默认 20 */
   minText?: number
   /** 扫描页渲染倍率，默认 2.0 */
   scale?: number
+  /**
+   * 只抽文字层、不渲染扫描页（网盘资料库检索）。
+   * ⚠️ 开了它扫描页会静默返回空文本——调用方必须用 page_count 与
+   * 「非空页数」判断这本是不是扫描版，别把「抽不到」当成「书是空的」。
+   */
+  textOnly?: boolean
+  /** 最多处理前 N 页（0=全部）；整本书抽正文时兜住极端大文件 */
+  maxPages?: number
   /** 硬超时（毫秒），默认 120s：pypdfium2 纯 CPU，百页 PDF 一般 <10s */
   timeoutMs?: number
 }
@@ -159,7 +172,20 @@ export function extractDocContent(opts: PdfToolOpts): Promise<PdfToolOutcome> {
     }, timeoutMs)
 
     let child: ReturnType<typeof spawn>
-    downloadToTemp(opts.url, ext)
+    // content 模式：先把二进制落到临时文件（脚本只吃路径）；两种模式都在 done 里删
+    const prepare = opts.content
+      ? Promise.resolve(
+          (() => {
+            const tmp = path.join(
+              os.tmpdir(),
+              `gk-doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`,
+            )
+            fs.writeFileSync(tmp, opts.content as Buffer)
+            return tmp
+          })(),
+        )
+      : downloadToTemp(opts.url as string, ext)
+    prepare
       .then((file) => {
         tmpFile = file
         const args = [
@@ -169,6 +195,8 @@ export function extractDocContent(opts: PdfToolOpts): Promise<PdfToolOutcome> {
           '--min-text', String(opts.minText ?? 20),
           '--scale', String(opts.scale ?? 2.0),
         ]
+        if (opts.textOnly) args.push('--text-only')
+        if (opts.maxPages && opts.maxPages > 0) args.push('--max-pages', String(opts.maxPages))
         child = spawn(toGuiPython(python), args, {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,

@@ -22,6 +22,7 @@ import { PdfModule } from './pdf/pdf.module'
 import { OcrModule } from './ocr/ocr.module'
 import { SearchModule } from './search/search.module'
 import { AnswerSearchModule } from './answer-search/answer-search.module'
+import { NetdiskModule } from './netdisk/netdisk.module'
 import { MaintenanceModule } from './maintenance/maintenance.module'
 import { QuotaModule } from './quota/quota.module'
 import { MemoryModule } from './memory/memory.module'
@@ -50,6 +51,7 @@ import { JobsModule } from './jobs/jobs.module'
     OcrModule,
     SearchModule,
     AnswerSearchModule, // 题目答案：联网搜索为主 + 大模型兜底
+    NetdiskModule, // 百度网盘资料检索（「资料库搜题」第一顺位）
     MaintenanceModule,
     QuotaModule, // 策略 6：配额
     MemoryModule, // 成长记忆

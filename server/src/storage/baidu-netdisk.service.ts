@@ -131,17 +131,79 @@ export class BaiduNetdiskService {
     return (await res.json().catch(() => ({ errno: -1, errmsg: '响应非 JSON' }))) as Json
   }
 
-  /** 列目录（返回原始条目：server_filename / fs_id / isdir / size） */
-  async list(dir: string): Promise<Json[]> {
+  /**
+   * 列目录（返回原始条目：server_filename / fs_id / isdir / size / server_mtime）。
+   *
+   * @param limit 单页条数，网盘上限 1000；目录文件特别多时要配合 start 分页
+   * @param start 起始偏移（分页用）
+   */
+  async list(dir: string, limit = 1000, start = 0): Promise<Json[]> {
     if (!this.enabled()) return []
     return this.call(async (token) => {
       const res = await fetch(
-        `${PAN_FILE}?method=list&access_token=${token}&dir=${encodeURIComponent(dir)}`,
+        `${PAN_FILE}?method=list&access_token=${token}&dir=${encodeURIComponent(dir)}` +
+          `&limit=${limit}&start=${start}&order=name`,
         { signal: AbortSignal.timeout(REQ_TIMEOUT_MS) },
       )
       const json = (await res.json().catch(() => ({ errno: -1 }))) as Json
       return { value: Number(json.errno) === 0 ? ((json.list || []) as Json[]) : [], errno: Number(json.errno || 0) }
     })
+  }
+
+  /**
+   * 网盘原生搜索（`method=search`，思傅 2026-11-03 需求的技术前提）。
+   *
+   * ⚠️ 实测口径（2026-11-03 在 /学生 上验过）：
+   *  - 只匹配**文件名与路径**，不索引正文 —— 「搜正文」必须自己下载后抽文本；
+   *  - `dir` + `recursion=1` 是在该目录下递归找，跨目录时 dir 给 '/' 最省事；
+   *  - 返回项含 path / fs_id / size / isdir / server_mtime，可直接落索引表。
+   *
+   * @param key   关键词（中文可）
+   * @param dir   起始目录，默认根
+   * @param limit 返回条数上限
+   */
+  async search(key: string, dir = '/', limit = 100): Promise<Json[]> {
+    if (!this.enabled()) return []
+    return this.call(async (token) => {
+      const res = await fetch(
+        `${PAN_FILE}?method=search&access_token=${token}&key=${encodeURIComponent(key)}` +
+          `&dir=${encodeURIComponent(dir)}&recursion=1&limit=${limit}`,
+        { signal: AbortSignal.timeout(REQ_TIMEOUT_MS) },
+      )
+      const json = (await res.json().catch(() => ({ errno: -1 }))) as Json
+      // errno=0 且 list 为空 = 真的没搜到，属正常结果，不是错误
+      return { value: Number(json.errno) === 0 ? ((json.list || []) as Json[]) : [], errno: Number(json.errno || 0) }
+    })
+  }
+
+  /**
+   * 按 fs_id 下载内容（比按路径快一步：省掉 list 找 fs_id）。
+   * 失败返回 null，调用方按「抽不到正文」降级处理。
+   */
+  async downloadByFsId(fsId: number | string): Promise<Buffer | null> {
+    if (!this.enabled()) return null
+    try {
+      return await this.call(async (token) => {
+        const meta = await fetch(
+          `${PAN_MULTIMEDIA}?method=filemetas&access_token=${token}&dlink=1&fsids=${JSON.stringify([Number(fsId)])}`,
+          { signal: AbortSignal.timeout(REQ_TIMEOUT_MS) },
+        )
+        const mj = (await meta.json().catch(() => ({ errno: -1 }))) as Json
+        const dlink = mj?.list?.[0]?.dlink
+        if (!dlink) return { value: null, errno: Number(mj.errno || 0) }
+
+        // ⚠️ 必须带 UA：pan.baidu.com，否则下载被拒
+        const res = await fetch(`${dlink}&access_token=${token}`, {
+          headers: { 'User-Agent': 'pan.baidu.com' },
+          signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+        })
+        if (!res.ok) return { value: null, errno: -1 }
+        return { value: Buffer.from(await res.arrayBuffer()), errno: 0 }
+      })
+    } catch (e) {
+      console.error('[baidu-netdisk] 按 fs_id 下载失败', fsId, e)
+      return null
+    }
   }
 
   /** 建目录（已存在则跳过；不存在时逐级创建） */

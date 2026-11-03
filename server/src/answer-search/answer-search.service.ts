@@ -7,6 +7,7 @@ import { TimelineService } from '../timeline/timeline.service'
 import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
 import { ImaKnowledgeProvider } from './ima-provider'
+import { NetdiskSearchService } from '../netdisk/netdisk-search.service'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -73,6 +74,7 @@ export class AnswerSearchService {
   constructor(
     private readonly timelineService: TimelineService,
     private readonly ocrService: OcrService,
+    private readonly netdiskSearch: NetdiskSearchService,
   ) {}
 
   /** 延迟初始化：无 key 时构造不报错，调用时才抛（与 SearchService 一致） */
@@ -273,6 +275,32 @@ export class AnswerSearchService {
             note: 'AI 解题失败：请检查模型 Key（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_TOKEN 混元）后重试',
           }
     } else if (mode === 'kb') {
+      // ---------- 资料库检索：**先百度网盘，再 ima**（思傅 2026-11-03 定） ----------
+      // 顺序理由：网盘里是自己攒的教辅真题（题源本身），比自建知识库更可能直接命中
+      // 「这道题出自哪份卷子」；而且网盘检索不吃 ima 的日配额（ima 按调用计数，零命中也扣）。
+      // 网盘未配置/未命中时原样落到 ima，绝不因为网盘不可用就让「资料库搜题」整体失灵。
+      const disk = await this.netdiskSearch
+        .search(userId, question)
+        .catch((e) => {
+          this.logger.warn(`[answer-search] 网盘检索异常: ${e instanceof Error ? e.message : e}`)
+          return null
+        })
+
+      if (disk && disk.hits.length > 0) {
+        const top = disk.hits[0]
+        const lines = disk.hits.slice(0, 5).map((h, i) =>
+          `${i + 1}. ${h.name}（${h.hit === 'content' ? '正文命中' : '文件名命中'} ${Math.round(h.score * 100)}%）\n   路径：${h.path}`,
+        )
+        result = {
+          source: 'netdisk',
+          verified: true,
+          answer: (top.snippet || `${top.name}\n路径：${top.path}`).slice(0, 500),
+          solution: lines.join('\n'),
+          refs: disk.hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
+          confidence: Number((top.score || 0).toFixed(2)),
+          note: `来自百度网盘资料（${disk.note}），请打开文件核对后再采纳`,
+        }
+      } else {
       // ---------- 知识库检索：只查 ima 知识库，不喂给 AI ----------
       const ima = new ImaKnowledgeProvider()
       if (!ima.available()) {
@@ -314,6 +342,11 @@ export class AnswerSearchService {
                 ? `资料库检索失败（${kbErr.slice(0, 80)}），请稍后重试`
                 : '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
           }
+        }
+      }
+        // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过网盘
+        if (result.source === 'none' && disk && disk.keys.length > 0) {
+          result.note = `${result.note || ''}（网盘按「${disk.keys.join(' / ')}」也没搜到）`
         }
       }
     } else {
