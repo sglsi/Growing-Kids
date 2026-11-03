@@ -294,10 +294,16 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 知识库   = 只检索 ima 知识库（秒级），直接给命中条目+高亮内容，不喂给 AI
   // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
   const handleSearch = async (searchMode: 'search' | 'kb' | 'ai') => {
-    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '知识库检索' : 'AI 解题'
-    // R-合规-02：三条通道都往外部发内容。未开启时后端会 403 AI_DISABLED，
+    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '资料库检索' : 'AI 解题'
+    // R-合规-02：联网搜题 / AI 解题都往外部发内容，未开启时后端会 403 AI_DISABLED，
     // 这里先拦一次是为了给出「去哪开」的提示，而不是让用户撞一个看不懂的报错。
-    if (!(await ensureAiSetting())) {
+    //
+    // ⚠️ kb（资料库检索）**不受 AI 开关约束**（思傅 2026-11-03）：它只去用户自己的
+    //    ima 知识库找，不做 AI 生成，被「AI 与在线检索」连坐是误伤。但题干确实会
+    //    发到腾讯 ima ⇒ 仍需监护人已同意隐私政策（guardPolicy 兜这道）。
+    if (searchMode === 'kb') {
+      if (!(await guardPolicy('检索我的资料库'))) return
+    } else if (!(await ensureAiSetting())) {
       Taro.showToast({ title: AI_DISABLED_HINT, icon: 'none' })
       return
     }
@@ -486,7 +492,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
-        {/* 联网搜题 / 知识库 / AI 解题：三条通道都往外部发内容，属 AI 服务。
+        {/* 资料库搜题：只检索**你自己的** ima 知识库，不生成内容、不喂给 AI。
+            ⚠️ 不受 AI_PUBLIC_ENTRY 约束（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
+            它跟「AI 解题」不是一回事，被一起收起属于误伤。 */}
+        <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
+          <BookOpen size={12} color={INK} />
+          <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '资料库搜题'}</Text>
+        </View>
+        {/* 联网搜题 / AI 解题：这两条确实往外部发内容且含 AI 生成，
             个人主体不开放（见 constants/app-info.ts），此处直接不渲染入口。 */}
         {AI_PUBLIC_ENTRY && (
           <>
@@ -494,11 +507,6 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
               <Globe size={12} color={INK} />
               <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
-            </View>
-            {/* 知识库：只检索 ima 知识库（秒级），不喂给 AI */}
-            <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
-              <BookOpen size={12} color={INK} />
-              <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '知识库'}</Text>
             </View>
             {/* AI 解题：只做模型推理，不检索 */}
             <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
@@ -527,7 +535,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
                 : candidate.source === 'kb'
-                  ? `知识库检索结果（${candidate.refs.length} 条）`
+                  ? `资料库检索结果（${candidate.refs.length} 条）`
                   : candidate.source === 'llm'
                     // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
                     // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写

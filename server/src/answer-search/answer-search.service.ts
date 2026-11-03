@@ -306,11 +306,13 @@ export class AnswerSearchService {
           const quotaHit = /220021|已达上限/.test(kbErr)
           result = {
             source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
+            // ⚠️ 不要把「改试联网搜题 / AI 解题」写进提示：个人主体下那两个入口
+            //    根本不渲染（AI_PUBLIC_ENTRY=false），指着不存在的按钮让人去点＝坏体验。
             note: quotaHit
-              ? '知识库今日调用次数已达上限，请明天再试；可改试「联网搜题」或「AI 解题」'
+              ? '资料库今日检索次数已达上限，请明天再试'
               : kbErr
-                ? `知识库检索失败（${kbErr.slice(0, 80)}），可改试「联网搜题」或「AI 解题」`
-                : '知识库中未找到该题的相关内容，可改试「联网搜题」或「AI 解题」',
+                ? `资料库检索失败（${kbErr.slice(0, 80)}），请稍后重试`
+                : '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
           }
         }
       }

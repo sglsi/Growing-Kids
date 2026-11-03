@@ -1,5 +1,5 @@
 import { Controller, Post, Body, Param, Req, HttpCode } from '@nestjs/common'
-import { requireAiEnabled, type RequestWithUser } from '../shared/user-context'
+import { requireAiEnabled, requireUserId, type RequestWithUser } from '../shared/user-context'
 import { AnswerSearchService } from './answer-search.service'
 
 @Controller('answer-search')
@@ -24,11 +24,16 @@ export class AnswerSearchController {
     @Param('id') id: string,
     @Body() body: { force?: boolean; mode?: 'search' | 'ai' | 'kb' } = {},
   ) {
-    // R-合规-02：三条通道（search 联网检索 / kb ima / ai 大模型）**全部是外发**，
-    // 未开启 AI 外发时一律 403 AI_DISABLED。仅本地模式下滑题功能整体不可用，
-    // 这是有意的：本地题库能兜住的用它兜，兜不住的宁可不给答案，也不偷偷发出去。
-    const userId = requireAiEnabled(req)
+    // R-合规-02：联网检索（search）与大模型解题（ai）**都是外发**，未开启 AI 外发时
+    // 一律 403 AI_DISABLED；仅本地模式下滑题功能整体不可用，这是有意的：本地题库能
+    // 兜住的用它兜，兜不住的宁可不给答案，也不偷偷发出去。
+    //
+    // ⚠️ kb（知识库）**单独放行**（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
+    //    它只检索用户自己的 ima 知识库、不做任何 AI 生成，属于「去自己的资料里找」，
+    //    既不是深度合成类服务，也不该被「AI 与在线检索」开关连坐。
+    //    代价是这一路不受开关约束 ⇒ 隐私政策里已单独写明：只在你点击时才发送题干。
     const mode = body?.mode === 'ai' ? 'ai' : body?.mode === 'kb' ? 'kb' : 'search'
+    const userId = mode === 'kb' ? requireUserId(req) : requireAiEnabled(req)
     const data = await this.answerSearchService.searchAnswer(userId, id, {
       force: !!body?.force,
       mode,

@@ -31,10 +31,24 @@ m.test('🔴 AI 关闭时 chat/message 必须 403（内容不得出机器）', a
   c.ok(body.includes('AI_DISABLED') || body.includes('未开启'), `错误码不含 AI_DISABLED：${body.slice(0, 200)}`)
 })
 
-m.test('🔴 AI 关闭时 answer-search 必须 403', async (c) => {
+m.test('🔴 AI 关闭时 answer-search（search/ai 通道）必须 403', async (c) => {
   const id = await c.ident('main')
   const res = await c.api('POST', '/answer-search/x', { token: id.token, body: {}, timeout: 60000 })
   c.status(res, [403, 404, 400], 'AI 关闭时搜题被放行')
+})
+
+// 2026-11-03：kb 通道单独放行。它只查用户自己的 ima 知识库、不做 AI 生成，
+// 个人主体下被「AI 与在线检索」连坐会导致「从我的资料库搜答案」整块消失。
+// ⚠️ 用不存在的题目 id：service 在闸门之后立刻返回「题目不存在」，
+//    这样既证明闸门没拦、又不消耗 ima 的日配额。
+m.test('AI 关闭时 answer-search 的 kb 通道必须放行（不是 AI 生成）', async (c) => {
+  const id = await c.ident('main')
+  await c.api('PUT', '/settings/ai', { token: id.token, body: { enabled: false } })
+  const res = await c.api('POST', '/answer-search/not-exist-id', {
+    token: id.token, body: { mode: 'kb' }, timeout: 60000,
+  })
+  c.status(res, 200, 'kb（资料库检索）被 AI 闸门拦了')
+  c.eq(res.json?.data?.source, 'none', '不存在的题目竟然返回了检索结果')
 })
 
 m.test('🔴 AI 关闭时 search/solve 必须 403', async (c) => {
