@@ -18,7 +18,7 @@
 | 按钮 | `mode` | 做什么 | **不做什么** | 结果标注 |
 |---|---|---|---|---|
 | 联网搜题 | `search` | 只检索，原样返回找到的内容 | 不喂 AI、不编造 | 附来源链接，`verified = true` |
-| 知识库 | `kb` | 只检索 ima 知识库 | 不推理 | 附文档来源（无外链），`verified = true` |
+| 资料库搜题 | `kb` | 只检索**自有资料**：先百度网盘（文件名 → 正文两级），未命中再 ima 知识库 | 不推理 | 附文件路径 / 知识库条目（均无外链），`verified = true` |
 | AI 解题 | `ai` | 只推理 | 不联网核实 | 🔴 **`verified = false`，标注「AI 推理结果，未联网核实，请自行判断」** |
 
 **无结果时如实说明，绝不用其它模式的结果顶替。** 三模式**互不兜底**——任一模式失败只返回 `source='none'` + 引导文案，由用户手动换按钮。
@@ -40,15 +40,15 @@ body: { force?: boolean, mode?: 'search' | 'ai' | 'kb' }
 
 ### 3.2 返回结构（`AnswerSearchResult`）
 
-| 字段 | search | kb | ai |
-|---|---|---|---|
-| `source` | `'search'` | `'kb'` | `'llm'` |
-| `verified` | `true` | `true` | 🔴 **`false`** |
-| `refs` | `items.filter(i => i.url).slice(0,5)`，**必须有 url** | `items.slice(0,5)`，`url` 恒为 `''` | 恒 `[]` |
-| `confidence` | 相关性即可用性门槛 | 仅展示，无门槛 | 恒 `0` |
-| `answer` | top 条目 summary/snippet 截断 500 字 | 同左 | 解析出的 `answer_content` |
-| `solution` | 前 3 条 `title：摘要(200字)` 拼接 | 同左 | 解析出的 `solution` |
-| `note` | 「来自网络检索（未做 AI 整理），请核对后采纳」 | 「来自 ima 知识库（未做 AI 整理），请核对后采纳」 | 「AI 推理结果，未联网核实，请自行判断」 |
+| 字段 | search | **netdisk（kb 第一顺位）** | kb（ima 兜底） | ai |
+|---|---|---|---|---|
+| `source` | `'search'` | `'netdisk'` | `'kb'` | `'llm'` |
+| `verified` | `true` | `true` | `true` | 🔴 **`false`** |
+| `refs` | `items.filter(i => i.url).slice(0,5)`，**必须有 url** | `hits.slice(0,5)`，`url` 恒为 `''`（网盘无直链） | `items.slice(0,5)`，`url` 恒为 `''` | 恒 `[]` |
+| `confidence` | 相关性即可用性门槛 | top 候选覆盖度 | 仅展示，无门槛 | 恒 `0` |
+| `answer` | top 条目 summary/snippet 截断 500 字 | top 候选的正文片段（`snippet`）截断 500 字 | 同左 | 解析出的 `answer_content` |
+| `solution` | 前 3 条 `title：摘要(200字)` 拼接 | 前 5 条 `序号. 文件名（命中方式 N%）\n   路径：…` | 前 3 条 `title：摘要(200字)` 拼接 | 解析出的 `solution` |
+| `note` | 「来自网络检索（未做 AI 整理），请核对后采纳」 | 「来自百度网盘资料（…），请打开文件核对后再采纳」 | 「来自 ima 知识库（未做 AI 整理），请核对后采纳」 | 「AI 推理结果，未联网核实，请自行判断」 |
 
 失败时统一 `source = 'none'` + `note`（文案见 §9.3）。
 
@@ -81,9 +81,29 @@ const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`           // CACHE_PREFIX = '
 
 ---
 
-## 5. `mode=kb`（ima 知识库）
+## 5. `mode=kb`（自有资料：先百度网盘，后 ima 知识库）
 
 > 本模块技术含量最高，改检索策略前必读 §5.3 三条红线。
+
+### 5.0 第一顺位：百度网盘资料（`netdisk-search.service.ts`，2026-11-03 新增）
+
+顺序理由：网盘里是自己攒的教辅真题（**题源本身**），比自建知识库更可能直接命中「这道题出自哪份卷子」；而且网盘检索不吃 ima 的日配额（ima 按调用计数，零命中也扣）。网盘未配置 / 未命中 / 异常时**原样落到 ima**，绝不因网盘不可用让「资料库搜题」整体失灵。
+
+**两级检索（关键设计，不要改回全量索引）**：
+
+| 级 | 做法 | 代价 |
+|---|---|---|
+| L1 文件名/路径 | 网盘原生 `method=search`（`recursion=1`），按题干 bigram 提词，最多 `MAX_KEYS` 个 key，每 key 取 `KEY_LIMIT` 条 | 秒级，零下载 |
+| L2 正文 | 只对 L1 排名靠前的 `L1_POOL` 个候选下载 + `pdf_tool.py --text-only` 抽文字层，做题干匹配 | 单份 1~3s；抽过的正文落 `netdisk_files.text_content`，再查直接命中 |
+
+🔴 **不做全量正文索引**：实测 `/学生` 采样 120 次目录列举即见 1318 文件 / 252GB，PDF 623 份且大量扫描版；按 26s/页 OCR 全量不可行。所以 `netdisk_files` 是**缓存**不是镜像。
+
+其他口径：
+- L1 结果会 `upsert` 进 `netdisk_files`（只元数据），下次同名检索先查本地 → 候选池更稳定；本地命中数与网盘命中数都进排序信号。
+- 中文匹配用 bigram 覆盖率，不用分词（未装 zhparser）。
+- 单次检索有总时限与请求数上限；超时按「已拿到的候选」返回，不报错。
+- ⚠️ **已知限制**：网盘 `method=search` 每次返回的候选子集不完全稳定，同一题连续搜可能出现排序抖动。缓解靠 24h 结果缓存（`answer_cache`，key 带 `mode`）；命中内容本身始终相关，不要把「排序不完全一致」当成故障排查。
+- 隐私：这是**读取用户自有网盘**，已写入隐私政策 r5（见 `docs/legal/隐私政策.md`），前端点击前过 `guardPolicy('检索我的资料库')`。
 
 ### 5.1 认证与响应
 

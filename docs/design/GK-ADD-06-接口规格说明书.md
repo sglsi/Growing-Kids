@@ -211,6 +211,17 @@
 | POST | `/api/answer-search/:id` | 为题目搜答案，**不写库**（前端「采纳」才落库） | path `id`；**body** `{force?: boolean, mode?: 'search'\|'ai'\|'kb'}`（默认 search） | 需 |
 
 > ⚠️ `mode` 是 **body 参数**，写在 query 上会静默走默认 `search`（联网搜题约 70s）。出参含 `cached` 标记（命中持久化缓存）。
+>
+> `mode=kb`（「资料库搜题」）**先查百度网盘资料、未命中再查 ima 知识库**，只做检索不生成；`kb` 走 `requireUserId()`，不受 `users.ai_enabled` 约束（`search`/`ai` 才受）。出参 `source` 取值 `search | netdisk | kb | llm | none`，`refs[].url` 在 `netdisk` 下为空串（网盘文件没有直链）。
+
+### 5.10.1 netdisk（排障直连端点）
+
+| 方法 | 路径 | 用途 | 入参 | 身份 |
+|---|---|---|---|---|
+| GET | `/api/netdisk/search` | 直连网盘资料检索，看提词/候选/命中方式，用于排障 | query `q`（题干，空 → 400）、`deep`（`0` 只做文件名级，默认做正文级） | 需 |
+| GET | `/api/netdisk/stats` | 本地正文缓存条数统计 | — | 需 |
+
+> 「资料库搜题」实际由 `answer-search` 内部调用，**不经过这两个端点**。检索分两级：L1 用网盘原生 `method=search` 按题干 bigram 提词筛文件名/路径；L2 只对 L1 前若干候选下载并抽正文比对（PDF/DOCX 走 `pdf_tool.py --text-only`），抽过的正文落 `netdisk_files` 缓存，下次直接命中。
 
 ### 5.11 quota / storage
 

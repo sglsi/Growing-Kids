@@ -113,6 +113,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | 15 | `materials` | v3 素材表 | **空转** | 无（前端不调用） |
 | 16 | `knowledge_articles` | AI 对话知识库（**全局表**，内容进 system prompt，后台维护） | **活跃**（全局） | 后台（走 `requireAdmin`），读：`chat.service.ts` `getActiveArticles()` |
 | 17 | `health_check` | 运维探针（历史遗留） | **废弃** | 无 |
+| 18 | `netdisk_files` | 百度网盘资料索引（元数据 + 按需抽取的正文缓存，0022） | 活跃 | `netdisk-search.service.ts` |
 
 ---
 
@@ -254,6 +255,15 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 - `knowledge_articles`：`id` / `title` / `content` / `category` / `tags text[]` / `is_active` / `sort_order` / `created_at` / `updated_at`。**活跃全局表**（⚠️ 不是废弃表，见 2.3 节订正），写操作走 `requireAdmin()`。
 - `health_check`：`id serial PK` / `updated_at`。**废弃**，业务代码零 `.from()` 调用。
+
+### 4.16 netdisk_files（活跃 · 0022）
+
+- 字段：`id` / `user_id`（varchar(36) FK → users，`on delete cascade`）/ `fs_id bigint` / `path` / `dir_path` / `name` / `ext varchar(12)` / `is_dir` / `size_bytes bigint` / `mtime` / `text_content text` / `text_status varchar(16)` / `text_updated_at` / `synced_at` / `created_at`。
+- 唯一键：`(user_id, fs_id)` —— 目录列举可重复执行，靠它 upsert。
+- `text_status`：`pending`（未抽）/ `ok`（已抽）/ `none`（无文字层，扫描版）/ `skipped`（类型不支持，mp4/rar/zip）/ `too_big`（超抽取上限）。
+- ⚠️ **这不是全量索引**。实测 `/学生` 采样即见 1318 文件 / 252GB，全量正文不可行（扫描版 PDF 按 26s/页 OCR）。本表只沉淀「搜过的候选」与「抽过的正文」，是**缓存**而非镜像：换账号或清表只会让下次检索变慢，不影响功能。
+- ⚠️ 故意不建 GIN/tsvector：PG 默认分词对中文无效、未装 zhparser。正文匹配走 `ilike`，且只在「文件名已命中的少量候选」里做，不全表扫。
+- 检索口径：L1 = 网盘原生 `method=search`（按题干 bigram 提词，命中文件名/路径）；L2 = 对 L1 前若干候选下载抽正文（`pdf_tool.py --text-only`）比对，结果落 `text_content`。
 
 ---
 
