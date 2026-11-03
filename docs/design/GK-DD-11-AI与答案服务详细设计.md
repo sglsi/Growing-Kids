@@ -94,12 +94,14 @@ const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`           // CACHE_PREFIX = '
 
 | 步 | 做什么 | 代价 |
 |---|---|---|
-| ① 建索引 | `node scripts/netdisk-index.mjs --user <uuid> --apply` 递归列 `/学生`，只落文件名/路径/大小到 `netdisk_files`（**不下载任何文件**）；生产已装 `gk-netdisk-index.timer` **每日 04:23 自动跑** | 实测 **12501 个目录 / 65835 个文件 / 1415 秒**（4 并发、26 分钟），可增量重跑 |
+| ① 建索引 | `node scripts/netdisk-index.mjs --user <uuid> --apply` 递归列 `/学生`，只落文件名/路径/大小到 `netdisk_files`（**不下载任何文件**）；生产已装 `gk-netdisk-index.timer` **每周日 04:23 自动跑** | **首次/全量 12511 个目录 / 65890 个文件 / 1510 秒**；日常走**增量**（按目录 mtime 剪枝），稳定期「根 1 次请求 + 少数变化子树」，秒级 |
 | ② 检索 | 只查 `netdisk_files`：`name ilike` OR `path ilike` 粗筛 → 内存按「命中几个检索词 → bigram 覆盖度 → 名字长度」排序 | **实测 0.5 秒**（6.5 万行、命中 8 条；冷启动首查 1.7s），结果稳定，网盘抽风也能用 |
 | ③ 读正文 | 仅对排名靠前 `NETDISK_DEEP_FILES`（默认 3）份按 `fs_id` 下载 + `pdf_tool.py --text-only` 抽文字层 | 单份 1~3s（deep=1 首查约 3.2s，抽过的走缓存约 1.3s），落 `text_content` 缓存 |
 
 关键口径：
-- 索引是**快照**：网盘新增文件必须重跑脚本才进得来；删除文件需 `--full-clean` 且遍历完整才清理（`last_seen_at` 落后即视作已删除）。
+- **索引同步只走变化的部分**（思傅 2026-11-03）：网盘没有全量清单接口（`method=listall` 要单独申请权限，实测 `errno 20020`），也没有 webhook；但 `list` 的每个条目带 `server_mtime`，而目录 mtime 会在子项增删/改名时更新并逐层向上反映 ⇒ 把目录 mtime 也存进 `netdisk_files`（`is_dir=true`），下轮比对相同就**整棵子树不发请求**。被剪枝的子树在清理阶段按路径前缀豁免，不会误删。
+- ⚠️ **增量看不见「内容替换」**：只比对目录 mtime，文件名/大小不变的正文替换发现不了。索引本身只存名字/路径/大小，对检索无影响；换教材版本时用 `--full` 重扫。
+- 索引是**快照**：网盘新增文件要等下周同步（或手动 `systemctl start gk-netdisk-index.service`）才进得来；删除文件需 `--full-clean` 且遍历完整才清理（`last_seen_at` 落后即视作已删除）。
 - 索引为空（首次使用 / 清过表）时才**实时兜底**搜一次网盘，note 会明确写「索引尚未建立」；一旦有索引就永不回落到实时检索。
 - `available()` 不再前置判断：正文只从索引搜，网盘凭证过期不该让「搜自己索引过的资料」失灵。
 - 中文匹配用 bigram 覆盖率，不用分词（未装 zhparser）；`path` 也参与匹配是因为目录名往往比文件名更有信息量（`/浮力专题/第3讲.docx`）。

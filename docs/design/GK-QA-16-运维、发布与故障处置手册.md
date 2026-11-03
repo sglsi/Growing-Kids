@@ -990,40 +990,64 @@ ssh ... "sudo -n cp /opt/gk/ocr-engine/pdf_tool.py /tmp/pdf_tool.py.bak-$(date +
 cd /opt/gk/server          # 生产；本地就是 server/
 # 先干跑看规模（不写库）
 node scripts/netdisk-index.mjs --user <uuid>
-# 真写
+# 真写（默认就是增量：只走 mtime 变了的子树）
 node scripts/netdisk-index.mjs --user <uuid> --apply
 # 完整遍历后顺手清理网盘已删除的文件
 node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean
+# 怀疑索引漂移时，强制全量重扫（忽略 mtime 剪枝）
+node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean --full
 ```
 
 - `--user` 必填：`netdisk_files` 按 `user_id` 隔离，索引要写清归属（正式账号 uuid）。
-- 只列目录、**不下载任何文件**：实测 `/学生` 15448 个文件 / 252GB，遍历约 10~15 分钟。
+- 只列目录、**不下载任何文件**：实测 `/学生` **12511 个目录 / 65890 个文件 / 1510 秒**（首次/全量口径；增量稳定期通常几秒）。
 - 被 `--budget-ms` / `--max-requests` 打断时 `complete=false`，此时**不会**删除任何旧记录（避免把「没走到」当成「已删除」）。
-- 可选参数：`--root`（默认 `/学生`）、`--gap-ms 80`（限流）、`--max-requests`、`--budget-ms`。
+- 可选参数：`--root`（默认 `/学生`）、`--gap-ms 80`（限流）、`--max-requests`、`--budget-ms`、`--full`、`--force-clean`。
 
-### 6.3.2 多久跑一次
+### 6.3.2 多久跑一次 · 为什么能只同步变化的部分
 
-索引是**快照**：网盘里新加的文件，不重跑就搜不到。**已装 systemd timer 每日一次**（04:23，排在 03:17 数据库备份、03:47 文件备份之后）：
+**已装 systemd timer 每周一次**（周日 04:23，排在 03:17 数据库备份、03:47 文件备份之后）。资料库内容相对稳定，每天全量重扫没有意义（思傅 2026-11-03）。
 
 ```bash
 systemctl list-timers gk-netdisk-index.timer    # 看下次触发时间
-systemctl start gk-netdisk-index.service        # 立即跑一次（前台等它结束）
+systemctl start gk-netdisk-index.service        # 立即跑一次
 journalctl -u gk-netdisk-index -n 80 --no-pager # 看上次结果
 ```
+
+**增量原理**（为什么不每次都花 25 分钟）：
+
+1. 网盘**没有**全量清单接口 — `multimedia?method=listall` 实测 `errno 20020`（该接口要单独申请权限），也没有 webhook 通知。
+2. 但 `list` 返回的每个条目都带 `server_mtime`，**目录的 mtime 会在其直接子项增删/改名时更新，并逐层向上反映**。
+3. 所以把每个目录的 mtime 也存进 `netdisk_files`（`is_dir = true` 的行），下轮扫描时父目录一列出来就能比：**mtime 相同 ⇒ 整棵子树一条请求都不发**。
+4. 被跳过的子树在清理阶段按路径前缀豁免（`path like any(keepPatterns)`），否则会被当成「已删除」。
+
+实测 `/学生` 顶层只有 12 个条目 —— 稳定期一次同步是「根 1 次请求 + 少数变化子树」，秒级完成。
+
+⚠️ **增量看不见什么**：只比对目录 mtime，所以「**文件内容被替换、文件名/大小不变**」发现不了。索引本来就只存名字/路径/大小，这对检索无影响；但缓存的 `text_content` 可能变旧（换教材版本时用 `--full` 重扫一次）。
 
 单元定义（`/etc/systemd/system/gk-netdisk-index.{service,timer}`）：
 
 | 项 | 值 | 为什么 |
 |---|---|---|
 | 运行账号 | `gk`（`EnvironmentFile=/etc/gk/index.env` 提供 `NETDISK_INDEX_USER`） | 与备份服务同账号；鉴权文件 `.env*` 都是 `gk:gk` |
-| 预算 | `--budget-ms 5400000`（90 分钟）、`TimeoutStartSec=6000` | 🔴 **别按「一次跑多久」给预算**：BFS 每次都从根重来，预算给小了每次都停在同一个位置，**尾部目录永远索引不到**。实测 `/学生` **12501 个目录 / 65835 个文件 / 1415 秒（约 24 分钟，4 并发）**，90 分钟留足三倍余量；小机器/网络差时别下调 |
-| 清理 | `--full-clean` | 网盘里删掉的文件要能消失；脚本只在**完整遍历**后才删，被打断就不删（安全） |
-| 并发 | `--concurrency 4` | 个人号网盘约 10 QPS 上限，实测 4 并发 ≈ 5 目录/秒，别再往上加 |
+| 触发 | `OnCalendar=Sun *-*-* 04:23`、`Persistent=true`、`RandomizedDelaySec=900` | 每周一次；`Persistent` 保证机器关机错过也会补跑 |
+| 预算 | `--budget-ms 5400000`（90 分钟）、`TimeoutStartSec=6000` | 🔴 **别按「一次跑多久」给预算**：全量 BFS 每次都从根重来，预算给小了每次都停在同一个位置，**尾部目录永远索引不到**。全量实测 1510 秒，90 分钟留足余量 |
+| 清理 | `--full-clean` | 网盘里删掉的文件要能消失；只在**完整遍历**后才删，被打断就不删 |
+| 并发 | `--concurrency 4` | 个人号网盘约 10 QPS 上限，实测 4 并发 ≈ 8~9 目录/秒，别再往上加 |
 | 第二个 ExecStart | `library-index-text.mjs --apply` | 顺带把 `library_docs` 里 `text_status=pending` 的存量抽掉（幂等、只捞 pending） |
 
-⚠️ **定时任务与隐私政策是绑定的**：政策第四节写的是「每日一次同步目录与文件名」，停掉 timer 就等于书面承诺不兑现。真要停，必须同时改政策文案。
+⚠️ **定时任务与隐私政策是绑定的**：政策第四节写的是「每周一次同步目录与文件名、只读有变化的部分」，停掉 timer 就等于书面承诺不兑现。真要停，必须同时改政策文案。
 
 脚本里 `--user` 仍是必填（`netdisk_files` 按 `user_id` 隔离）；多用户场景下每个账号各有一份物理网盘，timer 需要按人拆成多个 unit。
+
+#### 6.3.2.1 三条防误删护栏（都踩过坑才加的）
+
+| 护栏 | 触发条件 | 为什么 |
+|---|---|---|
+| 根目录必须合法 | `--root` 不以 `/` 开头、或含 `:` / `\` ⇒ 直接退出 | 在 Git Bash 里传 `--root /学生/最新` 会被 MSYS 转成 `D:/Program Files/.../学生/最新`，list 一个不存在的目录返回 0 条 ⇒ 判定「完整遍历」⇒ `--full-clean` **把整张表删光**（本地踩过，删了 65890 行） |
+| 零文件不清库 | 本轮一个文件都没列到 ⇒ 拒绝 `--full-clean` | 同上：root 写错 / 网盘异常时「没见到」不代表「已删除」 |
+| 大批量删除需确认 | 待删行数 > 库内总数一半 ⇒ 拒绝，要求 `--force-clean` | 网盘侧权限掉了/抽风时，整棵树都可能「列不出来」，一次删一半以上就是灾难 |
+
+清理只删「本轮没见到 **且** 不在被剪枝子树前缀下」的行，清完会打印 `删除 N 行`。
 
 ### 6.3.3 判据（搜不到东西时按这个顺序查）
 
