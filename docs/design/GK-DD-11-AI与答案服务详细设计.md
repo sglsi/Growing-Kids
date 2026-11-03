@@ -94,15 +94,16 @@ const cacheKey = `${CACHE_PREFIX}${mode}:${qHash}`           // CACHE_PREFIX = '
 
 | 步 | 做什么 | 代价 |
 |---|---|---|
-| ① 建索引 | `node scripts/netdisk-index.mjs --user <uuid> --apply` 递归列 `/学生`，只落文件名/路径/大小到 `netdisk_files`（**不下载任何文件**） | 万级文件约 10~15 分钟，可增量重跑 |
-| ② 检索 | 只查 `netdisk_files`：`name ilike` OR `path ilike` 粗筛 → 内存按「命中几个检索词 → bigram 覆盖度 → 名字长度」排序 | **毫秒~2s**，结果稳定，网盘抽风也能用 |
-| ③ 读正文 | 仅对排名靠前 `NETDISK_DEEP_FILES`（默认 3）份按 `fs_id` 下载 + `pdf_tool.py --text-only` 抽文字层 | 单份 1~3s，抽过的落 `text_content` 缓存 |
+| ① 建索引 | `node scripts/netdisk-index.mjs --user <uuid> --apply` 递归列 `/学生`，只落文件名/路径/大小到 `netdisk_files`（**不下载任何文件**）；生产已装 `gk-netdisk-index.timer` **每日 04:23 自动跑** | 实测 **12501 个目录 / 65835 个文件 / 1415 秒**（4 并发、26 分钟），可增量重跑 |
+| ② 检索 | 只查 `netdisk_files`：`name ilike` OR `path ilike` 粗筛 → 内存按「命中几个检索词 → bigram 覆盖度 → 名字长度」排序 | **实测 0.5 秒**（6.5 万行、命中 8 条；冷启动首查 1.7s），结果稳定，网盘抽风也能用 |
+| ③ 读正文 | 仅对排名靠前 `NETDISK_DEEP_FILES`（默认 3）份按 `fs_id` 下载 + `pdf_tool.py --text-only` 抽文字层 | 单份 1~3s（deep=1 首查约 3.2s，抽过的走缓存约 1.3s），落 `text_content` 缓存 |
 
 关键口径：
 - 索引是**快照**：网盘新增文件必须重跑脚本才进得来；删除文件需 `--full-clean` 且遍历完整才清理（`last_seen_at` 落后即视作已删除）。
 - 索引为空（首次使用 / 清过表）时才**实时兜底**搜一次网盘，note 会明确写「索引尚未建立」；一旦有索引就永不回落到实时检索。
 - `available()` 不再前置判断：正文只从索引搜，网盘凭证过期不该让「搜自己索引过的资料」失灵。
 - 中文匹配用 bigram 覆盖率，不用分词（未装 zhparser）；`path` 也参与匹配是因为目录名往往比文件名更有信息量（`/浮力专题/第3讲.docx`）。
+- ⚠️ **trigram 索引只在少条件时生效**：迁移 0024 装了 `pg_trgm` + GIN，但一次检索会把 4~6 个词展开成 8~12 个 `ilike`，PG 对这么多 OR 会改选**并行顺序扫描**（实测 6.5 万行 450ms，单条件可用索引只要 3~10ms）。0.5s 的端到端耗时可接受，**别以为「装了 trgm 就不慢」**；真要再压，得把多词 OR 改成一次 `gin` 位图查询（如自建 CJK 2-gram 倒排表，`pg_bigm` 本环境装不了）。
 - 隐私：这是**读取用户自有网盘**，已写入隐私政策 r5（见 `docs/legal/隐私政策.md`），前端点击前过 `guardPolicy('检索我的资料库')`。
 
 ### 5.0.1 自有资料库（`library_docs`）也进检索面

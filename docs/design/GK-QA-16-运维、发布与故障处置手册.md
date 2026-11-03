@@ -1016,7 +1016,7 @@ journalctl -u gk-netdisk-index -n 80 --no-pager # 看上次结果
 | 项 | 值 | 为什么 |
 |---|---|---|
 | 运行账号 | `gk`（`EnvironmentFile=/etc/gk/index.env` 提供 `NETDISK_INDEX_USER`） | 与备份服务同账号；鉴权文件 `.env*` 都是 `gk:gk` |
-| 预算 | `--budget-ms 5400000`（90 分钟）、`TimeoutStartSec=6000` | 🔴 **别按「一次跑多久」给预算**：BFS 每次都从根重来，预算给小了每次都停在同一个位置，**尾部目录永远索引不到**。实测 `/学生` 6000+ 目录需 30~40 分钟，必须留足余量 |
+| 预算 | `--budget-ms 5400000`（90 分钟）、`TimeoutStartSec=6000` | 🔴 **别按「一次跑多久」给预算**：BFS 每次都从根重来，预算给小了每次都停在同一个位置，**尾部目录永远索引不到**。实测 `/学生` **12501 个目录 / 65835 个文件 / 1415 秒（约 24 分钟，4 并发）**，90 分钟留足三倍余量；小机器/网络差时别下调 |
 | 清理 | `--full-clean` | 网盘里删掉的文件要能消失；脚本只在**完整遍历**后才删，被打断就不删（安全） |
 | 并发 | `--concurrency 4` | 个人号网盘约 10 QPS 上限，实测 4 并发 ≈ 5 目录/秒，别再往上加 |
 | 第二个 ExecStart | `library-index-text.mjs --apply` | 顺带把 `library_docs` 里 `text_status=pending` 的存量抽掉（幂等、只捞 pending） |
