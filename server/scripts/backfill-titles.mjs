@@ -15,6 +15,7 @@
  *   - 序号按「用户 + 学科 + 东八区自然日」分组，组内按 created_at 升序 1,2,3…
  *   - 未分类（subject_id 为空）单独一档，标题前缀「未分类」
  *   - 软删条目也参与编号（否则恢复回收站里的条目时会撞号）
+ *   - kind=image 的整页照片也算（它在复习本里同样是一条目，标题同样要能区分）
  *
  * 安全：
  *   - 默认干跑，必须显式 --apply 才写库；
@@ -58,7 +59,7 @@ try {
     `select t.id, t.user_id, t.subject_id, t.title, t.created_at, coalesce(s.name, '') as subject_name
        from timeline_items t
        left join subjects s on s.id = t.subject_id
-      where t.kind = 'question'${ONLY_USER ? ' and t.user_id = $1' : ''}
+      where t.kind in ('question', 'image')${ONLY_USER ? ' and t.user_id = $1' : ''}
       order by t.user_id, t.created_at, t.id`,
     params,
   )

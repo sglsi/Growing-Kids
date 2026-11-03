@@ -159,7 +159,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `user_id` | varchar(36) | FK → users, cascade | 隔离键 |
 | `subject_id` | varchar(36) | FK → subjects, **set null** | NULL = 未分类（前端哨兵 `'none'`，见 5.3） |
 | `kind` | varchar(16) | not null | `image` \| `question` |
-| `title` | text | | 题目标题：`kind=question` 由服务端生成 **`科目 日期 第N题`**（2026-11-03 起，东八区自然日、同学科当日递增）；`kind=image` 为「图片素材」（允许"无题干只有图"） |
+| `title` | text | | 题目标题：服务端统一生成 **`科目 日期 第N题`**（2026-11-03 起，东八区自然日、同学科当日递增；`kind=image` 同样适用，不再拿上传文件名当标题） |
 | `file_key` | text | | 图片主文件对象 key |
 | `thumb_key` | text | | 缩略图 key（WebP，宽 ≤400） |
 | `mime_type` | varchar(64) | | ⚠️ 0013 只放宽了 documents/library_docs，本表仍为 64（图片 MIME 均 < 20 字符，无风险） |

@@ -513,10 +513,10 @@ export class TimelineService {
       subject_id: subject.id,
       // 标题口径（思傅 2026-11-03）：`科目 日期 第N题`，不再拿题干前 40 字当标题
       // —— 同一张卷子十道题看起来全一样，列表里根本分不清。
-      // ⚠️ 图片条目（kind=image）保持「图片素材」：它是整页照片，不是某一道题。
-      title: dto.title ?? (dto.kind === 'image'
-        ? '图片素材'
-        : await this.nextTitle(userId, subject.id, subject.name, seqCache)),
+      // ⚠️ kind=image（整页照片）**同样走这个口径**：它在复习本里也是一条目，
+      //    原来那个「文件名当标题」会显示成一长串试卷原文（如「要求：1.应包含思维导图…」），
+      //    在多条之间完全没法区分。缩略图已经说明它是照片，标题只负责「哪科的、哪天第几张」。
+      title: dto.title ?? (await this.nextTitle(userId, subject.id, subject.name, seqCache)),
       source: dto.source ?? '',
       tags: dto.tags ?? [],
     }

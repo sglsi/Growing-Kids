@@ -256,8 +256,9 @@ export class UploadController {
         // 写入 thumb_key / width / height，使列表能走缩略图（此前这些字段恒空 → 列表拉原图）
         const item = await this.timelineService.create(userId, {
           kind: 'image',
-          // 临时名（tmp_xxx）不配当标题：首页卡片会显示成一串无意义字符
-          title: isOpaqueUploadName(displayName) ? '图片题目' : displayName,
+          // 标题由服务端统一生成「科目 日期 第N题」（思傅 2026-11-03）：
+          // 以前拿上传文件名当标题，微信聊天里选的卷子会把一长串试卷原文塞进列表
+          //（如「要求：1.应包含思维导图中的所有信息，可扩展」），多条之间分不清。
           file_key: key,
           thumb_key: ing.thumbKey,
           mime_type: ing.mimeType,
