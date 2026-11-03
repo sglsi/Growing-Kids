@@ -28,9 +28,12 @@ import {
  */
 export default function PolicyConsent() {
   // ⚠️ 初始值直接读存储，**不要**在 useEffect 里 setVisible(true)（思傅 2026-11-03 实测踩到）：
-  //    本组件挂在 App 根，effect 跑在页面根还没就绪的时刻，那一次 setState 会被丢掉
-  //    ⇒ 弹窗永远不出现（日志有、DOM 没有）。放进 useState 初始值就等于「首帧就画出来」，
-  //    不依赖任何后续更新。
+  //    最初本组件挂在 app.tsx，而 Taro 4.1.9 的 App 渲染出的是 `AppWrapper = h(App, ...)`，
+  //    它产出的**兄弟节点不会挂到任何页面**（挂个 fixed 红点就能验证：DOM 里根本没有）；
+  //    连带 effect 也跑在页面根还没就绪的时刻，那一次 setState 会被丢掉
+  //    ⇒ 弹窗永远不出现（日志有、DOM 没有）。现在改挂 `pages/index`（首页，冷启动必经），
+  //    并把判断放进 useState 初始值，等于「首帧就画出来」，不依赖任何后续更新。
+  //    二级页面不挂本组件：写操作由 `guardPolicy` 跳独立隐私页兜底，不靠弹层。
   const [visible, setVisible] = useState(() => !hasAgreedPolicy())
   const [checked, setChecked] = useState(false)
 
