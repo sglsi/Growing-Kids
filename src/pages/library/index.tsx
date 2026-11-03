@@ -327,7 +327,7 @@ export default function LibraryPage() {
           <Input
             className="flex-1 text-sm bg-transparent"
             value={keyword}
-            placeholder="搜索资料名称"
+            placeholder="搜索资料名称或内容"
             placeholderClass="text-muted-foreground"
             confirmType="search"
             onInput={(e) => setKeyword(e.detail.value)}

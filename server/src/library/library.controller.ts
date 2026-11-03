@@ -39,6 +39,20 @@ export class LibraryController {
     return { code: 200, msg: 'success', data: withUrl }
   }
 
+  @Post('index-text')
+  @HttpCode(200)
+  async indexText(
+    @Req() req: RequestWithUser,
+    @Body() body: { force?: boolean; limit?: number },
+  ) {
+    const userId = requireUserId(req)
+    const data = await this.libraryService.reindexText(userId, {
+      force: body?.force === true,
+      limit: Math.min(200, Number(body?.limit) || 50),
+    })
+    return { code: 200, msg: 'success', data }
+  }
+
   @Patch(':id')
   @HttpCode(200)
   async update(

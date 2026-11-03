@@ -3,9 +3,17 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { BaiduNetdiskService } from '../storage/baidu-netdisk.service'
+import { extractDocContent } from '../ocr/pdf-tool'
 import type { LibraryDoc, CreateLibraryDocDto, LibraryQuery } from './library.types'
 
 const TABLE = 'library_docs'
+
+/** 能抽文字层的类型（老 .doc 二进制 pdf_tool 解不了，只按文件名检索） */
+const TEXT_EXTS = new Set(['pdf', 'docx', 'txt', 'md'])
+/** 单文件抽取上限：再大就不值得为一次检索解包 */
+const MAX_TEXT_BYTES = Number(process.env.LIBRARY_TEXT_MAX_BYTES ?? 40 * 1024 * 1024)
+/** 正文截断长度（够做关键词匹配即可，不当正文库用） */
+const MAX_TEXT_CHARS = Number(process.env.LIBRARY_TEXT_MAX_CHARS ?? 200_000)
 
 /** 网盘文件名非法字符（百度网盘不接受，且 Windows 端同步时也会炸） */
 function sanitizeFileName(name: string): string {
@@ -37,8 +45,13 @@ export class LibraryService {
       .eq('user_id', userId)
       .is('deleted_at', null)
 
-    if (query.subject_id) q = q.eq('subject_id', query.subject_id)
-    if (query.keyword) q = q.ilike('name', `%${query.keyword}%`)
+    if (query.subject_id) q = q.eq('subject_id', query.subject_id)    // 关键词同时搜文件名与正文（思傅 2026-11-03：资料库也要能搜内容）。
+    // 正文是入库时抽好的 text_content，命中后前端照常打开原文件。
+    if (query.keyword) {
+      // PostgREST 的 or 表达式里逗号/括号/百分号是语法字符，必须剔干净
+      const kw = query.keyword.replace(/[%,()]/g, '').trim()
+      if (kw) q = q.or(`name.ilike.%${kw}%,text_content.ilike.%${kw}%`)
+    }
     q = q.order('created_at', { ascending: false }).range(from, to)
 
     const { data, error, count } = await q
@@ -118,7 +131,148 @@ export class LibraryService {
     // best-effort + 不 await：网盘慢/不可用绝不拖慢「保存资料」的响应，更不许让保存失败。
     void this.syncToNetdisk(userId, doc.id, dto.file_key, doc.name)
 
+    // 正文抽取（思傅 2026-11-03：资料库要能搜内容，不能只按文件名搜）
+    // 同样 best-effort + 不 await：抽正文可能要几秒，不该让「保存」等它。
+    // 抽不到就保持 pending/none，列表仍可按文件名搜到这条。
+    void this.indexText(userId, doc.id, dto.file_key, doc.name, doc.mime_type ?? undefined)
+
     return doc
+  }
+
+  /**
+   * 抽正文并落 `text_content`（best-effort，失败绝不影响入库）。
+   *
+   * 口径与网盘侧一致（`netdisk-search` 的 ensureText）：
+   *   · 只抽文字层（`textOnly`），扫描页不渲染——那是 OCR 的活，26s/页 不适合放在入库路径；
+   *   · 全篇几乎没字 ⇒ 标 `none`（扫描版），列表不把它当成「空文档」；
+   *   · 类型不支持 ⇒ `skipped`，超大 ⇒ `too_big`，都不再重试。
+   */
+  private async indexText(
+    userId: string,
+    id: string,
+    fileKey: string,
+    name: string,
+    mimeType?: string,
+  ): Promise<void> {
+    const client = getSupabaseClient()
+    const ext = ((name.match(/\.([A-Za-z0-9]{1,8})$/) || [, ''])[1] || '').toLowerCase()
+    const update = (patch: Record<string, unknown>) =>
+      client
+        .from(TABLE)
+        .update({ ...patch, text_updated_at: new Date().toISOString() })
+        .eq('user_id', userId)
+        .eq('id', id)
+
+    try {
+      if (!TEXT_EXTS.has(ext)) {
+        await update({ text_status: 'skipped', text_content: null })
+        return
+      }
+      const buf = await this.storageService.readObject(fileKey)
+      if (!buf || buf.length === 0) {
+        await update({ text_status: 'none', text_content: null })
+        return
+      }
+      if (buf.length > MAX_TEXT_BYTES) {
+        await update({ text_status: 'too_big', text_content: null })
+        return
+      }
+
+      let text = ''
+      if (ext === 'txt' || ext === 'md') {
+        text = buf.toString('utf8')
+      } else {
+        const out = await extractDocContent({
+          kind: ext === 'pdf' ? 'pdf' : 'docx',
+          content: buf,
+          textOnly: true,
+          maxPages: 200,
+          timeoutMs: 60_000,
+        })
+        if (!out.ok || !out.data) {
+          this.logger.warn(`[library] 抽正文失败（${out.reason}）：${name} ${out.detail || ''}`)
+          await update({ text_status: 'none', text_content: null })
+          return
+        }
+        text = out.data.pages.map((p) => p.text).filter(Boolean).join('\n')
+      }
+
+      const meaningful = text.replace(/\s+/g, '').length
+      if (meaningful < 20) {
+        // 扫描版 PDF / 空文档：记 none，避免以后反复抽
+        await update({ text_status: 'none', text_content: null })
+        return
+      }
+      await update({ text_status: 'ok', text_content: text.slice(0, MAX_TEXT_CHARS) })
+    } catch (e) {
+      // best-effort 但不许静默：抽不到正文要留痕，否则「搜不到」永远查不出原因
+      this.logger.warn(`[library] 抽正文异常：${name} — ${e instanceof Error ? e.message : e}`)
+      try {
+        await update({ text_status: 'none', text_content: null })
+      } catch { /* 状态回写失败不影响入库结果 */ }
+    }
+  }
+
+  /**
+   * 补抽历史资料的正文（`POST /api/library/index-text`）。
+   *
+   * 存在的理由：`indexText` 只在入库时跑一次，迁移 0023 之前的存量文档
+   * `text_status` 全是默认值 `pending`，不补就永远搜不到内容。
+   * 也用于「抽失败想重来」——`force=true` 连 ok/none 一起重抽。
+   *
+   * 一次只处理 `limit` 条（默认 50），避免一个请求跑十几分钟；
+   * 返回剩余条数，前端/运维按需再调。
+   */
+  async reindexText(
+    userId: string,
+    opts: { force?: boolean; limit?: number } = {},
+  ): Promise<{ processed: number; ok: number; none: number; skipped: number; remaining: number }> {
+    const client = getSupabaseClient()
+    const limit = Math.max(1, Math.min(200, opts.limit ?? 50))
+    let q = client
+      .from(TABLE)
+      .select('id, name, file_key, mime_type')
+      .eq('user_id', userId)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    // force 时不看状态；否则只补「还没抽过」的
+    if (!opts.force) q = q.eq('text_status', 'pending')
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+
+    const rows = (data || []) as { id: string; name: string; file_key: string; mime_type: string | null }[]
+    let ok = 0
+    let none = 0
+    let skipped = 0
+    for (const r of rows) {
+      const before = await this.textStatusOf(userId, r.id)
+      await this.indexText(userId, r.id, r.file_key, r.name, r.mime_type ?? undefined)
+      const after = await this.textStatusOf(userId, r.id)
+      if (after === 'ok') ok++
+      else if (after === 'skipped') skipped++
+      else if (after === before && before === 'pending') none++
+      else none++
+    }
+
+    const { count } = await client
+      .from(TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .is('deleted_at', null)
+      .eq('text_status', 'pending')
+
+    return { processed: rows.length, ok, none, skipped, remaining: count ?? 0 }
+  }
+
+  private async textStatusOf(userId: string, id: string): Promise<string> {
+    const { data } = await getSupabaseClient()
+      .from(TABLE)
+      .select('text_status')
+      .eq('user_id', userId)
+      .eq('id', id)
+      .maybeSingle()
+    return String((data as { text_status?: string } | null)?.text_status || '')
   }
 
   /**
