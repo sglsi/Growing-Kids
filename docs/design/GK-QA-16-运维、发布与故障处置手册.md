@@ -980,6 +980,60 @@ ssh ... "sudo -n cp /opt/gk/ocr-engine/pdf_tool.py /tmp/pdf_tool.py.bak-$(date +
 
 ---
 
+## 6.3 资料索引运维（`netdisk-index.mjs`）
+
+「资料库搜题」现在**只查本库索引**，不实时搜网盘。索引不建 = 搜不到任何网盘资料。
+
+### 6.3.1 建 / 更新索引
+
+```bash
+cd /opt/gk/server          # 生产；本地就是 server/
+# 先干跑看规模（不写库）
+node scripts/netdisk-index.mjs --user <uuid>
+# 真写
+node scripts/netdisk-index.mjs --user <uuid> --apply
+# 完整遍历后顺手清理网盘已删除的文件
+node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean
+```
+
+- `--user` 必填：`netdisk_files` 按 `user_id` 隔离，索引要写清归属（正式账号 uuid）。
+- 只列目录、**不下载任何文件**：实测 `/学生` 15448 个文件 / 252GB，遍历约 10~15 分钟。
+- 被 `--budget-ms` / `--max-requests` 打断时 `complete=false`，此时**不会**删除任何旧记录（避免把「没走到」当成「已删除」）。
+- 可选参数：`--root`（默认 `/学生`）、`--gap-ms 80`（限流）、`--max-requests`、`--budget-ms`。
+
+### 6.3.2 多久跑一次
+
+索引是**快照**：网盘里新加的文件，不重跑就搜不到。建议每天一次（业务低峰）：
+
+```cron
+# 每天 04:20 更新资料索引（按实际 uuid 替换）
+20 4 * * * cd /opt/gk/server && /usr/bin/node scripts/netdisk-index.mjs --user <uuid> --apply --full-clean >> /var/log/gk-netdisk-index.log 2>&1
+```
+
+### 6.3.3 判据（搜不到东西时按这个顺序查）
+
+| 现象 | 先看什么 |
+|---|---|
+| 同名资料时有时无 | `select count(*) from netdisk_files where user_id='<uuid>' and is_dir=false` —— 0 说明索引没建 |
+| 返回 `note` 里带「索引尚未建立」 | 同上，走 6.3.1 建索引 |
+| 有索引但仍搜不到某本书 | 书名里的词是否出现在 `name`/`path`？索引只匹配这两个字段；再确认该书是否在 `/学生` 下 |
+| 命中却拿不到正文 | `text_status`：`none` = 扫描版无文字层（只能按文件名命中）；`skipped` = 类型不支持（mp4/zip/老 .doc） |
+| 索引里出现网盘已删的文件 | 重跑时加 `--full-clean`，且必须遍历完整才会清理 |
+
+### 6.3.4 自有资料库的正文
+
+`library_docs` 入库时自动异步抽正文（PDF/DOCX/TXT/MD）。迁移 0023 之前的存量文档需要补一次：
+
+```bash
+# 循环调用直到 remaining=0（一次最多 200 条）
+curl -X POST https://<host>/api/library/index-text -H "X-Auth-Token: <token>" \
+  -H 'Content-Type: application/json' -d '{"limit": 200}'
+```
+
+返回 `{processed, ok, none, skipped, remaining}`。`force=true` 连已抽过的也重抽（换了解析器时用）。
+
+---
+
 ## 7. 发布检查清单
 
 > 提版本前逐条勾选。**带 ❗的是阻断项**——未通过禁止上传，其余为强烈建议。

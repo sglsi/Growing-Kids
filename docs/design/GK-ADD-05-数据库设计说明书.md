@@ -179,7 +179,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 ### 4.4 library_docs（活跃）
 
-`id` / `user_id`(cascade) / `subject_id`(set null) / `name varchar(128)` / `file_key text not null` / `mime_type varchar(128)`（0013 放宽）/ `size_bytes` / `source varchar(24)`（`upload`\|`external`\|`materials`）/ `tags text[]` / `deleted_at` / `created_at`；0004 补 `thumb_key` / `width` / `height` / `file_hash`；0015 补 `netdisk_path text`（百度网盘归档副本绝对路径，NULL = 未同步）。
+`id` / `user_id`(cascade) / `subject_id`(set null) / `name varchar(128)` / `file_key text not null` / `mime_type varchar(128)`（0013 放宽）/ `size_bytes` / `source varchar(24)`（`upload`\|`external`\|`materials`）/ `tags text[]` / `deleted_at` / `created_at`；0004 补 `thumb_key` / `width` / `height` / `file_hash`；0015 补 `netdisk_path text`（百度网盘归档副本绝对路径，NULL = 未同步）；**0023 补 `text_content text` / `text_status varchar(16)` / `text_updated_at`** —— 入库时异步抽正文（`library.indexText`），让资料库能按内容搜、而不只是按文件名。`text_status` 五态：`pending`（未抽）/ `ok` / `none`（无文字层，扫描版）/ `skipped`（类型不支持）/ `too_big`（超 40MB）。
 
 ### 4.5 documents（活跃）
 
@@ -258,12 +258,14 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 ### 4.16 netdisk_files（活跃 · 0022）
 
-- 字段：`id` / `user_id`（varchar(36) FK → users，`on delete cascade`）/ `fs_id bigint` / `path` / `dir_path` / `name` / `ext varchar(12)` / `is_dir` / `size_bytes bigint` / `mtime` / `text_content text` / `text_status varchar(16)` / `text_updated_at` / `synced_at` / `created_at`。
+- 字段：`id` / `user_id`（varchar(36) FK → users，`on delete cascade`）/ `fs_id bigint` / `path` / `dir_path` / `name` / `ext varchar(12)` / `is_dir` / `size_bytes bigint` / `mtime` / `text_content text` / `text_status varchar(16)` / `text_updated_at` / `synced_at` / `created_at`；**0023 补 `last_seen_at`** —— 最近一次遍历见到该文件的时间，落后于本轮索引开始时间即视作「网盘侧已删除」（`--full-clean` 且遍历完整时才真删）。
 - 唯一键：`(user_id, fs_id)` —— 目录列举可重复执行，靠它 upsert。
 - `text_status`：`pending`（未抽）/ `ok`（已抽）/ `none`（无文字层，扫描版）/ `skipped`（类型不支持，mp4/rar/zip）/ `too_big`（超抽取上限）。
-- ⚠️ **这不是全量索引**。实测 `/学生` 采样即见 1318 文件 / 252GB，全量正文不可行（扫描版 PDF 按 26s/页 OCR）。本表只沉淀「搜过的候选」与「抽过的正文」，是**缓存**而非镜像：换账号或清表只会让下次检索变慢，不影响功能。
+- ✅ **文件清单是全量的，正文不是**（2026-11-03 定）：`scripts/netdisk-index.mjs` 递归列目录把上万条文件名/路径/大小落进来（实测 `/学生` 15448 个文件 / 252GB，遍历约 10~15 分钟，零下载）；正文只在检索命中后按需抽取并缓存进 `text_content`。
+- 所以本表 = **全量文件索引 + 按需正文缓存**。搜索只查本表（毫秒级、稳定）；清表不会丢原文件，但会让「资料库搜题」退化成实时搜网盘（慢且排序会抖），重跑脚本即恢复。
 - ⚠️ 故意不建 GIN/tsvector：PG 默认分词对中文无效、未装 zhparser。正文匹配走 `ilike`，且只在「文件名已命中的少量候选」里做，不全表扫。
-- 检索口径：L1 = 网盘原生 `method=search`（按题干 bigram 提词，命中文件名/路径）；L2 = 对 L1 前若干候选下载抽正文（`pdf_tool.py --text-only`）比对，结果落 `text_content`。
+- 检索口径：**只查本表**（`name ilike` OR `path ilike` 粗筛 → 内存按「命中几个检索词 → bigram 覆盖度」排序）；命中候选要看正文时再按 `fs_id` 下载抽文字层（`pdf_tool.py --text-only`），结果落 `text_content`。
+- 索引为空时才实时兜底搜网盘一次（`liveFallback`），note 会写「索引尚未建立」。
 
 ---
 

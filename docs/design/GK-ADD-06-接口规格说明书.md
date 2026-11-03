@@ -156,9 +156,10 @@
 
 | 方法 | 路径 | 用途 | 入参 | 身份 |
 |---|---|---|---|---|
-| GET | `/api/library` | 列表（补 URL，带 `subjects` 关联） | `subject_id`、`keyword`、`page`(1)、`page_size`(20) | 需 |
+| GET | `/api/library` | 列表（补 URL，带 `subjects` 关联）。**`keyword` 同时匹配名称与正文**（0023 起） | `subject_id`、`keyword`、`page`(1)、`page_size`(20) | 需 |
 | POST | `/api/library` | 新建条目 | `name`、`file_key`、`thumb_key?`、`subject_id?`、`mime_type?`、`width/height?`、`size_bytes?`、`file_hash?`、`source?`、`tags?` | 需 |
 | PATCH | `/api/library/:id` | 改名 / 归属学科 | `{name?, subject_id?}`（`subject_id=null` = 未分类；传 id 时校验属于本人，否则 400） | 需 |
+| POST | `/api/library/index-text` | 补抽存量资料的正文（迁移 0023 之前入库的 `text_status` 全是 `pending`） | `{force?: boolean, limit?: number}`（默认只补 pending，一次 ≤200） | 需 |
 | POST | `/api/library/batch-delete` | 批量删除 | `{ids}` | 需 |
 | DELETE | `/api/library/:id` | 删除（软删） | — | 需 |
 
@@ -221,7 +222,9 @@
 | GET | `/api/netdisk/search` | 直连网盘资料检索，看提词/候选/命中方式，用于排障 | query `q`（题干，空 → 400）、`deep`（`0` 只做文件名级，默认做正文级） | 需 |
 | GET | `/api/netdisk/stats` | 本地正文缓存条数统计 | — | 需 |
 
-> 「资料库搜题」实际由 `answer-search` 内部调用，**不经过这两个端点**。检索分两级：L1 用网盘原生 `method=search` 按题干 bigram 提词筛文件名/路径；L2 只对 L1 前若干候选下载并抽正文比对（PDF/DOCX 走 `pdf_tool.py --text-only`），抽过的正文落 `netdisk_files` 缓存，下次直接命中。
+> 「资料库搜题」实际由 `answer-search` 内部调用，**不经过这两个端点**。
+> **检索只查本库索引 `netdisk_files`**（由 `scripts/netdisk-index.mjs` 预建，见 QA-16 §6.3）：`name ilike` OR `path ilike` 粗筛 → 内存排序（命中几个检索词 → bigram 覆盖度）。只有命中候选要看正文时，才按 `fs_id` 下载并抽文字层（`pdf_tool.py --text-only`），抽过的落 `text_content`。
+> 索引为空（未建/清过表）时才实时兜底搜一次网盘，返回的 `note` 会写「索引尚未建立」。
 
 ### 5.11 quota / storage
 
