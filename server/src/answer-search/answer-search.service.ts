@@ -298,7 +298,9 @@ export class AnswerSearchService {
           solution: lines.join('\n'),
           refs: disk.hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
           confidence: Number((top.score || 0).toFixed(2)),
-          note: `来自百度网盘资料（${disk.note}），请打开文件核对后再采纳`,
+          // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
+          // （思傅 2026-11-03）。来源细节（哪个网盘、哪份文件）放在 refs 与日志里。
+          note: `来自你的资料库（${disk.note}），请打开文件核对后再采纳`,
         }
       } else {
       // ---------- 知识库检索：只查 ima 知识库，不喂给 AI ----------
@@ -344,9 +346,9 @@ export class AnswerSearchService {
           }
         }
       }
-        // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过网盘
+        // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过资料库
         if (result.source === 'none' && disk && disk.keys.length > 0) {
-          result.note = `${result.note || ''}（网盘按「${disk.keys.join(' / ')}」也没搜到）`
+          result.note = `${result.note || ''}（资料库按「${disk.keys.join(' / ')}」也没搜到）`
         }
       }
     } else {

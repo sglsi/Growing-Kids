@@ -543,7 +543,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
                 : candidate.source === 'netdisk'
-                  ? `网盘资料检索结果（${candidate.refs.length} 份）`
+                  // 统一叫「资料库检索结果」：资料存在哪个网盘与本项目无关
+                  // （思傅 2026-11-03），界面不该出现第三方名字
+                  ? `资料库检索结果（${candidate.refs.length} 份文件）`
                   : candidate.source === 'kb'
                     ? `资料库检索结果（${candidate.refs.length} 条）`
                     : candidate.source === 'llm'
@@ -574,7 +576,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                 {candidate.source === 'kb'
                   ? '相关知识库条目'
                   : candidate.source === 'netdisk'
-                    ? '相关资料文件（网盘路径见上方）'
+                    ? '相关资料文件'
                     : '参考来源（点击复制链接）'}
               </Text>
               {candidate.refs.map((r, i) => (

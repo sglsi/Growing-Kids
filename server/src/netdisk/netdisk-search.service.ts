@@ -240,9 +240,12 @@ export class NetdiskSearchService {
     let liveFallback = false
     if (localHits.length === 0 && indexSize === 0) {
       if (!this.available()) {
+        this.logger.warn(`[netdisk] 资料库存储未配置，缺少 ${this.missingKeys().join(' / ')}；索引也可能还没建`)
         return {
           hits: [], keys, tookMs: Date.now() - started,
-          note: `本库还没有资料索引，且网盘未配置（缺 ${this.missingKeys().join(' / ')}）：请先在服务器填 BAIDU_APP_KEY / BAIDU_SECRET_KEY / BAIDU_REFRESH_TOKEN，再跑 scripts/netdisk-index.mjs 建索引`,
+          // 排障细节（缺哪个 key）只写日志：用户看到的应该是「资料库暂时不可用」，
+          // 而不是第三方的配置项名（思傅 2026-11-03：资料存在哪与本项目无关）。
+          note: '本库还没有资料索引，资料存储也还没配好，请联系维护者',
         }
       }
       liveFallback = true
@@ -324,8 +327,8 @@ export class NetdiskSearchService {
     let note = ''
     if (hits.length === 0) {
       note = liveFallback
-        ? `网盘里没有搜到与这道题相关的资料（按 ${keys.join(' / ')} 检索）`
-        : `本库索引里没有匹配的资料（按 ${keys.join(' / ')} 检索）。若网盘里确实有，先跑一次 netdisk-index.mjs 更新索引`
+        ? `资料库里没有搜到与这道题相关的资料（按 ${keys.join(' / ')} 检索）`
+        : `本库索引里没有匹配的资料（按 ${keys.join(' / ')} 检索）。若资料库里确实有，需先更新资料索引`
     } else if (!deep) {
       note = '按文件名/路径匹配（未读取正文）'
     } else if (deepDone.length === 0) {
@@ -333,7 +336,7 @@ export class NetdiskSearchService {
     } else {
       note = `文件名 + 正文匹配（正文命中 ${deepDone.length} 份）`
     }
-    if (liveFallback) note += '；⚠️ 索引尚未建立，本次是实时检索网盘'
+    if (liveFallback) note += '；⚠️ 索引尚未建立，本次直接读取资料库'
 
     return { hits, keys, note, tookMs: Date.now() - started }
   }
