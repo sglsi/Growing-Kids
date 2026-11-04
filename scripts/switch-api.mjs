@@ -9,13 +9,19 @@
  * 用法：
  *   node scripts/switch-api.mjs status          # 看当前指向
  *   node scripts/switch-api.mjs lan             # 切回局域网（本机后端，日常开发）
- *   node scripts/switch-api.mjs cloud           # 切到腾讯云（42.192.36.120，备案前联调用）
- *   node scripts/switch-api.mjs https://xxx.cn  # 任意地址（备案+证书下来后用这个）
+ *   node scripts/switch-api.mjs cloud           # 切到腾讯云 IP（42.192.36.120，仅调试）
+ *   node scripts/switch-api.mjs prod            # 切到 https://deep-root.cn（体验版/正式版唯一可用）
+ *   node scripts/switch-api.mjs https://xxx.cn  # 任意地址
  *
- * ⚠️ 切完必须重新构建，且微信开发者工具要勾「详情 → 本地设置 → 不校验合法域名」：
- *    云端目前是 HTTP + IP，微信白名单只收 HTTPS 域名，**IP 永远填不进去**，
- *    所以这条链路只能用于开发者工具/真机调试，不能用于体验版/正式版。
- *    正式版必须等 deep-root.cn 备案通过 + Caddy 上 HTTPS 后切成 https://deep-root.cn。
+ * ⚠️ 切完必须重新构建，且微信开发者工具要勾「详情 → 本地设置 → 不校验合法域名」。
+ *
+ * 三条地址的性质不同，别混用：
+ *   lan   = 局域网 http://IP:端口，只有同一 Wi-Fi 的手机能连
+ *   cloud = 公网 http://IP，**IP 永远填不进微信服务器域名白名单** ⇒ 体验版/正式版必然被拦
+ *   prod  = https://deep-root.cn，已备案 + 有效证书 ⇒ **唯一能进白名单的形态**
+ *
+ * 🔴 配白名单（mp 后台 / 第三方平台）与切这里是**两件事，必须都做**：
+ *    白名单放的是域名，包里写的是域名，两边一致才通；只做一边的表现都是「请求全失败」。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -34,6 +40,10 @@ const PRESETS = {
     url: 'http://42.192.36.120',
     note: '腾讯云轻量 L3（PG + PostgREST + Node 全在同一台），HTTP + IP，仅调试可用',
   },
+  prod: {
+    url: 'https://deep-root.cn',
+    note: '生产：https 自有域名（已 ICP 备案 -2 + Let\'s Encrypt 证书）。体验版/正式版只能用这个',
+  },
 }
 
 const HEADER = `# 小程序编译期的后端地址（由 config/index.ts 注入为 PROJECT_DOMAIN）
@@ -43,8 +53,8 @@ const HEADER = `# 小程序编译期的后端地址（由 config/index.ts 注入
 # 注意：H5 端不使用本变量（devServer 已把 /api 代理到本机 SERVER_PORT）。
 #
 # lan   = 局域网，本机后端（日常开发）
-# cloud = 腾讯云 42.192.36.120（备案前联调；需勾「不校验合法域名」）
-# 正式版必须等域名备案 + HTTPS 就绪后切成 https://deep-root.cn
+# cloud = 腾讯云 42.192.36.120（HTTP + IP，仅调试；IP 填不进微信白名单）
+# prod  = https://deep-root.cn（生产，体验版/正式版必须用这个）
 `
 
 function readEnv() {
@@ -115,5 +125,5 @@ if (/^https?:\/\//.test(arg)) {
 }
 
 console.error(`无法识别的参数：${arg}`)
-console.error('可用：status | lan | cloud | https://your-domain.cn')
+console.error('可用：status | lan | cloud | prod | https://your-domain.cn')
 process.exit(1)
