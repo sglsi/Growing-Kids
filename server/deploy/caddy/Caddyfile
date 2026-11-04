@@ -1,0 +1,75 @@
+# ============================================================
+# Growing Kids · L3 单机部署 ｜ Caddyfile
+#
+# 源文件入仓（此前只存在于服务器 /etc/caddy/Caddyfile，改动无从追溯）。
+# 部署：scp 到 /etc/caddy/Caddyfile → caddy validate → systemctl reload caddy
+#
+# 站点拓扑：
+#   :8080 (仅回环)  → PostgREST（后端 supabase-js 走它，SUPABASE_URL=http://127.0.0.1:8080）
+#   :80  (IP 直连)  → /api/* 反代 3000；其余静态首页。做备案/IP 直连兜底
+#   :443 (域名)     → 同上，但走 HTTPS（Caddy 自动申请并续期证书）
+# ============================================================
+
+# 内部站点：后端（NestJS）通过它访问 PostgREST
+#   代码里 SUPABASE_URL = http://127.0.0.1:8080
+#   supabase-js 会拼 /rest/v1/xxx ⇒ handle_path 剥掉前缀再转给 PostgREST
+http://127.0.0.1:8080 {
+	bind 127.0.0.1
+	handle_path /rest/v1/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+}
+
+# 对外 80：IP 直连兜底（备案审核、临时排查用）
+#
+#   /api/*  → Node 后端（127.0.0.1:3000）
+#   其余    → /srv/www 静态首页（备案要求首页可打开）
+#
+# ⚠️ 必须用 handle 而不是直接 file_server：直接写 file_server 时 /api/* 会被当成
+#    静态文件去找，返回 404（实测），反而盖住下面的反向代理。
+# ⚠️ 有了下面的域名站点后，http://deep-root.cn 由 Caddy 自动 308 到 https
+#    （host 匹配比本块的通配更具体），本块只剩「用 IP 访问」这一种入口。
+:80 {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		root * /srv/www
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
+
+# 正式站点（2026-11-04 起启用 HTTPS）
+#
+#   · 域名备案：陕ICP备2026030931号-2（2026-11-04 腾讯云「新增服务」通过）
+#   · 证书：Caddy 内置 ACME，自动向 Let's Encrypt 申请（HTTP-01 over :80），
+#     到期前自动续期，无需 cron。证书与账户存 /var/lib/caddy/.local/share/caddy
+#   · ⚠️ 443 必须在腾讯云「防火墙」放通，否则证书能签下来但客户端连不上
+#   · ⚠️ 小程序正式版的服务器域名白名单只收 https，本块是发版硬前置
+deep-root.cn, www.deep-root.cn {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		root * /srv/www
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
