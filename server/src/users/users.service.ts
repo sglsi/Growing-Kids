@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { normalizeGrade } from '../shared/grade'
 import { ANONYMOUS_TTL_MS, type User } from './users.types'
 
 const TABLE = 'users'
@@ -216,6 +217,71 @@ export class UsersService {
     }
     if (!data || !data.length) throw new Error('保存 AI 开关失败：未匹配到用户')
     return (data[0] as { ai_enabled?: boolean }).ai_enabled === true
+  }
+
+  /**
+   * 读取年级（`P-005` / `D-008`）。
+   *
+   * 与 `findFlags` 同一套降级思路：0025 迁移没跑时**不能让设置页 500**，
+   * 取不到就按「未选年级」处理 —— 检索仍然工作（不按年级过滤），只是没有默认归并。
+   */
+  async findGrade(id: string): Promise<{ grade: number | null; confirmedYear: number | null }> {
+    if (!id) return { grade: null, confirmedYear: null }
+    try {
+      const client = getSupabaseClient()
+      const { data, error } = await client
+        .from(TABLE)
+        .select('grade, grade_confirmed_year')
+        .eq('id', id)
+        .maybeSingle()
+      if (error) {
+        console.warn('[users] 读取 grade 失败（0025 迁移可能未执行），按未设置处理：', error.message)
+        return { grade: null, confirmedYear: null }
+      }
+      const row = data as { grade?: number | null; grade_confirmed_year?: number | null } | null
+      const confirmed = row?.grade_confirmed_year
+      return {
+        grade: normalizeGrade(row?.grade ?? null),
+        confirmedYear: typeof confirmed === 'number' ? confirmed : null,
+      }
+    } catch (e) {
+      console.warn('[users] 读取 grade 异常，按未设置处理：', e)
+      return { grade: null, confirmedYear: null }
+    }
+  }
+
+  /**
+   * 写入年级，并记录「这次确认属于哪个学年」。
+   *
+   * ⚠️ `grade=null`（清空）时把 `grade_confirmed_year` 一并清掉：
+   * 留着会造成「用户明明没选年级，系统却认为本学年已确认过」，
+   * 下次设置时升年级提示不出现。
+   */
+  async setGrade(
+    userId: string,
+    grade: number | null,
+    confirmedYear: number,
+  ): Promise<{ grade: number | null; confirmedYear: number | null }> {
+    const client = getSupabaseClient()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({
+        grade,
+        grade_confirmed_year: grade === null ? null : confirmedYear,
+      })
+      .eq('id', userId)
+      .select('id, grade, grade_confirmed_year')
+    if (error) {
+      throw new Error(
+        `保存年级失败：${error.message}（若提示列不存在，请先执行 migrations/0025_grade.sql）`,
+      )
+    }
+    if (!data || !data.length) throw new Error('保存年级失败：未匹配到用户')
+    const row = data[0] as { grade?: number | null; grade_confirmed_year?: number | null }
+    return {
+      grade: normalizeGrade(row.grade ?? null),
+      confirmedYear: typeof row.grade_confirmed_year === 'number' ? row.grade_confirmed_year : null,
+    }
   }
 
   /** 更新昵称 / 头像 */

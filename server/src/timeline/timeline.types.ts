@@ -110,6 +110,13 @@ export interface TimelineItem {
   next_review_at: string | null
   /** 累计答错次数（只记账，不参与排程） */
   review_lapses: number
+  /**
+   * 年级快照（migrations/0025，`P-005`）：1..12，null = 未标注（存量数据）。
+   * ⚠️ 是**创建时**的用户年级，升学不改写历史值；检索时按它做匹配与相邻扩散。
+   * 声明为可选：0025 未执行的环境里该列不存在，查询不会报错但字段为 undefined，
+   * 用必填类型会让调用方在缺列时拿到假值（`undefined` 被当成合法 null 处理反而更糟）。
+   */
+  grade?: number | null
   // 标签与状态
   tags: string[]
   mastered: boolean
@@ -150,6 +157,15 @@ export interface TimelineListQuery {
    * 分散练习要求「先复习最该复习的」，故默认不再用加入时间排序（GK-SRS-20b C5）。
    */
   sort?: 'due' | 'added'
+  /**
+   * 按年级检索（`P-005` / `D-008`）：本年级优先，**本年级 0 命中时**才向相邻年级扩散
+   * （±1 → ±2，最多 2 级，低年级先于高年级）。
+   *
+   * 不传 = 不做年级过滤（未选年级的用户照常全量返回，**不拦截**——`GK-SRS-20a M11`）。
+   * ⚠️ 后端不自动取用户年级：是否按年级检索由调用方显式决定，
+   *    否则「用户想看全部年级的题」这个诉求就没有出口。
+   */
+  grade?: number
   page?: number
   page_size?: number
 }
@@ -160,6 +176,11 @@ export interface CreateTimelineDto {
   title?: string
   source?: string
   tags?: string[]
+  /**
+   * 年级快照（`P-005` 决策 4）。不传 ⇒ 取用户当前年级（**写入时快照**，升学不改）。
+   * 显式传 null 也合法：表示「这条不标年级」，此时不会回退到用户年级。
+   */
+  grade?: number | null
   // image 专用
   file_key?: string
   thumb_key?: string
@@ -173,6 +194,6 @@ export interface CreateTimelineDto {
 }
 
 export type UpdateTimelineDto = Partial<
-  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered' | 'file_key' | 'thumb_key'> &
+  Pick<TimelineItem, 'title' | 'subject_id' | 'tags' | 'mastered' | 'file_key' | 'thumb_key' | 'grade'> &
   { content: QuestionContent }
 >

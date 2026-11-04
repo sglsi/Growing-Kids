@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
 import { findSimilarQuestions } from '../ocr/ocr-similar'
 import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, localDayKey, REVIEW_STAGES, type ReviewResult } from './review'
+import { gradeSpread, normalizeGrade } from '../shared/grade'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { IngestService } from '../storage/ingest.service'
@@ -204,14 +205,47 @@ export class TimelineService {
   }
 
   // ---------- 列表：recent / review，按时间倒序，页大小 20 ----------
+  /**
+   * 按年级检索（`P-005` / `D-008`）的落地位置。
+   *
+   * 顺序是硬约束，被 `verify/modules/26-grade.mjs` 锁住：
+   *   ① 本年级**精确命中**（不含 NULL 兜底）> 0 ⇒ 只用本年级，**不扩散**；
+   *   ② 本年级 0 命中 ⇒ 按 `gradeSpread()` 依次 ±1 → ±2（最多 2 级）；
+   *   ③ 两种情况都**附带 `grade is null` 的存量题**（决策 5：老题兜底可见）。
+   *
+   * ⚠️ 为什么「是否扩散」只看本年级精确命中数，而不看含 NULL 的总数：
+   *   存量 NULL 题数量很大，若把它算进「有结果」，扩散将**永远不会发生**
+   *   （模型：随便搜什么都命中老题），功能等于没做。故 NULL 只做可见兜底，不参与判定。
+   *
+   * ⚠️ 未传 `grade` 时完全不加年级条件 —— 未选年级的用户照常全量返回，
+   *    **绝不拦截**（`GK-SRS-20a M11`：提醒只能是引导，不能成门槛）。
+   */
   async list(
     userId: string,
     query: TimelineListQuery,
-  ): Promise<{ list: TimelineItem[]; total: number; page: number; page_size: number }> {
+  ): Promise<{
+    list: TimelineItem[]
+    total: number
+    page: number
+    page_size: number
+    /**
+     * 年级检索的落地情况（`P-005`）。未按年级检索时**不返回该字段**
+     * （而不是返回 null），避免前端把「没筛」误判成「筛了但没命中」。
+     */
+    grade_scope?: { requested: number; used: number[]; spread: boolean }
+  }> {
+    type ListResult = {
+      list: TimelineItem[]
+      total: number
+      page: number
+      page_size: number
+      grade_scope?: { requested: number; used: number[]; spread: boolean }
+    }
     // 读缓存 30s（思傅 2026-10-21：后端读缓存，与前端 SWR 双管齐下；后端见 cache-store.ts）；
     // 写操作全部走 invalidateUserTimeline 失效，最坏 30s 旧值。
+    // ⚠️ query 里带 grade，不同年级自然是不同 key，不会互相污染。
     const cacheKey = `${TL_LIST_PREFIX}${userId}:${stableQuery(query as Record<string, unknown>)}`
-    const cached = await cacheGet<{ list: TimelineItem[]; total: number; page: number; page_size: number }>(cacheKey)
+    const cached = await cacheGet<ListResult>(cacheKey)
     if (cached) return cached
 
     const client = getSupabaseClient()
@@ -220,79 +254,121 @@ export class TimelineService {
     const from = (page - 1) * pageSize
     const to = from + pageSize - 1
 
-    let q = client
-      .from(TABLE)
-      .select(SELECT_COLS, { count: 'exact' })
-      .eq('user_id', userId)          // 强制用户隔离
-      .is('deleted_at', null)         // 软删过滤
-
     // due=1 时强制走复习语义（前端即便只传 due 不传 scope 也不会查错）
     const scope: 'recent' | 'review' = query.due ? 'review' : (query.scope || 'recent')
-    if (scope === 'review') {
-      q = q.eq('in_review_book', true)
-    }
-    if (query.due) {
-      // 到期 = next_review_at 落在今天或更早。
-      // 上界取**本地日末**而非 now：排程是日历语义，晚上才到期的题在当天上午也该算
-      // 「今天该复习」，否则家长早上打开看不到任何待办，会以为功能没生效。
-      q = q.lte('next_review_at', endOfLocalDay().toISOString())
+
+    /**
+     * 与年级无关的公共过滤。抽出来是为了让「取数据」和「数命中」用**同一份条件**——
+     * 两处各写一遍的话，某天改了 keyword 却忘了改计数，扩散判定就会永远偏。
+     * ⚠️ `q: any`：PostgREST 链式 builder 在条件分支下无法保持同一泛型，
+     *    强类型只会逼出一堆断言，反而更难读。
+     */
+    const applyCommon = (q: any): any => {
+      let out = q.eq('user_id', userId).is('deleted_at', null) // 强制用户隔离 + 软删过滤
+      if (scope === 'review') out = out.eq('in_review_book', true)
+      if (query.due) {
+        // 到期 = next_review_at 落在今天或更早。
+        // 上界取**本地日末**而非 now：排程是日历语义，晚上才到期的题在当天上午也该算
+        // 「今天该复习」，否则家长早上打开看不到任何待办，会以为功能没生效。
+        out = out.lte('next_review_at', endOfLocalDay().toISOString())
+      }
+      // ⚠️ 哨兵值（思傅 2026-10-21「点未分类筛不出题」）：
+      //   overview 的 subject_stats 把「无学科」的题目汇总为 subject_id='none'
+      //   （真实值是 NULL）。列表若直接 .eq('subject_id','none') 必然查 0 条
+      //   ⇒ 首页点「未分类」显示空列表。「语数英正常」正是因为它们是真实 id。
+      //   'none'（以及前端可能传的 'null'/'uncategorized'）一律按 IS NULL 过滤。
+      if (query.subject_id) {
+        const sid = String(query.subject_id)
+        if (sid === 'none' || sid === 'null' || sid === 'uncategorized') {
+          out = out.is('subject_id', null)
+        } else {
+          out = out.eq('subject_id', sid)
+        }
+      }
+      if (query.tag) out = out.contains('tags', [query.tag])
+      if (query.keyword) {
+        const kw = `%${query.keyword}%`
+        // 题目按题干/答案/题号标签搜；图片按 title 搜（content->>question / content->>question_label / title）
+        out = out.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw},content->>question_label.ilike.${kw}`)
+      }
+      if (query.since) {
+        if (scope === 'review') {
+          // review 模式按加入复习本的时间过滤。
+          // 兼容历史数据：早期加入复习本的记录 added_to_review_at 可能为 NULL，
+          // 直接 gte 会因 NULL 比较为假而被整条排除（表现为"筛选后列表变空"），
+          // 故对空值回退到 created_at 参与过滤。
+          out = out.or(
+            `added_to_review_at.gte.${query.since},and(added_to_review_at.is.null,created_at.gte.${query.since})`,
+          )
+        } else {
+          out = out.gte('created_at', query.since)
+        }
+      }
+      return out
     }
 
-    // ⚠️ 哨兵值（思傅 2026-10-21「点未分类筛不出题」）：
-    //   overview 的 subject_stats 把「无学科」的题目汇总为 subject_id='none'
-    //   （真实值是 NULL）。列表若直接 .eq('subject_id','none') 必然查 0 条
-    //   ⇒ 首页点「未分类」显示空列表。「语数英正常」正是因为它们是真实 id。
-    //   'none'（以及前端可能传的 'null'/'uncategorized'）一律按 IS NULL 过滤。
-    if (query.subject_id) {
-      const sid = String(query.subject_id)
-      if (sid === 'none' || sid === 'null' || sid === 'uncategorized') {
-        q = q.is('subject_id', null)
-      } else {
-        q = q.eq('subject_id', sid)
+    /** 执行一次分页查询；`includeNullGrade` 控制是否把存量未标注题一并带回 */
+    const runList = async (
+      gradeFilter: number[] | null,
+      includeNullGrade = true,
+    ): Promise<{ rows: TimelineItem[]; total: number }> => {
+      // check-isolation-ignore: 隔离在 applyCommon 首句 .eq('user_id', userId)，静态扫描看不出间接链
+      let q: any = applyCommon(client.from(TABLE).select(SELECT_COLS, { count: 'exact' }))
+      if (gradeFilter && gradeFilter.length) {
+        const inClause = `grade.in.(${gradeFilter.join(',')})`
+        q = q.or(includeNullGrade ? `${inClause},grade.is.null` : inClause)
       }
-    }
-    if (query.tag) q = q.contains('tags', [query.tag])
-    if (query.keyword) {
-      const kw = `%${query.keyword}%`
-      // 题目按题干/答案/题号标签搜；图片按 title 搜（content->>question / content->>question_label / title）
-      q = q.or(`title.ilike.${kw},content->>question.ilike.${kw},content->>answer.ilike.${kw},content->>question_label.ilike.${kw}`)
-    }
-    if (query.since) {
-      if (scope === 'review') {
-        // review 模式按加入复习本的时间过滤。
-        // 兼容历史数据：早期加入复习本的记录 added_to_review_at 可能为 NULL，
-        // 直接 gte 会因 NULL 比较为假而被整条排除（表现为"筛选后列表变空"），
-        // 故对空值回退到 created_at 参与过滤。
-        q = q.or(
-          `added_to_review_at.gte.${query.since},and(added_to_review_at.is.null,created_at.gte.${query.since})`,
-        )
+      // 排序：
+      //   复习本默认按「到期先后」——按加入时间倒序等于「谁最近进本谁排前」，
+      //   与「该复习谁」毫无关系，天然形成块状 + 集中，与间隔/交错都相反（GK-SRS-20b C5）。
+      //   ASC 在 Postgres 里 NULL 自然垫底（已毕业/未排程排最后），正是想要的顺序。
+      if (scope === 'review' && query.sort !== 'added') {
+        q = q
+          .order('next_review_at', { ascending: true })
+          .order('added_to_review_at', { ascending: false })
       } else {
-        q = q.gte('created_at', query.since)
+        const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
+        q = q.order(orderField, { ascending: false })
       }
+      const { data, error, count } = await q.range(from, to)
+      if (error) throw new Error(error.message)
+      return { rows: (data || []) as unknown as TimelineItem[], total: count || 0 }
     }
 
-    // 排序：
-    //   复习本默认按「到期先后」——按加入时间倒序等于「谁最近进本谁排前」，
-    //   与「该复习谁」毫无关系，天然形成块状 + 集中，与间隔/交错都相反（GK-SRS-20b C5）。
-    //   ASC 在 Postgres 里 NULL 自然垫底（已毕业/未排程排最后），正是想要的顺序。
-    if (scope === 'review' && query.sort !== 'added') {
-      q = q
-        .order('next_review_at', { ascending: true })
-        .order('added_to_review_at', { ascending: false })
+    /**
+     * 本年级**精确**命中数（不含 NULL 兜底）——决定要不要扩散的唯一判据。
+     * 查询失败时返回 0（= 触发扩散）：宁可在多一档范围里找，也不要让用户看到空列表。
+     */
+    const countOwnGrade = async (grade: number): Promise<number> => {
+      // check-isolation-ignore: 隔离在 applyCommon 首句 .eq('user_id', userId)，静态扫描看不出间接链
+      const q: any = applyCommon(client.from(TABLE).select('id', { count: 'exact', head: true }))
+      const { count, error } = await q.eq('grade', grade)
+      if (error) {
+        console.warn('[timeline] 年级命中数查询失败，按 0 处理（将触发扩散）：', error.message)
+        return 0
+      }
+      return count || 0
+    }
+
+    const wantGrade = normalizeGrade(query.grade)
+    let gradeScope: { requested: number; used: number[]; spread: boolean } | undefined
+    let outcome: { rows: TimelineItem[]; total: number }
+
+    if (wantGrade !== null) {
+      const own = await countOwnGrade(wantGrade)
+      const used = own > 0 ? [wantGrade] : gradeSpread(wantGrade)
+      outcome = await runList(used)
+      gradeScope = { requested: wantGrade, used, spread: used.length > 1 }
     } else {
-      const orderField = scope === 'review' ? 'added_to_review_at' : 'created_at'
-      q = q.order(orderField, { ascending: false })
+      outcome = await runList(null)
     }
-    q = q.range(from, to)
 
-    const { data, error, count } = await q
-    if (error) throw new Error(error.message)
-
-    const result = {
-      list: (data || []) as unknown as TimelineItem[],
-      total: count || 0,
+    const result: ListResult = {
+      list: outcome.rows,
+      total: outcome.total,
       page,
       page_size: pageSize,
+      ...(gradeScope ? { grade_scope: gradeScope } : {}),
     }
     await cacheSet(cacheKey, result)
     return result
@@ -390,7 +466,9 @@ export class TimelineService {
     }
 
     const client = getSupabaseClient()
-    const payload = await this.buildPayload(userId, dto)
+    // 未显式指定年级时才查用户表（省一次 RTT）
+    const userGrade = dto.grade === undefined ? await this.ownerGrade(userId) : undefined
+    const payload = await this.buildPayload(userId, dto, undefined, undefined, userGrade)
 
     const { data, error } = await client.from(TABLE).insert(payload).select(SELECT_COLS).single()
     if (error) throw new Error(error.message)
@@ -399,6 +477,30 @@ export class TimelineService {
     // 新建条目 ⇒ 列表/概览缓存失效（详情缓存按 id 失效，防旧详情残留）
     await invalidateUserTimeline(userId)
     return data as unknown as TimelineItem
+  }
+
+  /**
+   * 用户当前年级（仅供**新建条目的快照**使用，`P-005` 决策 4）。
+   *
+   * 失败一律返回 null，不抛错：年级是归档标签，取不到（迁移未执行 / 网络抖动）
+   * 不该让「保存题目」这件事失败 —— 与 `normalizeSubjectId` 同一条取舍。
+   */
+  private async ownerGrade(userId: string): Promise<number | null> {
+    try {
+      const { data, error } = await getSupabaseClient()
+        .from('users')
+        .select('grade')
+        .eq('id', userId)
+        .maybeSingle()
+      if (error) {
+        // 0025 未执行时这里会报 column 不存在：静默降级为「未标注」，不打扰用户
+        return null
+      }
+      return normalizeGrade((data as { grade?: number | null } | null)?.grade ?? null)
+    } catch {
+      /* 取不到按未标注处理（见方法注释） */
+      return null
+    }
   }
 
   /**
@@ -504,13 +606,31 @@ export class TimelineService {
     dto: CreateTimelineDto,
     ownedSubjects?: Map<string, string>,
     seqCache?: Map<string, number>,
+    userGrade?: number | null,
   ): Promise<Record<string, unknown>> {
+    // 年级合法性前置校验：显式传了非法值就 400，别静默存成 null
+    // （静默降级会让客户端 bug 一直不暴露：用户以为标了三年级，其实什么都没标）
+    if (dto.grade !== undefined && dto.grade !== null && normalizeGrade(dto.grade) === null) {
+      throw new BadRequestException('grade 必须是 1-12 的整数或 null')
+    }
     // ⚠️ 绝不能直接写 dto.subject_id：空串会撞外键约束（见 normalizeSubjectId）
     const subject = await this.resolveSubject(userId, dto.subject_id, ownedSubjects)
+
+    // 年级快照（P-005 决策 4）：
+    //   · `dto.grade` 显式给了值（含 null）⇒ 以它为准，**不回退**用户年级
+    //     （null 是「这条不标年级」的合法意图，不能被用户默认值覆盖）
+    //   · 没给 ⇒ 取用户当前年级
+    // ⚠️ 快照写入后**不随升学改写**：历史归属必须稳定，否则去年那道五年级题
+    //    会跟着用户升入六年级，检索口径年年漂移。
+    const grade = dto.grade !== undefined
+      ? normalizeGrade(dto.grade)
+      : normalizeGrade(userGrade ?? null)
+
     const payload: Record<string, unknown> = {
       user_id: userId,               // 强制写入，禁止信任前端
       kind: dto.kind,
       subject_id: subject.id,
+      grade,
       // 标题口径（思傅 2026-11-03）：`科目 日期 第N题`，不再拿题干前 40 字当标题
       // —— 同一张卷子十道题看起来全一样，列表里根本分不清。
       // ⚠️ kind=image（整页照片）**同样走这个口径**：它在复习本里也是一条目，
@@ -577,6 +697,9 @@ export class TimelineService {
     const ownedSubjects = await this.ownedSubjects(userId, dtos.map((d) => d.subject_id))
     // 标题序号分配器（同一批内递增，见 nextTitle）
     const seqCache = new Map<string, number>()
+    // 整批是同一时刻录入的，用户年级只查一次（逐题查会白跑 N 次跨境 RTT）；
+    // 全批都显式给了 grade 时连这一次都不必查。
+    const userGrade = dtos.some((d) => d.grade === undefined) ? await this.ownerGrade(userId) : undefined
     const payloads: Record<string, unknown>[] = []
     for (const dto of dtos) {
       if (dto.kind !== 'image' && dto.kind !== 'question') {
@@ -596,7 +719,7 @@ export class TimelineService {
           || !!((c2.images || []).length)
         if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
-      payloads.push(await this.buildPayload(userId, dto, ownedSubjects, seqCache))
+      payloads.push(await this.buildPayload(userId, dto, ownedSubjects, seqCache, userGrade))
     }
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
@@ -677,6 +800,13 @@ export class TimelineService {
     if (dto.mastered !== undefined) {
       payload.mastered = dto.mastered
       payload.mastered_at = dto.mastered ? new Date().toISOString() : null
+    }
+    // 年级可手改（录错时能修）；语义与创建一致：null = 取消标注，非法值 400
+    if (dto.grade !== undefined) {
+      if (dto.grade !== null && normalizeGrade(dto.grade) === null) {
+        throw new BadRequestException('grade 必须是 1-12 的整数或 null')
+      }
+      payload.grade = normalizeGrade(dto.grade)
     }
 
     // 1) 执行更新（只 select id，不带任何嵌入，避免关联解析失败导致 0 行）

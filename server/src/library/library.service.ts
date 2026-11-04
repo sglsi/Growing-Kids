@@ -4,6 +4,7 @@ import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { BaiduNetdiskService } from '../storage/baidu-netdisk.service'
 import { extractDocContent } from '../ocr/pdf-tool'
+import { gradeSpread, normalizeGrade } from '../shared/grade'
 import type { LibraryDoc, CreateLibraryDocDto, LibraryQuery } from './library.types'
 
 const TABLE = 'library_docs'
@@ -32,31 +33,79 @@ export class LibraryService {
     private readonly netdisk: BaiduNetdiskService,
   ) {}
 
-  async list(userId: string, query: LibraryQuery): Promise<{ list: LibraryDoc[]; total: number; page: number; page_size: number }> {
+  /**
+   * 资料库列表（`P-005` 起支持按年级检索）。
+   *
+   * 年级语义与题目完全一致（见 `timeline.service.ts` 同名注释）：
+   *   本年级精确命中 > 0 ⇒ 只给本年级（+ 存量未标注兜底），**不扩散**；
+   *   本年级 0 命中 ⇒ 按 `gradeSpread()` 依次 ±1 → ±2；
+   *   未传 grade ⇒ 不加任何年级条件，全量返回（绝不拦截）。
+   */
+  async list(userId: string, query: LibraryQuery): Promise<{
+    list: LibraryDoc[]
+    total: number
+    page: number
+    page_size: number
+    grade_scope?: { requested: number; used: number[]; spread: boolean }
+  }> {
     const client = getSupabaseClient()
     const page = Math.max(1, query.page || 1)
     const pageSize = Math.min(100, query.page_size || 20)
     const from = (page - 1) * pageSize
     const to = from + pageSize - 1
 
-    let q = client
-      .from(TABLE)
-      .select('*, subjects:subject_id(id, name, color)', { count: 'exact' })
-      .eq('user_id', userId)
-      .is('deleted_at', null)
-
-    if (query.subject_id) q = q.eq('subject_id', query.subject_id)    // 关键词同时搜文件名与正文（思傅 2026-11-03：资料库也要能搜内容）。
-    // 正文是入库时抽好的 text_content，命中后前端照常打开原文件。
-    if (query.keyword) {
-      // PostgREST 的 or 表达式里逗号/括号/百分号是语法字符，必须剔干净
-      const kw = query.keyword.replace(/[%,()]/g, '').trim()
-      if (kw) q = q.or(`name.ilike.%${kw}%,text_content.ilike.%${kw}%`)
+    // 与年级无关的公共条件（取数据与数命中共用同一份，避免两处漂移）
+    const applyCommon = (q: any): any => {
+      let out = q.eq('user_id', userId).is('deleted_at', null)
+      if (query.subject_id) out = out.eq('subject_id', query.subject_id)
+      // 关键词同时搜文件名与正文（思傅 2026-11-03：资料库也要能搜内容）。
+      // 正文是入库时抽好的 text_content，命中后前端照常打开原文件。
+      if (query.keyword) {
+        // PostgREST 的 or 表达式里逗号/括号/百分号是语法字符，必须剔干净
+        const kw = query.keyword.replace(/[%,()]/g, '').trim()
+        if (kw) out = out.or(`name.ilike.%${kw}%,text_content.ilike.%${kw}%`)
+      }
+      return out
     }
-    q = q.order('created_at', { ascending: false }).range(from, to)
 
-    const { data, error, count } = await q
-    if (error) throw new Error(error.message)
-    return { list: (data || []) as unknown as LibraryDoc[], total: count || 0, page, page_size: pageSize }
+    const runList = async (gradeFilter: number[] | null): Promise<{ rows: LibraryDoc[]; total: number }> => {
+      // check-isolation-ignore: 隔离在 applyCommon 首句 .eq('user_id', userId)，静态扫描看不出间接链
+      let q: any = applyCommon(client.from(TABLE).select('*, subjects:subject_id(id, name, color)', { count: 'exact' }))
+      if (gradeFilter && gradeFilter.length) {
+        q = q.or(`grade.in.(${gradeFilter.join(',')}),grade.is.null`)
+      }
+      const { data, error, count } = await q.order('created_at', { ascending: false }).range(from, to)
+      if (error) throw new Error(error.message)
+      return { rows: (data || []) as unknown as LibraryDoc[], total: count || 0 }
+    }
+
+    /** 本年级精确命中数（不含 NULL 兜底）—— 扩散判据；失败按 0 处理（宁可多扩一档） */
+    const countOwnGrade = async (grade: number): Promise<number> => {
+      // check-isolation-ignore: 隔离在 applyCommon 首句 .eq('user_id', userId)，静态扫描看不出间接链
+      const q: any = applyCommon(client.from(TABLE).select('id', { count: 'exact', head: true }))
+      const { count, error } = await q.eq('grade', grade)
+      if (error) {
+        this.logger.warn(`[library] 年级命中数查询失败，按 0 处理：${error.message}`)
+        return 0
+      }
+      return count || 0
+    }
+
+    const wantGrade = normalizeGrade(query.grade)
+    if (wantGrade === null) {
+      const outcome = await runList(null)
+      return { list: outcome.rows, total: outcome.total, page, page_size: pageSize }
+    }
+    const own = await countOwnGrade(wantGrade)
+    const used = own > 0 ? [wantGrade] : gradeSpread(wantGrade)
+    const outcome = await runList(used)
+    return {
+      list: outcome.rows,
+      total: outcome.total,
+      page,
+      page_size: pageSize,
+      grade_scope: { requested: wantGrade, used, spread: used.length > 1 },
+    }
   }
 
   /**
@@ -103,8 +152,32 @@ export class LibraryService {
     return (data as unknown as LibraryDoc) || null
   }
 
+  /**
+   * 用户当前年级（仅供新建资料的快照）。失败返回 null，不抛错——
+   * 年级是归档标签，取不到不该让「保存资料」失败（与 timeline.ownerGrade 同口径）。
+   */
+  private async ownerGrade(userId: string): Promise<number | null> {
+    try {
+      const { data, error } = await getSupabaseClient()
+        .from('users')
+        .select('grade')
+        .eq('id', userId)
+        .maybeSingle()
+      if (error) return null
+      return normalizeGrade((data as { grade?: number | null } | null)?.grade ?? null)
+    } catch {
+      /* 取不到按未标注处理 */
+      return null
+    }
+  }
+
   async create(userId: string, dto: CreateLibraryDocDto): Promise<LibraryDoc> {
     if (!dto.file_key) throw new BadRequestException('文档缺少 file_key')
+    // 年级：显式给值以它为准（含 null），未给则取用户当前年级做**快照**（P-005 决策 4）
+    if (dto.grade !== undefined && dto.grade !== null && normalizeGrade(dto.grade) === null) {
+      throw new BadRequestException('grade 必须是 1-12 的整数或 null')
+    }
+    const grade = dto.grade !== undefined ? normalizeGrade(dto.grade) : await this.ownerGrade(userId)
     const client = getSupabaseClient()
     const { data, error } = await client
       .from(TABLE)
@@ -121,6 +194,7 @@ export class LibraryService {
         file_hash: dto.file_hash ?? null,
         source: dto.source ?? 'upload',
         tags: dto.tags ?? [],
+        grade,
       })
       .select('*, subjects:subject_id(id, name, color)')
       .single()
@@ -329,8 +403,8 @@ export class LibraryService {
   async update(
     userId: string,
     id: string,
-    patch: { name?: string; subject_id?: string | null },
-  ): Promise<{ id: string; name: string; subject_id: string | null }> {
+    patch: { name?: string; subject_id?: string | null; grade?: number | null },
+  ): Promise<{ id: string; name: string; subject_id: string | null; grade: number | null }> {
     const client = getSupabaseClient()
     const upd: Record<string, unknown> = {}
     if (patch.name !== undefined) {
@@ -353,6 +427,13 @@ export class LibraryService {
       }
       upd.subject_id = sid
     }
+    // 年级可手改（标错了能修）；null = 取消标注，非法值 400
+    if (patch.grade !== undefined) {
+      if (patch.grade !== null && normalizeGrade(patch.grade) === null) {
+        throw new BadRequestException('grade 必须是 1-12 的整数或 null')
+      }
+      upd.grade = normalizeGrade(patch.grade)
+    }
     if (Object.keys(upd).length === 0) throw new BadRequestException('没有需要更新的字段')
 
     const { data, error } = await client
@@ -361,11 +442,11 @@ export class LibraryService {
       .eq('user_id', userId)
       .eq('id', id)
       .is('deleted_at', null)
-      .select('id, name, subject_id')
+      .select('id, name, subject_id, grade')
       .maybeSingle()
     if (error) throw new Error(error.message)
     if (!data) throw new NotFoundException('文档不存在')
-    return data as { id: string; name: string; subject_id: string | null }
+    return data as { id: string; name: string; subject_id: string | null; grade: number | null }
   }
 
   /** 重命名（兼容旧调用；等价于 update({ name })） */

@@ -28,6 +28,12 @@ export class TimelineController {
     @Query('due') due?: string,
     /** 复习本排序：due（默认，按到期）/ added（按加入时间） */
     @Query('sort') sort?: 'due' | 'added',
+    /**
+     * 按年级检索（`P-005`）：本年级优先，0 命中才向相邻年级扩散。
+     * 不传 = 不按年级过滤（未选年级的用户照常全量返回，不拦截）。
+     * 非法值按「不传」处理：检索是读路径，不该因为一个脏参数让用户搜不了题。
+     */
+    @Query('grade') grade?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
   ) {
@@ -36,6 +42,7 @@ export class TimelineController {
       scope, subject_id: subjectId, tag, keyword, since,
       due: due === '1' || due === 'true',
       sort,
+      grade: grade ? Number(grade) : undefined,
       page: page ? Number(page) : 1,
       page_size: pageSize ? Number(pageSize) : 20,
     })

@@ -17,12 +17,15 @@ export class LibraryController {
     @Req() req: RequestWithUser,
     @Query('subject_id') subjectId?: string,
     @Query('keyword') keyword?: string,
+    /** 按年级检索（`P-005`）：本年级优先，0 命中才扩散；不传 = 不按年级过滤 */
+    @Query('grade') grade?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
   ) {
     const userId = requireUserId(req)
     const data = await this.libraryService.list(userId, {
       subject_id: subjectId, keyword,
+      grade: grade ? Number(grade) : undefined,
       page: page ? Number(page) : 1,
       page_size: pageSize ? Number(pageSize) : 20,
     })
@@ -58,12 +61,13 @@ export class LibraryController {
   async update(
     @Req() req: RequestWithUser,
     @Param('id') id: string,
-    @Body() body: { name?: string; subject_id?: string | null },
+    @Body() body: { name?: string; subject_id?: string | null; grade?: number | null },
   ) {
     const userId = requireUserId(req)
     const data = await this.libraryService.update(userId, id, {
       name: body?.name,
       subject_id: body?.subject_id,
+      grade: body?.grade,
     })
     return { code: 200, msg: 'success', data }
   }

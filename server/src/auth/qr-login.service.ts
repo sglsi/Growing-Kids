@@ -4,6 +4,7 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
 import { code2Session } from './wechat-session'
 import { signAuthToken } from '../shared/auth-token'
+import { schoolYearStart } from '../shared/grade'
 import type { User } from '../users/users.types'
 
 export type QrTicketStatus = 'pending' | 'authorized' | 'expired'
@@ -284,9 +285,28 @@ export class QrLoginService implements OnModuleDestroy {
         }
         migrated[table] += (data || []).length
       }
+      await this.adoptGrade(anonId, targetUserId)
     }
     await this.usersService.removeByIds([...anonIds])
     return migrated
+  }
+
+  /**
+   * 年级是**用户属性**，不挂在任何一张业务表上 ⇒ 上面那轮"只改 user_id"的迁移
+   * 带不走它，匿名号一删就永久丢失，用户登录后要重选一次。
+   * 规则：目标号已有年级 ⇒ 尊重目标号（不覆盖）；目标号没有 ⇒ 继承匿名号的。
+   * 失败只记日志：年级丢了是"再选一次"，绝不能连累主迁移。
+   */
+  private async adoptGrade(fromId: string, toId: string): Promise<void> {
+    try {
+      const target = await this.usersService.findGrade(toId)
+      if (target.grade !== null) return
+      const anon = await this.usersService.findGrade(fromId)
+      if (anon.grade === null) return
+      await this.usersService.setGrade(toId, anon.grade, anon.confirmedYear ?? schoolYearStart())
+    } catch (e) {
+      this.logger.warn(`[qr-login] 继承年级失败（不影响主迁移）: ${(e as Error).message}`)
+    }
   }
 
   /**
