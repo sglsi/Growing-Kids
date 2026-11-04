@@ -1,7 +1,7 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState, useRef } from 'react'
-import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Eraser, Tag } from 'lucide-react-taro'
+import { useEffect, useState, useRef } from 'react'
+import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Eraser, Tag, Ellipsis } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import ReviewItemCard from '@/components/review-item-card'
@@ -10,19 +10,22 @@ import AnswerSheet from '@/components/answer-sheet'
 import FilterHeader, {
   TagFilterBar, EmptyCard, BottomActionBar, ActionBtn,
 } from '@/components/filter-header'
-import SelectionBar from '@/components/selection-bar'
+import SelectionBar, { CheckDot } from '@/components/selection-bar'
 import SubjectBadge from '@/components/subject-badge'
+import SegmentedTabs from '@/components/segmented-tabs'
+import RenameDialog from '@/components/rename-dialog'
 import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
   updateTimeline, updateQuestion, uploadImage, replaceTimelineImage, fetchReviewSummary,
-  type Subject, type TimelineItem, type Paged, type ImageAction, type ReviewSummary,
+  fetchDocuments, batchDeleteDocuments, deleteDocument, renameDocument,
+  type Subject, type TimelineItem, type Paged, type ImageAction, type ReviewSummary, type DocItem,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
-import { openStorageFile } from '@/services/net'
+import { openStorageFile, isPdfFile } from '@/services/net'
 import { DANGER, INK, BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
-import { formatDate } from '@/types'
+import { formatDate, formatTime } from '@/types'
 
 const PAGE_SIZE = 20
 
@@ -52,6 +55,34 @@ export default function SubjectPage() {
   /** 只看今天该复习（含逾期） */
   const [dueOnly, setDueOnly] = useState(false)
   const sel = useSelection()
+
+  /**
+   * 顶部两个可切换的视图（思傅 2026-11-04 要求）。
+   *
+   * 起因：导出资料原本藏在二级页「汇总导出」的第二个 tab 里，而它本质上是
+   * **复习产物的归档**，跟复习本是一件事。要看一份上次打过的卷子，得先点
+   * 「汇总导出」再切 tab，路径绕。现在提到复习本顶部，与「科目」并列。
+   *
+   * ⚠️ 两个视图**各持一套选择态**（sel / selDocs）：共用一套会把「已选 3 道题」
+   * 的状态带进资料列表，于是「删除」按钮对着资料执行、却按题目的 id 数确认数量。
+   */
+  const [view, setView] = useState<'subject' | 'docs'>('subject')
+  const [docs, setDocs] = useState<DocItem[]>([])
+  const [docsLoading, setDocsLoading] = useState(false)
+  const [docsLoaded, setDocsLoaded] = useState(false)
+  const [docFilter, setDocFilter] = useState<'all' | 'docx' | 'pdf'>('all')
+  const [docsBusy, setDocsBusy] = useState(false)
+  const [renameDoc, setRenameDoc] = useState<DocItem | null>(null)
+  const selDocs = useSelection()
+  /**
+   * 固定顶栏高度（实测，不写死）。
+   *
+   * 顶栏高度会变：①「科目 / 导出资料」两个视图的头不一样高；② 标签行
+   * （TagFilterBar）只在 tagPool 非空时渲染。写死一个常量必然出现「要么压住
+   * 第一张卡、要么顶上留一条白缝」——2026-11-04 实测同一份代码两次量到
+   * 189 与 237 两个值，就是标签行迟到/早退造成的。
+   */
+  const [headerH, setHeaderH] = useState(192)
   // 图片编辑器状态（思傅 2026-10-22：复习本与首页同一套规则——点图片可直接编辑）
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
   // 答案面板的目标题目（思傅 2026-10-21）
@@ -186,13 +217,72 @@ export default function SubjectPage() {
     await Promise.all([subsTask, sumTask, listTask])
   }
 
+  // ---------- 导出资料（2026-11-04 从 /pages/summary 的第二个 tab 迁入）----------
+
+  /**
+   * 加载导出资料列表。
+   * ⚠️ silent：导出/删除后缓存已失效，非 silent 会把列表换成骨架屏 →
+   * ScrollView 内容塌缩 → 滚动位置被钳到顶部（与首页/资料库同一条规则）。
+   */
+  const loadDocs = async (opts: { silent?: boolean } = {}) => {
+    // SWR：先读缓存，后台刷新回写
+    const listKey = cacheListKey('doc', { pageSize: 100 })
+    const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
+    if (cached) {
+      setDocs(cached.list || [])
+      setDocsLoading(false)
+    } else if (!opts.silent) {
+      setDocsLoading(true)
+    }
+    try {
+      const res = await fetchDocuments({ pageSize: 100 })
+      setDocs(res.list)
+      setDocsLoaded(true)
+      cacheSet(listKey, res)
+    } catch (e) {
+      console.error('[subject] 加载导出资料失败', e)
+      // ⚠️ 不能静默：后端不通时列表显示「还没有导出过资料」，用户会以为资料丢了
+      if (!opts.silent) Taro.showToast({ title: '加载失败，请下拉重试', icon: 'none' })
+    } finally {
+      setDocsLoading(false)
+    }
+  }
+
+  const measureHeader = () => {
+    Taro.createSelectorQuery()
+      .select('#gk-topbar')
+      .boundingClientRect()
+      .exec((res) => {
+        const r = (res && res[0]) as { height?: number } | null
+        if (r && r.height) setHeaderH(Math.ceil(r.height) + 2)
+      })
+  }
+
+  // 视图切换、标签行出现/消失、条数变化都会改变顶栏高度 ⇒ 每次都重新量
+  useEffect(() => {
+    const t = setTimeout(measureHeader, 60)
+    return () => clearTimeout(t)
+  }, [view, tagPool.length, total])
+
+  /** 切视图：首次进「导出资料」才拉一次；切换时两侧选择态都退掉，避免误删 */
+  const switchView = (v: 'subject' | 'docs') => {
+    if (v === view) return
+    sel.exit()
+    selDocs.exit()
+    setView(v)
+    if (v === 'docs' && !docsLoaded) void loadDocs()
+  }
+
   useDidShow(() => {
     // 从详情页返回：回到「同一道题」（按 id 锚定），只恢复一次
     if (!restoredRef.current && restoreItemIdRef.current) {
       pendingRestoreIdRef.current = restoreItemIdRef.current
       restoredRef.current = true
     }
+    selDocs.exit()
     init()
+    // 停在「导出资料」视图时回来（导出完成/看完文件），静默刷一下列表
+    if (view === 'docs') void loadDocs({ silent: true })
   })
 
   const resetAndLoad = (patch: Partial<{ subjectId: string; keyword: string; tag: string; range: RangeValue; due: boolean }>) => {
@@ -467,13 +557,77 @@ export default function SubjectPage() {
     })
   }
 
+  // ---------- 导出资料的交互（迁自 /pages/summary 的 library tab）----------
+
+  const filteredDocs = docs.filter((d) => docFilter === 'all' || d.type === docFilter)
+
+  const handleDocOpen = (d: DocItem) => {
+    if (selDocs.selecting) { selDocs.toggle(d.id); return }
+    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type), d.file_key)
+  }
+
+  /** 卡片「⋯」→ 重命名 / 删除 */
+  const handleDocMore = (d: DocItem) => {
+    if (selDocs.selecting) return
+    Taro.showActionSheet({ itemList: ['重命名', '删除'] })
+      .then((res) => {
+        if (res.tapIndex === 0) setRenameDoc(d)
+        else if (res.tapIndex === 1) void handleDocSingleDelete(d)
+      })
+      .catch(() => { /* 用户取消 */ })
+  }
+
+  const handleDocSingleDelete = async (d: DocItem) => {
+    const ok = await confirmDelete(1, '份资料')
+    if (!ok) return
+    try {
+      await deleteDocument(d.id)
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      void loadDocs({ silent: true })
+    } catch (e) {
+      console.error('[subject] 删除资料失败', e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    }
+  }
+
+  const handleDocRename = async (value: string) => {
+    if (!renameDoc) return
+    // ⚠️ 必须捕获：原 summary 页同类实现曾无 try/catch ⇒ 失败时弹层不关且无提示
+    try {
+      await renameDocument(renameDoc.id, value)
+      setRenameDoc(null)
+      Taro.showToast({ title: '已重命名', icon: 'success' })
+      void loadDocs({ silent: true })
+    } catch (e) {
+      console.error('[subject] 重命名失败', e)
+      Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
+    }
+  }
+
+  const handleDocsBatchDelete = async () => {
+    if (selDocs.isEmpty) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
+    const ok = await confirmDelete(selDocs.count, '份资料')
+    if (!ok) return
+    setDocsBusy(true)
+    try {
+      await batchDeleteDocuments(Array.from(selDocs.selected))
+      Taro.showToast({ title: '已删除', icon: 'success' })
+      selDocs.exit()
+      void loadDocs({ silent: true })
+    } catch (e) {
+      console.error('[subject] 批量删除资料失败', e)
+      Taro.showToast({ title: '删除失败', icon: 'none' })
+    } finally {
+      setDocsBusy(false)
+    }
+  }
+
   /**
-   * 汇总导出（2026-11-02 从「文档」tab 移入复习本）。
+   * 汇总生成（2026-11-02 从「文档」tab 移入复习本；2026-11-04 导出资料搬走后，
+   * 二级页 /pages/summary 只剩这一件事，因此入口文案由「汇总导出」改为「汇总生成」）。
    *
-   * 思傅的判断：按时间段把题目汇总成卷、导出练习卷/答疑版，本质是**复习动作**，
-   * 单独占一个 tab 反而让「复习」和「出卷」分成两处。现在入口在复习本，页面独立
-   * （/pages/summary/index）——这里本页头部已经很挤（学科 + 搜索 + 标签 + 时间范围），
-   * 再塞一整块汇总面板会让人找不到主列表。
+   * 为什么不把汇总生成也塞成第三个 tab：它是一张「选时间段 + 选学科 + 开关」的
+   * 表单，塞进本页会让主列表在顶部被压掉一屏；而且它是一次性动作，不是常驻视图。
    */
   const goSummary = () => Taro.navigateTo({ url: '/pages/summary/index' })
 
@@ -482,133 +636,219 @@ export default function SubjectPage() {
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
-      {/* 固定顶部：学科 + 搜索 + 标签 + 操作 */}
-      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', borderBottom: '1px solid #ecefe3' }}>
-        <FilterHeader
-          subjects={subjects}
-          activeSubject={activeSubject}
-          onSubjectChange={(id) => resetAndLoad({ subjectId: id })}
-          keyword={keyword}
-          onKeywordChange={(kw) => setKeyword(kw)}
-          onSearch={() => resetAndLoad({ keyword: keyword })}
-          // ⚠️ 清空必须显式传空串：不能复用 onSearch（它拿到的是旧 keyword 闭包值）
-          onClear={() => { setKeyword(''); resetAndLoad({ keyword: '' }) }}
-          countText={`复习本 · 共 ${total} 条`}
-          placeholder="搜索题干 / 答案关键词，回车确认"
-          right={(
-            <View className="flex flex-row items-center gap-2">
-              {!sel.selecting && (
-                <View
-                  className="flex flex-row items-center gap-1 rounded-lg px-2 py-1"
-                  style={{ border: `1px solid ${BRAND}`, backgroundColor: 'rgba(16, 185, 129, 0.06)' }}
-                  onClick={goSummary}
-                >
-                  <FileText size={13} color={BRAND_TEXT} />
-                  <Text className="block text-sm" style={{ color: BRAND_TEXT }}>汇总导出</Text>
-                </View>
-              )}
-              <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
+      {/* 固定顶部：视图切换（科目 / 导出资料）+ 各自的筛选头 */}
+      <View id="gk-topbar" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', borderBottom: '1px solid #ecefe3' }}>
+        {/* 思傅 2026-11-04：把「导出资料」提到最上，与「科目」成为两个可切换的页面 */}
+        <View style={{ padding: '8px 16px 4px' }}>
+          <SegmentedTabs<'subject' | 'docs'>
+            value={view}
+            onValueChange={switchView}
+            options={[
+              { value: 'subject', label: '科目' },
+              { value: 'docs', label: '导出资料' },
+            ]}
+          />
+        </View>
+
+        {view === 'subject' ? (
+          <FilterHeader
+            subjects={subjects}
+            activeSubject={activeSubject}
+            onSubjectChange={(id) => resetAndLoad({ subjectId: id })}
+            keyword={keyword}
+            onKeywordChange={(kw) => setKeyword(kw)}
+            onSearch={() => resetAndLoad({ keyword: keyword })}
+            // ⚠️ 清空必须显式传空串：不能复用 onSearch（它拿到的是旧 keyword 闭包值）
+            onClear={() => { setKeyword(''); resetAndLoad({ keyword: '' }) }}
+            countText={`复习本 · 共 ${total} 条`}
+            placeholder="搜索题干 / 答案关键词，回车确认"
+            right={(
+              <View className="flex flex-row items-center gap-2">
+                {!sel.selecting && (
+                  <View
+                    className="flex flex-row items-center gap-1 rounded-lg px-2 py-1"
+                    style={{ border: `1px solid ${BRAND}`, backgroundColor: 'rgba(16, 185, 129, 0.06)' }}
+                    onClick={goSummary}
+                  >
+                    <FileText size={13} color={BRAND_TEXT} />
+                    <Text className="block text-sm" style={{ color: BRAND_TEXT }}>汇总生成</Text>
+                  </View>
+                )}
+                <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
+              </View>
+            )}
+          >
+            <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
+            <View className="mt-2">
+              <RangePicker value={range} onChange={(v) => resetAndLoad({ range: v })} />
             </View>
-          )}
-        >
-          <TagFilterBar tags={tagPool} active={activeTag} onChange={(t) => resetAndLoad({ tag: t })} />
-          <View className="mt-2">
-            <RangePicker value={range} onChange={(v) => resetAndLoad({ range: v })} />
+          </FilterHeader>
+        ) : (
+          <View style={{ padding: '0 16px 8px' }}>
+            <View className="flex flex-row items-center justify-between">
+              <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份资料</Text>
+              <SelectionBar selection={selDocs} enterLabel="批量选择" />
+            </View>
+            <View className="mt-2">
+              <SegmentedTabs<'all' | 'docx' | 'pdf'>
+                value={docFilter}
+                onValueChange={(v) => { setDocFilter(v); selDocs.clear() }}
+                options={[
+                  { value: 'all', label: '全部' },
+                  { value: 'docx', label: 'Word' },
+                  { value: 'pdf', label: 'PDF' },
+                ]}
+              />
+            </View>
           </View>
-        </FilterHeader>
+        )}
       </View>
 
-      <ScrollView
-        id="list-scroll"
-        scrollY
-        scrollTop={scrollTop}
-        onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
-        style={{ height: '100vh', paddingTop: 168 }}
-        onScrollToLower={() => {
-          if (canLoadMore && !loadingMore && !loading) {
-            const since = getSinceFromRange(range, latestTimestamp)
-            load({ subjectId: activeSubject, keyword, tag: activeTag, page: page + 1, since, append: true })
-          }
-        }}
-      >
-        <View className="px-4 pb-28 pt-3">
-          {/**
-            * C4 复习排程横幅：「今天该复习 N 题」是分散练习唯一需要推动用户行动的数字。
-            * 只在复习本非空时出现；due_today = 0 时给一句明确的「今天没有到期的题」，
-            * 避免用户以为排程坏了（空状态也要有话说）。
-            * ⚠️ 点击区用 View 不用 Text —— Taro 4.1.9 下 Text 绑 onClick 不响应。
-            */}
-          {sum && sum.in_book > 0 && (
-            <View
-              className="rounded-2xl p-3 mb-3"
-              style={{ backgroundColor: sum.due_today > 0 ? 'rgba(16, 185, 129, 0.08)' : '#F7F5EF' }}
-            >
-              <View className="flex flex-row items-center justify-between">
-                <Text className="block text-sm font-semibold text-foreground">
-                  {sum.due_today > 0 ? `今天该复习 ${sum.due_today} 题` : '今天没有到期的题'}
+      {view === 'subject' && (
+        <ScrollView
+          id="list-scroll"
+          scrollY
+          scrollTop={scrollTop}
+          onScroll={(e) => { scrollRef.current = (e as any)?.detail?.scrollTop || 0 }}
+          style={{ height: '100vh', paddingTop: headerH }}
+          onScrollToLower={() => {
+            if (canLoadMore && !loadingMore && !loading) {
+              const since = getSinceFromRange(range, latestTimestamp)
+              load({ subjectId: activeSubject, keyword, tag: activeTag, page: page + 1, since, append: true })
+            }
+          }}
+        >
+          <View className="px-4 pb-28 pt-3">
+            {/**
+              * C4 复习排程横幅：「今天该复习 N 题」是分散练习唯一需要推动用户行动的数字。
+              * 只在复习本非空时出现；due_today = 0 时给一句明确的「今天没有到期的题」，
+              * 避免用户以为排程坏了（空状态也要有话说）。
+              * ⚠️ 点击区用 View 不用 Text —— Taro 4.1.9 下 Text 绑 onClick 不响应。
+              */}
+            {sum && sum.in_book > 0 && (
+              <View
+                className="rounded-2xl p-3 mb-3"
+                style={{ backgroundColor: sum.due_today > 0 ? 'rgba(16, 185, 129, 0.08)' : '#F7F5EF' }}
+              >
+                <View className="flex flex-row items-center justify-between">
+                  <Text className="block text-sm font-semibold text-foreground">
+                    {sum.due_today > 0 ? `今天该复习 ${sum.due_today} 题` : '今天没有到期的题'}
+                  </Text>
+                  <View
+                    className="px-2 py-1 rounded-lg"
+                    style={dueOnly
+                      ? { backgroundColor: BRAND }
+                      : { border: `1px solid ${BRAND}` }}
+                    onClick={() => resetAndLoad({ due: !dueOnly })}
+                  >
+                    <Text className="block text-xs" style={{ color: dueOnly ? BRAND_FOREGROUND : BRAND_TEXT }}>
+                      {dueOnly ? '看全部' : '只看今天'}
+                    </Text>
+                  </View>
+                </View>
+                <Text className="block text-xs text-muted-foreground mt-1">
+                  复习本共 {sum.in_book} 题
+                  {sum.graduated > 0 ? ` · 已走完五档 ${sum.graduated}` : ''}
+                  {sum.next_due_at ? ` · 下次 ${formatDate(sum.next_due_at)}` : ''}
                 </Text>
-                <View
-                  className="px-2 py-1 rounded-lg"
-                  style={dueOnly
-                    ? { backgroundColor: BRAND }
-                    : { border: `1px solid ${BRAND}` }}
-                  onClick={() => resetAndLoad({ due: !dueOnly })}
-                >
-                  <Text className="block text-xs" style={{ color: dueOnly ? BRAND_FOREGROUND : BRAND_TEXT }}>
-                    {dueOnly ? '看全部' : '只看今天'}
+              </View>
+            )}
+            {loading ? (
+              <View className="space-y-3">
+                <Skeleton className="h-24 w-full rounded-2xl" />
+                <Skeleton className="h-24 w-full rounded-2xl" />
+                <Skeleton className="h-24 w-full rounded-2xl" />
+              </View>
+            ) : items.length ? (
+              <>
+                <View className="space-y-3">
+                  {items.map((it) => (
+                    <View id={`tl-item-${it.id}`} key={it.id}>
+                      <ReviewItemCard
+                        item={it}
+                        selecting={sel.selecting}
+                        checked={sel.selected.has(it.id)}
+                        onOpen={handleOpen}
+                        onTapImage={handleTapImage}
+                        onLongPress={(x) => sel.longPress(x.id)}
+                        timeField="added_to_review_at"
+                        onMore={openMore}
+                        onAnswer={openAnswer}
+                      />
+                    </View>
+                  ))}
+                </View>
+                <View className="py-4 flex items-center justify-center">
+                  <Text className="block text-xs text-muted-foreground">
+                    {loadingMore ? '加载中…' : canLoadMore ? `上拉加载更多（${items.length}/${total}）` : '已经到底啦'}
                   </Text>
                 </View>
-              </View>
-              <Text className="block text-xs text-muted-foreground mt-1">
-                复习本共 {sum.in_book} 题
-                {sum.graduated > 0 ? ` · 已走完五档 ${sum.graduated}` : ''}
-                {sum.next_due_at ? ` · 下次 ${formatDate(sum.next_due_at)}` : ''}
-              </Text>
-            </View>
-          )}
-          {loading ? (
-            <View className="space-y-3">
-              <Skeleton className="h-24 w-full rounded-2xl" />
-              <Skeleton className="h-24 w-full rounded-2xl" />
-              <Skeleton className="h-24 w-full rounded-2xl" />
-            </View>
-          ) : items.length ? (
-            <>
+              </>
+            ) : (
+              <EmptyCard
+                title="复习本还是空的"
+                hint="到收件箱长按选择题目，点「加入复习本」即可归档到这里"
+                actionLabel="去拍照识别"
+                onAction={goRecognize}
+              />
+            )}
+          </View>
+        </ScrollView>
+      )}
+
+      {view === 'docs' && (
+        <ScrollView scrollY style={{ height: '100vh', paddingTop: headerH }}>
+          <View className="px-4 pb-28 pt-3">
+            {docsLoading ? (
               <View className="space-y-3">
-                {items.map((it) => (
-                  <View id={`tl-item-${it.id}`} key={it.id}>
-                    <ReviewItemCard
-                      item={it}
-                      selecting={sel.selecting}
-                      checked={sel.selected.has(it.id)}
-                      onOpen={handleOpen}
-                      onTapImage={handleTapImage}
-                      onLongPress={(x) => sel.longPress(x.id)}
-                      timeField="added_to_review_at"
-                      onMore={openMore}
-                      onAnswer={openAnswer}
-                    />
+                <Skeleton className="h-16 w-full rounded-2xl" />
+                <Skeleton className="h-16 w-full rounded-2xl" />
+              </View>
+            ) : filteredDocs.length ? (
+              <View className="space-y-2">
+                {filteredDocs.map((d) => (
+                  <View
+                    key={d.id}
+                    className={`flex flex-row items-center gap-3 rounded-2xl border p-4 ${selDocs.selected.has(d.id) ? 'border-brand-line bg-brand-soft' : 'border-border bg-card'}`}
+                    onClick={() => handleDocOpen(d)}
+                    onLongPress={() => selDocs.longPress(d.id)}
+                  >
+                    {selDocs.selecting && (
+                      <CheckDot checked={selDocs.selected.has(d.id)} size={20} />
+                    )}
+                    <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
+                      <FileText size={20} color={INK} />
+                    </View>
+                    <View className="flex-1 min-w-0">
+                      <View className="flex flex-row items-center gap-2">
+                        <View className="rounded px-2 py-1 flex-shrink-0 bg-muted">
+                          <Text className="block text-xs font-medium text-foreground">
+                            {d.type === 'pdf' ? 'PDF' : 'Word'}
+                          </Text>
+                        </View>
+                        <Text className="block text-sm font-medium text-foreground truncate">{d.title}</Text>
+                      </View>
+                      <Text className="block text-xs text-muted-foreground mt-1">{formatTime(d.created_at)}</Text>
+                    </View>
+                    {!selDocs.selecting && (
+                      <View className="p-2" onClick={(e) => { e.stopPropagation?.(); handleDocMore(d) }}>
+                        <Ellipsis size={16} color="#bbb" />
+                      </View>
+                    )}
                   </View>
                 ))}
               </View>
-              <View className="py-4 flex items-center justify-center">
-                <Text className="block text-xs text-muted-foreground">
-                  {loadingMore ? '加载中…' : canLoadMore ? `上拉加载更多（${items.length}/${total}）` : '已经到底啦'}
-                </Text>
-              </View>
-            </>
-          ) : (
-            <EmptyCard
-              title="复习本还是空的"
-              hint="到收件箱长按选择题目，点「加入复习本」即可归档到这里"
-              actionLabel="去拍照识别"
-              onAction={goRecognize}
-            />
-          )}
-        </View>
-      </ScrollView>
+            ) : (
+              <EmptyCard
+                title={docFilter === 'all' ? '还没有导出过资料' : `没有 ${docFilter === 'pdf' ? 'PDF' : 'Word'} 资料`}
+                hint="在「科目」里点「汇总生成」按时间段成卷，或批量选中题目「合成PDF/WORD」；成品都归档到这里"
+              />
+            )}
+          </View>
+        </ScrollView>
+      )}
 
-      {sel.selecting && (
+      {view === 'subject' && sel.selecting && (
         <BottomActionBar>
           <View style={{ flex: 1 }}>
             <ActionBtn
@@ -638,6 +878,31 @@ export default function SubjectPage() {
             />
           </View>
         </BottomActionBar>
+      )}
+
+      {/* 导出资料视图的底部操作条：只有「删除选中」（资料没有「移出复习本」的概念） */}
+      {view === 'docs' && selDocs.selecting && (
+        <BottomActionBar>
+          <View style={{ flex: 1 }}>
+            <ActionBtn
+              icon={<Trash2 size={16} color="#fff" />}
+              label="删除选中"
+              danger
+              disabled={selDocs.isEmpty || docsBusy}
+              onClick={handleDocsBatchDelete}
+            />
+          </View>
+        </BottomActionBar>
+      )}
+
+      {/* 重命名资料（迁自 /pages/summary） */}
+      {renameDoc && (
+        <RenameDialog
+          title="重命名资料"
+          initialValue={renameDoc.title}
+          onCancel={() => setRenameDoc(null)}
+          onConfirm={handleDocRename}
+        />
       )}
 
       {/* 图片编辑器（思傅 2026-10-22：复习本与首页同一套规则，点图片即可编辑并原位替换） */}

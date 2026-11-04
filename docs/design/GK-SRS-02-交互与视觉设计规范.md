@@ -1,6 +1,6 @@
 # GK-SRS-02 交互与视觉设计规范
 
-> 编号：GK-SRS-02 ｜ 版本：v1.0 ｜ 日期：2026-10-25 ｜ 状态：正文完成（待统一校正）
+> 编号：GK-SRS-02 ｜ 版本：v1.1 ｜ 日期：2026-11-04 ｜ 状态：正文完成（待统一校正）
 > 读者：前端 / 设计 ｜ 上游：SRS-01 ｜ 下游：DD-08
 > 定位：把散落在代码、历次真机反馈里的交互与视觉约定固化成规范，避免"每次改 UI 都要重新吵一遍"。
 > 数据来源：2026-10-25 代码现状（`src/app.config.ts`、`src/app.css`、`src/lib/theme.ts`、各页面实现）。与代码冲突时以代码为准并回写本文。
@@ -37,7 +37,7 @@
 | Tab | 页面 | 用途 |
 |---|---|---|
 | 首页 | `pages/index` | 最近录入（收件箱全量流 + 筛选 + 批量） |
-| 复习本 | `pages/subject` | 复习本条目（学科/标签/时间筛选、合成 PDF/Word、进「汇总导出」） |
+| 复习本 | `pages/subject` | 顶部「科目 / 导出资料」两视图切换；科目视图＝复习本条目（学科/标签/时间筛选、合成 PDF/Word、进「汇总生成」） |
 | 资料 | `pages/library` | 资料库本体（导入、搜索、打开、改名、归类、删除） |
 | 记忆 | `pages/memory` | 成长记忆列表 |
 | 我的 | `pages/profile` | 登录、资料、配额与统计 |
@@ -47,7 +47,7 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
 ### 2.2 页面树（13 个）
 
 **一级（Tab）**：index、subject、library（资料）、memory、profile
-**二级（从列表/我的进入）**：detail（题目详情）、recognize（识别导入）、summary（汇总导出）、chat（智能客服）、chat/admin（知识库管理）、memory/edit、memory/detail、scan-login（H5 扫码登录落地页）
+**二级（从列表/我的进入）**：detail（题目详情）、recognize（识别导入）、summary（汇总生成）、chat（智能客服）、chat/admin（知识库管理）、memory/edit、memory/detail、scan-login（H5 扫码登录落地页）
 
 ### 2.3 跳转关系
 
@@ -57,7 +57,8 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
        └─▶ 图片编辑器（cropOnly 裁剪入题）
 复习本 ─┬─▶ 详情
         ├─▶ 合成 PDF/WORD（批量选中）
-        └─▶ 汇总导出（二级页：汇总生成 + 导出资料列表）
+        ├─▶ 导出资料（本页顶部第二个视图，与「科目」切换）
+        └─▶ 汇总生成（二级页）
 资料 ───▶ 资料库本身（导入、搜索、打开、改名、归类、删除）
 记忆 ───▶ 记忆详情 / 记忆编辑
 我的 ───▶ 登录、客服、知识库管理
@@ -227,7 +228,7 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
 | `qr-login-modal` | 扫码登录弹层（票据 5 分钟续期） | 我的 / H5 |
 | `range-picker` | 时间范围选择 + `getSinceFromRange` | 首页、复习本、记忆 |
 | `rename-dialog` | 重命名弹层 | 资料库、导出资料 |
-| `segmented-tabs` | 分段切换器 | 汇总导出页等 |
+| `segmented-tabs` | 分段切换器 | 复习本顶部（科目 / 导出资料）、汇总生成页等 |
 | `selection-bar` | 批量底栏 + `CheckDot` | 各列表页 |
 | `subject-badge` | 学科胶囊 | 全局 |
 | `wrongq-box-editor` | 错题圈定叠加编辑器 | 识别导入 |
@@ -262,3 +263,4 @@ TabBar 视觉：`color #9A948A`、`selectedColor #2E6F4E`（品牌色）、背�
 |---|---|---|
 | v0.0 | 2026-10-23 | 建立提纲（待审） |
 | v1.0 | 2026-10-25 | 全章正文落地：5 Tab / 13 页面信息架构与跳转、返回锚回规则、列表与图片交互、z-index 分层、表单与数学输入、反馈规范、**视觉基线（品牌色按代码现状写为松绿 `#2E6F4E` 及三档派生、字号下限 12px、触控 ≥44px、8pt 栅格）**、Taro 8 条平台限制、19 个业务组件清单与准入条件、交互检查清单 |
+| v1.1 | 2026-11-04 | **复习本改为「科目 / 导出资料」双视图**（顶部 `segmented-tabs`），「导出资料」从二级页 `summary` 迁入；`summary` 只保留「汇总生成」。页面清单、跳转树、组件用途同步改写 |

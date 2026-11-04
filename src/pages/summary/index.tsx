@@ -1,125 +1,71 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import ReviewItemCard from '@/components/review-item-card'
-import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
-import SegmentedTabs from '@/components/segmented-tabs'
+import { EmptyCard } from '@/components/filter-header'
 import SubjectBadge from '@/components/subject-badge'
-import SelectionBar, { CheckDot } from '@/components/selection-bar'
-import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/range-picker'
-import { confirmDelete, useSelection } from '@/lib/use-selection'
+import RangePicker, { getSinceFromRange, RANGE_OPTIONS, type RangeValue } from '@/components/range-picker'
 import {
-  fetchTimeline, fetchSubjects, fetchDocuments, batchDeleteDocuments, exportDocument, renameDocument, deleteDocument,
-  type Subject, type TimelineItem, type DocItem, type Paged,
+  fetchTimeline, fetchSubjects, exportDocument,
+  type Subject, type TimelineItem, type Paged,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
-import { formatTime } from '@/types'
-import { openStorageFile, isPdfFile } from '@/services/net'
-import { FileText, Ellipsis, Trash2 } from 'lucide-react-taro'
-import RenameDialog from '@/components/rename-dialog'
-import { INK } from '@/lib/theme'
+import { openStorageFile } from '@/services/net'
 
 /**
- * 汇总导出（2026-11-02 从「文档」tab 搬到复习本）
+ * 汇总生成（本页现在只做一件事）
  *
- * 思傅的判断：**按时间段汇总成卷、把导出过的资料归档，本质都是复习动作**，
- * 放在「文档」这个 tab 里，等于把复习流程拆成两个入口；而那个 tab 又同时塞着
- * 「导入的 PDF/Word/图片」——两件事搅在一起。
+ * 沿革：
+ *   · 2026-11-02 从「文档」tab 搬进复习本（按时间段成卷 + 导出资料归档）；
+ *   · **2026-11-04「导出资料」搬到复习本顶部，与本页的「科目」并列成两个可切换视图**
+ *     ⇒ 本页只剩「汇总生成」一件事，所以去掉原来的两个 tab。
  *
- * 所以拆成：
- *   · 复习本（tab）= 待复习题目 + 本页入口（顶部「汇总导出」）；
- *   · 资料（tab）= 资料库（自己导入的文件）；
- *   · 本页（二级页，从复习本进）= 汇总生成 + 导出过的资料列表。
- *
- * 页面内容是原 `pages/document/index.tsx` 的两段，去掉了「跳资料库」按钮
- * （已经在另一个 tab 里），其余逻辑一字未改。
+ * 与复习本「批量选择 → 合成PDF/WORD」的分工（这是最容易被问混的一点）：
+ *   · 本页 = **按条件自动收题**：给定时间段 + 学科，把符合条件的题一次成卷，
+ *     不需要手指点；适合「把这一周的题打一份练习卷」。
+ *   · 批量选择 = **手动挑题**：在列表里勾哪几道就出哪几道，可跨学科任意组合；
+ *     适合「就是这 5 道错题，单独打印」。
+ *   两者产物都会归档进「导出资料」，区别只在「谁来挑题」。
  */
-type Range = RangeValue
-type Tab = 'generate' | 'library'
 
-function getDateRange(r: Range, latestTimestamp?: string | null): { start: string; end: string } {
+function getDateRange(r: RangeValue, latestTimestamp?: string | null): { start: string; end: string } {
   const end = new Date().toISOString()
   const since = getSinceFromRange(r, latestTimestamp)
   if (!since) return { start: '', end: r === 'all' ? '' : end }
   return { start: since, end }
 }
 
-export default function SummaryPage() {
-  const [tab, setTab] = useState<Tab>('generate')
+const RANGE_LABEL: Record<RangeValue, string> = RANGE_OPTIONS.reduce(
+  (acc, o) => { acc[o.value] = o.label; return acc },
+  {} as Record<RangeValue, string>,
+)
 
+export default function SummaryPage() {
   // —— 生成相关 ——
-  const [range, setRange] = useState<Range>('week')
+  const [range, setRange] = useState<RangeValue>('week')
   const [latestTimestamp, setLatestTimestamp] = useState<string | undefined>(undefined)
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [activeSubject, setActiveSubject] = useState('')
   const [questions, setQuestions] = useState<TimelineItem[]>([])
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
-  const [previewed, setPreviewed] = useState(false)
   const [includeMastered, setIncludeMastered] = useState(false)
 
-  // —— 导出资料列表 ——
-  const [docs, setDocs] = useState<DocItem[]>([])
-  const [docsLoading, setDocsLoading] = useState(true)
-  const [docFilter, setDocFilter] = useState<'all' | 'docx' | 'pdf'>('all')
-  const [busy, setBusy] = useState(false)
-  const [renameTarget, setRenameTarget] = useState<DocItem | null>(null)
-  const sel = useSelection()
-
-  useDidShow(() => {
-    if (subjects.length === 0) {
-      const cachedSubs = cacheGet<Subject[]>('subj:list')
-      if (cachedSubs) setSubjects(cachedSubs)
-      fetchSubjects()
-        .then((s) => {
-          setSubjects(s)
-          if (s.length) cacheSet('subj:list', s)
-        })
-        // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）
-        .catch((e) => console.error('[summary] 学科列表加载失败', e))
-    }
-    sel.exit()
-    loadDocs()
-  })
-
   /**
-   * 加载导出资料列表。
-   * ⚠️ silent（思傅 2026-10-23：与首页/复习本/资料库/记忆同一规则）：
-   * 导出/删除后缓存已失效，非 silent 会 setDocsLoading(true) → 骨架屏替换列表 →
-   * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
+   * 按当前筛选条件拉取题目。
+   *
+   * ⚠️ 2026-11-04 修「打开汇总生成，一道题都没有」：
+   * 原实现只在用户手动点「生成汇总预览」后才拉数据，且未预览时列表区**连空态都不渲染**
+   * ⇒ 进页面看到的是「时间段 + 学科 + 开关 + 一个按钮 + 大片空白」，很容易被当成坏了。
+   * 现在改为**进页面自动生成一次**、改筛选条件也自动重生成，页面永远有内容或明确的空态。
    */
-  const loadDocs = async (opts: { silent?: boolean } = {}) => {
-    // SWR（思傅 2026-10-21）：先读缓存，后台刷新回写
-    const listKey = cacheListKey('doc', { pageSize: 100 })
-    const cached = cacheGet<{ total: number; list: DocItem[] }>(listKey)
-    if (cached) {
-      setDocs(cached.list || [])
-      setDocsLoading(false)
-    } else if (!opts.silent) {
-      setDocsLoading(true)
-    }
-    try {
-      const res = await fetchDocuments({ pageSize: 100 })
-      setDocs(res.list)
-      cacheSet(listKey, res)
-    } catch (e) {
-      console.error('加载导出资料失败', e)
-      // ⚠️ 不能静默：后端不通时列表显示「暂无资料」，用户以为资料丢了。
-      // 只有后台静默刷新（silent）才不打扰用户。
-      if (!opts.silent) Taro.showToast({ title: '加载失败，请下拉重试', icon: 'none' })
-    } finally {
-      setDocsLoading(false)
-    }
-  }
-
-  const handlePreview = async () => {
+  const preview = async () => {
     setLoading(true)
-    setPreviewed(true)
     try {
-      // v4：汇总数据源为 timeline（kind=question），已掌握过滤与时间/学科筛选均在后端
+      // 数据源为 timeline（kind=question），已掌握过滤与学科筛选在后端，时间窗在前端
       const { start, end } = getDateRange(range, latestTimestamp)
       // SWR：重复预览同一筛选时先读缓存（写操作已失效 tl 域，拿到即最新）
       const listKey = cacheListKey('tl', { scope: 'recent', subjectId: activeSubject || '', pageSize: 100 })
@@ -142,24 +88,47 @@ export default function SummaryPage() {
       if (end) list = list.filter((it) => it.created_at <= end)
       setQuestions(list)
     } catch (e) {
-      console.error('预览失败', e)
+      console.error('[summary] 预览失败', e)
       Taro.showToast({ title: '汇总预览失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)
     }
   }
 
+  useDidShow(() => {
+    const cachedSubs = cacheGet<Subject[]>('subj:list')
+    if (cachedSubs && subjects.length === 0) setSubjects(cachedSubs)
+    fetchSubjects()
+      .then((s) => {
+        setSubjects(s)
+        if (s.length) cacheSet('subj:list', s)
+      })
+      // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）
+      .catch((e) => console.error('[summary] 学科列表加载失败', e))
+
+  })
+
+  /**
+   * 筛选条件一变就重新生成——保证「看到的列表」永远等于「当前筛选」。
+   * 不做这一步的话，把时间段从「近一周」改成「全部」后列表还是旧的，
+   * 用户会以为筛选没生效（这正是老版本被误判成「没有一道题」的第二个原因）。
+   */
+  useEffect(() => {
+    void preview()
+    // preview 每次渲染都是新函数，放进依赖会无限循环；它读的 range/subject/includeMastered 已在下面列出
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, activeSubject, includeMastered])
+
   /**
    * 导出 Word/PDF（2026-10-28 起两种用途分开，默认练习卷）。
    *
-   * 背景：本页是全站唯一的「按时间段汇总成卷」入口，此前不传 `include_answers`
-   * 而后端默认含答案 ⇒ 家长想打一份空白练习卷，拿到的却是答案纸
-   * （而复习本合成 PDF 的默认恰好相反，同一产品两套默认）。
+   * 背景：此前不传 `include_answers` 而后端默认含答案 ⇒ 家长想打一份空白练习卷，
+   * 拿到的却是答案纸（而复习本合成 PDF 的默认恰好相反，同一产品两套默认）。
    * 现在按钮把用途写明：**打印练习卷 = 不含答案**，另一颗按钮才是答疑解惑。
    */
   const handleExport = async (withAnswers: boolean) => {
     if (!questions.length) {
-      Taro.showToast({ title: '请先生成汇总', icon: 'none' })
+      Taro.showToast({ title: '当前条件没有题目，先放宽筛选', icon: 'none' })
       return
     }
     if (exporting) return
@@ -175,272 +144,94 @@ export default function SummaryPage() {
       })
       openStorageFile(res.url, false, res.file_key)
       Taro.showToast({ title: withAnswers ? '已生成答疑解惑版' : '已生成练习卷', icon: 'none' })
-      loadDocs({ silent: true })
     } catch (e) {
-      console.error('导出失败', e)
+      console.error('[summary] 导出失败', e)
       Taro.showToast({ title: '导出失败', icon: 'none' })
     } finally {
       setExporting(false)
     }
   }
 
-  const filteredDocs = docs.filter((d) => docFilter === 'all' || d.type === docFilter)
-
-  const handleItemOpen = (d: DocItem) => {
-    if (sel.selecting) { sel.toggle(d.id); return }
-    openStorageFile(d.url || '', isPdfFile(d.mime_type || d.type), d.file_key)
-  }
-
-  /** 卡片「⋯」→ 重命名 / 删除（思傅 2026-10-24） */
-  const handleDocMore = (d: DocItem) => {
-    if (sel.selecting) return
-    Taro.showActionSheet({ itemList: ['重命名', '删除'] })
-      .then((res) => {
-        if (res.tapIndex === 0) setRenameTarget(d)
-        else if (res.tapIndex === 1) handleSingleDelete(d)
-      })
-      .catch(() => { /* 取消 */ })
-  }
-
-  const handleSingleDelete = async (d: DocItem) => {
-    const ok = await confirmDelete(1, '份资料')
-    if (!ok) return
-    try {
-      await deleteDocument(d.id)
-      Taro.showToast({ title: '已删除', icon: 'success' })
-      loadDocs({ silent: true })
-    } catch (e) {
-      console.error('删除失败', e)
-      Taro.showToast({ title: '删除失败', icon: 'none' })
-    }
-  }
-
-  const handleRenameConfirm = async (value: string) => {
-    if (!renameTarget) return
-    // ⚠️ 必须捕获：原实现无 try/catch ⇒ 失败时弹层不关、无提示（见资料库同类修复）
-    try {
-      await renameDocument(renameTarget.id, value)
-      setRenameTarget(null)
-      Taro.showToast({ title: '已重命名', icon: 'success' })
-      loadDocs({ silent: true })
-    } catch (e) {
-      console.error('[summary] 重命名失败', e)
-      Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
-    }
-  }
-
-  const handleDelete = async () => {
-    if (sel.isEmpty) { Taro.showToast({ title: '请先选择资料', icon: 'none' }); return }
-    const ok = await confirmDelete(sel.count, '份资料')
-    if (!ok) return
-    setBusy(true)
-    try {
-      await batchDeleteDocuments(Array.from(sel.selected))
-      Taro.showToast({ title: '已删除', icon: 'success' })
-      sel.exit()
-      loadDocs({ silent: true })
-    } catch (e) {
-      console.error('删除失败', e)
-      Taro.showToast({ title: '删除失败', icon: 'none' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  /** 空态引导：回复习本挑题（本页已从复习本进入） */
-  const backToReview = () => Taro.navigateBack({ delta: 1 })
+  const subjectName = subjects.find((s) => s.id === activeSubject)?.name || ''
+  /** 空态提示要具体到「当前筛选是什么」，否则家长不知道该改哪一项 */
+  const emptyHint = `当前筛选：${RANGE_LABEL[range]}${subjectName ? ` · ${subjectName}` : ' · 全部学科'}${includeMastered ? '' : ' · 不含已掌握'}。把时间段放宽到「全部」，或打开「包含已掌握题目」再试。`
 
   return (
     <View className="bg-background" style={{ position: 'relative', height: '100vh' }}>
-      {/* 固定顶部标签 */}
-      <View style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50, backgroundColor: '#fff', padding: '12px 16px', borderBottom: '1px solid #ecefe3' }}>
-        <SegmentedTabs<Tab>
-          value={tab}
-          onValueChange={setTab}
-          options={[
-            { value: 'generate', label: '汇总生成' },
-            { value: 'library', label: '导出资料' },
-          ]}
-        />
-      </View>
+      <ScrollView scrollY style={{ height: '100vh' }}>
+        <View className="px-4 pt-4 pb-32">
+          <Text className="block text-base font-semibold text-foreground mb-2">汇总时间段</Text>
+          <View className="mb-4">
+            <RangePicker value={range} onChange={setRange} />
+          </View>
 
-      {tab === 'generate' ? (
-        <ScrollView scrollY style={{ height: '100vh', paddingTop: 60 }}>
-          <View className="px-4 pt-4 pb-32">
-            <Text className="block text-base font-semibold text-foreground mb-2">汇总时间段</Text>
-            <View className="mb-4">
-              <RangePicker
-                value={range}
-                onChange={(v) => {
-                  setRange(v)
-                  setPreviewed(false)
-                }}
+          <View className="mb-2">
+            <Text className="block text-base font-semibold text-foreground">选择学科（不选为全部学科）</Text>
+          </View>
+          <View className="flex flex-row flex-wrap gap-2 mb-5">
+            <SubjectBadge name="全部" active={activeSubject === ''} onClick={() => setActiveSubject('')} />
+            {subjects.map((s) => (
+              <SubjectBadge
+                key={s.id}
+                name={s.name}
+                color={s.color}
+                active={activeSubject === s.id}
+                onClick={() => setActiveSubject(s.id)}
               />
-            </View>
-
-            <View className="mb-2">
-              <Text className="block text-base font-semibold text-foreground">选择学科（不选为全部学科）</Text>
-            </View>
-            <View className="flex flex-row flex-wrap gap-2 mb-5">
-              <SubjectBadge name="全部" active={activeSubject === ''} onClick={() => setActiveSubject('')} />
-              {subjects.map((s) => (
-                <SubjectBadge
-                  key={s.id}
-                  name={s.name}
-                  color={s.color}
-                  active={activeSubject === s.id}
-                  onClick={() => setActiveSubject(s.id)}
-                />
-              ))}
-            </View>
-
-            <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-5">
-              <View className="flex-1">
-                <Text className="block text-sm font-medium text-foreground">包含已掌握题目</Text>
-                <Text className="block text-xs text-muted-foreground">默认仅汇总未掌握题目，开启后已掌握题一并纳入</Text>
-              </View>
-              <Switch checked={includeMastered} onCheckedChange={(v) => setIncludeMastered(v)} />
-            </View>
-
-            <View className="bg-muted rounded-xl px-4 py-3 mb-5">
-              <Text className="block text-sm font-medium text-foreground">两种导出用途</Text>
-              <Text className="block text-xs text-muted-foreground mt-1">
-                「打印练习卷」＝不含答案与解析，打给孩子做；「答疑解惑」＝含答案/解析/错因，用于对答案与讲解。两份可分别导出。
-              </Text>
-            </View>
-
-            <Button variant="outline" className="w-full h-11 rounded-xl mb-5" disabled={loading} onClick={handlePreview}>
-              <Text className="block text-sm">{loading ? '生成中…' : '生成汇总预览'}</Text>
-            </Button>
-
-            {loading ? (
-              <View className="space-y-3">
-                <Skeleton className="h-28 w-full rounded-2xl" />
-              </View>
-            ) : previewed && (
-              questions.length ? (
-                <>
-                  <Text className="block text-xs text-muted-foreground mb-3">共 {questions.length} 题，按录入时间排列</Text>
-                  <View className="space-y-3 mb-5">
-                    {questions.map((q) => <ReviewItemCard key={q.id} item={q} showSubject />)}
-                  </View>
-                </>
-              ) : (
-                <EmptyCard title="所选条件下暂无题目" />
-              )
-            )}
+            ))}
           </View>
 
-          <View style={{
-            position: 'fixed', bottom: 0, left: 0, right: 0,
-            display: 'flex', flexDirection: 'row', gap: '12px',
-            padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
-          }}
-          >
-            <Button className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(false)}>
-              <Text className="block text-sm">{exporting ? '导出中…' : '打印练习卷'}</Text>
-            </Button>
-            <Button variant="outline" className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(true)}>
-              <Text className="block text-sm">答疑解惑（含答案）</Text>
-            </Button>
-          </View>
-        </ScrollView>
-      ) : (
-        <>
-          <View style={{ position: 'fixed', top: 70, left: 0, right: 0, zIndex: 49, backgroundColor: '#fff', padding: '8px 16px', borderBottom: '1px solid #ecefe3' }}>
-            <View className="flex flex-row items-center justify-between">
-              <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份资料</Text>
-              <SelectionBar selection={sel} enterLabel="批量选择" />
+          <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-5">
+            <View className="flex-1">
+              <Text className="block text-sm font-medium text-foreground">包含已掌握题目</Text>
+              <Text className="block text-xs text-muted-foreground">默认仅汇总未掌握题目，开启后已掌握题一并纳入</Text>
             </View>
-            <View className="mt-2">
-              <SegmentedTabs<'all' | 'docx' | 'pdf'>
-                value={docFilter}
-                onValueChange={(v) => { setDocFilter(v); sel.clear() }}
-                options={[
-                  { value: 'all', label: '全部' },
-                  { value: 'docx', label: 'Word' },
-                  { value: 'pdf', label: 'PDF' },
-                ]}
-              />
-            </View>
+            <Switch checked={includeMastered} onCheckedChange={(v) => setIncludeMastered(v)} />
           </View>
 
-          <ScrollView scrollY style={{ height: '100vh', paddingTop: 170 }}>
-            <View className="px-4 pb-28 pt-3">
-              {docsLoading ? (
-                <View className="space-y-3">
-                  <Skeleton className="h-16 w-full rounded-2xl" />
-                  <Skeleton className="h-16 w-full rounded-2xl" />
+          <View className="bg-muted rounded-xl px-4 py-3 mb-5">
+            <Text className="block text-sm font-medium text-foreground">两种导出用途</Text>
+            <Text className="block text-xs text-muted-foreground mt-1">
+              「打印练习卷」＝不含答案与解析，打给孩子做；「答疑解惑」＝含答案/解析/错因，用于对答案与讲解。两份可分别导出。
+            </Text>
+          </View>
+
+          <Button variant="outline" className="w-full h-11 rounded-xl mb-5" disabled={loading} onClick={() => void preview()}>
+            <Text className="block text-sm">{loading ? '生成中…' : '重新生成预览'}</Text>
+          </Button>
+
+          {loading ? (
+            <View className="space-y-3">
+              <Skeleton className="h-28 w-full rounded-2xl" />
+            </View>
+          ) : (
+            questions.length ? (
+              <>
+                <Text className="block text-xs text-muted-foreground mb-3">共 {questions.length} 题，按录入时间排列</Text>
+                <View className="space-y-3 mb-5">
+                  {questions.map((q) => <ReviewItemCard key={q.id} item={q} showSubject />)}
                 </View>
-              ) : filteredDocs.length ? (
-                <View className="space-y-2">
-                  {filteredDocs.map((d) => (
-                    <View
-                      key={d.id}
-                      className={`flex flex-row items-center gap-3 rounded-2xl border p-4 ${sel.selected.has(d.id) ? 'border-brand-line bg-brand-soft' : 'border-border bg-card'}`}
-                      onClick={() => handleItemOpen(d)}
-                      onLongPress={() => sel.longPress(d.id)}
-                    >
-                      {sel.selecting && (
-                        <CheckDot checked={sel.selected.has(d.id)} size={20} />
-                      )}
-                      <View className="w-11 h-11 flex-shrink-0 flex items-center justify-center rounded-lg bg-muted">
-                        <FileText size={20} color={INK} />
-                      </View>
-                      <View className="flex-1 min-w-0">
-                        <View className="flex flex-row items-center gap-2">
-                          <View className="rounded px-2 py-1 flex-shrink-0 bg-muted">
-                            <Text className="block text-xs font-medium text-foreground">
-                              {d.type === 'pdf' ? 'PDF' : 'Word'}
-                            </Text>
-                          </View>
-                          <Text className="block text-sm font-medium text-foreground truncate">{d.title}</Text>
-                        </View>
-                        <Text className="block text-xs text-muted-foreground mt-1">{formatTime(d.created_at)}</Text>
-                      </View>
-                      {!sel.selecting && (
-                        <View className="p-2" onClick={(e) => { e.stopPropagation?.(); handleDocMore(d) }}>
-                          <Ellipsis size={16} color="#bbb" />
-                        </View>
-                      )}
-                    </View>
-                  ))}
-                </View>
-              ) : (
-                <EmptyCard
-                  title="还没有导出过资料"
-                  hint="在「汇总生成」按时间段汇总成卷，或在复习本里选中题目「合成 PDF/Word」，成品都会归档到这里"
-                  actionLabel="回复习本挑题"
-                  onAction={backToReview}
-                />
-              )}
-            </View>
-          </ScrollView>
-
-          {sel.selecting && (
-            <BottomActionBar>
-              <View style={{ flex: 1 }}>
-                <ActionBtn
-                  icon={<Trash2 size={16} color="#fff" />}
-                  label="删除选中"
-                  danger
-                  disabled={sel.isEmpty || busy}
-                  onClick={handleDelete}
-                />
-              </View>
-            </BottomActionBar>
+              </>
+            ) : (
+              <EmptyCard title="这个条件下没有题目" hint={emptyHint} />
+            )
           )}
+        </View>
 
-          {renameTarget && (
-            <RenameDialog
-              title="重命名资料"
-              initialValue={renameTarget.title}
-              onCancel={() => setRenameTarget(null)}
-              onConfirm={handleRenameConfirm}
-            />
-          )}
-        </>
-      )}
+        <View style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          display: 'flex', flexDirection: 'row', gap: '12px',
+          padding: '12px 16px', backgroundColor: '#fff', borderTop: '1px solid #ece8e0', zIndex: 100,
+        }}
+        >
+          <Button className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(false)}>
+            <Text className="block text-sm">{exporting ? '导出中…' : '打印练习卷'}</Text>
+          </Button>
+          <Button variant="outline" className="flex-1 h-11 rounded-xl" disabled={exporting} onClick={() => handleExport(true)}>
+            <Text className="block text-sm">答疑解惑（含答案）</Text>
+          </Button>
+        </View>
+      </ScrollView>
     </View>
   )
 }
