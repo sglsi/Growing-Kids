@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { View, Text } from '@tarojs/components'
+import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { Plus, Trash2, ChevronRight, NotebookPen } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,7 @@ import {
   fetchMemories, batchDeleteMemories,
   type Memory, type MemoryCategory, MEMORY_CATEGORIES,
 } from '@/services/memory'
+import { fetchSubjects, type Subject } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 
@@ -22,8 +23,29 @@ const CAT_OPTIONS = [
   ...MEMORY_CATEGORIES.map((c) => ({ value: c.value, label: c.label })),
 ] as const
 
+/**
+ * 时间筛选（思傅 2026-11-04：「记忆页面的资料内容可按时间、科目等进行筛选」）。
+ *
+ * 用**相对区间**而不是月份选择器：服务端目前只支持 `since`（`occurred_at >= ?`），
+ * 相对档位天然对上，不需要改接口；月份区间要再加 `until` 与一套月份列表 UI，
+ * 反而把「随口缩小一下范围」变成两次选择。
+ */
+const TIME_OPTIONS = [
+  { value: 'all',  label: '全部时间', days: 0 },
+  { value: '7d',   label: '近 7 天',  days: 7 },
+  { value: '30d',  label: '近 30 天', days: 30 },
+  { value: '180d', label: '近半年',  days: 180 },
+] as const
+
+type TimeValue = (typeof TIME_OPTIONS)[number]['value']
+
+const daysOf = (v: TimeValue) => TIME_OPTIONS.find((o) => o.value === v)?.days ?? 0
+
 export default function MemoryHomePage() {
   const [category, setCategory] = useState<CatValue>('all')
+  const [timeRange, setTimeRange] = useState<TimeValue>('all')
+  const [subjectId, setSubjectId] = useState<string>('')
+  const [subjects, setSubjects] = useState<Subject[]>([])
   const [keyword, setKeyword] = useState('')
   const [activeKeyword, setActiveKeyword] = useState('')
   const [list, setList] = useState<Memory[]>([])
@@ -39,9 +61,17 @@ export default function MemoryHomePage() {
    * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
    */
   const load = useCallback(async (opts: { silent?: boolean } = {}) => {
+    const days = daysOf(timeRange)
+    // since 用「当前时刻往前推 N 天」：occurred_at 是记录发生时间，与 created_at 无关。
+    // 不传就不加这个条件（「全部时间」）。
+    const since = days > 0 ? new Date(Date.now() - days * 86400000).toISOString() : undefined
     // SWR（思傅 2026-10-21）：先同步读缓存渲染首帧，再后台刷新回写
+    // 🔴 缓存 key 必须带上筛选条件：否则切到「近 7 天」会先闪一屏「全部时间」的缓存内容，
+    //    用户以为筛选失效（同类问题在资料库页已踩过）。
     const listKey = cacheListKey('mem', {
       category: category === 'all' ? '' : category,
+      time: timeRange,
+      subject: subjectId,
       keyword: activeKeyword || '',
       page: 1,
       pageSize: 50,
@@ -53,12 +83,16 @@ export default function MemoryHomePage() {
       setErrorMsg(null)
       setLoading(false)
     } else if (!opts.silent) {
+      setList([])
+      setTotal(0)
       setLoading(true)
       setErrorMsg(null)
     }
     try {
       const res = await fetchMemories({
         category: category === 'all' ? undefined : category,
+        subjectId: subjectId || undefined,
+        since,
         keyword: activeKeyword || undefined,
         page: 1,
         pageSize: 50,
@@ -75,7 +109,20 @@ export default function MemoryHomePage() {
     } finally {
       setLoading(false)
     }
-  }, [category, activeKeyword])
+  }, [category, timeRange, subjectId, activeKeyword])
+
+  // 科目筛选的数据源：科目数量固定、体量极小，一次拉全量即可。
+  // 失败**不阻断列表** —— 科目只是「可选地缩小范围」，拉不到就退化成「全部科目」。
+  useEffect(() => {
+    let alive = true
+    fetchSubjects()
+      .then((rows) => { if (alive) setSubjects(Array.isArray(rows) ? rows : []) })
+      .catch((e) => {
+        console.warn('[memory] 科目列表加载失败，科目筛选降级为「全部科目」', e)
+        if (alive) setSubjects([])
+      })
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => { load() }, [load])
 
@@ -173,6 +220,19 @@ export default function MemoryHomePage() {
   // 按月份分组
   const groups = useMemo(() => groupByMonth(list), [list])
 
+  // 有没有「正在生效的筛选」：空态文案要分情况，否则筛完之后说「还没有记忆」
+  // 等于告诉用户记录丢了（本来只是被筛掉了）。
+  const hasFilter =
+    category !== 'all' || timeRange !== 'all' || !!subjectId || !!activeKeyword
+
+  const clearFilters = useCallback(() => {
+    setCategory('all')
+    setTimeRange('all')
+    setSubjectId('')
+    setKeyword('')
+    setActiveKeyword('')
+  }, [])
+
   return (
     <View className="flex flex-col min-h-full pb-24">
       {/* 分类筛选 */}
@@ -183,6 +243,52 @@ export default function MemoryHomePage() {
           options={CAT_OPTIONS as any}
         />
       </View>
+
+      {/* 时间筛选（思傅 2026-11-04） */}
+      <View className="px-4 pt-2">
+        <View className="flex flex-row items-center gap-2">
+          {TIME_OPTIONS.map((o) => {
+            const on = timeRange === o.value
+            return (
+              <View
+                key={o.value}
+                className="rounded-full px-3 h-7 flex flex-row items-center"
+                style={{ backgroundColor: on ? BRAND : '#EFEAE2' }}
+                onClick={() => setTimeRange(o.value)}
+              >
+                <Text className="text-xs" style={{ color: on ? BRAND_FOREGROUND : BRAND_TEXT }}>
+                  {o.label}
+                </Text>
+              </View>
+            )
+          })}
+        </View>
+      </View>
+
+      {/* 科目筛选：科目可能有八九个，横向滚动比折行更省纵向空间 */}
+      {subjects.length > 0 && (
+        <View className="pt-2">
+          <ScrollView scrollX style={{ whiteSpace: 'nowrap' }}>
+            <View className="flex flex-row items-center gap-2 px-4">
+              {[{ id: '', name: '全部科目' }, ...subjects].map((s) => {
+                const on = subjectId === s.id
+                return (
+                  <View
+                    key={s.id || 'all'}
+                    className="rounded-full px-3 h-7 flex flex-row items-center"
+                    style={{ backgroundColor: on ? BRAND : '#EFEAE2' }}
+                    onClick={() => setSubjectId(s.id)}
+                  >
+                    <Text className="text-xs" style={{ color: on ? BRAND_FOREGROUND : BRAND_TEXT }}>
+                      {s.name}
+                    </Text>
+                  </View>
+                )
+              })}
+            </View>
+          </ScrollView>
+        </View>
+      )}
 
       {/* 搜索 */}
       <View className="px-4 pt-3">
@@ -273,16 +379,28 @@ export default function MemoryHomePage() {
           </Button>
         </View>
       ) : list.length === 0 ? (
-        <View className="px-4 pt-12 flex flex-col items-center gap-4">
-          <Text className="block text-base text-foreground">还没有记忆</Text>
-          <Text className="block text-sm text-muted-foreground text-center">
-            把成长路上的随想、心得、照片、声音都留下来{'\n'}让记忆成为可翻阅的「成长手记」
-          </Text>
-          <Button className="mt-2 rounded-xl" onClick={onCreate}>
-            <Plus size={16} color={BRAND_FOREGROUND} />
-            <Text className="block text-sm ml-1">记录第一段</Text>
-          </Button>
-        </View>
+        hasFilter ? (
+          <View className="px-4 pt-12 flex flex-col items-center gap-4">
+            <Text className="block text-base text-foreground">这个筛选下没有记录</Text>
+            <Text className="block text-sm text-muted-foreground text-center">
+              换个时间范围或科目看看{'\n'}你的记录都还在，只是没落在当前条件下
+            </Text>
+            <Button className="mt-2 rounded-xl" onClick={clearFilters}>
+              <Text className="block text-sm">清除筛选</Text>
+            </Button>
+          </View>
+        ) : (
+          <View className="px-4 pt-12 flex flex-col items-center gap-4">
+            <Text className="block text-base text-foreground">还没有记忆</Text>
+            <Text className="block text-sm text-muted-foreground text-center">
+              把成长路上的随想、心得、照片、声音都留下来{'\n'}让记忆成为可翻阅的「成长手记」
+            </Text>
+            <Button className="mt-2 rounded-xl" onClick={onCreate}>
+              <Plus size={16} color={BRAND_FOREGROUND} />
+              <Text className="block text-sm ml-1">记录第一段</Text>
+            </Button>
+          </View>
+        )
       ) : (
         <View className="flex flex-col gap-3 px-4 pt-1 pb-4">
           {groups.map((g) => (
