@@ -312,7 +312,7 @@ if (usePrivacyCheck === true) {
   warn(
     '隐私保护校验',
     `当前关闭（__usePrivacyCheck__=${String(usePrivacyCheck)}）`,
-    '开发/体验阶段可接受：托管方代配隐私指引后，用 GK_PRIVACY_CHECK=1 重新 build',
+    '开发/体验阶段可接受：mp 后台隐私指引生效后，用 GK_PRIVACY_CHECK=1 重新 build（两家第三方授权已解除，不再有代配豁免）',
   )
 } else {
   block(
