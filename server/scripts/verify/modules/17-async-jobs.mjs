@@ -160,6 +160,24 @@ m.test('🔴 AI 关闭时提交 search-solve → 403（同上，另一条通道�
   c.status(res, [401, 403], `AI 关闭时提交被放行了（HTTP ${res.status}）`)
 })
 
+// 2026-11-04 回归：kb（资料库搜题）必须与同步端点 `POST /answer-search/:id` 同口径。
+// 🔴 曾有 bug：jobs.controller 的提交闸门不分 mode 一律 requireAiEnabled ⇒
+//    ai_enabled 默认 false 时，点「资料库搜题」提交即 403 AI_DISABLED，
+//    前端表现为「点了没反应」（微信开发者工具里只看到一条红色 403）。
+// ⚠️ 用不存在的题目 id：闸门放行后任务会在执行阶段立刻返回 source=none，
+//    既证明流程通了，又不会真去查网盘 / 消耗 ima 日配额。
+m.test('🔴 AI 关闭时提交 answer-search + mode=kb 必须放行（资料库搜题不受 AI 开关连坐）', async (c) => {
+  const id = await c.ident('main')
+  const off = await c.api('PUT', '/settings/ai', { token: id.token, body: { enabled: false } })
+  c.status(off, 200, '无法把 AI 开关置为关闭，本用例失去意义')
+  const { res, id: jobId } = await submit(c, 'answer-search', {
+    item_id: 'not-exist-kb-regression', mode: 'kb',
+  }, { token: id.token })
+  c.status(res, [200, 202], `kb 模式提交被 AI 闸门拦了（HTTP ${res.status}）—— 资料库搜题会「点了没反应」`)
+  // 收尾：别把并发闸门占住，否则后续用例会拿到 429 而不是它该验的状态码
+  if (jobId) await waitDone(c, jobId, id.token, 30000)
+})
+
 // ---------------------------------------------------------------- 收敛与可读
 
 m.test('任务失败必须落到 failed 并给出可读原因（不得让客户端永远轮询）', async (c) => {
