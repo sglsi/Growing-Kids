@@ -301,7 +301,7 @@
 | `ai_enabled` | boolean | 是否允许内容发往第三方 AI（0018，**默认 false**） |
 | `role` | `user` \| `admin` | 0017；前端只用于**渲染**管理入口，权限由 `requireAdmin()` 兜底 |
 | `grade` | `number \| null` | 当前年级，12 档连续编号（`null` = 未选择） |
-| `grade_label` | `string \| null` | 服务端算好的中文标签，避免前端各自拼 |
+| `grade_label` | string | 服务端算好的中文标签，前端不重复拼。⚠️ **未选年级时是空串 `''`，不是 null**（`gradeLabel()` 恒返回 string） |
 | `grade_rollover` | `{from, suggested, school_year} \| null` | **学年到期建议**；只在"已设年级且跨了学年"时非 null |
 
 `PUT /api/settings/grade` 的两种"没有值"**必须区分**：

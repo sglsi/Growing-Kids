@@ -569,7 +569,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `0022_netdisk_index.sql` | 建 `netdisk_files` | 百度网盘资料索引 |
 | `0023_content_index.sql` | library_docs / netdisk_files 加 `text_content` / `text_status` / `text_updated_at` | 让搜索跑本地索引，不再每次去网盘现搜 |
 | `0024_netdisk_trgm.sql` | netdisk_files 加 trigram 索引 | 名字/路径模糊搜 |
-| `0025_grade.sql` | users 加 `grade` / `grade_confirmed_year`；timeline_items 与 library_docs 加 `grade`；两表各加 `(user_id, grade) where deleted_at is null` 索引 | 年级属性与按年级检索（`P-005` / `D-008`）。⚠️ **纯加可空列 + 索引，无破坏性，但 L3 生产库需单独执行一次** |
+| `0025_grade.sql` | users 加 `grade` / `grade_confirmed_year`；timeline_items 与 library_docs 加 `grade`；两表各加 `(user_id, grade) where deleted_at is null` 索引 | 年级属性与按年级检索（`P-005` / `D-008`）。⚠️ **纯加可空列 + 索引，无破坏性**；开发库与 **L3 生产库均已执行**（生产于 2026-11-04 21:26，见 QA-16 v1.32） |
 
 ### 10.2 迁移纪律（写死）
 
