@@ -111,13 +111,19 @@ export default function MemoryDetailPage() {
     }
     stopAudio()
     const ctx = Taro.createInnerAudioContext()
+    // ⚠️ 默认 true：iOS 打开静音开关时**完全不发声**，用户以为「播放失败」。
+    //    这是录音类功能最常见的假故障，必须显式关掉。
+    ctx.obeyMuteSwitch = false
+    ctx.autoplay = false
     ctx.src = m.url
     ctx.onPlay(() => setPlayingId(m.id))
     ctx.onEnded(() => { setPlayingId(null); setPlayPos(0) })
     ctx.onTimeUpdate(() => setPlayPos(Math.floor(ctx.currentTime || 0)))
     ctx.onError((err) => {
-      console.warn('[memory] 音频播放失败', err)
-      Taro.showToast({ title: '播放失败，试试重新进入', icon: 'none' })
+      // 带上 errCode/errMsg：微信的音频错误码是唯一能区分「地址取不到」「格式不认」
+      // 「服务器没给 Content-Length」的线索，只打通用文案等于下次还得猜一遍。
+      console.warn('[memory] 音频播放失败', err?.errCode, err?.errMsg, m.url)
+      Taro.showToast({ title: `播放失败（${err?.errCode ?? '未知'}）`, icon: 'none' })
       setPlayingId(null)
     })
     audioCtxRef.current = ctx

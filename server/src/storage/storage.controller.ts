@@ -66,11 +66,26 @@ export class StorageController {
     }
     const ext = path.extname(abs).slice(1).toLowerCase()
 
-    // 1) local 驱动（或本地盘确有该对象）：直接流盘
+    // 1) local 驱动（或本地盘确有该对象）：直接给文件
     if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-      res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream')
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
-      fs.createReadStream(abs).pipe(res)
+      // ⚠️ 不能用 fs.createReadStream(abs).pipe(res)（2026-11-04 修）：
+      //    pipe 出来是 `Transfer-Encoding: chunked`，**既没有 Content-Length、
+      //    也不支持 Range**（带 Range 请求仍回 200 而不是 206）。
+      //    图片和视频封面看不出问题，但微信的 `InnerAudioContext` 靠这两样确定
+      //    时长与缓冲窗口 ⇒ 录音点了要么没反应、要么直接 onError。
+      //    sendFile 基于 send，会正确处理 Content-Length / Accept-Ranges / 206 分段。
+      res.sendFile(abs, {
+        headers: {
+          'Content-Type': MIME[ext] || 'application/octet-stream',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      }, (err) => {
+        // 头已经发出去了就不能再改状态码，只能记录；没发出去才回 500
+        if (!err) return
+        if (!res.headersSent) res.status(500).json({ code: 500, msg: '读取对象失败' })
+        // eslint-disable-next-line no-console
+        console.warn('[storage] sendFile 失败', abs, err.message)
+      })
       return
     }
 
