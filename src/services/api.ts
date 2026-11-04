@@ -17,11 +17,13 @@ import { buildHeaders, captureUserId } from '@/services/net'
 import { invalidateDomain } from '@/services/cache'
 import { runJob } from '@/services/jobs'
 import type {
-  ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview,
+  ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview, GradeScope,
   SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource,
 } from '@/types'
 
-export type { TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged, ReviewSummary, ReviewPlan }
+export type {
+  TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged, ReviewSummary, ReviewPlan, GradeScope,
+}
 export { getUserId } from '@/services/net'
 
 /** 构造带身份头的请求头（首次为匿名，后端回传 X-User-Id 后续用） */
@@ -389,6 +391,11 @@ export interface TimelineQuery {
   due?: boolean
   /** 复习本排序：due（默认，按到期）/ added（按加入时间） */
   sort?: 'due' | 'added'
+  /**
+   * 按年级检索（`P-005`）：本年级优先，**本年级 0 命中**才向相邻年级扩散（最多 2 级）。
+   * 不传 = 不按年级过滤（未选年级的用户照常全量返回，不做任何拦截）。
+   */
+  grade?: number
   page?: number
   pageSize?: number
 }
@@ -402,6 +409,8 @@ export function fetchTimeline(q: TimelineQuery = {}) {
   if (q.since) data.since = q.since
   if (q.due) data.due = '1'
   if (q.sort && q.sort !== 'due') data.sort = q.sort
+  // ⚠️ 用真值判断即可：0 不是合法年级，不需要 `!== undefined` 的写法
+  if (q.grade) data.grade = q.grade
   if (q.page !== undefined) data.page = q.page
   if (q.pageSize !== undefined) data.page_size = q.pageSize
   return unwrap<Paged<TimelineItem>>(
@@ -775,6 +784,8 @@ export function markReviewed(id: string, result: 'correct' | 'wrong' = 'correct'
 export interface LibraryQuery {
   subjectId?: string
   keyword?: string
+  /** 按年级检索（`P-005`）：与题目同口径，不传 = 不按年级过滤 */
+  grade?: number
   page?: number
   pageSize?: number
 }
@@ -783,6 +794,7 @@ export function fetchLibrary(q: LibraryQuery = {}) {
   const data: Record<string, unknown> = {}
   if (q.subjectId) data.subject_id = q.subjectId
   if (q.keyword) data.keyword = q.keyword
+  if (q.grade) data.grade = q.grade
   data.page = q.page ?? 1
   data.page_size = q.pageSize ?? 20
   return unwrap<Paged<LibraryDoc>>(
@@ -1759,15 +1771,52 @@ export interface PurgeResult {
  */
 // ---------------- 用户设置（OPS-18 R-合规-02：AI 外发开关） ----------------
 
+/** 学年到期的升年级建议（`P-005` 决策 7）。服务端只给建议，绝不自动写入 */
+export interface GradeRollover {
+  /** 当前年级 */
+  from: number
+  /** 建议升入的年级 */
+  suggested: number
+  /** 当前学年起始年（2026 = 2026-09 ~ 2027-08 学年） */
+  school_year: number
+}
+
 export interface UserSettings {
   /** 是否允许把题目内容发往第三方 AI（ima / 联网检索 / 大模型）。false = 仅本地 */
   ai_enabled: boolean
+  /** 当前年级 1–12；null = 未选择（检索不按年级过滤） */
+  grade?: number | null
+  /** 年级展示名（后端给，避免两端各拼一遍） */
+  grade_label?: string
+  /** 升年级建议；null = 不需要提示 */
+  grade_rollover?: GradeRollover | null
+  /** 角色（后端一直有返回，这里补上类型） */
+  role?: 'user' | 'admin'
 }
 
 /** 读取用户设置 */
 export function getSettings() {
   return unwrap<UserSettings>(
     Network.request({ url: '/api/settings', method: 'GET', header: authHeaders() }),
+  )
+}
+
+/**
+ * 设置 / 清空年级（`P-005`）。
+ *
+ * @param grade 1–12；**传 `null` 表示取消年级**（合法意图，不是「不改」）
+ *
+ * ⚠️ 与 `setAiEnabled` 不同，改年级后**不需要** `invalidateUserFlags`：
+ *    年级不参与任何服务端拦截，只在下次新建条目时被读取做快照。
+ */
+export function setGrade(grade: number | null) {
+  return unwrap<{ grade: number | null; grade_label: string; confirmed_year: number | null }>(
+    Network.request({
+      url: '/api/settings/grade',
+      method: 'PUT',
+      data: { grade },
+      header: authHeaders(),
+    }),
   )
 }
 

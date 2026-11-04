@@ -1,5 +1,5 @@
 // eslint-disable-next-line no-restricted-syntax -- open-type/chooseAvatar 只有原生 button 支持
-import { View, Text, Image, ScrollView, Button as NativeButton } from '@tarojs/components'
+import { View, Text, Image, ScrollView, Button as NativeButton, Picker } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot } from 'lucide-react-taro'
@@ -14,13 +14,14 @@ import {
   type AuthState,
 } from '@/services/auth'
 import { fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImage,
-  type Overview, type StorageUsage,
+  getSettings, setGrade, type Overview, type StorageUsage, type GradeRollover,
 } from '@/services/api'
 import { buildHeaders } from '@/services/net'
 import { Network } from '@/network'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
+import { GRADE_PICKER_LABELS, gradeLabel, toGrade, toGradeIndex } from '@/constants/grades'
 
 /**
  * 头像本机持久化副本（`chooseAvatar` 给的是临时文件，重启即失效）。
@@ -95,6 +96,13 @@ export default function ProfilePage() {
   const [qrVisible, setQrVisible] = useState(false)
   /** AI 外发开关（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */
   const [aiEnabled, setAiEnabledState] = useState(peekAiEnabled())
+  /**
+   * 年级（`P-005`）：决定新录入题目默认归到哪一年级、检索时优先找哪一年级。
+   * null = 未选择 —— 此时检索**不按年级过滤**，功能照常可用（不做任何拦截）。
+   */
+  const [grade, setGradeValue] = useState<number | null>(null)
+  /** 学年到期的升年级建议；null = 不需要提示 */
+  const [rollover, setRollover] = useState<GradeRollover | null>(null)
 
   /** 打开隐私政策（R-合规-03） */
   const openPolicy = () => Taro.navigateTo({ url: '/pages/privacy/index' })
@@ -131,6 +139,49 @@ export default function ProfilePage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  /**
+   * 保存年级（`P-005` 决策 7）。
+   *
+   * ⚠️ 升年级必须是「确认式」而不是「自动式」：9/1 升一级只对**正常升级**成立，
+   *    留级 / 跳级 / 休学 / 转学都不适用；而后台静默改用户数据不可逆，
+   *    用户只会看到「年级自己变了」。所以只在用户点选后才写库。
+   */
+  const persistGrade = async (next: number | null) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await setGrade(next)
+      setGradeValue(r.grade ?? null)
+      // 手动设过 ⇒ 本学年已确认，升年级提示立即收起，不再反复出现
+      setRollover(null)
+      Taro.showToast({
+        title: r.grade ? `已设置为${r.grade_label}` : '已取消年级',
+        icon: 'none',
+      })
+    } catch (e) {
+      console.error('[profile] 保存年级失败', e)
+      Taro.showToast({ title: '保存失败，请稍后重试', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Picker 选择：索引 0 = 「暂不选择」⇒ null */
+  const handleGradeChange = (e: { detail?: { value?: number | string } }) => {
+    const idx = Number(e?.detail?.value ?? 0)
+    void persistGrade(toGrade(Number.isFinite(idx) ? idx : 0))
+  }
+
+  /**
+   * 升年级建议的两个出口（`P-005` 决策 7）。
+   * ⚠️「先不升」也要写一次：写入当前年级 = 记录「本学年已确认」，
+   *    否则每次进本页都会再提示一次，从提醒退化成骚扰。
+   */
+  const handleRollover = (accept: boolean) => {
+    if (!rollover) return
+    void persistGrade(accept ? rollover.suggested : rollover.from)
   }
 
   /**
@@ -227,6 +278,14 @@ export default function ProfilePage() {
     // 存储配额（策略 6）；拿不到就整块不展示，不影响本页其余功能
     const u = await fetchStorageUsage()
     setUsage(u)
+    // 年级（P-005）：未登录时该接口 401，静默跳过，不打扰未登录用户
+    try {
+      const s = await getSettings()
+      setGradeValue(s.grade ?? null)
+      setRollover(s.grade_rollover ?? null)
+    } catch {
+      /* 未登录 / 后端暂不可用：保持「未选择」，检索照常可用 */
+    }
     // 有本地身份时向服务端校验一次（失效则降级为未登录）
     if (getAuthState()) {
       try {
@@ -559,6 +618,59 @@ export default function ProfilePage() {
               )}
             </Card>
           )}
+
+          {/* 年级（P-005）：新录入的题目默认归到该年级；检索时优先找同年级的题目。
+              未选择时不拦截任何功能，只在检索页做一次轻提示（M11：引导可、门槛禁）。 */}
+          <Card className="rounded-2xl border-border p-4 mb-5">
+            <View className="flex flex-row items-center justify-between">
+              <View className="flex flex-row items-center gap-2">
+                <BookOpen size={16} color="#9A948A" />
+                <Text className="block text-sm font-semibold text-foreground">年级</Text>
+              </View>
+              <Picker
+                mode="selector"
+                range={GRADE_PICKER_LABELS}
+                value={toGradeIndex(grade)}
+                disabled={busy}
+                onChange={handleGradeChange}
+              >
+                <View className="flex flex-row items-center gap-1">
+                  <Text className="text-sm text-foreground">{gradeLabel(grade) || '未选择'}</Text>
+                  <Text className="text-sm text-muted-foreground">›</Text>
+                </View>
+              </Picker>
+            </View>
+            <Text className="block mt-2 text-xs text-muted-foreground">
+              {grade
+                ? `新录入的题目会自动归到${gradeLabel(grade)}；检索时优先找同年级的题目，没有再扩展到相邻年级。`
+                : '选择了年级后，新录入的题目会自动归到该年级，检索时也优先找同年级的题目。不选择也能正常使用。'}
+            </Text>
+
+            {rollover && (
+              <View className="mt-3 rounded-xl border border-border p-3">
+                <Text className="block text-xs text-foreground">
+                  {`新学年开始了。按正常升学，应该从${gradeLabel(rollover.from)}升到${gradeLabel(rollover.suggested)}，对吗？`}
+                </Text>
+                <View className="mt-2 flex flex-row gap-2">
+                  <View
+                    className="flex h-8 flex-1 items-center justify-center rounded-lg"
+                    style={{ backgroundColor: INK }}
+                    onClick={() => handleRollover(true)}
+                  >
+                    <Text className="text-xs" style={{ color: BRAND_FOREGROUND }}>
+                      {`升到${gradeLabel(rollover.suggested)}`}
+                    </Text>
+                  </View>
+                  <View
+                    className="flex h-8 flex-1 items-center justify-center rounded-lg border border-border"
+                    onClick={() => handleRollover(false)}
+                  >
+                    <Text className="text-xs text-foreground">{`还是${gradeLabel(rollover.from)}`}</Text>
+                  </View>
+                </View>
+              </View>
+            )}
+          </Card>
 
           {/* AI 与在线检索（R-合规-02）：默认关 = 仅本地，任何内容不出机器。
               ⚠️ 个人主体下整块收起（见 constants/app-info.ts）：留着开关等于让审核员

@@ -170,6 +170,12 @@ export interface TimelineItem {
   content: QuestionContent
   source: string | null
 
+  /**
+   * 年级快照（`P-005`）：1–12，null / undefined = 未标注（存量题）。
+   * 检索结果里可用它标注「这条来自相邻年级」。
+   */
+  grade?: number | null
+
   // 复习本
   in_review_book: boolean
   added_to_review_at: string | null
@@ -220,6 +226,8 @@ export interface LibraryDoc {
   size_bytes: number | null
   source: string | null
   tags: string[]
+  /** 年级快照（`P-005`）：1–12，null / undefined = 未标注（存量资料） */
+  grade?: number | null
   created_at: string
   url?: string
   thumb_url?: string
@@ -248,11 +256,26 @@ export interface ApiEnvelope<T> {
 }
 
 // 分页结果
+/**
+ * 年级检索的落地情况（`P-005`）。只有**传了 grade** 的请求才会带这个字段。
+ * ⚠️ 用「字段不存在」而不是 `null` 表示「没按年级筛」——
+ *    避免把「没筛」误读成「筛了但没命中」，那会让 UI 弹出错误的空态提示。
+ */
+export interface GradeScope {
+  /** 请求的年级 */
+  requested: number
+  /** 实际使用的年级序列（本年级在首位；扩散时长度 > 1） */
+  used: number[]
+  /** 是否发生了相邻年级扩散 */
+  spread: boolean
+}
+
 export interface Paged<T> {
   list: T[]
   total: number
   page: number
   page_size: number
+  grade_scope?: GradeScope
 }
 
 // 首页概览统计

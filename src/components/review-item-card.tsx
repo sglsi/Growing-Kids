@@ -36,6 +36,12 @@ interface Props {
   /** 点击「更多」时触发（用于对已加入的资料再做裁剪 / 智能高清 / 去手写等）；不传则不显示「更多」 */
   onMore?: (item: TimelineItem) => void
   /**
+   * 年级徽标（`P-005`）：只在检索结果**来自相邻年级**时传。
+   * 用途是告诉用户「这条不是你们年级的」，避免把超前题误当成自己的错题去复习。
+   * 本年级的题目不传（不传就不渲染），否则每条都挂一个年级标签是纯噪声。
+   */
+  gradeTag?: string
+  /**
    * 点击列表里的**图片**时触发（思傅 2026-10-21 规则）：
    * 点图片 = 直接打开该图片并可编辑；点其他区域才进详情。
    * @param kind 'item' = 图片条目自身的图；'questionImage' = 题目条目的题面图
@@ -57,7 +63,7 @@ interface Props {
  */
 export default function ReviewItemCard({
   item, showSubject = true, selecting = false, checked = false,
-  onOpen, onTapImage, onLongPress, timeField = 'created_at', onChangeSubject, onMore, onAnswer,
+  onOpen, onTapImage, onLongPress, timeField = 'created_at', onChangeSubject, onMore, onAnswer, gradeTag,
 }: Props) {
   const color = getSubjectColor(item.subjects?.color)
   const subjectName = item.subjects?.name || '未分类'
@@ -84,6 +90,13 @@ export default function ReviewItemCard({
     >
       <Ellipsis size={18} color="#9A948A" />
     </View>
+  ) : null
+
+  // 年级徽标（P-005）：仅在「结果来自相邻年级」时由调用方传入
+  const gradeBadge = gradeTag ? (
+    <Badge variant="outline" className="border border-border rounded-full px-2 py-0 text-xs text-muted-foreground">
+      {gradeTag}
+    </Badge>
   ) : null
 
   // ---------- 图片条目：缩略图卡片 ----------
@@ -136,6 +149,7 @@ export default function ReviewItemCard({
                       </Badge>
                     )
                   )}
+                  {gradeBadge}
                   {item.in_review_book && (
                     <Badge className="bg-brand-soft text-brand-text border border-brand-line rounded-full px-2 py-0 text-xs">
                       复习本
@@ -189,6 +203,7 @@ export default function ReviewItemCard({
                   </Badge>
                 )
               )}
+              {gradeBadge}
               {status === 'pending' && (
                 <Badge className="bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0 text-xs">
                   待找答案

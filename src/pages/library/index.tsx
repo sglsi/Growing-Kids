@@ -13,8 +13,10 @@ import SubjectPickerSheet from '@/components/subject-picker-sheet'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
   fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc, updateLibraryDoc,
-  type LibraryDoc, type Subject, type Paged,
+  getSettings,
+  type LibraryDoc, type Subject, type Paged, type GradeScope,
 } from '@/services/api'
+import { gradeLabel } from '@/constants/grades'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
@@ -63,6 +65,16 @@ export default function LibraryPage() {
   const [busy, setBusy] = useState(false)
   const [renameTarget, setRenameTarget] = useState<LibraryDoc | null>(null)
   const [assignTarget, setAssignTarget] = useState<LibraryDoc | null>(null)
+  /**
+   * 年级口径（P-005，与首页题目检索完全一致）：
+   *   userGrade   = 用户当前年级（设置页可改），决定默认筛到哪个年级
+   *   gradeFilter = 本次实际生效的年级；null = 不加年级条件（"显示全部年级"）
+   *   gradeScope  = 后端告诉你实际用了哪几档（本年级 0 命中时才扩散）
+   * ⚠️ 绝不因为年级筛掉资料不给出路：标题行右侧永远有"显示全部年级"的开关。
+   */
+  const [userGrade, setUserGrade] = useState<number | null>(null)
+  const [gradeFilter, setGradeFilter] = useState<number | null>(null)
+  const [gradeScope, setGradeScope] = useState<GradeScope | null>(null)
   const sel = useSelection()
 
   /** 每页条数：滚到底追加，避免一次拉太多在慢网上白等 */
@@ -74,20 +86,25 @@ export default function LibraryPage() {
    * 删除/上传后缓存已失效，非 silent 的 load 会 setLoading(true) → 骨架屏替换列表 →
    * ScrollView 内容塌缩 → 滚动位置被钳到顶部。silent = 旧列表留屏，后台静默替换。
    */
-  const load = async (opts: { keyword?: string; subjectId?: string; silent?: boolean; append?: boolean } = {}) => {
+  const load = async (
+    opts: { keyword?: string; subjectId?: string; silent?: boolean; append?: boolean; grade?: number | null } = {},
+  ) => {
     // SWR（思傅 2026-10-21）：先同步读缓存渲染，再后台刷新回写
     const kw = (opts.keyword !== undefined ? opts.keyword : keyword) || undefined
     const sid = opts.subjectId || undefined
+    const grade = opts.grade === undefined ? gradeFilter : opts.grade
     const append = opts.append === true
     const nextPage = append ? page + 1 : 1
     // 追加页不进缓存（key 会膨胀，且意义小），只缓存第一页
-    const listKey = append ? '' : cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', pageSize: PAGE_SIZE })
+    // ⚠️ 缓存 key 必须带 grade：否则切年级会命中上一个年级的缓存，看着像"筛了没用"
+    const listKey = append ? '' : cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', grade: grade ?? '', pageSize: PAGE_SIZE })
     if (!append) {
       const cached = listKey ? cacheGet<Paged<LibraryDoc>>(listKey) : null
       if (cached) {
         setDocs(cached.list)
         setTotal(cached.total)
         setPage(cached.page || 1)
+        setGradeScope(cached.grade_scope ?? null)
         setLoading(false)
       } else if (!opts.silent) {
         setLoading(true)
@@ -98,12 +115,15 @@ export default function LibraryPage() {
       const res = await fetchLibrary({
         keyword: kw,
         subjectId: sid,
+        // 未选年级 / 已"显示全部年级"时传 undefined —— 后端不加任何年级条件，绝不拦截
+        grade: grade ?? undefined,
         page: nextPage,
         pageSize: PAGE_SIZE,
       })
       setDocs((prev) => (append ? [...prev, ...res.list] : res.list))
       setTotal(res.total)
       setPage(res.page || nextPage)
+      if (!append) setGradeScope(res.grade_scope ?? null)
       if (listKey) cacheSet(listKey, res)
     } catch (e) {
       console.error('加载资料库失败', e)
@@ -136,7 +156,26 @@ export default function LibraryPage() {
       // ⚠️ best-effort 的 catch 必须打全错（工程规范第 7 章第 2 条）：
       // 空 catch 会把「服务不可用」伪装成「资料未分类」，排查时无从下手。
       .catch((e) => console.error('[library] 学科列表加载失败', e))
-    load()
+    /**
+     * 年级对齐后再拉列表。
+     * ⚠️ 多这一次请求是为了首屏就是"筛过的"——若先 load() 再改 grade，
+     * 用户会看到全量列表闪一下再被筛掉，像数据错乱。设置接口挂在 /api/settings，
+     * 与列表并行发出、体积很小，代价可接受。
+     */
+    getSettings()
+      .then((s) => {
+        const g = s.grade ?? null
+        setUserGrade(g)
+        setGradeFilter(g)
+        void load({ grade: g })
+      })
+      .catch((e) => {
+        // 取不到年级不能让资料库打不开：退回"不加年级条件"的全量列表
+        console.error('[library] 年级设置加载失败，按全部年级展示', e)
+        setUserGrade(null)
+        setGradeFilter(null)
+        void load({ grade: null })
+      })
   })
 
   const handleOpen = (d: LibraryDoc) => {
@@ -341,9 +380,28 @@ export default function LibraryPage() {
 
       <ScrollView scrollY style={{ height: '100vh', paddingTop: 92 }} onScrollToLower={loadMore} lowerThreshold={120}>
         <View className="px-4 pb-28 pt-3">
-          <Text className="block text-xs text-muted-foreground mb-3">
-            共 {total} 份资料{docs.length < total ? `（已显示 ${docs.length}）` : ''}
-          </Text>
+          {/* 年级口径说明 + 一键回到全量：筛掉的资料必须有一条随时能走回来的路 */}
+          <View className="flex flex-row items-center justify-between mb-3">
+            <Text className="block text-xs text-muted-foreground">
+              共 {total} 份资料{docs.length < total ? `（已显示 ${docs.length}）` : ''}
+            </Text>
+            {userGrade ? (
+              <Text
+                className="block text-xs text-brand-text"
+                onClick={() => {
+                  const next = gradeFilter === null ? userGrade : null
+                  setGradeFilter(next)
+                  void load({ grade: next })
+                }}
+              >
+                {gradeFilter === null
+                  ? '按年级筛选'
+                  : gradeScope?.spread
+                    ? '已扩展 · 显示全部'
+                    : `${gradeLabel(gradeFilter)} · 显示全部`}
+              </Text>
+            ) : null}
+          </View>
           {loading ? (
             <View className="space-y-3">
               <Skeleton className="h-16 w-full rounded-2xl" />
@@ -385,6 +443,8 @@ export default function LibraryPage() {
                       <Text className="block text-xs text-muted-foreground mt-1">
                         {getTypeLabel(d.mime_type, d.name)}
                         {getSubjectName(d.subject_id) ? ` · ${getSubjectName(d.subject_id)}` : ''} · {formatTime(d.created_at)}
+                        {/* 扩散时标出「不是本年级」的那份来自哪一档，避免用户以为是标错了 */}
+                        {gradeScope?.spread && d.grade && d.grade !== gradeScope.requested ? ` · ${gradeLabel(d.grade)}` : ''}
                       </Text>
                     </View>
                     {!sel.selecting && (

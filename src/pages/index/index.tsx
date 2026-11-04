@@ -14,15 +14,19 @@ import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook, removeFromReviewBook,
-  fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion,
-  type Overview, type TimelineItem, type Subject, type ImageAction, type Paged,
+  fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion, getSettings,
+  type Overview, type TimelineItem, type Subject, type ImageAction, type Paged, type GradeScope,
 } from '@/services/api'
+import { gradeLabel } from '@/constants/grades'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getAuthState, isLoggedIn, promptLogin, type AuthState } from '@/services/auth'
 import QrLoginModal from '@/components/qr-login-modal'
 import PolicyConsent from '@/components/policy-consent'
 import { BUILD_META } from '@/build-meta'
 import { BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
+
+/** 未选年级提示的关闭状态（本机记住，关掉后不再出现；P-005 决策 8） */
+const GRADE_NOTICE_KEY = 'gk_grade_notice_off_v1'
 
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -66,6 +70,23 @@ export default function IndexPage() {
   // 学科筛选（思傅 2026-10-21：点学科 = 就地筛选下方「最近题目」，不再跳复习本；
   // '' = 全部。与顶部「全部 ›」的跳转是两回事）
   const [subjectFilter, setSubjectFilter] = useState('')
+  /**
+   * 年级筛选（`P-005`）：默认取用户设置的年级；null = 显示全部年级。
+   * ⚠️ 未设置年级时**不拦截任何功能**，只在列表上方给一次轻提示（M11：引导可、门槛禁）。
+   */
+  const [gradeFilter, setGradeFilter] = useState<number | null>(null)
+  /** 用户设置里的年级（决定默认筛选与提示文案） */
+  const [userGrade, setUserGrade] = useState<number | null>(null)
+  /** 上一次检索的年级落地情况（是否扩散到相邻年级），用于提示条文案 */
+  const [gradeScope, setGradeScope] = useState<GradeScope | null>(null)
+  /** 未选年级提示是否已被用户关掉（本机记住，不反复打扰） */
+  const [gradeNoticeOff, setGradeNoticeOff] = useState(() => {
+    try {
+      return Taro.getStorageSync(GRADE_NOTICE_KEY) === 1
+    } catch {
+      return false
+    }
+  })
   // 图片编辑器状态（复用 ImageEditor）
   const [editorItem, setEditorItem] = useState<TimelineItem | null>(null)
   const [editorSrc, setEditorSrc] = useState('')
@@ -204,14 +225,21 @@ export default function IndexPage() {
    * 灰条，而且请求再成功也不显示。现在：缓存命中即解除；请求结束（成功或失败）
    * 由**最后一个**在途请求解除——用计数而非布尔，避免并发时先返回的那个提前放行。
    */
-  const load = async (sid = subjectFilter, opts: { silent?: boolean; fresh?: boolean } = {}) => {
+  const load = async (
+    sid = subjectFilter,
+    opts: { silent?: boolean; fresh?: boolean; grade?: number | null } = {},
+  ) => {
     const seq = ++loadSeqRef.current
     pendingLoadsRef.current += 1
     setAuth(getAuthState())
+    // 年级：显式传入优先（useDidShow 对齐设置后要立即用新值），否则用当前筛选状态
+    const grade = opts.grade === undefined ? gradeFilter : opts.grade
     // SWR（思傅 2026-10-21：没触发数据库操作时只读缓存）：
     // 先同步读本地缓存渲染首帧（0 网络等待），再后台刷新、静默回写。
     // 写操作已在 api.ts 收口失效缓存，这里取到即是最新。
-    const listKey = cacheListKey('tl', { scope: 'recent', subjectId: sid || '', pageSize: 20 })
+    // ⚠️ 缓存 key 必须带 grade：否则「换年级」会命中上一个年级的缓存，
+    //    表现为「点了筛选，列表没变」（静默串数据，最难排查的一类）。
+    const listKey = cacheListKey('tl', { scope: 'recent', subjectId: sid || '', grade: grade ?? '', pageSize: 20 })
     const cachedOv = opts.fresh ? null : cacheGet<Overview>('tl:ov')
     const cachedList = opts.fresh ? null : cacheGet<Paged<TimelineItem>>(listKey)
     const cachedSubs = opts.fresh ? null : cacheGet<Subject[]>('subj:list')
@@ -220,6 +248,7 @@ export default function IndexPage() {
       if (cachedList) {
         setInbox(cachedList.list)
         setInboxTotal(cachedList.total)
+        setGradeScope(cachedList.grade_scope ?? null)
       }
       if (cachedSubs) setSubjects(cachedSubs)
       // 缓存已经把内容铺上屏了，骨架屏没有继续挡着的理由（哪怕这次是 silent 调用）
@@ -235,14 +264,20 @@ export default function IndexPage() {
       // 「最近题目」全要等那个最慢的请求，用户看到的就是「一直空着」。
       // 现在列表先到先渲染，统计后到再填；statistics 失败不影响列表。
       const [list, subs] = await Promise.all([
-        // 学科筛选走后端（subjectId），不是前端过滤——否则只能筛已加载的 20 条
-        fetchTimeline({ scope: 'recent', subjectId: sid || undefined, pageSize: 20 }),
+        // 学科与年级筛选都走后端，不是前端过滤——否则只能筛已加载的 20 条
+        fetchTimeline({
+          scope: 'recent',
+          subjectId: sid || undefined,
+          grade: grade ?? undefined,
+          pageSize: 20,
+        }),
         fetchSubjects().catch(() => [] as Subject[]),
       ])
       // 期间用户又切了筛选 ⇒ 本次结果已过期，丢弃（缓存由新的那次负责回写）
       if (seq !== loadSeqRef.current) return
       setInbox(list.list)
       setInboxTotal(list.total)
+      setGradeScope(list.grade_scope ?? null)
       setSubjects(subs)
       cacheSet(listKey, list)
       if (subs.length) cacheSet('subj:list', subs)
@@ -302,6 +337,21 @@ export default function IndexPage() {
     }
     // fresh：回到本页一律以服务端为准（新增题目/识别入库/别处改答案都要立刻可见）
     void load(subjectFilter, { silent: true, fresh: true })
+    // 年级（P-005）：设置可能在「我的」页被改过，回来对齐一次。
+    // ⚠️ 不 await —— 列表先出来；只有年级真的变了才补一次静默刷新，
+    //    避免每次回到首页都白白多发一次列表请求。
+    void getSettings()
+      .then((s) => {
+        const g = s.grade ?? null
+        if (g === userGrade) return
+        setUserGrade(g)
+        setGradeFilter(g)
+        void load(subjectFilter, { silent: true, fresh: true, grade: g })
+      })
+      .catch((e) => {
+        // 未登录 / 后端暂不可用：按「未选年级」处理，检索照常可用
+        console.warn('[index] 读取年级设置失败', e)
+      })
   })
 
   /** 离开首页（再进详情/识别页等）：停掉闭环，别在后台页面里量布局 */
@@ -780,6 +830,57 @@ export default function IndexPage() {
                 </View>
                 <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
               </View>
+              {/* 年级提示条（P-005）：
+                  · 有年级 → 说明「优先显示哪个年级」；扩散了就写明扩到哪些年级
+                  · 无年级 → 一次性轻提示，可关闭、**不拦截**（M11：引导可、门槛禁） */}
+              {userGrade ? (
+                <View className="flex flex-row items-center gap-2 mb-2">
+                  <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
+                    {gradeFilter === null
+                      ? '当前显示全部年级的题目'
+                      : gradeScope?.spread
+                        ? `本年级没有匹配，已扩展：${gradeScope.used.map((g) => gradeLabel(g)).join('、')}`
+                        : `优先显示${gradeLabel(gradeFilter)}的题目`}
+                  </Text>
+                  <View
+                    className="block text-xs text-muted-foreground"
+                    onClick={() => {
+                      const next = gradeFilter === null ? userGrade : null
+                      setGradeFilter(next)
+                      void load(subjectFilter, { grade: next })
+                    }}
+                  >
+                    {gradeFilter === null ? '按年级筛选' : '✕ 显示全部年级'}
+                  </View>
+                </View>
+              ) : gradeNoticeOff ? null : (
+                <View className="flex flex-row items-center gap-2 mb-2">
+                  <Text className="block text-xs text-muted-foreground">
+                    勾选年级后，优先找同年级的题目
+                  </Text>
+                  <View
+                    className="block text-xs"
+                    style={{ color: BRAND_TEXT }}
+                    onClick={() => Taro.navigateTo({ url: '/pages/profile/index' })}
+                  >
+                    去选择
+                  </View>
+                  <View
+                    className="block text-xs text-muted-foreground"
+                    onClick={() => {
+                      setGradeNoticeOff(true)
+                      try {
+                        Taro.setStorageSync(GRADE_NOTICE_KEY, 1)
+                      } catch {
+                        /* 存不了就只在本页生效，不影响检索 */
+                      }
+                    }}
+                  >
+                    ✕
+                  </View>
+                </View>
+              )}
+
               {/* 学科筛选提示条（点「✕ 显示全部」或上面的「全部」清除） */}
               {subjectFilter ? (
                 <View className="flex flex-row items-center gap-2 mb-2">
@@ -800,6 +901,12 @@ export default function IndexPage() {
                         item={item}
                         selecting={sel.selecting}
                         checked={sel.selected.has(item.id)}
+                        // 只有「扩散到相邻年级」时才标年级：本年级的题不必每条都挂标签
+                        gradeTag={
+                          gradeScope?.spread && item.grade && item.grade !== gradeScope.requested
+                            ? gradeLabel(item.grade)
+                            : undefined
+                        }
                         onOpen={handleOpen}
                         onTapImage={handleTapImage}
                         onLongPress={(it) => sel.longPress(it.id)}
