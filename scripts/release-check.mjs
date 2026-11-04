@@ -105,9 +105,11 @@ if (MODE_REVERT) {
     const c = readPConfig()
     if (c?.setting) {
       c.setting.urlCheck = false
-      c.setting.minified = false
+      // minified 保持 true：它只影响「预览/上传」时的打包压缩，不影响模拟器编译；
+      // 而 false 会让开发者工具「代码质量 → JS文件」判未通过（2026-11-04 实测）。
+      c.setting.minified = true
       writePConfig(c)
-      console.log('✅ 已恢复开发态（无备份文件，按默认值写回）')
+      console.log('✅ 已恢复开发态（无备份文件，urlCheck=false，minified 保持 true）')
     }
   }
   process.exit(0)
@@ -253,6 +255,42 @@ if (!pconfig?.setting) {
   }
   if (pconfig.description === 'test' || !pconfig.description) {
     warn('项目描述', `description="${pconfig.description ?? ''}"`, '--prepare 会改成正式描述')
+  }
+}
+
+// ── 4.5 代码质量两项（开发者工具「代码质量」面板会判「未通过」）────
+// 2026-11-04 实测：上传后面板报两项未通过 ——「代码压缩 → JS文件」与
+// 「代码包 → 启用组件按需注入」。两项都**不阻断上传**，但会一直挂着：
+//   · JS 压缩由 project.config.json 的 setting.minified 控制（--prepare 会置 true）
+//   · 按需注入必须写进 app.json（源头是 src/app.config.ts 的 lazyCodeLoading），
+//     改完要重跑 build:weapp，否则 dist/app.json 还是旧的。
+{
+  const minified = pconfig?.setting?.minified
+  if (minified === true) {
+    ok('上传压缩 JS', 'setting.minified = true')
+  } else {
+    block(
+      '上传压缩 JS',
+      `setting.minified = ${String(minified)}`,
+      '开发者工具「代码质量 → 代码压缩 → JS文件」判未通过；跑 `--prepare` 或直接改 true（只影响上传/预览打包）',
+    )
+  }
+
+  const lazy = appJson.lazyCodeLoading
+  if (lazy === 'requiredComponents') {
+    ok('组件按需注入', 'lazyCodeLoading = requiredComponents')
+  } else if (MODE_DEV) {
+    warn(
+      '组件按需注入',
+      `dist/app.json lazyCodeLoading = ${String(lazy)}`,
+      '改 src/app.config.ts 的 lazyCodeLoading 后必须重跑 build:weapp；发布态会阻断',
+    )
+  } else {
+    block(
+      '组件按需注入',
+      `dist/app.json lazyCodeLoading = ${String(lazy)}`,
+      '「代码质量 → 代码包 → 启用组件按需注入」判未通过；在 src/app.config.ts 加 lazyCodeLoading: "requiredComponents" 后重建',
+    )
   }
 }
 

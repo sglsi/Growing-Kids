@@ -27,6 +27,14 @@
 const PRIVACY_CHECK_ENABLED = typeof PRIVACY_CHECK !== 'undefined' && PRIVACY_CHECK === '1'
 
 export default defineAppConfig({
+  /**
+   * 组件按需注入（2026-11-04 加）：开发者工具「代码质量」里这一项原来判「未通过」。
+   * `requiredComponents` 只注入当前页面 usingComponents 真正声明了的组件，
+   * 减少启动时的组件注册开销。⚠️ 前提是所有自定义组件都经 usingComponents 静态声明
+   * —— Taro 编译时会按 import 生成，符合条件；但**改完必须重编译并在模拟器逐页点一遍**
+   * （按需注入漏声明时的故障是「页面白屏 + Component is not found」，编译期不报错）。
+   */
+  lazyCodeLoading: 'requiredComponents',
   __usePrivacyCheck__: PRIVACY_CHECK_ENABLED,
   pages: [
     'pages/index/index',
