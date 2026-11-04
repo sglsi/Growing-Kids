@@ -2,6 +2,13 @@ import { Injectable, Logger } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { BaiduNetdiskService } from '../storage/baidu-netdisk.service'
 import { extractDocContent } from '../ocr/pdf-tool'
+// P-006 / D-009：检索词（找资料）与判定锚点（认原题）分开，真相源在 shared/
+import {
+  TOPIC_WORDS,
+  NOISE_PREFIX,
+  extractDistinctive,
+  judge,
+} from '../shared/question-match'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -60,34 +67,8 @@ const KEY_LIMIT = 100
 /** L1 合并后进入 L2 的候选池大小 */
 const L1_POOL = 20
 
-/**
- * 初中常见知识点词表——只用来「从题干里挑搜网盘的 key」。
- * ⚠️ 不是学科本体，不需要全，覆盖高频即可；命中不了会退回滑窗，不影响正确性。
- */
-const TOPIC_WORDS = [
-  // 物理
-  '浮力', '压强', '密度', '重力', '摩擦力', '杠杆', '滑轮', '机械效率', '机械能', '动能', '势能',
-  '电流', '电压', '电阻', '欧姆定律', '电功率', '电功', '焦耳定律', '串联', '并联', '磁场', '电磁感应',
-  '光的反射', '光的折射', '凸透镜', '成像', '物态变化', '熔化', '凝固', '汽化', '液化', '升华',
-  '比热容', '内能', '热量', '声音', '音调', '响度', '速度', '路程', '参照物', '惯性', '二力平衡',
-  // 数学
-  '函数', '一次函数', '二次函数', '反比例函数', '方程', '方程组', '不等式', '因式分解', '分式',
-  '三角形', '全等', '相似', '四边形', '平行四边形', '矩形', '菱形', '梯形', '圆', '扇形', '切线',
-  '勾股定理', '锐角三角函数', '正弦', '余弦', '正切', '概率', '统计', '平均数', '中位数', '方差',
-  '数列', '集合', '导数', '圆锥', '圆柱', '体积', '表面积',
-  // 化学
-  '化学式', '化学方程式', '配平', '相对分子质量', '溶液', '溶质', '溶剂', '溶解度', '酸碱盐',
-  '氧化还原', '化合反应', '分解反应', '置换反应', '复分解反应', '金属活动性', 'pH',
-  // 生物 / 语文 / 英语（搜题也会遇到）
-  '细胞', '光合作用', '呼吸作用', '遗传', '生态系统', '文言文', '古诗', '阅读理解', '完形填空',
-]
-
-/** 题干里这些开头的片段做 search key 基本是噪声 */
-const NOISE_PREFIX = [
-  '如图', '下列', '关于', '我们', '一个', '如果', '已知', '根据', '下列说', '请', '求', '计算',
-  '　', '的是', '的是', '正确', '错误', '说法', '选项',
-]
-
+// ⚠️ 主题词表 / 噪声前缀已搬到 `shared/question-match.ts`（P-006 单一真相源）：
+//    检索与判定共用一份词表，避免「召回时算主题词、判定时又算一遍」出现口径漂移。
 function isNoise(s: string): boolean {
   if (s.length < 2) return true
   return NOISE_PREFIX.some((p) => s.startsWith(p))
@@ -102,8 +83,11 @@ function plainBlocks(text: string): string[] {
 }
 
 /**
- * 从题干里挑出用于网盘搜索的 key。
- * 顺序：学科词优先（命中率最高）→ 4 字滑窗兜底。最多 MAX_KEYS 个且去重。
+ * 从题干里挑出用于网盘**召回**的 key（主题词优先 → 4 字滑窗兜底）。
+ *
+ * ⚠️ P-006：这里只负责「把同专题资料找出来」，**不负责判定是不是这道题**。
+ *    判定用 `shared/question-match.ts` 的区分性片段（数值 / 变量 / 条件短语），
+ *    两组词在 `search()` 里合并做粗筛，主题词兜底保证不丢原有召回能力。
  */
 export function extractKeys(question: string): string[] {
   const q = question || ''
@@ -159,8 +143,14 @@ export interface NetdiskHit {
   hit: 'name' | 'content'
   /** 0~1，越大越相关 */
   score: number
-  /** 正文命中时的上下文片段 */
+  /** 正文命中时的上下文片段（⚠️ 仅排障用，P-006 起**禁止**当作答案展示） */
   snippet?: string
+  /** P-006：原题判定档位。只有 exact 才允许把 solutionExcerpt 当答案 */
+  matchLevel?: 'exact' | 'topic'
+  /** exact 时定位到的【答案】/【解析】段（不是任意上下文） */
+  solutionExcerpt?: string
+  /** 题干长锚点在这份正文里的命中数（排障用） */
+  anchorsHit?: number
 }
 
 export interface NetdiskSearchResult {
@@ -170,6 +160,8 @@ export interface NetdiskSearchResult {
   /** 人类可读的说明（未配置/无命中/扫描版抽不到正文等） */
   note: string
   tookMs: number
+  /** P-006：判定为「找到了这道题 + 解析段」的份数 */
+  exactCount: number
 }
 
 interface CacheRow {
@@ -215,9 +207,16 @@ export class NetdiskSearchService {
     // ⚠️ 这里**不**先判 available()：搜索只查本库索引，网盘凭证失效/过期
     //    不该让「搜自己索引过的资料」跟着失灵。只有走实时兜底时才要求凭证可用。
 
-    const keys = extractKeys(question)
+    // P-006：主题词仍排第一顺位（文件名/路径召回全靠它），只补少量区分性片段。
+    // ⚠️ 别把 11 个 6 字长锚点全塞进来：它们不会出现在文件名里，却会把主题词
+    //    挤出 keys ⇒ 文件名召回直接归零。原题判定在正文深挖阶段用 judge() 做，不靠粗筛。
+    const { keys: distKeys } = extractDistinctive(question)
+    const keys = [...new Set([...extractKeys(question), ...distKeys.slice(0, 3)])].slice(0, MAX_KEYS + 3)
     if (keys.length === 0) {
-      return { hits: [], keys, note: '题干太短，提不出可用的检索词', tookMs: Date.now() - started }
+      return {
+        hits: [], keys, exactCount: 0,
+        note: '题干太短，提不出可用的检索词', tookMs: Date.now() - started,
+      }
     }
 
     const qSet = bigrams(question)
@@ -242,7 +241,7 @@ export class NetdiskSearchService {
       if (!this.available()) {
         this.logger.warn(`[netdisk] 资料库存储未配置，缺少 ${this.missingKeys().join(' / ')}；索引也可能还没建`)
         return {
-          hits: [], keys, tookMs: Date.now() - started,
+          hits: [], keys, exactCount: 0, tookMs: Date.now() - started,
           // 排障细节（缺哪个 key）只写日志：用户看到的应该是「资料库暂时不可用」，
           // 而不是第三方的配置项名（思傅 2026-11-03：资料存在哪与本项目无关）。
           note: '本库还没有资料索引，资料存储也还没配好，请联系维护者',
@@ -311,18 +310,36 @@ export class NetdiskSearchService {
           if (!text) continue
           const score = coverage(qSet, text)
           if (score < 0.2) continue
+          // P-006：判定「是不是这道题」并定位【答案】/【解析】段。
+          // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
+          const j = judge(question, text)
           const snippet = this.snippetFor(question, text)
-          deepDone.push({ ...cand, hit: 'content', score: Number(score.toFixed(3)), snippet })
+          deepDone.push({
+            ...cand,
+            hit: 'content',
+            score: Number(score.toFixed(3)),
+            snippet,
+            matchLevel: j.exact ? 'exact' : 'topic',
+            ...(j.exact ? { solutionExcerpt: j.solution } : {}),
+            anchorsHit: j.anchorsHit,
+          })
         } catch (e) {
           this.logger.warn(`[netdisk] 抽正文失败 ${cand.path}: ${e instanceof Error ? e.message : e}`)
         }
       }
     }
 
-    // 正文命中优先展示（它比文件名命中更贴近「这道题」），同分按覆盖度
+    // P-006：原题 exact 排最前；其次正文命中；同档按覆盖度。
+    // 只有 exact 会进入 answer-search 的「答案」字段，其余一律按同主题资料呈现。
     const hits = [...deepDone, ...l1.filter((h) => !deepDone.some((d) => d.fsId === h.fsId))]
-      .sort((a, b) => (a.hit === b.hit ? b.score - a.score : a.hit === 'content' ? -1 : 1))
+      .sort((a, b) => {
+        const ea = a.matchLevel === 'exact' ? 1 : 0
+        const eb = b.matchLevel === 'exact' ? 1 : 0
+        if (ea !== eb) return eb - ea
+        return a.hit === b.hit ? b.score - a.score : a.hit === 'content' ? -1 : 1
+      })
       .slice(0, limit)
+    const exactCount = hits.filter((h) => h.matchLevel === 'exact').length
 
     let note = ''
     if (hits.length === 0) {
@@ -336,9 +353,11 @@ export class NetdiskSearchService {
     } else {
       note = `文件名 + 正文匹配（正文命中 ${deepDone.length} 份）`
     }
+    if (exactCount > 0) note += `；原题判定命中 ${exactCount} 份`
+    else if (hits.length > 0) note += '；未定位到这道题的答案，仅找到同主题资料'
     if (liveFallback) note += '；⚠️ 索引尚未建立，本次直接读取资料库'
 
-    return { hits, keys, note, tookMs: Date.now() - started }
+    return { hits, keys, note, exactCount, tookMs: Date.now() - started }
   }
 
   /**
