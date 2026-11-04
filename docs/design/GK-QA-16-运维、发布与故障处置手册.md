@@ -1099,6 +1099,37 @@ delete from answer_cache
  where mode = 'kb' and coalesce(result->>'note','') like '%百度网盘%';
 ```
 
+### 6.4 录音点了没反应 / 播放失败 ⇒ 先看响应头有没有 `Content-Length`
+
+**症状**：记忆里的录音点播放，要么毫无反应、要么弹「播放失败」；同一份存储里的图片、视频封面却正常。
+
+**一句话判据**：
+
+```bash
+KEY=blobs/xx/xxxx/original.mp3
+curl -s -o /dev/null -D - --noproxy '*' "http://<域名>/api/storage/files/$KEY" | grep -iE 'content-length|accept-ranges|transfer-encoding'
+curl -s -o /dev/null -D - --noproxy '*' -H 'Range: bytes=0-1023' "http://<域名>/api/storage/files/$KEY" | head -3
+```
+
+| 结果 | 含义 |
+|---|---|
+| `Transfer-Encoding: chunked`、无 `Content-Length` | 🔴 就是这个。播放器无法确定时长与缓冲窗口 |
+| 带 `Range` 请求回 **200**（而不是 206） | 🔴 不支持分段，seek 不可用，部分机型直接报错 |
+| 200 + `Content-Length` + `Accept-Ranges: bytes`，Range 回 206 | ✅ 服务端没问题，去查客户端（见下） |
+
+**根因（2026-11-04 实测）**：`storage.controller.ts` 里用 `fs.createReadStream(abs).pipe(res)` 发文件。pipe **不会替你算长度、也不处理分段**，所以响应是 chunked，且 Range 请求被忽略。
+
+图片和封面走 `<Image>`，它对这两个头不敏感，所以一直没暴露；音频走微信 `InnerAudioContext`，缺这两样就播不动。
+
+**修法**：改用 `res.sendFile(abs, { headers: { 'Content-Type', 'Cache-Control' } })`。它基于 `send`，会自动给出 `Content-Length`、`Accept-Ranges`，并正确处理 206。修完实测：`200 → Content-Length: 44496`、`206 → Content-Range: bytes 0-1023/44496`。
+
+**服务端没问题时，再查客户端两条**：
+
+1. `InnerAudioContext.obeyMuteSwitch` 默认 `true` ⇒ **iOS 打开静音开关时完全不发声**，用户看到的就是「点了没反应」。必须显式设 `false`。
+2. `onError` 一定要把 `errCode` 打出来。微信的音频错误码是唯一能区分「地址取不到」「格式不认」「服务器没给长度」的线索；只写一句「播放失败」等于下次还得从头猜一遍。
+
+⚠️ 通用规矩：凡是喂给 `<Image>` / `<Video>` / `InnerAudioContext` 的地址，都必须由**静态服务**（`sendFile`）发出来。手写 `createReadStream().pipe()` 在 JSON 接口里看着没事，一旦换成媒体就当头一棒。
+
 代价：这些题下次会重新消耗一次 ima / 联网配额，清理范围别超过实际改动的模式（`search` / `kb` / `ai` 分开看）。
 
 ---
@@ -1601,3 +1632,4 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 | **v1.20** | 2026-10-30 | **4.5.19 由六条扩为八条（同日第二轮）**。起因：思傅实操进入两个控制台，产生三个前一版没有的事实。① 新增 ⑦ **微信云托管 ≠ 微信云开发**（官方 FAQ：两套独立体系、环境互不可见，云托管环境在腾讯云控制台也看不到；且「云开发中的云托管能力已停止功能更新」）⇒「云托管跑后端 + 云开发跑数据库」只能走公网 HTTPS，**不能内网直连**；网上"内网互通"教程说的都是已停更的旧产品。② 新增 ⑧ **CloudBase PostgreSQL 与 Supabase 有意对齐**（PostgREST 同一开源项目、三角色同名、JWT claims 对齐、GRANT+RLS 写法一致），迁库从"自建 PG + 自建 PostgREST"缩为"建环境 + 补一层 /rest/v1 → /v1/rdb/rest 路径重写"，218 处查询仍零改动；并记下**直改 base URL 行不通**（会被拼成 /v1/rdb/rest/v1/xxx）。③ 补两条脚注：备案云资源可用云开发环境（个人版及以上 + 剩余有效期≥6 个月 + 开启云托管固定 IP，免费体验环境不支持）；19 个 migration 静态预检零阻塞（create extension 0 处、auth.uid() 全在注释、gen_random_uuid 由 PG 17 内核提供）。④ 路线结论相应修正：由"L1 一刀切出局"改为"**按时间压力分岔**"——今天就要上线选 L1，能等 7–20 天选 L3，L2 只作过渡。详见调研纪要 v4.1 §2.6 / §3.2。 |
 | **v1.21** | 2026-10-30 | **4.5.19 修订一条多余约束 + 新增执行层指路**。① 订正：原文写"必须同批迁文件（换 COS/MinIO 并新增一个 s3 驱动）"——多余。`storage.service.ts` 的 `local` 分支是完整生产实现（`STORAGE_LOCAL_DIR` 落盘 + `GET /api/storage/files/*` 读取 + `resolveLocal()` 路径逃逸防护），改 `STORAGE_DRIVER=local` 即可零代码迁移，无需 COS/MinIO 与 s3 驱动。② 新增"决定走 L3 后的执行步骤"指路段，指向 `docs/后端托管-L3实施方案.md`（S0 采购与备案 → S1 服务器初始化 → S2 迁库迁存储 → S3 证书与内测 → S4 切换与回退，含命令与验收判据、官方价目表）。③ 点名三条新查出、踩了很难查的坑：`SUPABASE_URL` 必须写 IP 字面量（dns-pin 对 IP 短路，写 localhost 会装上补丁并对 443 做 TLS 探测）／`service_role` 必须 `BYPASSRLS`（`ocr_results` 启用 RLS 无 policy，否则静默返回 0 行）／纯 API 域名备案会被驳回（首页不能是空目录，文案不得含教育类字样）。**本轮仍不改业务代码。** |
 | **v1.22** | 2026-11-03 | **新增 §6.3 资料索引运维（建索引 / 定时任务 / 判据 / 正文回填）与 §6.1.1 部署包漏文件判据**。本轮三件事需要运维记住：① **资料索引不再是「实时搜网盘」**，`netdisk-index.mjs` 把文件名/路径/大小落进 `netdisk_files`，检索只查本库（毫秒级、结果稳定），要正文才按 `fs_id` 下载；② **索引改为每周增量**（`gk-netdisk-index.timer`，周日 04:23），按目录 `server_mtime` 剪枝——`listall` 全量接口实测 `errno 20020` 不可用，也没有 webhook，但目录 mtime 会在子项增删改名时更新并逐层向上反映，所以「父目录里那条子目录的 mtime」就是免费的变更信号；③ **三条防误删护栏**：`--root` 必须是网盘绝对路径（Git Bash 的 MSYS 会把 `/学生/最新` 转成 `D:/.../学生/最新`，导致列出 0 条、判定「完整遍历」、`--full-clean` 删光整表——本地实测删了 65890 行）、零文件不清库、待删超一半要求 `--force-clean`。另记 §6.1.1：只换 `server/dist` 会漏 `ocr-engine/*.py`，且失败是静默降级（接口照样 200、正文抽不出来）。规模基线：`/学生` **12511 个目录 / 65890 个文件**，全量遍历 **1510 秒**（4 并发）。 |
+| **v1.23** | 2026-11-04 | **新增 §6.4「录音点了没反应 / 播放失败」判据**。记忆页录音点击播放失败，实测根因不是文件、不是格式，而是 `GET /api/storage/files/*` 用 `fs.createReadStream().pipe(res)` 发文件——pipe 不算长度也不处理分段，响应是 `Transfer-Encoding: chunked`（无 `Content-Length`、无 `Accept-Ranges`），带 `Range` 请求仍回 200 而非 206。图片/视频封面走 `<Image>` 对此不敏感所以长期没暴露；微信 `InnerAudioContext` 靠这两个头确定时长与缓冲窗口，缺了就播不动。修法＝改 `res.sendFile`（基于 send，自动给 `Content-Length`/`Accept-Ranges`/206）。附「服务端没问题时再查客户端两条」：`obeyMuteSwitch` 默认 true 会让 iOS 静音开关下完全不发声（录音类最常见的假故障）、`onError` 必须打出 `errCode`。⚠️ 通用规矩：喂给 `<Image>/<Video>/<InnerAudioContext>` 的地址必须由静态服务（`sendFile`）发出，别手写 pipe。 |
