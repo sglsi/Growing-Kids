@@ -386,7 +386,7 @@ export default function LibraryPage() {
               共 {total} 份资料{docs.length < total ? `（已显示 ${docs.length}）` : ''}
             </Text>
             {userGrade ? (
-              <Text
+              <View
                 className="block text-xs text-brand-text"
                 onClick={() => {
                   const next = gradeFilter === null ? userGrade : null
@@ -399,7 +399,7 @@ export default function LibraryPage() {
                   : gradeScope?.spread
                     ? '已扩展 · 显示全部'
                     : `${gradeLabel(gradeFilter)} · 显示全部`}
-              </Text>
+              </View>
             ) : null}
           </View>
           {loading ? (
