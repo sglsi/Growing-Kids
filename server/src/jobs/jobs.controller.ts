@@ -38,15 +38,23 @@ export class JobsController {
     if (!TABLE_OF_TYPE.has(type)) {
       throw new BadRequestException(`不支持的任务类型：${String(body?.type)}（可选：ocr-page / doc-recognize / answer-search / search-solve）`)
     }
+    const params = (body?.params && typeof body.params === 'object' ? body.params : {}) as Record<string, unknown>
     // ⚠️ **闸门必须在提交阶段拦，不能留到执行阶段**。
-    //    `/api/search/solve` 与 `/api/answer-search` 都过 `requireAiEnabled`
+    //    `/api/search/solve` 与 `/api/answer-search` 的**非 kb 模式**都过 `requireAiEnabled`
     //    （R-合规-02：AI 外发开关）。而任务是在后台执行的，**那时没有 req** ——
     //    若把校验放进执行器，异步化就等于给 AI 闸门开了一道后门：
     //    用户关了开关，只要他能提交任务，内容照样外发。
+    //
+    // ⚠️ **mode=kb（资料库搜题）单独放行**：与同步端点 `POST /api/answer-search/:id`
+    //    同口径（`mode === 'kb' ? requireUserId : requireAiEnabled`）。它只检索用户
+    //    自己的网盘 / ima 资料、不做 AI 生成，不该被「AI 与在线检索」开关连坐。
+    //    🔴 2026-11-04 修复：此前不分 mode 一律 requireAiEnabled，而 ai_enabled 默认
+    //    false ⇒ 点「资料库搜题」提交即 403 AI_DISABLED，前端表现为「点了没反应」。
+    //    放行是安全的：执行器（jobs.service）同样按 mode 分流，kb 只走 netdisk + ima。
     if (type === 'answer-search' || type === 'search-solve') {
-      userId = requireAiEnabled(req)
+      const kbOnly = type === 'answer-search' && params.mode === 'kb'
+      if (!kbOnly) userId = requireAiEnabled(req)
     }
-    const params = (body?.params && typeof body.params === 'object' ? body.params : {}) as Record<string, unknown>
     const headers = (req.headers || {}) as Record<string, string>
     const data = await this.jobsService.submit(userId, type, params, headers)
     return { code: 200, msg: 'success', data }
