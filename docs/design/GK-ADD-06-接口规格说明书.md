@@ -223,7 +223,17 @@
 
 > ⚠️ `mode` 是 **body 参数**，写在 query 上会静默走默认 `search`（联网搜题约 70s）。出参含 `cached` 标记（命中持久化缓存）。
 >
-> `mode=kb`（「资料库搜题」）**先查百度网盘资料、未命中再查 ima 知识库**，只做检索不生成；`kb` 走 `requireUserId()`，不受 `users.ai_enabled` 约束（`search`/`ai` 才受）。出参 `source` 取值 `search | netdisk | kb | llm | none`，`refs[].url` 在 `netdisk` 下为空串（网盘文件没有直链）。
+> `mode=kb`（「资料库搜题」）走 `requireUserId()`，不受 `users.ai_enabled` 约束（`search`/`ai` 才受）。出参 `source` 取值 `search | netdisk | kb | llm | none`，`refs[].url` 在 `netdisk` 下为空串（网盘文件没有直链）。
+>
+> **P-006 / D-009（2026-11-04）`kb` 结果契约**：新增 `match_level?: 'exact' | 'topic' | 'none'`，v4 起 `kb` 返回必带。
+>
+> | 档位 | `verified` | `answer` | 前端呈现 | 含义 |
+> |---|---|---|---|---|
+> | `exact` | `true` | 非空，取自定位到的【答案】/【解析】段或自有题库已有答案 | 显示「找到这道题的参考答案」，提供「采纳」 | 找到了这道题 |
+> | `topic` | `false` | **必须为空串** | 显示「没找到这道题的答案，以下是同主题资料」，**隐藏「采纳」**，`solution`（文件名清单）不当解题过程渲染 | 只找到同主题资料 |
+> | `none` | `false` | 空 | 不渲染结果卡片 | 无结果 |
+>
+> 🔴 **硬闸**：任何数据源（含 **ima 语义检索**）都不得「有结果就 `verified:true`」。只有 `server/src/shared/question-match.ts` 的 `judge()` / `isSameQuestion()` 判定为原题（≥3 个长锚点共现且命中率 ≥40%，并定位到答案/解析段）才允许填 `answer`。`CACHE_VERSION` 现为 **`v4`**——v3 的持久化缓存会把别的题解析当答案返回，改文案或结果结构必须 bump。`kb` 检索顺序：① 自有题库同题答案 → ② `library_docs.text_content` 的解析段 → ③ 网盘资料 `exact` 解析段 → ④ ima 知识库（过 `isSameQuestion` 才算 exact）→ ⑤ 兜底把网盘命中与 ima 条目合并列为同主题资料。新增查库两处均 `.eq('user_id', userId)`。回归见 `GK-QA-21 M27`。
 
 ### 5.10.1 netdisk（排障直连端点）
 
