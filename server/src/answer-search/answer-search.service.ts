@@ -40,7 +40,7 @@ const CACHE_PREFIX = 'ans:srch:'
  * 把整个 result（含 note 字符串）按题干哈希永久存着，命中即原样返回。
  * 版本参与 qHash ⇒ bump 一次，旧缓存自然不再命中（旧行成为孤儿，见 QA-16 §6.3.5）。
  */
-const CACHE_VERSION = 'v2'
+const CACHE_VERSION = 'v3'
 const QUOTA_PREFIX = 'ans:q:'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
@@ -310,7 +310,7 @@ export class AnswerSearchService {
           confidence: Number((top.score || 0).toFixed(2)),
           // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
           // （思傅 2026-11-03）。来源细节（哪个网盘、哪份文件）放在 refs 与日志里。
-          note: `来自你的资料库（${disk.note}），请打开文件核对后再采纳`,
+          note: `来自资料库（${disk.note}），请打开文件核对后再采纳`,
         }
       } else {
       // ---------- 知识库检索：只查 ima 知识库，不喂给 AI ----------
