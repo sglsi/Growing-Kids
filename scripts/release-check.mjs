@@ -337,6 +337,11 @@ if (head && metaCommit === head) {
 }
 
 // ── 7. 备份时效（警告级）────────────────────────────────────
+// ⚠️ 只看**本机** server/backups。生产备份落在服务器 /var/lib/gk/backups，
+//    本机通常一份都没有 ⇒ 2026-11-04 实测它每天报「备份 123 小时前」，
+//    而生产当天 03:19 刚成功跑完（rows=80792、已上传网盘）。
+//    天天误报的结果是这条警告被无视，真出问题那天也没人看 —— 所以本机没有副本
+//    时不报警，只把「怎么核对生产备份」写出来。
 const backupDir = path.join(ROOT, 'server', 'backups')
 if (fs.existsSync(backupDir)) {
   const files = walk(backupDir)
@@ -344,14 +349,14 @@ if (fs.existsSync(backupDir)) {
     .map((f) => ({ f, t: fs.statSync(f).mtimeMs }))
     .sort((a, b) => b.t - a.t)
   if (files.length === 0) {
-    warn('备份', 'backups 目录存在但没有 .gkbk 文件', '至少跑一次备份演练')
+    ok('备份', '本机无备份副本（生产：systemctl list-timers gk-backup-db.timer / ls /var/lib/gk/backups）')
   } else {
     const ageH = (Date.now() - files[0].t) / 3600_000
-    if (ageH > 48) warn('备份时效', `最新备份 ${ageH.toFixed(0)} 小时前（要求 <48h）`, '跑一次备份')
-    else ok('备份时效', `最新备份 ${ageH.toFixed(1)} 小时前`)
+    if (ageH > 48) warn('备份时效', `本机副本 ${ageH.toFixed(0)} 小时前（要求 <48h）`, '跑一次备份演练，或确认本机副本是否还该留')
+    else ok('备份时效', `本机副本 ${ageH.toFixed(1)} 小时前`)
   }
 } else {
-  warn('备份', '未找到 server/backups', '上线前至少完成一次备份 + 恢复演练')
+  ok('备份', '本机无备份目录（生产备份在服务器，用 systemctl list-timers gk-backup-db.timer 核对）')
 }
 
 // ── 输出 ────────────────────────────────────────────────────
