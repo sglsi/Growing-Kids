@@ -8,6 +8,7 @@ import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
 import { ImaKnowledgeProvider } from './ima-provider'
 import { NetdiskSearchService } from '../netdisk/netdisk-search.service'
+import { judge, isSameQuestion, extractDistinctive } from '../shared/question-match'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -40,7 +41,9 @@ const CACHE_PREFIX = 'ans:srch:'
  * 把整个 result（含 note 字符串）按题干哈希永久存着，命中即原样返回。
  * 版本参与 qHash ⇒ bump 一次，旧缓存自然不再命中（旧行成为孤儿，见 QA-16 §6.3.5）。
  */
-const CACHE_VERSION = 'v3'
+// v4（P-006 / D-009）：新增 match_level 字段、answer 不再塞资料片段、文案改写
+// ⇒ 结构变了必须 bump，否则老 answer_cache 行会继续把别的题解析当成答案返回。
+const CACHE_VERSION = 'v4'
 const QUOTA_PREFIX = 'ans:q:'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
@@ -269,7 +272,12 @@ export class AnswerSearchService {
     }
 
     // ⑤ 按 mode 分三条互不混淆的路径
-    let result: AnswerSearchResult
+    // 兜底默认值：P-006 起 kb 分支用 settled 标志分五段赋值，TS 的控制流分析
+    // 看不出「必有一条赋值」，给一个 source=none 的安全兜底（宁可说没找到，也不返回 undefined）。
+    let result: AnswerSearchResult = {
+      source: 'none', verified: false, match_level: 'none',
+      answer: '', solution: '', refs: [], confidence: 0,
+    }
 
     if (mode === 'ai') {
       // ---------- AI 解题：只推理，不检索 ----------
@@ -285,81 +293,161 @@ export class AnswerSearchService {
             note: 'AI 解题失败：请检查模型 Key（COZE_API_TOKEN 扣子 / DEEPSEEK_API_KEY DeepSeek / HUNYUAN_API_TOKEN 混元）后重试',
           }
     } else if (mode === 'kb') {
-      // ---------- 资料库检索：**先百度网盘，再 ima**（思傅 2026-11-03 定） ----------
-      // 顺序理由：网盘里是自己攒的教辅真题（题源本身），比自建知识库更可能直接命中
-      // 「这道题出自哪份卷子」；而且网盘检索不吃 ima 的日配额（ima 按调用计数，零命中也扣）。
-      // 网盘未配置/未命中时原样落到 ima，绝不因为网盘不可用就让「资料库搜题」整体失灵。
-      const disk = await this.netdiskSearch
-        .search(userId, question)
-        .catch((e) => {
-          this.logger.warn(`[answer-search] 网盘检索异常: ${e instanceof Error ? e.message : e}`)
-          return null
-        })
+      // ---------- 资料库检索（P-006 / D-009，2026-11-04 重排） ----------
+      // 顺序按「能不能给出这道题的真答案」排，而不是按「哪个源先配好」排：
+      //   ① 同用户题库里做过、有答案的同一道题（最快、最可靠）
+      //   ② 自有资料库 library_docs 正文里定位到的【答案】/【解析】段
+      //   ③ 网盘资料正文里定位到的解析段（原有链路，现在带原题判定）
+      //   ④ ima 知识库（原有能力，语义检索；沿用既有口径）
+      //   ⑤ 都没给答案 ⇒ 只列同主题资料，明说「没找到这道题的答案」，绝不冒充
+      // 🔴 旧实现 `disk.hits.length > 0` 就直接 verified:true 并把 top.snippet 塞进 answer，
+      //    实测（2026-11-04 生产 answer_cache）返回的是**另一道题**的【分析】片段——
+      //    同专题教辅 + 一堆文件名。D-009 硬性约束：answer 只能来自 exact 判定。
+      // ⚠️ 不做 AI 生成、不改隐私政策 r5、不动 AI 开关（个人主体合规边界）。
+      let disk: Awaited<ReturnType<NetdiskSearchService['search']>> | null = null
+      let settled = false
+      let imaMissNote = ''
+      /** ④ 里判不出原题的 ima 条目：不抢占 result，交给 ⑤ 与网盘命中一起如实列出 */
+      let imaItems: WebItem[] = []
 
-      if (disk && disk.hits.length > 0) {
-        const top = disk.hits[0]
-        const lines = disk.hits.slice(0, 5).map((h, i) =>
-          `${i + 1}. ${h.name}（${h.hit === 'content' ? '正文命中' : '文件名命中'} ${Math.round(h.score * 100)}%）\n   路径：${h.path}`,
-        )
+      // ① 自己的题库：以前做过这道题 / 录入过答案
+      const own = await this.searchOwnAnswers(userId, itemId, question)
+      if (own) {
         result = {
-          source: 'netdisk',
-          verified: true,
-          answer: (top.snippet || `${top.name}\n路径：${top.path}`).slice(0, 500),
-          solution: lines.join('\n'),
-          refs: disk.hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
-          confidence: Number((top.score || 0).toFixed(2)),
-          // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
-          // （思傅 2026-11-03）。来源细节（哪个网盘、哪份文件）放在 refs 与日志里。
-          note: `来自资料库（${disk.note}），请打开文件核对后再采纳`,
+          source: 'netdisk', verified: true, match_level: 'exact',
+          answer: own.answer.slice(0, 500),
+          solution: own.solution.slice(0, 500) || `来自：${own.title}`,
+          refs: [{ title: own.title, url: '' }],
+          confidence: 1,
+          note: '在你自己的题库里找到了这道题的答案，请核对后采纳',
         }
-      } else {
-      // ---------- 知识库检索：只查 ima 知识库，不喂给 AI ----------
-      const ima = new ImaKnowledgeProvider()
-      if (!ima.available()) {
-        result = {
-          source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
-          note: `知识库未配置（缺 ${ima.missingKeys().join(' / ')}）：请在服务器 .env.secrets 填入 IMA_CLIENT_ID / IMA_API_KEY / IMA_KB_ID（ima.qq.com/agent-interface 获取）后重跑 encrypt-env 并重启后端`,
-        }
-      } else {
-        let items: WebItem[] = []
-        let kbErr = ''
-        try {
-          items = await ima.search(question, 8)
-        } catch (e) {
-          kbErr = e instanceof Error ? e.message : String(e)
-          this.logger.warn(`[answer-search] ima 知识库检索失败: ${kbErr}`)
-        }
-        // ima 检索已按语义相关度排序，非空即采用（confidence 仅作参考信息展示）
-        const conf = relevance(question, items)
-        if (items.length > 0) {
-          const top = items[0]
+        settled = true
+      }
+
+      // ② 自有资料库正文
+      if (!settled) {
+        const doc = await this.searchLibraryDocs(userId, question)
+        if (doc) {
           result = {
-            source: 'kb', verified: true,
-            answer: (top.summary || top.snippet || '').slice(0, 500),
-            solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
-            refs: items.slice(0, 5).map((i) => ({ title: i.title, url: i.url })),
-            confidence: Number(conf.toFixed(2)),
-            note: '来自 ima 知识库（未做 AI 整理），请核对后采纳',
+            source: 'netdisk', verified: true, match_level: 'exact',
+            answer: doc.solution.slice(0, 500),
+            solution: `来自：${doc.title}`,
+            refs: [{ title: doc.title, url: '' }],
+            confidence: 0.9,
+            note: '在你的资料库里找到了这道题的解析，请核对后采纳',
           }
-        } else {
-          // 220021 = ima 日配额耗尽（按调用计数，零命中也扣）——专属文案，别混在泛化失败里
-          const quotaHit = /220021|已达上限/.test(kbErr)
+          settled = true
+        }
+      }
+
+      // ③ 网盘资料（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
+      if (!settled) {
+        disk = await this.netdiskSearch
+          .search(userId, question)
+          .catch((e) => {
+            this.logger.warn(`[answer-search] 网盘检索异常: ${e instanceof Error ? e.message : e}`)
+            return null
+          })
+        const exact = disk?.hits.find((h) => h.matchLevel === 'exact' && h.solutionExcerpt)
+        if (exact?.solutionExcerpt) {
           result = {
-            source: 'none', verified: false, answer: '', solution: '', refs: [], confidence: 0,
+            source: 'netdisk', verified: true, match_level: 'exact',
+            answer: exact.solutionExcerpt.slice(0, 500),
+            solution: `来自：${exact.name}`,
+            refs: [{ title: exact.name, url: '' }],
+            confidence: Number((exact.score || 0).toFixed(2)),
+            // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
+            note: '来自资料库（已定位到这道题的解析段），请打开文件核对后再采纳',
+          }
+          settled = true
+        }
+      }
+
+      // ④ ima 知识库（P-006 硬闸：语义检索结果也必须过原题判定，不得无条件标 exact）
+      //    ⚠️ 旧实现 `items.length > 0` 就直接 `verified:true / answer: top.summary`，
+      //       而 ima 的查询链本身被降级成「主题词」（buildQueryFallbacks），命中同专题
+      //       不同题几乎必然 ⇒ 与网盘那条「把资料片段当答案」是同一个病，只是来源不同。
+      //    判据用 isSameQuestion（多锚点共现），不要求【答案】标记——ima 条目是高亮片段，
+      //    没有教辅那种段落标记；判不出就降级 topic，由 ⑤ 如实列出，绝不冒充。
+      if (!settled) {
+        const ima = new ImaKnowledgeProvider()
+        if (!ima.available()) {
+          imaMissNote = `知识库未配置（缺 ${ima.missingKeys().join(' / ')}）：请在服务器 .env.secrets 填入 IMA_CLIENT_ID / IMA_API_KEY / IMA_KB_ID（ima.qq.com/agent-interface 获取）后重跑 encrypt-env 并重启后端`
+        } else {
+          let items: WebItem[] = []
+          let kbErr = ''
+          try {
+            items = await ima.search(question, 8)
+          } catch (e) {
+            kbErr = e instanceof Error ? e.message : String(e)
+            this.logger.warn(`[answer-search] ima 知识库检索失败: ${kbErr}`)
+          }
+          const joined = items.slice(0, 3)
+            .map((i) => `${i.title}\n${i.summary || i.snippet || ''}`)
+            .join('\n')
+          if (items.length > 0 && isSameQuestion(question, joined)) {
+            const top = items[0]
+            result = {
+              source: 'kb', verified: true, match_level: 'exact',
+              answer: (top.summary || top.snippet || '').slice(0, 500),
+              solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
+              refs: items.slice(0, 5).map((i) => ({ title: i.title, url: i.url })),
+              confidence: Number(relevance(question, items).toFixed(2)),
+              note: '来自 ima 知识库（未做 AI 整理），请核对后采纳',
+            }
+            settled = true
+          } else if (items.length > 0) {
+            // 只找到同主题条目 ⇒ 不抢占 result，交给 ⑤ 与网盘命中一起如实列出
+            imaItems = items.slice(0, 5)
+          } else {
+            // 220021 = ima 日配额耗尽（按调用计数，零命中也扣）——专属文案，别混在泛化失败里
+            const quotaHit = /220021|已达上限/.test(kbErr)
             // ⚠️ 不要把「改试联网搜题 / AI 解题」写进提示：个人主体下那两个入口
             //    根本不渲染（AI_PUBLIC_ENTRY=false），指着不存在的按钮让人去点＝坏体验。
-            note: quotaHit
+            imaMissNote = quotaHit
               ? '资料库今日检索次数已达上限，请明天再试'
               : kbErr
                 ? `资料库检索失败（${kbErr.slice(0, 80)}），请稍后重试`
-                : '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
+                : '资料库里没有找到与这道题相关的内容，可以先手动填写答案'
           }
         }
       }
-        // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过资料库
-        if (result.source === 'none' && disk && disk.keys.length > 0) {
-          result.note = `${result.note || ''}（资料库按「${disk.keys.join(' / ')}」也没搜到）`
+
+      // ⑤ 兜底：有同主题资料（网盘命中 + ima 条目）就如实列出来（answer 必须为空）
+      if (!settled) {
+        const hits = disk?.hits ?? []
+        const fileLines = hits.slice(0, 5).map((h, i) =>
+          `${i + 1}. ${h.name}（${h.hit === 'content' ? '正文命中' : '文件名命中'} ${Math.round(h.score * 100)}%）\n   路径：${h.path}`,
+        )
+        const kbLines = imaItems.map((i, idx) =>
+          `${fileLines.length + idx + 1}. ${i.title}（知识库同主题条目）`,
+        )
+        if (fileLines.length > 0 || kbLines.length > 0) {
+          result = {
+            source: hits.length > 0 ? 'netdisk' : 'kb',
+            verified: false,
+            match_level: 'topic',
+            answer: '', // 🔴 D-009：同主题资料片段绝不进答案字段
+            solution: [...fileLines, ...kbLines].join('\n'),
+            refs: [
+              ...hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
+              ...imaItems.map((i) => ({ title: i.title, url: '' })),
+            ],
+            confidence: Number((hits[0]?.score || 0).toFixed(2)),
+            note: '没找到这道题的答案，以下是同主题资料，可打开文件自行核对',
+          }
+        } else {
+          result = {
+            source: 'none', verified: false, match_level: 'none',
+            answer: '', solution: '', refs: [], confidence: 0,
+            note: imaMissNote || '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
+          }
         }
+      }
+
+      // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过资料库
+      if (result.source === 'none' && disk && disk.keys.length > 0) {
+        result.note = `${result.note || ''}（资料库按「${disk.keys.join(' / ')}」也没搜到）`
       }
     } else {
       // ---------- 联网搜题：只检索，不喂给 AI ----------
@@ -400,6 +488,84 @@ export class AnswerSearchService {
     await cacheSet(cacheKey, result, CACHE_TTL_MS)
     await this.cacheWrite(userId, qHash, mode, result)
     return result
+  }
+
+  /**
+   * ① 自有题库：找「以前做过、有答案」的同一道题（P-006 B4）。
+   * 判据用 shared/question-match 的多锚点共现，不用 bigram 覆盖率——
+   * 同专题但不同题不能因为「都讲抛物线」就被当成同一道题。
+   * ⚠️ 无 RLS ⇒ 查询必须 .eq('user_id', userId)；排除当前题自身，
+   *    避免拿自己已有的旧答案冒充「检索出来的答案」。
+   */
+  private async searchOwnAnswers(
+    userId: string,
+    excludeItemId: string,
+    question: string,
+  ): Promise<{ answer: string; solution: string; title: string } | null> {
+    try {
+      const client = getSupabaseClient()
+      const { data, error } = await client
+        .from('timeline_items')
+        .select('id, title, content')
+        .eq('user_id', userId)
+        .is('deleted_at', null)
+        .neq('id', excludeItemId)
+        .limit(300)
+      if (error || !data) return null
+      for (const row of data as { id: string; title: string | null; content: Record<string, unknown> | null }[]) {
+        const c = (row.content || {}) as Record<string, unknown>
+        const ans = String(c.answer || '').trim()
+        if (!ans) continue
+        const qText = String(c.question || c.stem || row.title || '')
+        if (!isSameQuestion(question, qText)) continue
+        return {
+          answer: ans,
+          solution: String(c.solution || '').trim(),
+          title: String(row.title || qText.slice(0, 40) || '题库里的一道题'),
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`[answer-search] 查自有题库失败: ${e instanceof Error ? e.message : e}`)
+    }
+    return null
+  }
+
+  /**
+   * ② 自有资料库正文：先用区分性片段 ilike 粗筛，再用 judge() 定位【答案】/【解析】段。
+   * ⚠️ 只读自己的行：.eq('user_id', userId)；正文截断 60k 字，避免整本书一次塞进内存判定。
+   */
+  private async searchLibraryDocs(
+    userId: string,
+    question: string,
+  ): Promise<{ solution: string; title: string } | null> {
+    try {
+      const client = getSupabaseClient()
+      const clean = extractDistinctive(question).keys
+        .filter((k) => k.length >= 2)
+        .slice(0, 4)
+        .map((k) => k.replace(/[%,()]/g, ''))
+      if (clean.length === 0) return null
+      const ors = clean.flatMap((k) => [`name.ilike.%${k}%`, `text_content.ilike.%${k}%`]).join(',')
+      const { data, error } = await client
+        .from('library_docs')
+        .select('id, name, text_content')
+        .eq('user_id', userId)
+        .is('deleted_at', null)
+        .or(ors)
+        .limit(30)
+      if (error || !data) return null
+      for (const row of data as { name: string | null; text_content: string | null }[]) {
+        const text = String(row.text_content || '').slice(0, 60_000)
+        if (!text) continue
+        const j = judge(question, text)
+        if (j.exact && j.solution) {
+          return { solution: j.solution, title: String(row.name || '资料库文档') }
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`[answer-search] 查自有资料库正文失败: ${e instanceof Error ? e.message : e}`)
+    }
+    return null
   }
 
   /** AI 解题（mode=ai）：只做模型推理，不联网检索，结果明确标注未核实 */

@@ -22,6 +22,14 @@ export interface AnswerSearchResult {
    * llm = 无检索、纯模型推理；none = 都不可用
    */
   source: 'search' | 'kb' | 'netdisk' | 'llm' | 'none'
+  /**
+   * P-006 / D-009：原题判定档位。
+   *  - exact = 找到了这道题并定位到它的答案/解析段 ⇒ 允许填 answer、允许采纳
+   *  - topic = 只找到同主题资料 ⇒ answer 必须为空、禁止采纳
+   *  - none  = 什么都没找到
+   * ⚠️ 只有 mode=kb 会带；老缓存（v3 及以前）没有此字段，前端按缺省值 topic 处理更安全。
+   */
+  match_level?: 'exact' | 'topic' | 'none'
   /** 是否经过核实（检索类=true；纯模型推理=false） */
   verified: boolean
   answer: string
