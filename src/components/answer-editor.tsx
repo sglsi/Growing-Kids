@@ -342,8 +342,16 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }
 
+  // P-006 / D-009：同主题资料不是这道题的答案，禁止写进题库。
+  // 前端隐藏「采纳」按钮 + 保存前再拦一道（双保险），异常返回也拦得住。
+  const canAdopt = !!candidate && candidate.match_level !== 'topic' && candidate.match_level !== 'none'
+
   const handleAdopt = async () => {
     if (!candidate) return
+    if (!canAdopt) {
+      Taro.showToast({ title: '非本题答案，不能采纳', icon: 'none' })
+      return
+    }
     setSaving(true)
     try {
       const updated = await saveAnswer(item.id, {
@@ -542,13 +550,16 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND_TEXT }}>
               {candidate.source === 'search'
                 ? `网络检索结果（${candidate.refs.length} 条来源）`
-                : candidate.source === 'netdisk'
-                  // 统一叫「资料库检索结果」：资料存在哪个网盘与本项目无关
-                  // （思傅 2026-11-03），界面不该出现第三方名字
-                  ? `资料库检索结果（${candidate.refs.length} 份文件）`
-                  : candidate.source === 'kb'
-                    ? `资料库检索结果（${candidate.refs.length} 条）`
-                    : candidate.source === 'llm'
+                : candidate.source === 'netdisk' || candidate.source === 'kb'
+                  // P-006 / D-009：按原题判定分档，netdisk 与 kb 一视同仁——
+                  // ima 语义检索命中也可能只是同专题不同题，不得无条件叫「资料库检索结果」。
+                  // 未带 match_level 的旧契约仍走原文案，避免老结果显示成「没找到」。
+                  ? candidate.match_level === 'exact'
+                    ? '找到这道题的参考答案'
+                    : candidate.match_level === 'topic'
+                      ? '没找到这道题的答案，以下是同主题资料'
+                      : `资料库检索结果（${candidate.refs.length} 条）`
+                  : candidate.source === 'llm'
                     // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
                     // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写
                     // 「AI 推理结果」，未落到「生成内容」这一法定表述。
@@ -563,7 +574,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               <MathText text={candidate.answer.slice(0, 300)} size={14} />
             </View>
           ) : null}
-          {candidate.solution ? (
+          {/* P-006：topic 的 solution 是文件名清单，不是解题过程，不在这里当正文渲染；
+              下方「参考来源」区会把它列成可点开的列表 */}
+          {candidate.solution && candidate.match_level !== 'topic' ? (
             <View className="mb-2">
               <MathText text={candidate.solution.slice(0, 200)} size={12} color="#7A736A" />
             </View>
@@ -573,11 +586,13 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           {candidate.refs.length ? (
             <View className="mb-2">
               <Text className="block text-xs text-muted-foreground mb-1">
-                {candidate.source === 'kb'
-                  ? '相关知识库条目'
-                  : candidate.source === 'netdisk'
-                    ? '相关资料文件'
-                    : '参考来源（点击复制链接）'}
+                {candidate.match_level === 'topic'
+                  ? '同主题资料'
+                  : candidate.source === 'kb'
+                    ? '相关知识库条目'
+                    : candidate.source === 'netdisk'
+                      ? '相关资料文件'
+                      : '参考来源（点击复制链接）'}
               </Text>
               {candidate.refs.map((r, i) => (
                 <View
@@ -601,14 +616,18 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <Text className="block text-xs text-muted-foreground mb-2">{candidate.note}</Text>
           ) : null}
           <View className="flex flex-row gap-2">
-            <View
-              className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
-              style={{ backgroundColor: BRAND }}
-              onClick={() => void handleAdopt()}
-            >
-              <Check size={12} color={BRAND_FOREGROUND} />
-              <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>采纳</Text>
-            </View>
+            {/* 🔴 P-006：topic 只找到同主题资料 ⇒ 不提供「采纳」，
+                避免把别的题的解析写进本题答案（handleAdopt 里还有第二道拦截） */}
+            {canAdopt ? (
+              <View
+                className="flex flex-row items-center gap-1 px-3 py-1 rounded-lg"
+                style={{ backgroundColor: BRAND }}
+                onClick={() => void handleAdopt()}
+              >
+                <Check size={12} color={BRAND_FOREGROUND} />
+                <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>采纳</Text>
+              </View>
+            ) : null}
             <View
               className="px-3 py-1 rounded-lg border border-border"
               onClick={() => setCandidate(null)}

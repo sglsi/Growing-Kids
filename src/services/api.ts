@@ -1268,6 +1268,14 @@ export interface AnswerSearchResult {
    * kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用
    */
   source: 'search' | 'netdisk' | 'kb' | 'llm' | 'none'
+  /**
+   * P-006 / D-009：原题判定档位（mode=kb 的 netdisk/kb 结果才会带）。
+   *  - exact = 找到了这道题 + 定位到答案/解析段 ⇒ 可采纳
+   *  - topic = 只找到同主题资料 ⇒ answer 为空、禁止采纳
+   *  - none  = 什么都没找到 ⇒ 不渲染结果卡片
+   * ⚠️ 只有显式 topic/none 才拦；字段缺失（联网搜题 / AI 解题 / 老缓存）沿用原逻辑。
+   */
+  match_level?: 'exact' | 'topic' | 'none'
   /** 是否经过核实（检索类=true；纯模型推理=false） */
   verified: boolean
   answer: string
