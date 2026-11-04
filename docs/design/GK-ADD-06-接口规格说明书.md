@@ -1,6 +1,6 @@
 # GK-ADD-06 接口规格说明书（REST API）
 
-> 编号：GK-ADD-06 ｜ 版本：v1.0 ｜ 日期：2026-10-25 ｜ 状态：正文完成（待统一校正）
+> 编号：GK-ADD-06 ｜ 版本：v1.1 ｜ 日期：2026-11-04 ｜ 状态：正文完成（待统一校正）
 > 读者：前后端 / 测试 ｜ 上游：SRS-01、ADD-05 ｜ 下游：DD-08、DD-09、QA-15
 > 定位：前后端**唯一契约来源**。改接口不改本文视为缺陷；e2e 用例以本文为准。
 > 数据来源：2026-10-25 从 `server/src/*/*.controller.ts` 全量提取（**20 个 controller / 70 个处理器**），与代码冲突时以代码为准并回写本文。
@@ -139,26 +139,36 @@
 
 | 方法 | 路径 | 用途 | 入参 | 身份 |
 |---|---|---|---|---|
-| GET | `/api/timeline` | 列表 | `scope`(recent\|review)、`subject_id`、`tag`、`keyword`、`since`、`page`(1)、`page_size`(20) | 需 |
+| GET | `/api/timeline` | 列表 | `scope`(recent\|review)、`subject_id`、`tag`、`keyword`、`since`、**`grade`(1-12)**、`page`(1)、`page_size`(20) | 需 |
 | GET | `/api/timeline/overview` | 概览 + recent | — | 需 |
-| POST | `/api/timeline` | 新建条目 | `CreateTimelineDto`（kind/title/file_key/thumb_key/content/tags/subject_id…） | 需 |
-| POST | `/api/timeline/batch` | 批量新建 | `{items: CreateTimelineDto[]}`（空 → 400） | 需 |
+| POST | `/api/timeline` | 新建条目 | `CreateTimelineDto`（kind/title/file_key/thumb_key/content/tags/subject_id/**grade**…） | 需 |
+| POST | `/api/timeline/batch` | 批量新建 | `{items: CreateTimelineDto[]}`（空 → 400；`grade` 缺省的条目整批只查一次用户年级） | 需 |
 | POST | `/api/timeline/review-book` | 加入复习本 | `{ids}` | 需 |
 | DELETE | `/api/timeline/review-book` | 移出复习本 | `{ids}` | 需 |
 | POST | `/api/timeline/:id/similar` | 相似/变式题推荐 | `{limit?}`（钳制 1~20，默认 5） | 需 |
 | POST | `/api/timeline/:id/review` | 标记本次复习完成 | — | 需 |
 | POST | `/api/timeline/batch-delete` | 批量删除 | `{ids}` | 需 |
 | GET | `/api/timeline/:id` | 详情（**补签名 URL**） | — | 需 |
-| PUT | `/api/timeline/:id` | 更新（补签名 URL） | `UpdateTimelineDto` | 需 |
+| PUT | `/api/timeline/:id` | 更新（补签名 URL） | `UpdateTimelineDto`（含 `grade`，传 `null` = 取消标注） | 需 |
 | DELETE | `/api/timeline/:id` | 删除 | — | 需 |
+
+**按年级检索（`P-005` / `D-008`）**：`grade` 只影响返回范围，**从不拦截**。
+
+1. 不传 `grade` ⇒ 不加任何年级条件，响应**不含** `grade_scope`（老客户端行为完全不变）。
+2. 传 `grade` ⇒ 先数**本年级精确命中**（`grade = g`，不含 NULL）：
+   - `> 0` ⇒ 只给本年级 + `grade IS NULL` 的存量题（**不扩散**）；
+   - `= 0` ⇒ 按 `gradeSpread(g)` 依次 ±1 → ±2（最多 2 级，低年级优先，去重）。
+3. 响应恒带 `grade_scope: {requested, used, spread}`，`spread = used.length > 1`。
+4. **`grade IS NULL` 的行永远可见** —— 存量数据全是 NULL，排除它们等于"上线即让用户丢掉全部旧题"。
+5. 计数查询失败按 `0` 处理（触发扩散）：宁可在多一档范围里找，也不要给用户一个空列表。
 
 ### 5.5 library（资料库）
 
 | 方法 | 路径 | 用途 | 入参 | 身份 |
 |---|---|---|---|---|
-| GET | `/api/library` | 列表（补 URL，带 `subjects` 关联）。**`keyword` 同时匹配名称与正文**（0023 起） | `subject_id`、`keyword`、`page`(1)、`page_size`(20) | 需 |
-| POST | `/api/library` | 新建条目 | `name`、`file_key`、`thumb_key?`、`subject_id?`、`mime_type?`、`width/height?`、`size_bytes?`、`file_hash?`、`source?`、`tags?` | 需 |
-| PATCH | `/api/library/:id` | 改名 / 归属学科 | `{name?, subject_id?}`（`subject_id=null` = 未分类；传 id 时校验属于本人，否则 400） | 需 |
+| GET | `/api/library` | 列表（补 URL，带 `subjects` 关联）。**`keyword` 同时匹配名称与正文**（0023 起） | `subject_id`、`keyword`、**`grade`(1-12)**、`page`(1)、`page_size`(20) | 需 |
+| POST | `/api/library` | 新建条目 | `name`、`file_key`、`thumb_key?`、`subject_id?`、`mime_type?`、`width/height?`、`size_bytes?`、`file_hash?`、`source?`、`tags?`、**`grade?`** | 需 |
+| PATCH | `/api/library/:id` | 改名 / 归属学科 / 改年级 | `{name?, subject_id?, grade?}`（`subject_id=null` = 未分类；`grade=null` = 取消标注；传 id 时校验属于本人，否则 400） | 需 |
 | POST | `/api/library/index-text` | 补抽存量资料的正文（迁移 0023 之前入库的 `text_status` 全是 `pending`） | `{force?: boolean, limit?: number}`（默认只补 pending，一次 ≤200） | 需 |
 | POST | `/api/library/batch-delete` | 批量删除 | `{ids}` | 需 |
 | DELETE | `/api/library/:id` | 删除（软删） | — | 需 |
@@ -276,6 +286,36 @@
 
 > 概览里的未分类哨兵：`subject_id='none'` 代表 NULL，查询需转 `.is('subject_id', null)`。
 
+### 5.15 settings（用户设置 · 0025 起含年级）
+
+| 方法 | 路径 | 用途 | 入参 | 身份 |
+|---|---|---|---|---|
+| GET | `/api/settings` | 读取设置（前端启动预热） | — | 需 |
+| PUT | `/api/settings/ai` | AI 外发开关 | `{enabled: boolean}`（非布尔 → 400） | 需 |
+| PUT | `/api/settings/grade` | 设置 / 清空年级 | `{grade: 1–12 \| null}` | 需 |
+
+`GET /api/settings` 返回：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `ai_enabled` | boolean | 是否允许内容发往第三方 AI（0018，**默认 false**） |
+| `role` | `user` \| `admin` | 0017；前端只用于**渲染**管理入口，权限由 `requireAdmin()` 兜底 |
+| `grade` | `number \| null` | 当前年级，12 档连续编号（`null` = 未选择） |
+| `grade_label` | `string \| null` | 服务端算好的中文标签，避免前端各自拼 |
+| `grade_rollover` | `{from, suggested, school_year} \| null` | **学年到期建议**；只在"已设年级且跨了学年"时非 null |
+
+`PUT /api/settings/grade` 的两种"没有值"**必须区分**：
+
+| 请求体 | 结果 |
+|---|---|
+| `{"grade": null}` | **清空**年级（合法意图：孩子还小 / 不想填）。同时把 `grade_confirmed_year` 置空 |
+| 不传 `grade` | **400** —— 客户端 bug，不能当清空悄悄放过 |
+| `{"grade": 0}` / `"3"` / `13` / `""` | **400** —— ⚠️ `Number('') === 0`，空串必须显式挡掉，否则会静默落成"一年级" |
+
+写入时同步记录 `grade_confirmed_year = 当前学年起始年`（9/1 起算，东八区），所以本年度的升学提示不再出现，明年 9/1 之后才会再次提示。
+
+> ⚠️ **服务端只给 `grade_rollover` 建议，绝不自动改写 `users.grade`**：留级/跳级/休学/复读都不适用，静默改用户数据不可逆（`P-005` 决策 7；`GK-SRS-20a M11` 只允许引导性展示）。
+
 ---
 
 ## 6. 文件上传协议
@@ -310,6 +350,7 @@
 | `keyword` | 名称/题干模糊匹配（`ilike`） | 空 |
 | `tag` / `category` | 标签 / 记忆分类精确匹配 | 空 |
 | `since` | 起始时间（ISO 或日期） | 空；⚠️ 传 `undefined` 会变成字符串导致 500 |
+| `grade` | 按年级检索（timeline / library）：12 档连续编号 | 空 = 不筛（**不是** 0，也不是全 0）；见 5.4 的五条规则 |
 | `type` | materials/documents 的类型过滤 | 空 |
 
 **排序**：统一按 `created_at desc`（timeline/library/documents/memories）；`subjects` 按 `sort_order`。列表稳定性依赖 `created_at` 唯一性，批量导入时由后端保证递增。
@@ -391,3 +432,4 @@
 |---|---|---|
 | v0.0 | 2026-10-23 | 建立提纲（待审） |
 | v1.0 | 2026-10-25 | 全章正文落地：按 2026-10-25 代码全量提取 **20 controller / 70 处理器**端点表、统一信封与错误码表、鉴权链路、上传 purpose 语义表、分页筛选规范、前端调用对照表、变更流程；标注 `mode` 必须走 body、身份缺失表现为 500 等实测坑；第 8 章 `/api/v2` 标注为「已决策未实施」 |
+| v1.1 | 2026-11-04 | **补 `settings` 整节（5.15）** —— 原文档根本没有 settings 端点表，`GET /api/settings`、`PUT /api/settings/ai` 长期漏记；同时新增 `PUT /api/settings/grade` 与 `grade` / `grade_label` / `grade_rollover` 三个响应字段。**年级检索（`P-005` / `D-008`）**：5.4 timeline 补 `grade` 入参与五条不拦截规则（不传不筛 / 本年级有命中不扩散 / 0 命中 ±1→±2 / NULL 永远可见 / 计数失败按 0 处理），5.5 library 补 `grade` 入参与创建快照、PATCH 可改；7 章筛选表补 `grade` 行，写明「空 = 不筛，不是 0」 |

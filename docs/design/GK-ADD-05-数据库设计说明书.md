@@ -1,6 +1,6 @@
 # GK-ADD-05 数据库设计说明书
 
-> 编号：GK-ADD-05 ｜ 版本：v1.0 ｜ 日期：2026-10-27 ｜ 状态：**正文完成**
+> 编号：GK-ADD-05 ｜ 版本：v1.3 ｜ 日期：2026-11-04 ｜ 状态：**正文完成**
 > 读者：后端 / 运维 ｜ 上游：SRS-01、ADD-04 ｜ 下游：DD-09、DD-10、DD-11、DD-12、DD-14、QA-16
 > 定位：**17 张表**（活跃 14 + 空转 2 + 废弃 1）的权威说明。**含数据字典**（原 SRS-03 的数据字典部分并入第 5 章）。
 > ⚠️ 口径校正：v0.0 提纲记 15 张，现按 `migrations/` 实际为 **17 张**——2026-10-24 后新增 `answer_cache`（0014）与 `ocr_results`（0016）。
@@ -133,6 +133,8 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `is_anonymous` | boolean | not null, default false | 免注册匿名用户 |
 | `expire_at` | timestamptz | | 匿名用户过期时间（1 天，滑动续期）；登录用户为 NULL |
 | `device_id` | text | 部分唯一索引 | 0011 加。匿名身份按设备持久化，解决"每次新匿名身份" |
+| `grade` | smallint | check 1–12 或 NULL | **0025 加**。用户**自报**的当前年级（12 档连续编号，见 5.2.1）。NULL = 未选择，业务侧必须当作"不筛"处理 |
+| `grade_confirmed_year` | smallint | check 或 NULL | **0025 加**。用户最近一次确认年级的**学年起始年**（9/1 起算，2026 表示 2026-09→2027-08 这一学年）。用途只有"要不要提示升学"，**不作为判据**（M11） |
 | `created_at` | timestamptz | not null | |
 
 索引：`users_anon_expire_idx on (expire_at) where is_anonymous`（匿名清理只扫少量行）；`users_device_id_key unique on (device_id) where device_id is not null`。
@@ -174,12 +176,13 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `tags` | text[] | default '{}' | |
 | `mastered` | boolean | default false | 是否已掌握 |
 | `mastered_at` | timestamptz | | |
+| `grade` | smallint | check 1–12 或 NULL | **0025 加**。**创建时快照**的用户年级。升学**不回溯改旧题**（旧题留在当年年级，见 5.2.1）。NULL = 2026-11-04 之前创建的存量题，按年级检索时**必须仍然可见**（兜底，不能因升年级把老题筛没） |
 | `deleted_at` | timestamptz | | **软删**（不物理删，靠 GC 收文件） |
 | `created_at` / `updated_at` | timestamptz | not null | `updated_at` 由 0008 触发器自动刷新 |
 
 ### 4.4 library_docs（活跃）
 
-`id` / `user_id`(cascade) / `subject_id`(set null) / `name varchar(128)` / `file_key text not null` / `mime_type varchar(128)`（0013 放宽）/ `size_bytes` / `source varchar(24)`（`upload`\|`external`\|`materials`）/ `tags text[]` / `deleted_at` / `created_at`；0004 补 `thumb_key` / `width` / `height` / `file_hash`；0015 补 `netdisk_path text`（百度网盘归档副本绝对路径，NULL = 未同步）；**0023 补 `text_content text` / `text_status varchar(16)` / `text_updated_at`** —— 入库时异步抽正文（`library.indexText`），让资料库能按内容搜、而不只是按文件名。`text_status` 五态：`pending`（未抽）/ `ok` / `none`（无文字层，扫描版）/ `skipped`（类型不支持）/ `too_big`（超 40MB）。
+`id` / `user_id`(cascade) / `subject_id`(set null) / `name varchar(128)` / `file_key text not null` / `mime_type varchar(128)`（0013 放宽）/ `size_bytes` / `source varchar(24)`（`upload`\|`external`\|`materials`）/ `tags text[]` / `deleted_at` / `created_at`；0004 补 `thumb_key` / `width` / `height` / `file_hash`；0015 补 `netdisk_path text`（百度网盘归档副本绝对路径，NULL = 未同步）；**0023 补 `text_content text` / `text_status varchar(16)` / `text_updated_at`** —— 入库时异步抽正文（`library.indexText`），让资料库能按内容搜、而不只是按文件名。`text_status` 五态：`pending`（未抽）/ `ok` / `none`（无文字层，扫描版）/ `skipped`（类型不支持）/ `too_big`（超 40MB）；**0025 补 `grade smallint`** —— 与 `timeline_items.grade` 同语义（创建时快照 + NULL 兜底可见），让资料库检索也能按年级优先。
 
 ### 4.5 documents（活跃）
 
@@ -305,6 +308,31 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `scope` | `recent` \| `review` | 列表查询参数 | 最近题目 / 复习本 |
 | `role` | `user` \| `assistant` | chat_messages | 对话角色 |
 
+### 5.2.1 `grade` 年级值域（0025 加 · 三处同语义）
+
+**唯一编号口径：12 档连续整数**（`migrations/0025_grade.sql` 的 check 约束即此范围）。**不建 grades 字典表**：档位是常量、永不变动、不按用户变化，建表只换来一次 join。
+
+| 值 | 1–6 | 7–9 | 10–12 |
+|---|---|---|---|
+| 含义 | 小学一–六年级 | 初中一–三年级 | 高中一–三年级 |
+
+三列**语义不同，禁止混用**：
+
+| 列 | 谁写 | 语义 | 能被改吗 |
+|---|---|---|---|
+| `users.grade` | 用户自报（设置页） | **当前**年级 | 随时可改 |
+| `users.grade_confirmed_year` | 每次确认/修改年级时写入 | 最近一次确认所属**学年起始年** | 改年级时同步刷新 |
+| `timeline_items.grade` / `library_docs.grade` | 创建时从 `users.grade` **快照** | 该条内容**归属**的年级 | 可单条改，但**升学不批量回溯** |
+
+四条硬约束（`P-005` 决策 4/5 落地，改其一须同步 20a/20b/断言）：
+
+1. **快照**：升学后旧题留在原年级 —— 三年级做过的题，四年级时它们仍是"三年级题"，这是**事实**而不是错误。
+2. **NULL 兜底可见**：按年级检索时 `grade IS NULL` 的行**必须仍然返回**。存量数据全为 NULL，若把它们排除，功能一上线就等于"用户丢了全部旧题"。
+3. **扩散判据只看本年级精确命中数**，不看"含 NULL 的总数"。反过来算会让扩散永远不发生（存量 NULL 永远 > 0）。
+4. **年级只由用户自报**，禁止由行为、正确率、题面难度推算（`D-004` 否决"算出 ZPD"的同一理由；`D-008`）。
+
+扩散序列由 `server/src/shared/grade.ts` 的 `gradeSpread()` 唯一定义：本年级在最前，然后 ±1、±2，低年级优先，边界不越界（`GRADE_SPREAD_MAX = 2`）。<br>⚠️ **两份镜像必须逐字一致**：`server/src/shared/grade.ts` ↔ `src/constants/grades.ts`（小程序端不能引服务端代码，故不跨端 import）。<br>守它的是 **M26「年级字典：12 档连续编号，且与前端 constants/grades.ts 逐字一致」** 这条断言 —— **不是** M16 的 H3 同步门（H3 只覆盖复习间隔表与导出默认口径两处）。<br>另有两条纪律：① 本功能**在 20a 无对应准则**，走"显式不宣称"（`P-005` 第③栏），不引用任何效应量；② 提示文案受 M11 约束（只作引导，不得成为判定标准或硬门槛），由 M26「静态：提示文案是引导而非门槛」守着。
+
 ### 5.3 布尔与哨兵语义（易错）
 
 | 项 | 语义 |
@@ -403,6 +431,8 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `timeline_tags_gin` | timeline_items | `gin (tags)` |
 | `timeline_subject_idx` | timeline_items | `(user_id, subject_id)` |
 | `timeline_hash_idx` | timeline_items | `(user_id, file_hash)` |
+| `idx_timeline_items_user_grade` | timeline_items | **0025**：`(user_id, grade) where deleted_at is null` —— 按年级检索与"本年级命中数"计数共用 |
+| `idx_library_docs_user_grade` | library_docs | **0025**：`(user_id, grade) where deleted_at is null` |
 | `library_user_created_idx` / `library_hash_idx` / `library_docs_netdisk_idx` | library_docs | 部分索引 + 去重 + 网盘路径 |
 | `documents_user_created_idx` / `documents_hash_idx` | documents | |
 | `blob_gc_idx` / `blob_created_idx` | blob_objects | `(ref_count, last_ref_at) where ref_count=0` / `(created_at)` |
@@ -512,7 +542,7 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 
 ## 10. 迁移演进史
 
-### 10.1 迁移清单（15 个文件，0002 → 0016）
+### 10.1 迁移清单（23 个文件，0002 → 0025）
 
 | 文件 | 作用 | 备注 |
 |---|---|---|
@@ -531,6 +561,15 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | `0014_answer_cache.sql` | 建 `answer_cache` | 应对 ima 每日调用配额 |
 | `0015_library_netdisk_path.sql` | library_docs 加 `netdisk_path` | 百度网盘归档副本登记（主存储仍为主，网盘只是副本） |
 | `0016_ocr_result_cache.sql` | 建 `ocr_results`（全局 OCR 结果缓存，启用 RLS 无 policy） | 同文件只识别一次 |
+| `0017_user_role.sql` | users 加 `role`（`user`\|`admin`）+ `requireAdmin()` fail-closed | 管理员体系，提权唯一入口 `promote-admin.mjs` |
+| `0018_user_ai_toggle.sql` | users 加 `ai_enabled`（**默认 false**） | 用户级「是否允许内容发往第三方 AI」 |
+| `0019_review_schedule.sql` | timeline_items 加复习排程列（`next_review_at` / `review_stage` / 等） | C4 分散练习的落地列，间隔表真相源是 `timeline/review.ts` |
+| `0020_async_jobs.sql` | 建 `async_jobs` | 超 60s 的任务走 202 + 轮询；任务只在内存跑，重启即 failed |
+| `0021_review_events.sql` | 建 `review_events`（作答埋点） | 唯一够格的结果指标「到期首次作答正确率」的数据来源 |
+| `0022_netdisk_index.sql` | 建 `netdisk_files` | 百度网盘资料索引 |
+| `0023_content_index.sql` | library_docs / netdisk_files 加 `text_content` / `text_status` / `text_updated_at` | 让搜索跑本地索引，不再每次去网盘现搜 |
+| `0024_netdisk_trgm.sql` | netdisk_files 加 trigram 索引 | 名字/路径模糊搜 |
+| `0025_grade.sql` | users 加 `grade` / `grade_confirmed_year`；timeline_items 与 library_docs 加 `grade`；两表各加 `(user_id, grade) where deleted_at is null` 索引 | 年级属性与按年级检索（`P-005` / `D-008`）。⚠️ **纯加可空列 + 索引，无破坏性，但 L3 生产库需单独执行一次** |
 
 ### 10.2 迁移纪律（写死）
 
@@ -596,3 +635,4 @@ node server/scripts/migrate.mjs --only 0008_updated_at_trigger.sql
 | v1.0 | 2026-10-27 | **正文完成**。按 `migrations/` 复核校正表清单为 **17 张**（新增 answer_cache / ocr_results）；补齐 12 章正文：ER 与三条结构约定、逐表字段表、`timeline_items.content` 完整 schema 与演进、索引清单与查询热路径、隔离门禁（check-isolation.mjs）豁免规则、blob 引用计数三条契约与三类定时任务、迁移演进史 15 个文件与 6 条纪律、变更流程 9 步、备份现状与待确认项 |
 | v1.1 | 2026-10-27 | **表分类订正**：`knowledge_articles` 由「废弃」改判为**活跃全局表**（实证 `chat.service.ts` 的 `getActiveArticles()` 读取 `is_active=true` 文章拼进 system prompt，写操作走 `requireAdmin`）⇒ 分类改为 **活跃 13 + 备用 1 + 空转 2 + 废弃 1**，2.3 节由「非活跃 5 张」改为「4 张」并附订正说明。与 OPS-18 `R-工程-01` 对齐 |
 | v1.2 | 2026-10-27 | **表分类第二次订正**：`login_tickets` 由「备用」改判为**活跃**（`QR_TICKET_STORE=auto` 默认优先落库，OPS-18 `R-技术-10` 第 2 项）⇒ 17 张表分类改为 **活跃 14 + 空转 2 + 废弃 1**；2.3 节由「非活跃 4 张」改为「3 张」并附订正说明；3 章表清单第 13 行状态与写入方更新；4.12 补写入方与"token 即凭据、`user_id` 非隔离维度"说明；**顺带订正 4.15 标题**（`knowledge_articles` 是活跃全局表，原与 `health_check` 并列写作「废弃」是遗留错误） |
+| v1.3 | 2026-11-04 | **年级属性（0025 / `P-005` / `D-008`）**：4.1 补 `grade` / `grade_confirmed_year`，4.3 补 `timeline_items.grade` 并写明"创建时快照、升学不回溯、NULL 必须兜底可见"，4.4 补 `library_docs.grade`；**新增 5.2.1「`grade` 年级值域」**（12 档编号、三列语义差异表、四条硬约束、扩散序列唯一定义与三处镜像）；7.2 补两条部分索引；**10.1 迁移清单由「15 个 / 0002→0016」补齐到「23 个 / 0002→0025」**（原缺 0017–0025 九行，属长期漏记） |

@@ -1,6 +1,6 @@
 # GK-DD-09 后端详细设计
 
-> 编号：GK-DD-09 ｜ 版本：v1.0 ｜ 日期：2026-10-27 ｜ 状态：**正文完成**
+> 编号：GK-DD-09 ｜ 版本：v1.1 ｜ 日期：2026-11-04 ｜ 状态：**正文完成**
 > 读者：后端 ｜ 上游：ADD-04、ADD-05、ADD-06、ADD-07 ｜ 下游：QA-16
 > 定位：NestJS 模块的职责与请求生命周期。**含身份、权限与配额**（原 DD-15 并入第 9 章）。缓存细节引用 DD-13，算法管线引用 DD-10，存储生命周期引用 DD-12。
 
@@ -410,9 +410,46 @@ curl --noproxy '*' -H "X-Device-Id: dev_test_1" http://127.0.0.1:3001/api/timeli
 
 ---
 
+## 14. 年级语义的落点（`P-005` / `D-008`）
+
+**唯一真相源：`server/src/shared/grade.ts`**（零 import 的纯函数，可单编单测）。别处一律不得自己算年级、自己拼标签、自己定义扩散顺序。
+
+| 导出 | 作用 |
+|---|---|
+| `GRADES` / `GRADE_MIN` / `GRADE_MAX` | 12 档连续编号（1–6 小学、7–9 初中、10–12 高中） |
+| `GRADE_SPREAD_MAX = 2` | 扩散上限，硬编码在这一个常量 |
+| `normalizeGrade(v)` | 非法值降级为 `null`（**不抛错**，与 `normalizeSubjectId` 同源思路） |
+| `gradeLabel(g)` | 中文标签，服务端算好后下发，前端不重复拼 |
+| `gradeSpread(g, max)` | 扩散序列：本年级在最前，然后 ±1、±2，低年级优先，边界不越界 |
+| `schoolYearStart(at)` | 学年起始年（9/1 起算，**东八区**） |
+| `suggestGrade(grade, confirmedYear)` | 只给"该升一年级了"的**建议**，返回 `number \| null` |
+
+**三处落点，同一套口径**
+
+1. `timeline.service.ts` —— 抽 `applyCommon()`（隔离 + 软删 + 各筛选条件）、`runList(gradeFilter, includeNullGrade)`、`countOwnGrade(grade)`。列表与计数**共用同一份 `applyCommon`**，防止两处条件漂移。
+2. `library.service.ts` —— 完全同构的三件套，语义必须与 timeline 一致（`P-005` 决策 6：生效范围含资料库检索）。
+3. `settings.controller.ts` —— `GET /api/settings` 并行取 flags 与 grade；`PUT /api/settings/grade` 区分「清空（显式 null）」与「客户端 bug（400）」。
+
+**四条容易写错的判定**
+
+1. **扩散只看本年级精确命中数**（`grade = g`，不含 NULL）。
+   > 若把 `grade IS NULL` 也算进"有结果"，扩散**永远不会发生** —— 存量数据全是 NULL，本年级命中数永远 ≥ 存量数。
+2. **NULL 必须始终可见**：查询条件是 `grade.in.(g±1,g±2),grade.is.null`，不是只有 `in`。漏了 `is.null` 等于上线即让用户丢掉全部旧题。
+3. **`Number('') === 0`**：`normalizeGrade` 必须先排除 `''` / `null` / `undefined` 再 `Number()`，否则空串会静默落成"一年级"。
+4. **计数失败按 `0`**（触发扩散）而不是抛错：宁可多捞一档，也不给用户空列表。
+
+**快照由服务端写，不由客户端传**：`create` / `createBatch` 在 `dto.grade === undefined` 时才查一次 `users.grade`（批量整批只查一次）。`dto.grade` 显式 `null` **不回退**到用户年级——那是"明确不标注"。
+
+**学年只提示不改数**：`grade_rollover` 只在"已设年级 + 跨学年"时非 null，写库动作永远由 `PUT /api/settings/grade` 触发。留级/跳级/休学/复读都不适用，静默改用户数据不可逆（`GK-SRS-20a M11`）。
+
+**账号迁移要带走年级**：`qr-login.service.ts` 的 `migrateAnonymous` 只 `update user_id`，带不走挂在 `users` 上的 `grade` ⇒ 补 `adoptGrade()`：目标号空则继承匿名号的，失败只记日志不影响主迁移。
+
+---
+
 ## 变更记录
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
 | v0.0 | 2026-10-24 | 建立提纲（待审） |
 | v1.0 | 2026-10-27 | **正文完成**：启动与端口占用踩坑、24 模块/18 controller 清单与三个易混区分、请求生命周期八环与每环边界、用户上下文与 60s 缓存、数据访问四条硬约束、DTO 三条隐式依赖、异常过滤器四个要点、配额模型四张表与档位、定时任务与 dry-run 安全阀、子进程与侧车策略（含 #117 编码铁律）、配置加载顺序与主要配置项、本地开发命令与排障顺序。同批修复：`main.ts` CORS `exposedHeaders` 补 `X-Auth-Token`（H5 扫码登录页在浏览器环境读不到续签令牌） |
+| v1.1 | 2026-11-04 | **新增第 14 章「年级语义的落点」（`P-005` / `D-008`）**：`shared/grade.ts` 七个导出与"别处不得自己算"的纪律；三处落点（timeline / library 同构三件套、settings）；四条易错判定（扩散只看本年级精确命中、NULL 必须始终可见、`Number('')===0`、计数失败按 0）；快照由服务端写且显式 null 不回退；学年只提示不改数；`qr-login` 补 `adoptGrade()` 让账号迁移带走年级 |
