@@ -180,3 +180,12 @@ image {
   background-color: var(--selection);
   color: var(--selection-foreground);
 }
+
+/*
+ * 自定义样式的原生 button（如「发送意见与建议」的 open-type="contact"）：
+ * 微信小程序的 button 默认用 ::after 伪元素画外边框，只设 border:none 去不掉，
+ * 会露出一圈灰边。加这个类名即视为「我要自己的样式」。
+ */
+.gk-plain-btn::after {
+  border: none;
+}

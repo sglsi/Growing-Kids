@@ -2,7 +2,7 @@
 import { View, Text, Image, ScrollView, Button as NativeButton, Picker } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot } from 'lucide-react-taro'
+import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot, MessageSquare } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
@@ -734,6 +734,49 @@ export default function ProfilePage() {
                 <Text className="text-[13px] text-[#B3261E]">注销账号</Text>
               </View>
             </View>
+          </Card>
+
+          {/* 意见与建议（2026-11-05）：走微信原生客服 open-type="contact"。
+              ✅ 合规：个人主体明确允许「单向反馈（仅开发者可见）」，不需要「社交-社区/论坛」类目；
+                 消息承载在微信客服会话里，**不写入我们的数据库** ⇒ 不新增个人信息收集项，
+                 隐私政策无需升版本、用户不必重新同意同意书。
+              ⚠️ 三个硬前提，缺任一个就表现为「点了没反应」（已记 QA-16）：
+                 ① mp 后台「功能 → 客服」必须添加客服人员（绑定微信号），否则点开提示「暂无客服人员」；
+                 ② open-type=contact **只在真机生效**，开发者工具里点了不动 —— 别拿模拟器判故障；
+                 ③ 必须用 @tarojs/components 的原生 Button：ui/Button 基于 View，openType 无效。
+              ⛔ 别改成 View + onClick 调 API：唤起客服是 button 的原生能力，不是可调用的 JS API。 */}
+          <Card className="rounded-2xl border-border p-4 mb-5">
+            <View className="flex flex-row items-center gap-2 mb-2">
+              <MessageSquare size={16} color="#9A948A" />
+              <Text className="block text-sm font-semibold text-foreground">意见与建议</Text>
+            </View>
+            <Text className="block text-xs text-muted-foreground">
+              识别不准、用起来别扭，或者有想加的功能，点下面直接告诉我。
+            </Text>
+            <Text className="mt-1 block text-xs text-muted-foreground">
+              内容只有开发者本人能看到，不会公开展示，其他用户也看不到。
+            </Text>
+            {/* 同头像处：open-type 只有原生 button 支持，属项目内合理例外 */}
+            {/* eslint-disable-next-line no-restricted-syntax */}
+            <NativeButton
+              openType="contact"
+              hoverClass="none"
+              className="gk-plain-btn"
+              style={{
+                margin: '12px 0 0',
+                padding: '11px 0',
+                width: '100%',
+                background: INK,
+                color: BRAND_FOREGROUND,
+                borderRadius: '12px',
+                fontSize: '14px',
+                lineHeight: '1.45',
+                fontWeight: 500,
+                border: 'none',
+              }}
+            >
+              <Text>发送意见与建议</Text>
+            </NativeButton>
           </Card>
 
           {/* 备案信息（2026-10-29 通过）：微信客户端会在小程序「更多资料」页自动展示备案号，
