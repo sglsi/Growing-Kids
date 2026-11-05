@@ -531,13 +531,13 @@ export default function ProfilePage() {
             </Card>
           )}
 
-          {/* 登录 / 退出 */}
+          {/* 登录 / 退出（C1：换手机前登录引导，P-007 / D-010，纯文案不新增交互） */}
           <Card className="rounded-2xl border-border p-4 mb-5">
             {logged ? (
               <>
                 <Text className="block text-sm font-semibold text-foreground mb-2">账号</Text>
                 <Text className="block text-xs text-muted-foreground mb-4">
-                  你的题目、复习本与资料已与微信账号绑定，换设备登录即可找回。
+                  你的题目、复习本与资料已与微信账号绑定，换手机后用同一微信账号登录即可找回。
                 </Text>
                 <Button variant="outline" className="w-full h-11 rounded-xl" disabled={busy} onClick={handleLogout}>
                   <LogOut size={16} color={INK} />
@@ -548,7 +548,7 @@ export default function ProfilePage() {
               <>
                 <Text className="block text-sm font-semibold text-foreground mb-2">登录以同步数据</Text>
                 <Text className="block text-xs text-muted-foreground mb-4">
-                  当前为匿名状态，本机数据保留 30 天。登录后现有内容会自动迁移到你的微信账号，长期保存、多端同步。
+                  当前为匿名状态，本机数据保留 30 天。换手机前建议先登录微信账号：未登录时的匿名记录换机后无法找回；登录后现有内容会自动迁移到你的微信账号，长期保存、多端同步。
                 </Text>
                 <Button className="w-full h-11 rounded-xl" disabled={busy} onClick={handleLogin}>
                   <LogIn size={16} color={BRAND_FOREGROUND} />
