@@ -1,6 +1,20 @@
+// ============================================================
+// 身份契约（P-007 / D-010）：`X-Auth-Token` 唯一信任根 + `openid` 唯一身份
+//   + `device_id` 临时锚点。`device_id` 只用于 bootstrap 换令牌与登录时合并
+//   匿名数据，绝不是跨设备找回数据的依据（找回靠 openid，见 findOrCreateByOpenId）。
+//
+// ⚠️ 建号闸门：`findOrCreateByDeviceId()` 的 insert 分支必须过
+//    `anon-bootstrap-guard.ts`；find 分支（已存在的 device_id）零改动，
+//    保证现有用户零影响（P-007 ④②）。
+// ============================================================
 import { Injectable } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { normalizeGrade } from '../shared/grade'
+import {
+  AnonymousCreationRejectedError,
+  anonymousCreationGate,
+  type GateDecision,
+} from '../shared/anon-bootstrap-guard'
 import { ANONYMOUS_TTL_MS, type User } from './users.types'
 
 const TABLE = 'users'
@@ -89,6 +103,16 @@ export class UsersService {
         }
       }
       return u
+    }
+
+    // ---- P-007 / D-010：陌生 device_id 不再无条件落一行 users ----
+    // 闸门只拦「新建」：上面的 find 分支（已存在 device_id）零改动，
+    // 老用户的查找 / 滑动续期 / 签令牌完全不受影响（只增不减、现有用户零影响）。
+    // 拒绝时抛专用错误，由 /api/auth/anonymous 如实回报 429，不伪装成「缺参数」。
+    const decision: GateDecision = anonymousCreationGate.allow(deviceId)
+    if (!decision.allowed) {
+      console.warn('[users] 拒绝新建匿名号（P-007 建号闸门）:', decision.reason, deviceId.slice(0, 24))
+      throw new AnonymousCreationRejectedError(decision.reason ?? 'RATE_LIMITED')
     }
 
     const expireAt = new Date(Date.now() + ANONYMOUS_TTL_MS).toISOString()

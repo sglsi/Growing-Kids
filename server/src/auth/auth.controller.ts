@@ -1,8 +1,9 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, Patch, Post, Query, Req } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpException, Patch, Post, Query, Req } from '@nestjs/common'
 import { AuthService } from './auth.service'
 import { QrLoginService } from './qr-login.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
 import { signAuthToken } from '../shared/auth-token'
+import type { GateReason } from '../shared/anon-bootstrap-guard'
 import type { LoginDto, QrAuthorizeDto, UpdateProfileDto } from './auth.types'
 
 @Controller('auth')
@@ -48,6 +49,19 @@ export class AuthController {
   @HttpCode(200)
   async anonymous(@Req() req: RequestWithUser) {
     if (!req.userId) {
+      // P-007 / D-010：建号闸门拒绝必须如实回报，别伪装成「缺少 X-Device-Id」——
+      // 明明带了 device id 却报缺参数，会把「限流」误判成「前端没传头」，永远查不出真因。
+      if (req.identityRejected) {
+        const reason: GateReason = req.identityRejected
+        throw new HttpException(
+          {
+            code: 429,
+            msg: '当前创建匿名身份过于频繁，请稍后重新进入小程序',
+            data: { reason },
+          },
+          429,
+        )
+      }
       throw new BadRequestException('缺少 X-Device-Id，无法建立匿名身份')
     }
     const token = signAuthToken(req.userId)

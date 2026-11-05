@@ -2,6 +2,10 @@
 // 用户上下文：解析"当前用户"，支持匿名（免注册）可读写
 // 位置：server/src/shared/user-context.ts
 //
+// 身份契约（P-007 / D-010）：`X-Auth-Token` 唯一信任根 + `openid` 唯一身份
+//   + `device_id` 临时锚点。device_id 不是账号，只在 bootstrap 换令牌与
+//   登录时合并匿名数据两处用；跨设备找回数据一律靠 openid。
+//
 // 身份来源（2026-10-27 严格令牌化后）：
 //  1) `X-Auth-Token` —— 服务端 HMAC 签发的身份令牌，**唯一被采信的业务身份来源**
 //  2) 引导路由（`/api/auth/*`、`/api/health`）额外允许 `X-Open-Id`（登录）
@@ -20,6 +24,7 @@ import { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
 import { cacheDel, cacheGet, cacheSet } from './mem-cache'
 import { authTokenEnabled, readAuthHeader, signAuthToken, verifyAuthToken } from './auth-token'
+import { AnonymousCreationRejectedError, type GateReason } from './anon-bootstrap-guard'
 
 const HEADER_USER_ID = 'x-user-id'
 const HEADER_OPEN_ID = 'x-open-id'
@@ -104,6 +109,12 @@ export interface RequestWithUser extends Request {
   userAiEnabled?: boolean
   /** 请求头 X-Device-Id 原样透传（登录时用于绑定正式账号 + 迁移设备名下匿名号） */
   deviceId?: string
+  /**
+   * 匿名建号闸门拒绝原因（P-007 / D-010）。
+   * 中间件 catch 到 AnonymousCreationRejectedError 时挂上，供 /api/auth/anonymous
+   * 如实回报 429，而不是伪装成「缺少 X-Device-Id」。
+   */
+  identityRejected?: GateReason
 }
 
 /**
@@ -201,6 +212,10 @@ export class UserContextMiddleware implements NestMiddleware {
     } catch (e) {
       // 用户上下文失败不应直接 500，交给下游（下游会用 userId 校验并报错）
       req.userId = undefined
+      // P-007 / D-010：建号闸门拒绝是**预期内的可归因结果**，不能吞成「缺参数」
+      if (e instanceof AnonymousCreationRejectedError) {
+        req.identityRejected = e.reason
+      }
       console.error('[user-context] 解析用户失败', e)
     }
     next()
