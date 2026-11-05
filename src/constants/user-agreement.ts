@@ -10,7 +10,7 @@
 
 import { APP_NAME, ICP_FILING_NO } from './app-info'
 
-export const AGREEMENT_VERSION = '2026-10-29-r1'
+export const AGREEMENT_VERSION = '2026-11-05-r2'
 
 export const AGREEMENT_TITLE = `${APP_NAME} · 用户协议`
 
@@ -104,7 +104,7 @@ export const AGREEMENT_SECTIONS: AgreementSection[] = [
     heading: '十、运营者与联系方式',
     paragraphs: [
       `本小程序由个人开发者运营（个人主体），已完成小程序 ICP 备案，备案号：${ICP_FILING_NO}。`,
-      '对本协议有疑问，可通过小程序「右上角 ··· → 更多资料」页公示的开发者联系方式与我们联系。',
+      '对本协议有疑问，可通过小程序「我的 → 意见与建议」直接告诉我们，也可通过「右上角 ··· → 更多资料」页公示的开发者联系方式与我们联系。',
       '我们会在 15 个工作日内答复。',
     ],
   },
