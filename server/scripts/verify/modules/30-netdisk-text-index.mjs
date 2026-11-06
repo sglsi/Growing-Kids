@@ -77,6 +77,25 @@ m.test('🔴 只写三列：text_content / text_status / text_updated_at，且�
   )
 })
 
+m.test('🔴 正文落库前剥离 NUL：PostgreSQL 的 text 不接受 U+0000', (c) => {
+  // 2026-11-06 实测：`string.txt` / `eula.txt` 正文里带 NUL 字节，
+  // 整条 update 抛 `invalid byte sequence for encoding "UTF8": 0x00`，
+  // 两份文档永远停在 pending。这不是「抽不出来」，是写不进去 —— 必须洗掉。
+  const s = read(SCRIPT)
+  c.ok(
+    /function stripNul\(text\)/.test(s),
+    '缺 stripNul()：带 NUL 的正文写不进 PostgreSQL，文件会永远 pending',
+  )
+  c.ok(
+    s.includes('stripNul(text)'),
+    'writeRow 没过 stripNul —— txt / pdf / docx 三条路径都会漏（docx 的 XML 也夹 NUL）',
+  )
+  c.ok(
+    s.includes("stripNul(buf.toString('utf8'))"),
+    'txt 分支没有先剥 NUL 再判字数 —— NUL 不在 \\s 里会被算成有效字符，误判为 ok',
+  )
+})
+
 m.test('🔴 环境类失败保持 pending：`no-python` / `no-script` / `timeout` 分支不得写库', (c) => {
   const s = read(SCRIPT)
   c.ok(
@@ -161,7 +180,7 @@ m.test('🔴 抽取口径与服务端 ensureText() 一致（textOnly / maxPages 
 // 三、文档层：提案单 / 台账 / 实测记录
 // ============================================================
 
-m.test('P-008 提案单存在，且阶段边界（dry-run → 1000 份 → 追加 4000 份）记录完整', (c) => {
+m.test('P-008 提案单存在，且阶段边界（dry-run → 1000 → 追加 4000 → 收尾）记录完整', (c) => {
   const s = read(PROPOSAL)
   c.ok(s.includes('提案号：P-008'), '提案单编号不对')
   c.ok(s.includes('dry-run'), '提案单里没有 dry-run 边界')
@@ -175,6 +194,13 @@ m.test('P-008 提案单存在，且阶段边界（dry-run → 1000 份 → 追�
   c.ok(s.includes('续抽 4000 份'), '提案单缺 2026-11-06 「续抽 4000 份」的落地记录')
   c.ok(s.includes('4,043'), '提案单缺续抽的写入行数（4,043）')
   c.ok(s.includes('2026-11-05 16:15:09+00'), '提案单缺续抽阶段的回滚锚点')
+  // 2026-11-06 收尾：方案 A 抽完了。这一段的重点不是数字好看，而是
+  // ① 候选池 pending 归零（否则「抽完了」是句空话）；② NUL 缺陷与治法必须留档
+  // （它伪装成「环境失败」，不写下来下一个人会当成环境问题去查 python）。
+  c.ok(s.includes('收尾 6,123 份'), '提案单缺 2026-11-06 收尾阶段的落地记录')
+  c.ok(s.includes('归零'), '提案单没写「候选池 pending 归零」')
+  c.ok(s.includes('stripNul'), '提案单缺 NUL 缺陷的治法（stripNul）')
+  c.ok(s.includes('2026-11-06 04:00:15+00'), '提案单缺收尾阶段的回滚锚点')
   for (const sec of ['① 判据', '② 归因', '③ 证据', '④ 算子', '⑤ falsifier', '⑥ 验收断言']) {
     c.ok(s.includes(sec), `六栏缺 ${sec}`)
   }
@@ -199,6 +225,11 @@ m.test('D-011 台账存在，落地记录含 dry-run 与 1000 份试抽实测数
   c.ok(block.includes('4,747'), '台账缺续抽后的 ok 总量（4,747）')
   c.ok(block.includes('2026-11-05 16:15:09+00'), '台账缺续抽阶段的回滚锚点')
   c.ok(block.includes('nohup'), '台账漏记「长任务须远端 nohup」这条运维口径')
+  // 收尾阶段（方案 A 完成）：必须留「抽完了」的判据与被抽出的缺陷。
+  c.ok(block.includes('10,454'), '台账缺方案 A 完成后的 ok 总量（10,454）')
+  c.ok(block.includes('归零'), '台账没写「候选池 pending 归零」——「抽完了」必须有判据')
+  c.ok(block.includes('0x00') || block.includes('U+0000'), '台账漏记 NUL 字节缺陷（会伪装成环境失败）')
+  c.ok(block.includes('2026-11-06 04:00:15+00'), '台账缺收尾阶段的回滚锚点')
 })
 
 m.test('测算报告已把估算升级为实测校验（§13 dry-run + §14 试抽 + §15 续抽）', (c) => {
@@ -218,6 +249,13 @@ m.test('测算报告已把估算升级为实测校验（§13 dry-run + §14 试�
   c.ok(s.includes('## 15. 续抽实测'), '报告缺 §15 续抽实测一节')
   c.ok(s.includes('AB=6'), '报告 §15 缺题干片段的召回对照（AB=6）')
   c.ok(s.includes('4,747'), '报告 §15 缺续抽后的 ok 总量')
+  // §16 是方案 A 的收尾账：可抽量预估偏了多少、耗时模型偏了多少、
+  // 以及那个伪装成「环境失败」的 NUL 缺陷。三个都必须留在报告里。
+  c.ok(s.includes('## 16. 方案 A 收尾实测'), '报告缺 §16 收尾实测一节')
+  c.ok(s.includes('10,454'), '报告 §16 缺最终 ok 总量（10,454）')
+  c.ok(s.includes('93.5%'), '报告 §16 缺最终可抽率（93.5%）')
+  c.ok(s.includes('NUL'), '报告 §16 漏记 NUL 字节缺陷')
+  c.ok(s.includes('慢 46%'), '报告 §16 没有量化耗时模型偏差（实测比 dry-run 慢 46%）')
 })
 
 m.test('M30 已登记进验证套件（自检：本模块被自动发现）', (c) => {

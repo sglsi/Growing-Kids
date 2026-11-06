@@ -310,7 +310,9 @@ async function applyRun(client) {
             return // 下载失败不写库：保持 pending，下次重试
           }
           stat.bytes += buf.length
-          const text = buf.toString('utf8')
+          // 先剥 NUL 再判字数：NUL 不在 `\s` 里，会被算成「有效字符」，
+          // 一份全是 NUL 的 txt 会被误判成 ok（2026-11-06 实测）。
+          const text = stripNul(buf.toString('utf8'))
           const meaningful = text.replace(/\s+/g, '').length
           if (meaningful < MIN_MEANINGFUL_CHARS) {
             stat.none++
@@ -405,13 +407,23 @@ async function applyRun(client) {
 /**
  * 写库：**只碰三列**，且带 user_id 双重限定（数据隔离红线）。
  * 行数不符立即抛错 —— 静默漏写会让「为什么搜不到」永远查不出来。
+ *
+ * 🔴 PostgreSQL 的 `text` 类型**不接受 U+0000**（NUL）：文件里带一个 NUL，
+ *    整条 update 就抛 `invalid byte sequence for encoding "UTF8": 0x00`，
+ *    这份文档永远停在 `pending`（2026-11-06 实测 `string.txt` / `eula.txt`）。
+ *    NUL 对检索零价值 ⇒ 落库前剔除。放在这里而不是各分支里，
+ *    是为了让 txt / pdf / docx 三条路径都被覆盖（docx 的 XML 里也会夹 NUL）。
  */
+function stripNul(text) {
+  return typeof text === 'string' ? text.replace(/\u0000/g, '') : text
+}
+
 async function writeRow(client, row, text, status) {
   const { rowCount } = await client.query(
     `update netdisk_files
         set text_content = $1, text_status = $2, text_updated_at = now()
       where id = $3 and user_id = $4`,
-    [text, status, row.id, row.user_id],
+    [stripNul(text), status, row.id, row.user_id],
   )
   if (rowCount !== 1) {
     throw new Error(`写库行数不符：id=${row.id} user=${row.user_id}，实际 ${rowCount} 行`)
