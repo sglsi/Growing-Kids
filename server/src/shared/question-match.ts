@@ -214,22 +214,366 @@ export interface Judgement {
   hasSolutionSection: boolean
 }
 
+// ===========================================================================
+// P-009 / D-012（2026-11-06）：一题一对象 + 来源位置 + 多因子准入闸门
+//
+// 为什么加这一层：P-006 的 judge() 把**整份文件**当成一个判定单元。在单题片段上
+// 它是对的，但生产正文里一份 docx 常是整本教辅（L3 实测 3.5 万字 / 76 道题 /
+// 303 个【答案】标记）。此时「全文锚点共现」会把散落在不同题目里的条件片段凑够
+// 3 个，而「文中有任意【解析】段」几乎必然成立 ⇒ 实测 1 道真题判出 3 个 exact，
+// 逐条核对全是别的题的解析（单例精确率 0/3）。另发现「条件全同、设问不同」
+// （讲义「判断 △AGD 形状」vs 用户「求 △ABC 面积」）也会被当成同题。
+//
+// 业界（作业帮 CN113505786A「基于空间位置切割拆分，确定待检索的题干内容」、
+// TextIn 版面拆题）统一做法是「一道题一个对象」。本层在**纯函数内**用文本标记做
+// 等价切分，不依赖版面坐标、不需要重新下载、不写库：
+//   ① 切分：按题号 /【例 N】/ 问题 N 找题目起点，按【答案】/【解析】/【分析】
+//      找相邻解析段 ⇒ 每个 QuestionObject 自带来源位置（字符区间 + 题号）。
+//   ② 多因子：锚点共现**限定在该对象题干内** + 设问意图一致 + 相邻解析段。
+//   ③ 闸门：全部达标才放行 exact 且必须带来源位置；任一不达标降级 topic，
+//      answer 保持为空。这就是「未达标不放行」，定义与判据见报告 §8。
+//
+// ⚠️ 本文件仍保持零依赖单文件（M27 用 tsc 单编后 require），不得引入 import。
+// ⚠️ judge() 的返回结构 / 阈值字面 / 单题行为**不变**，只是内部委托到本层，
+//    否则 P-006 / D-009 的 M27 硬闸会失守。
+// ===========================================================================
+
+/** 题目起点标记（行首）：`1．` / `1.` / `1、` / `【例 4】` / `问题一：` / `演练 1` */
+const QUESTION_START = /(?:^|\n)[ \t]*(?:(【\s*例\s*\d+\s*】)|(【\s*练习\s*\d+\s*】)|((?:问题|演练)\s*[一二三四五六七八九十\d]+\s*[:：.．]?)|(\d{1,3}\s*[．.、]))/g
+/** 非 g 版本，只用于解析段边界检测（避免 lastIndex 在对象循环里串状态） */
+const SOLUTION_BOUNDARY_RE = /\n[ \t]*(?:【\s*例\s*\d+\s*】|【\s*练习\s*\d+\s*】|(?:问题|演练)\s*[一二三四五六七八九十\d]+\s*[:：.．]|\d{1,3}\s*[．.、])/
+
+/** 单个题目对象允许的最大题干长度：超出说明切分失败，宁可判不出 */
+export const MATCH_MAX_OBJECT_CHARS = 6000
+/** 相邻解析段最短有效字数（去掉空白后）：太短的多半是 `【答案】略` */
+export const MATCH_MIN_SOLUTION_CHARS = 8
+/** 设问意图无法确认时，锚点命中率门槛上调（信息少 ⇒ 要求证据更强） */
+export const MATCH_STRICT_ANCHOR_RATIO = 0.55
+
+/** 设问意图类别：条件相同但问的不是一回事，就不该给同一份答案 */
+export type AskKind =
+  | 'choice' | 'existence' | 'shape' | 'proof' | 'area' | 'angle'
+  | 'range' | 'coordinate' | 'ratio' | 'length' | 'value' | 'unknown'
+
+/** 顺序即优先级：`判断…形状并证明` 归 shape，`下列说法正确的是` 归 choice */
+const ASK_RULES: readonly [RegExp, AskKind][] = [
+  [/下列说法|以下说法|正确的是|错误的是|不正确|符合题意/, 'choice'],
+  [/是否存在|是否能|能否|是否/, 'existence'],
+  [/形状|是什么三角形|为何种图形|判断.{0,10}(?:形状|三角形|四边形)/, 'shape'],
+  [/求证|证明|试证/, 'proof'],
+  [/面积/, 'area'],
+  [/度数|角度|多少度|为多少度/, 'angle'],
+  [/取值范围|最大值|最小值|范围为/, 'range'],
+  [/坐标/, 'coordinate'],
+  [/之比|比值|比为|∶/, 'ratio'],
+  [/长度|的长|周长|线段.{0,6}长/, 'length'],
+  [/的值为|为多少|是多少|等于|求.{0,10}(?:值|数)|计算|求/, 'value'],
+]
+
 /**
- * 对一份正文做最终判定。
- * exact 的三个前提缺一不可：① 题干本身能提出 ≥3 个长锚点；② 共现 ≥3 个且命中率 ≥40%；
- * ③ 正文里确实有【答案】/【解析】段。任一不满足 ⇒ 降级，由调用方按 topic/none 呈现。
+ * 抽「这道题到底在问什么」。只看末尾窗口：中文题干的设问几乎总在最后一句，
+ * 拿全文扫关键词会把「已知…面积公式」这类条件误当成设问。
  */
-export function judge(question: string, text: string): Judgement {
-  const h = countAnchorHits(question, text)
-  const sec = locateSolution(text, question)
-  const enoughAnchors = h.total >= MATCH_MIN_LONG_ANCHORS
-    && h.hit >= MATCH_MIN_LONG_ANCHORS
-    && h.ratio >= MATCH_MIN_LONG_RATIO
+export function extractAsk(text: string): { kind: AskKind; phrase: string } {
+  const flat = (text || '').replace(/\s+/g, '')
+  const win = flat.length > 80 ? flat.slice(-80) : flat
+  for (const [re, kind] of ASK_RULES) {
+    const mo = win.match(re)
+    if (mo) return { kind, phrase: mo[0] }
+  }
+  return { kind: 'unknown', phrase: '' }
+}
+
+/** 设问一致性：冲突=硬否决，未知=不否决但收紧锚点门槛，相同=放行 */
+export function compareAsk(question: string, stem: string): 'same' | 'conflict' | 'unknown' {
+  const a = extractAsk(question)
+  const b = extractAsk(stem)
+  if (a.kind === 'unknown' || b.kind === 'unknown') return 'unknown'
+  return a.kind === b.kind ? 'same' : 'conflict'
+}
+
+/** 来源位置：让 exact 可追溯到「哪份资料、第几题、原文哪一段」 */
+export interface SourceLocation {
+  /** 来源文件标识（fs_id / library_docs.id / 'own'），由调用方填 */
+  sourceId?: string
+  /** 来源文件名（给家长看、可复核），由调用方填 */
+  sourceName?: string
+  /** 该对象是本文第几个题目（0-based） */
+  objectIndex: number
+  /** 题号标记原文，如 `1．` / `【例 4】` / 空串（无题号的单题文档） */
+  label: string
+  /** 对象在原文中的字符区间 [charStart, charEnd) */
+  charStart: number
+  charEnd: number
+  /** 题干区间（用于前端定位，不必回查全文） */
+  stemStart: number
+  stemEnd: number
+}
+
+/** 一题一对象：题干 + 紧跟它的解析段 + 来源位置 */
+export interface QuestionObject {
+  stem: string
+  solution: string
+  hasSolution: boolean
+  source: SourceLocation
+}
+
+/** 把长锚点命中的计算抽出来复用，避免对 76 个对象重复抽题干锚点 */
+function hitsWithAnchors(longAnchors: string[], text: string): AnchorHits {
+  const flat = normalizeForMatch(text)
+  const matched = longAnchors.filter((a) => flat.includes(a))
+  const total = longAnchors.length
   return {
-    exact: enoughAnchors && !!sec,
-    ...(enoughAnchors && sec ? { solution: sec.excerpt } : {}),
+    hit: matched.length,
+    total,
+    matched,
+    ratio: total === 0 ? 0 : matched.length / total,
+  }
+}
+
+/**
+ * 把一份正文切成「一题一对象」。
+ *
+ * 规整教辅（L3 真实语料）：`1．题干…【答案】…【解析】… 2．下一题`；
+ * 讲义变体：`【例 4】…`、`问题一：…`；单题片段（自有题库 / ima 高亮）没有题号
+ * ⇒ **退化为 1 个对象**，保证 P-006 的老行为不回退。
+ */
+export function splitQuestionObjects(text: string, source?: { sourceId?: string; sourceName?: string }): QuestionObject[] {
+  const src = text || ''
+  if (!src.trim()) return []
+
+  // ① 题目起点
+  QUESTION_START.lastIndex = 0
+  const starts: { at: number; label: string }[] = []
+  let mo: RegExpExecArray | null
+  while ((mo = QUESTION_START.exec(src)) !== null) {
+    starts.push({ at: mo.index + (mo[0].startsWith('\n') ? 1 : 0), label: (mo[0] || '').trim() })
+    if (starts.length >= 2000) break
+  }
+
+  // ② 解析标记（复用 P-006 的标记集合，避免两套口径漂移）
+  SOLUTION_MARKER.lastIndex = 0
+  const marks: number[] = []
+  while ((mo = SOLUTION_MARKER.exec(src)) !== null) {
+    marks.push(mo.index)
+    if (marks.length >= 8000) break
+  }
+  const firstMarkAt = (from: number, to: number): number => {
+    for (const at of marks) if (at >= from && at < to) return at
+    return -1
+  }
+
+  const build = (start: number, end: number, label: string, index: number): QuestionObject => {
+    const cut = firstMarkAt(start, end)
+    const stemEnd = cut >= 0 ? cut : end
+    const location: SourceLocation = {
+      ...(source?.sourceId ? { sourceId: source.sourceId } : {}),
+      ...(source?.sourceName ? { sourceName: source.sourceName } : {}),
+      objectIndex: index,
+      label,
+      charStart: start,
+      charEnd: end,
+      stemStart: start,
+      stemEnd,
+    }
+    return {
+      stem: src.slice(start, stemEnd),
+      solution: cut >= 0 ? src.slice(cut, end) : '',
+      hasSolution: cut >= 0,
+      source: location,
+    }
+  }
+
+  if (starts.length === 0) return [build(0, src.length, '', 0)]
+
+  const out: QuestionObject[] = []
+  for (let i = 0; i < starts.length; i++) {
+    const start = starts[i].at
+    const end = i + 1 < starts.length ? starts[i + 1].at : src.length
+    if (end <= start) continue
+    // 起点之前的章节前言（「专题13 …」「一、单选题」）不是题目，不单独成对象
+    out.push(build(start, end, starts[i].label, out.length))
+  }
+  return out.length > 0 ? out : [build(0, src.length, '', 0)]
+}
+
+/**
+ * 解析段关系校验：与题干共享的「符号指纹」（连续大写字母串、多位数值）。
+ * 长锚点对 OCR 标点太敏感，符号指纹在同一章不同题之间也会撞（ABCD、60），
+ * 所以它**只作置信分层，不作硬闸**——见报告 §8.4 的残余风险。
+ */
+function symbolTokens(s: string): string[] {
+  const flat = normalizeForMatch(s)
+  const out: string[] = []
+  for (const m of flat.matchAll(/[A-Z]{2,4}|\d{2,}/g)) if (!out.includes(m[0])) out.push(m[0])
+  return out
+}
+
+export function solutionLink(question: string, solution: string): {
+  anchors: number
+  symbols: number
+  symbolRatio: number
+  score: number
+} {
+  const anchors = countAnchorHits(question, solution).hit
+  const qTokens = symbolTokens(question)
+  const sTokens = symbolTokens(solution)
+  const symbols = qTokens.filter((t) => sTokens.includes(t)).length
+  const symbolRatio = qTokens.length === 0 ? 0 : symbols / qTokens.length
+  return { anchors, symbols, symbolRatio, score: anchors * 2 + symbols }
+}
+
+/** 多因子明细：排障、验收集统计、置信度分层都读它 */
+export interface MatchFactors {
+  anchorHit: number
+  anchorTotal: number
+  anchorRatio: number
+  askQuestion: AskKind
+  askStem: AskKind
+  askMatch: 'same' | 'conflict' | 'unknown'
+  adjacentSolution: boolean
+  solutionChars: number
+  /** 解析段与题干的关系校验（软信号，只影响置信度） */
+  solutionLinkScore: number
+  /** 解析段里是否出现了下一题的题号：出现=切分错位，该对象不可信 */
+  solutionCrossesBoundary: boolean
+  requiredRatio: number
+  objectCount: number
+}
+
+export interface ObjectJudgement extends Judgement {
+  /** 是否通过准入闸门（== exact） */
+  passed: boolean
+  /** 未通过时的人类可读原因（排障；验收集据此统计误判/漏判） */
+  rejectReason?: string
+  /** 三因子明细 */
+  factors: MatchFactors
+  /** 0~1，只用于呈现层「请核对」的强弱，不参与放行判定 */
+  confidence: number
+  /** 放行时必带的来源位置 */
+  sourceLocation?: SourceLocation
+}
+
+/** 逐个因子判，返回「为什么不放行」——判据集中一处，M31 可逐条验收 */
+export function judgeQuestionObject(question: string, obj: QuestionObject, longAnchors: string[], objectCount: number): ObjectJudgement {
+  const h = hitsWithAnchors(longAnchors, obj.stem)
+  const a = extractAsk(question)
+  const b = extractAsk(obj.stem)
+  const askMatch = compareAsk(question, obj.stem)
+  const solutionChars = obj.solution.replace(/\s+/g, '').length
+  const link = obj.hasSolution ? solutionLink(question, obj.solution) : { anchors: 0, symbols: 0, symbolRatio: 0, score: 0 }
+  // 解析段里若出现「下一题的题号」，说明题号边界没被识别出来，这个对象里
+  // 混进了别人的题 ⇒ 关系不可信，硬否决（对应业界「父子 ID / 位置校验」）。
+  // ⚠️ 必须用独立的非 g 正则：QUESTION_START 带 g，.test() 会推进 lastIndex，
+  //    在「对 76 个对象循环判定」时会串状态，导致隔一个对象漏检。
+  const solutionCrossesBoundary = obj.hasSolution && SOLUTION_BOUNDARY_RE.test(obj.solution)
+  const adjacentSolution = obj.hasSolution
+    && solutionChars >= MATCH_MIN_SOLUTION_CHARS
+    && obj.stem.length <= MATCH_MAX_OBJECT_CHARS
+    && !solutionCrossesBoundary
+  const requiredRatio = askMatch === 'same' ? MATCH_MIN_LONG_RATIO : MATCH_STRICT_ANCHOR_RATIO
+
+  const factors: MatchFactors = {
+    anchorHit: h.hit, anchorTotal: h.total, anchorRatio: h.ratio,
+    askQuestion: a.kind, askStem: b.kind, askMatch,
+    adjacentSolution, solutionChars,
+    solutionLinkScore: link.score, solutionCrossesBoundary,
+    requiredRatio, objectCount,
+  }
+
+  let rejectReason = ''
+  if (h.total < MATCH_MIN_LONG_ANCHORS) rejectReason = '题干提不出 ≥3 个长锚点，没有判定能力'
+  else if (obj.stem.length > MATCH_MAX_OBJECT_CHARS) rejectReason = '题目对象超长，切分失败不可信'
+  else if (askMatch === 'conflict') rejectReason = `设问冲突：题干问「${a.kind}」、资料问「${b.kind}」`
+  else if (h.hit < MATCH_MIN_LONG_ANCHORS || h.ratio < requiredRatio) rejectReason = `对象内锚点共现不足：${h.hit}/${h.total}（要求 ≥${requiredRatio}）`
+  else if (solutionCrossesBoundary) rejectReason = '解析段混入下一题的题号，题目边界不可信'
+  else if (!adjacentSolution) rejectReason = '该题干后没有紧邻的有效解析段'
+
+  const passed = rejectReason === ''
+  const sec = passed ? locateSolution(obj.solution, question) : null
+  const solution = sec ? sec.excerpt : (passed ? obj.solution.slice(0, 800) : undefined)
+  // 置信度分层：三因子硬闸决定「放不放行」，关系校验只决定「有多可信」。
+  // 低置信仍可 exact（否则会误杀大量正例），由调用方在 note 里提示核对。
+  const confidence = passed
+    ? Math.min(1, Number((0.6 + Math.min(0.25, link.score * 0.05) + (askMatch === 'same' ? 0.15 : 0)).toFixed(2)))
+    : 0
+
+  return {
+    exact: passed,
+    ...(passed && solution ? { solution } : {}),
     anchorsHit: h.hit,
     anchorsTotal: h.total,
-    hasSolutionSection: !!sec,
+    hasSolutionSection: obj.hasSolution,
+    passed,
+    ...(passed ? {} : { rejectReason }),
+    factors,
+    confidence,
+    ...(passed ? { sourceLocation: obj.source } : {}),
+  }
+}
+
+/**
+ * 统一放行闸门：全文候选对象各自独立判定，只有**通过闸门**的才能进 exact。
+ * 多个对象同时通过且分数并列 ⇒ 无法唯一定位 ⇒ 不放行（宁可判不出，也不冒充）。
+ */
+export function judgeObjects(question: string, text: string, source?: { sourceId?: string; sourceName?: string }): ObjectJudgement {
+  const objects = splitQuestionObjects(text, source)
+  const longAnchors = extractDistinctive(question).longAnchors
+  if (objects.length === 0) {
+    return {
+      exact: false, anchorsHit: 0, anchorsTotal: longAnchors.length, hasSolutionSection: false,
+      passed: false, rejectReason: '正文为空', confidence: 0,
+      factors: {
+        anchorHit: 0, anchorTotal: longAnchors.length, anchorRatio: 0,
+        askQuestion: extractAsk(question).kind, askStem: 'unknown', askMatch: 'unknown',
+        adjacentSolution: false, solutionChars: 0,
+        solutionLinkScore: 0, solutionCrossesBoundary: false,
+        requiredRatio: MATCH_MIN_LONG_RATIO, objectCount: 0,
+      },
+    }
+  }
+
+  const scored = objects.map((o) => judgeQuestionObject(question, o, longAnchors, objects.length))
+  const passed = scored.filter((r) => r.passed)
+  if (passed.length === 0) {
+    // 全部不达标时，返回「最接近」的那个的明细，便于排障与验收集统计
+    const best = scored.slice().sort((x, y) =>
+      y.factors.anchorHit - x.factors.anchorHit ||
+      y.factors.anchorRatio - x.factors.anchorRatio ||
+      y.factors.solutionChars - x.factors.solutionChars)[0]
+    return best
+  }
+  passed.sort((x, y) =>
+    y.factors.anchorHit - x.factors.anchorHit ||
+    y.factors.anchorRatio - x.factors.anchorRatio ||
+    y.factors.solutionChars - x.factors.solutionChars)
+  if (passed.length > 1) {
+    const a = passed[0], b = passed[1]
+    if (a.factors.anchorHit === b.factors.anchorHit && a.factors.anchorRatio === b.factors.anchorRatio) {
+      return {
+        ...a, exact: false, passed: false, solution: undefined,
+        rejectReason: '多个题目对象同时达标且无法唯一定位，按「宁可判不出」降级',
+        sourceLocation: undefined,
+      }
+    }
+  }
+  return passed[0]
+}
+
+/**
+ * 对一份正文做最终判定（P-006 契约保持不变）。
+ *
+ * P-009 起内部委托 `judgeObjects()`：整本教辅不再当成一个判定单元，锚点共现
+ * 限定在题目对象内。返回结构、阈值字面、单题行为均不变（M27 硬闸）。
+ */
+export function judge(question: string, text: string): Judgement {
+  const r = judgeObjects(question, text)
+  const h = countAnchorHits(question, text)
+  return {
+    exact: r.exact,
+    ...(r.exact && r.solution ? { solution: r.solution } : {}),
+    anchorsHit: h.hit,
+    anchorsTotal: h.total,
+    hasSolutionSection: splitQuestionObjects(text).some((o) => o.hasSolution),
   }
 }
