@@ -201,11 +201,41 @@ m.test('判定参数锁定：≥3 个长锚点共现且命中率 ≥40%', (c) =>
 // 二、静态源码层：四处必须同时改，缺一即静默失败
 // ============================================================
 
-m.test('🔴 缓存版本已 bump 到 v4（否则老 answer_cache 继续把别的题解析当答案）', (c) => {
+m.test('🔴 缓存版本已 bump 到 v5（否则老 answer_cache 继续把别的题解析当答案）', (c) => {
   const s = read(SERVICE)
-  c.ok(/const CACHE_VERSION = 'v4'/.test(s), 'CACHE_VERSION 不是 v4')
-  c.ok(!/const CACHE_VERSION = 'v3'/.test(s), '还留着 v3 的赋值')
+  // P-006 时是 v4；P-009 / D-012 改了 result 结构（新增 source_location）与
+  // exact 判定口径（一题一对象），note 也带了题号 ⇒ 必须再 bump 一次，
+  // 否则命中的老缓存行仍是全文级 judge() 判出的假 exact（实测 0/3）。
+  c.ok(/const CACHE_VERSION = 'v5'/.test(s), 'CACHE_VERSION 不是 v5')
+  c.ok(!/const CACHE_VERSION = 'v[1-4]'/.test(s), '还留着旧版本号的赋值')
   c.ok(s.includes('${CACHE_VERSION}:${question}'), 'CACHE_VERSION 必须参与 qHash，否则 bump 无效')
+})
+
+m.test('🔴 P-009：来源位置三处契约同步（后端类型 / service / 前端 api）', (c) => {
+  const t = read(TYPES)
+  const sv = read(SERVICE)
+  const fe = read(FE_API)
+  for (const [name, s] of [['后端类型', t], ['前端 api', fe]]) {
+    c.ok(s.includes('source_location?:'), `${name} 缺少 source_location 可选字段`)
+    c.ok(/object_index:\s*number/.test(s), `${name} source_location 缺 object_index`)
+    c.ok(/char_start:\s*number/.test(s) && /char_end:\s*number/.test(s), `${name} source_location 缺字符区间`)
+  }
+  c.ok(sv.includes('function toSourceLocation'), 'service 缺来源位置收敛函数')
+  c.ok(sv.includes('source_location: toSourceLocation'), 'exact 结果没有真正带上来源位置')
+  // 硬闸：topic / none 绝不能出现 source_location（否则等于给无出处答案背书）
+  const exactBlocks = [...sv.matchAll(/match_level: 'exact'/g)]
+  c.ok(exactBlocks.length >= 2, 'exact 组装点不足两处')
+  c.ok(!/match_level: 'topic'[\s\S]{0,200}source_location/.test(sv), 'topic 结果带了 source_location')
+})
+
+m.test('🔴 P-009：两个正文数据源都走 judgeObjects 硬闸（无数据源豁免）', (c) => {
+  const sv = read(SERVICE)
+  const nd = read('server/src/netdisk/netdisk-search.service.ts')
+  c.ok(nd.includes('judgeObjects(question, text,'), '网盘深挖没有改用 judgeObjects')
+  c.ok(sv.includes('judgeObjects(question, text,'), 'library_docs 没有改用 judgeObjects')
+  c.ok(!/const j = judge\(/.test(nd + sv), '仍有全文件级 judge() 在给 exact 供数')
+  // ima 是语义高亮片段，按 P-006 口径仍用 isSameQuestion，但不得因此绕过闸门
+  c.ok(sv.includes('isSameQuestion(question, joined)'), 'ima 分支原题判定被删了')
 })
 
 m.test('🔴 match_level 契约三处同名同值域（后端类型 / service / 前端 api）', (c) => {
