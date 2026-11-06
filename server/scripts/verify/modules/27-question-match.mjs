@@ -201,13 +201,13 @@ m.test('判定参数锁定：≥3 个长锚点共现且命中率 ≥40%', (c) =>
 // 二、静态源码层：四处必须同时改，缺一即静默失败
 // ============================================================
 
-m.test('🔴 缓存版本已 bump 到 v5（否则老 answer_cache 继续把别的题解析当答案）', (c) => {
+m.test('🔴 缓存版本已 bump 到 v6（否则老 answer_cache 会绕过后续人工修复）', (c) => {
   const s = read(SERVICE)
-  // P-006 时是 v4；P-009 / D-012 改了 result 结构（新增 source_location）与
-  // exact 判定口径（一题一对象），note 也带了题号 ⇒ 必须再 bump 一次，
-  // 否则命中的老缓存行仍是全文级 judge() 判出的假 exact（实测 0/3）。
-  c.ok(/const CACHE_VERSION = 'v5'/.test(s), 'CACHE_VERSION 不是 v5')
-  c.ok(!/const CACHE_VERSION = 'v[1-4]'/.test(s), '还留着旧版本号的赋值')
+  // P-006 v4；P-009 / D-012 v5（新增 source_location、一题一对象）；
+  // P-010 / D-013 v6（exact 改走入库结构化对象）：老缓存可能存着「后来被标
+  // rejected 的对象」放行的 exact，不 bump 会让人工定点修复对缓存命中无效。
+  c.ok(/const CACHE_VERSION = 'v6'/.test(s), 'CACHE_VERSION 不是 v6')
+  c.ok(!/const CACHE_VERSION = 'v[1-5]'/.test(s), '还留着旧版本号的赋值')
   c.ok(s.includes('${CACHE_VERSION}:${question}'), 'CACHE_VERSION 必须参与 qHash，否则 bump 无效')
 })
 

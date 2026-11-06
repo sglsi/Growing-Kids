@@ -323,9 +323,9 @@ m.test('🔴 残余风险已登记，且 P1/P2/P3 明示未批准（防后人误
   c.ok(/有 `exact` 但全是假的/.test(decision), 'D-012 没有登记「负收益形式」的触发口径')
 })
 
-m.test('🔴 缓存版本 v5 参与 qHash（老缓存里存着全文级假 exact）', (c) => {
+m.test('🔴 缓存版本 v6 参与 qHash（P1 结构化判定后老缓存必须失效）', (c) => {
   const sv = read('server/src/answer-search/answer-search.service.ts')
-  c.ok(/const CACHE_VERSION = 'v5'/.test(sv), 'CACHE_VERSION 不是 v5')
+  c.ok(/const CACHE_VERSION = 'v6'/.test(sv), 'CACHE_VERSION 不是 v6')
   c.ok(sv.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
 })
 
