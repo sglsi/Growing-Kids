@@ -534,14 +534,35 @@ export function judgeObjects(question: string, text: string, source?: { sourceId
   }
 
   const scored = objects.map((o) => judgeQuestionObject(question, o, longAnchors, objects.length))
+  // P1 起与结构化链路共用同一个「唯一定位」选择器，避免两套口径漂移
+  return selectUnique(scored)
+}
+
+/**
+ * 统一放行选择器：只有唯一达标的对象能进 exact。
+ * 多个对象同时通过且分数并列 ⇒ 无法唯一定位 ⇒ 不放行（宁可判不出，也不冒充）。
+ * P0（judgeObjects）与 P1（judgeStoredObjects）必须共用它，M32 有静态断言。
+ */
+export function selectUnique(scored: ObjectJudgement[]): ObjectJudgement {
+  if (scored.length === 0) {
+    return {
+      exact: false, anchorsHit: 0, anchorsTotal: 0, hasSolutionSection: false,
+      passed: false, rejectReason: '没有可判定的题目对象', confidence: 0,
+      factors: {
+        anchorHit: 0, anchorTotal: 0, anchorRatio: 0,
+        askQuestion: 'unknown', askStem: 'unknown', askMatch: 'unknown',
+        adjacentSolution: false, solutionChars: 0, solutionLinkScore: 0,
+        solutionCrossesBoundary: false, requiredRatio: MATCH_MIN_LONG_RATIO, objectCount: 0,
+      },
+    }
+  }
   const passed = scored.filter((r) => r.passed)
   if (passed.length === 0) {
     // 全部不达标时，返回「最接近」的那个的明细，便于排障与验收集统计
-    const best = scored.slice().sort((x, y) =>
+    return scored.slice().sort((x, y) =>
       y.factors.anchorHit - x.factors.anchorHit ||
       y.factors.anchorRatio - x.factors.anchorRatio ||
       y.factors.solutionChars - x.factors.solutionChars)[0]
-    return best
   }
   passed.sort((x, y) =>
     y.factors.anchorHit - x.factors.anchorHit ||
@@ -575,5 +596,186 @@ export function judge(question: string, text: string): Judgement {
     anchorsHit: h.hit,
     anchorsTotal: h.total,
     hasSolutionSection: splitQuestionObjects(text).some((o) => o.hasSolution),
+  }
+}
+
+// ===========================================================================
+// P-010 / D-013 · P1：结构化题目对象（入库时预切分）
+// ---------------------------------------------------------------------------
+// ⚠️ 本文件仍保持零依赖单文件：hash 算法由调用方注入，这里只定义「什么参与指纹」。
+//    M27 / M31 的 tsc 单编后 require 契约不破。
+//
+// 与 P0 的区别不是「判得更准」，而是**判定单元不再由运行时猜**：
+//   · P0：judgeObjects() 现场 splitQuestionObjects(text)，对象无稳定身份；
+//   · P1：读入库时已经绑定的题干/解析对，先校验版本、正文 hash、内容指纹、
+//         结构区间、link_status，再走同一套六条硬闸（selectUnique 共用）。
+// 由此得到三项 P0 没有的能力：可复算审计 / 正文变更自动失效 / 误判对象定点排除。
+//
+// 🔴 诚实边界：纯文本没有版面坐标。若原始文本流本身把别人的解析排在这题后面，
+//    结构化切分仍会把它们绑一起。P1 不宣称「已证明解析段归属」（报告 §8.4）。
+// ===========================================================================
+
+/** 切分规则版本：改 splitQuestionObjects() / 字段口径必须 bump，否则旧对象不会重建 */
+export const OBJECT_ENGINE_VERSION = 'qobj-1'
+
+/** 结构化对象行（列名与 0026 迁移逐字对应） */
+export interface StoredQuestionObject {
+  source_id: string
+  source_name: string | null
+  object_index: number
+  label: string
+  char_start: number
+  char_end: number
+  stem_start: number
+  stem_end: number
+  stem_text: string
+  solution_text: string | null
+  has_solution: boolean
+  object_fingerprint: string
+  source_revision: string
+  link_status: string
+  engine_version: string
+}
+
+/**
+ * 指纹输入：只含「内容 + 位置 + 规则版本」，不含时间、行 ID、文件名。
+ * 同一份正文重跑必须得到同一个值，否则幂等 upsert 会把每行都判成新增。
+ */
+export function objectFingerprintInput(o: {
+  source_id: string
+  object_index: number
+  label: string
+  char_start: number
+  char_end: number
+  stem_start: number
+  stem_end: number
+  stem_text: string
+  solution_text: string | null
+  has_solution: boolean
+}): string {
+  return [
+    o.source_id, o.object_index, o.label,
+    o.char_start, o.char_end, o.stem_start, o.stem_end,
+    o.stem_text || '', o.solution_text || '', o.has_solution ? 1 : 0,
+    OBJECT_ENGINE_VERSION,
+  ].join('\u0001')
+}
+
+/** 正文版本输入：就是正文原文，别加盐，否则构建脚本与运行时算不出同一个值 */
+export function sourceRevisionInput(text: string): string {
+  return text || ''
+}
+
+export interface StructuredJudgement extends ObjectJudgement {
+  /** true = 本次真的用了结构化对象；false = 无可用对象，由调用方决定回退还是降级 */
+  structured: boolean
+  /** 放行对象的稳定指纹，供家长回查与误判定点排除 */
+  objectFingerprint?: string
+  store: {
+    total: number
+    usable: number
+    rejected: string[]
+  }
+}
+
+/** 解析段是否混进下一题题号：构建脚本与判定层共用，避免复制正则造成口径漂移 */
+export function solutionBoundaryBroken(solution: string): boolean {
+  return SOLUTION_BOUNDARY_RE.test(solution || '')
+}
+
+/** 入库结构校验：返回空串表示可用，否则返回人类可读的拒绝原因 */
+export function validateStoredObject(
+  row: StoredQuestionObject,
+  opts: { hash: (s: string) => string; expectedRevision: string },
+): string {
+  if (row.engine_version !== OBJECT_ENGINE_VERSION) return '切分规则版本不一致，需重建'
+  if (row.link_status !== 'ok') return '该对象已被标记排除或未通过入库结构校验'
+  if (row.source_revision !== opts.expectedRevision) return '来源正文已变化，对象过期'
+  if (opts.hash(objectFingerprintInput(row)) !== row.object_fingerprint) return '内容指纹不匹配'
+  if (!row.stem_text || !row.stem_text.trim()) return '题干为空'
+  if (row.char_start < 0 || row.char_end <= row.char_start) return '对象字符区间不合法'
+  if (row.stem_end < row.stem_start || row.stem_end > row.char_end) return '题干区间不合法'
+  if (row.has_solution && solutionBoundaryBroken(row.solution_text || '')) {
+    return '解析段混入下一题题号，题目边界不可信'
+  }
+  return ''
+}
+
+/** DB 行 → 判定层题目对象；source 位置字段逐字回填，保证 source_location 可追溯 */
+export function toQuestionObject(row: StoredQuestionObject): QuestionObject & { fingerprint: string } {
+  return {
+    stem: row.stem_text,
+    solution: row.solution_text || '',
+    hasSolution: !!row.has_solution,
+    source: {
+      ...(row.source_id ? { sourceId: row.source_id } : {}),
+      ...(row.source_name ? { sourceName: row.source_name } : {}),
+      objectIndex: row.object_index,
+      label: row.label,
+      charStart: row.char_start,
+      charEnd: row.char_end,
+      stemStart: row.stem_start,
+      stemEnd: row.stem_end,
+    },
+    fingerprint: row.object_fingerprint,
+  }
+}
+
+/**
+ * 结构化链路的统一放行闸门。
+ * 六条硬闸（judgeQuestionObject）与唯一定位（selectUnique）与 P0 完全共用，
+ * 额外叠加的是**入库对象的可复算校验**——它只会减少放行，绝不会放宽。
+ *
+ * @param opts.strict true = 无可用结构化对象时也不回退（上线准启用）；
+ *                    false = 返回 structured:false，由调用方回退 P0，保证铺量期功能不倒退
+ */
+export function judgeStoredObjects(
+  question: string,
+  rows: StoredQuestionObject[],
+  opts: {
+    hash: (s: string) => string
+    expectedRevision: string
+    strict?: boolean
+  },
+): StructuredJudgement {
+  const rejected: string[] = []
+  const usable: (QuestionObject & { fingerprint: string })[] = []
+  for (const row of rows || []) {
+    const why = validateStoredObject(row, opts)
+    if (why) rejected.push(`#${row.object_index}: ${why}`)
+    else usable.push(toQuestionObject(row))
+  }
+
+  const store = { total: (rows || []).length, usable: usable.length, rejected }
+  const longAnchors = extractDistinctive(question).longAnchors
+
+  if (usable.length === 0) {
+    const reason = store.total === 0
+      ? '该来源还没有结构化题目对象'
+      : `结构化对象全部不可用（${rejected.length} 条被校验拒绝）`
+    const empty = selectUnique([])
+    return {
+      ...empty,
+      anchorsTotal: longAnchors.length,
+      factors: { ...empty.factors, anchorTotal: longAnchors.length, askQuestion: extractAsk(question).kind },
+      // structured 的语义是「本次由结构化链路负责判定」。
+      // strict 时链路负责地给出「不放行」，故为 true（调用方不得再回退 P0）；
+      // 非 strict 时为 false，调用方回退 P0，保证铺量期功能不倒退。
+      structured: !!opts.strict,
+      rejectReason: `${reason}${opts.strict ? '；严格模式不回退全文判定' : ''}`,
+      store,
+    }
+  }
+
+  const scored = usable.map((o) => judgeQuestionObject(question, o, longAnchors, usable.length))
+  const picked = selectUnique(scored)
+  const winner = picked.passed && picked.sourceLocation
+    ? usable.find((o) => o.source.objectIndex === picked.sourceLocation?.objectIndex)
+    : undefined
+  return {
+    ...picked,
+    structured: true,
+    ...(winner && picked.passed ? { objectFingerprint: winner.fingerprint } : {}),
+    store,
   }
 }
