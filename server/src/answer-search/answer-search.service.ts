@@ -10,6 +10,8 @@ import { ImaKnowledgeProvider } from './ima-provider'
 import { NetdiskSearchService } from '../netdisk/netdisk-search.service'
 import { judgeObjects, isSameQuestion, extractDistinctive } from '../shared/question-match'
 import type { SourceLocation } from '../shared/question-match'
+// P-010 / D-013：与网盘链路共用同一个结构化取数/判定入口，硬闸无数据源豁免
+import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -47,7 +49,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // v5（P-009 / D-012）：result 新增 source_location（来源位置）、exact 判定改为
 // 「一题一对象 + 多因子闸门」，note 增加「第 N 题」。老缓存里存的是全文级
 // judge() 的旧 exact（实测 0/3 假阳性），不 bump 会继续把别的题解析当答案。
-const CACHE_VERSION = 'v5'
+// v6（P-010 / D-013）：exact 改走入库结构化对象，新增指纹 / 正文版本 / 定点排除校验。
+// 老缓存可能存着「后来被标 rejected 的对象」放行的 exact，不 bump 会绕过人工修复。
+const CACHE_VERSION = 'v6'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -588,7 +592,10 @@ export class AnswerSearchService {
         // P-009 / D-012：与网盘链路共用同一套「一题一对象 + 多因子闸门」，
         // 硬闸无数据源豁免（M27 有断言）。老 judge() 在整本教辅上会出假 exact。
         const title = String(row.name || '资料库文档')
-        const j = judgeObjects(question, text, { sourceId: String(row.id), sourceName: title })
+        const source = { sourceId: String(row.id), sourceName: title }
+        const rows = await loadQuestionObjects(client, userId, 'library', source.sourceId)
+        const j = judgeWithStore(question, text, rows,
+          () => judgeObjects(question, text, source))
         if (j.exact && j.solution) {
           return {
             solution: j.solution,

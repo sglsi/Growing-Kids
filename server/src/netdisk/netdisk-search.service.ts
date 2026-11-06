@@ -10,6 +10,8 @@ import {
   judgeObjects,
 } from '../shared/question-match'
 import type { SourceLocation } from '../shared/question-match'
+// P-010 / D-013：优先消费入库时预切分的结构化题目对象（P1），无对象时回退 P0
+import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -320,10 +322,13 @@ export class NetdiskSearchService {
           // P-009 / D-012：一题一对象 + 多因子闸门。整本教辅不再当成一个判定单元，
           // exact 必须同时带来源位置；未达标一律 topic（answer 为空，见报告 §8）。
           // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
-          const j = judgeObjects(question, text, {
-            sourceId: String(cand.fsId),
-            sourceName: cand.name,
-          })
+          // P-010 / D-013：先查入库时绑定的题目对象（带内容指纹 / 正文版本 / 定点排除）。
+          // 没有可用对象时回退 P0 全文判定，保证铺量期不倒退；
+          // QUESTION_OBJECTS_STRICT=1 时无对象即不给 exact（上线准启用）。
+          const source = { sourceId: String(cand.fsId), sourceName: cand.name }
+          const rows = await loadQuestionObjects(getSupabaseClient(), userId, 'netdisk', source.sourceId)
+          const j = judgeWithStore(question, text, rows,
+            () => judgeObjects(question, text, source))
           const snippet = this.snippetFor(question, text)
           deepDone.push({
             ...cand,
@@ -334,7 +339,10 @@ export class NetdiskSearchService {
             ...(j.exact ? { solutionExcerpt: j.solution } : {}),
             anchorsHit: j.anchorsHit,
             ...(j.exact && j.sourceLocation ? { sourceLocation: j.sourceLocation } : {}),
-            matchFactors: j.factors as unknown as Record<string, unknown>,
+            matchFactors: {
+              ...j.factors,
+              ...('storeMeta' in j && j.storeMeta ? { store: j.storeMeta } : {}),
+            } as unknown as Record<string, unknown>,
             ...(j.rejectReason ? { rejectReason: j.rejectReason } : {}),
           })
         } catch (e) {
