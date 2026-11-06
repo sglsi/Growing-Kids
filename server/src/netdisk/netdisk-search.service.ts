@@ -7,8 +7,9 @@ import {
   TOPIC_WORDS,
   NOISE_PREFIX,
   extractDistinctive,
-  judge,
+  judgeObjects,
 } from '../shared/question-match'
+import type { SourceLocation } from '../shared/question-match'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -151,6 +152,12 @@ export interface NetdiskHit {
   solutionExcerpt?: string
   /** 题干长锚点在这份正文里的命中数（排障用） */
   anchorsHit?: number
+  /** P-009：exact 时定位到的「哪份资料、第几题、原文哪一段」 */
+  sourceLocation?: SourceLocation
+  /** P-009：多因子明细（排障 / 验收集统计） */
+  matchFactors?: Record<string, unknown>
+  /** P-009：未放行原因（topic 时可解释） */
+  rejectReason?: string
 }
 
 export interface NetdiskSearchResult {
@@ -310,9 +317,13 @@ export class NetdiskSearchService {
           if (!text) continue
           const score = coverage(qSet, text)
           if (score < 0.2) continue
-          // P-006：判定「是不是这道题」并定位【答案】/【解析】段。
+          // P-009 / D-012：一题一对象 + 多因子闸门。整本教辅不再当成一个判定单元，
+          // exact 必须同时带来源位置；未达标一律 topic（answer 为空，见报告 §8）。
           // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
-          const j = judge(question, text)
+          const j = judgeObjects(question, text, {
+            sourceId: String(cand.fsId),
+            sourceName: cand.name,
+          })
           const snippet = this.snippetFor(question, text)
           deepDone.push({
             ...cand,
@@ -322,6 +333,9 @@ export class NetdiskSearchService {
             matchLevel: j.exact ? 'exact' : 'topic',
             ...(j.exact ? { solutionExcerpt: j.solution } : {}),
             anchorsHit: j.anchorsHit,
+            ...(j.exact && j.sourceLocation ? { sourceLocation: j.sourceLocation } : {}),
+            matchFactors: j.factors as unknown as Record<string, unknown>,
+            ...(j.rejectReason ? { rejectReason: j.rejectReason } : {}),
           })
         } catch (e) {
           this.logger.warn(`[netdisk] 抽正文失败 ${cand.path}: ${e instanceof Error ? e.message : e}`)

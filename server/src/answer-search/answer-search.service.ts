@@ -8,7 +8,8 @@ import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
 import { ImaKnowledgeProvider } from './ima-provider'
 import { NetdiskSearchService } from '../netdisk/netdisk-search.service'
-import { judge, isSameQuestion, extractDistinctive } from '../shared/question-match'
+import { judgeObjects, isSameQuestion, extractDistinctive } from '../shared/question-match'
+import type { SourceLocation } from '../shared/question-match'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -43,8 +44,33 @@ const CACHE_PREFIX = 'ans:srch:'
  */
 // v4（P-006 / D-009）：新增 match_level 字段、answer 不再塞资料片段、文案改写
 // ⇒ 结构变了必须 bump，否则老 answer_cache 行会继续把别的题解析当成答案返回。
-const CACHE_VERSION = 'v4'
+// v5（P-009 / D-012）：result 新增 source_location（来源位置）、exact 判定改为
+// 「一题一对象 + 多因子闸门」，note 增加「第 N 题」。老缓存里存的是全文级
+// judge() 的旧 exact（实测 0/3 假阳性），不 bump 会继续把别的题解析当答案。
+const CACHE_VERSION = 'v5'
 const QUOTA_PREFIX = 'ans:q:'
+
+/** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
+function toSourceLocation(loc: SourceLocation): NonNullable<AnswerSearchResult['source_location']> {
+  return {
+    ...(loc.sourceId ? { source_id: loc.sourceId } : {}),
+    ...(loc.sourceName ? { source_name: loc.sourceName } : {}),
+    object_index: loc.objectIndex,
+    label: loc.label,
+    char_start: loc.charStart,
+    char_end: loc.charEnd,
+  }
+}
+
+/**
+ * 把来源位置写进用户可见文案：家长要能知道「答案出自这份资料的哪一题」。
+ * ⚠️ H2 口径：只陈述事实，不出现宣称词；单题文档没有题号就不硬凑。
+ */
+function sourceNote(loc?: SourceLocation): string {
+  if (!loc) return ''
+  const label = (loc.label || '').replace(/\s+/g, '').slice(0, 12)
+  return label ? `（资料中${label}）` : ''
+}
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
 
@@ -334,7 +360,8 @@ export class AnswerSearchService {
             solution: `来自：${doc.title}`,
             refs: [{ title: doc.title, url: '' }],
             confidence: 0.9,
-            note: '在你的资料库里找到了这道题的解析，请核对后采纳',
+            note: `在你的资料库里找到了这道题的解析，请核对后采纳${sourceNote(doc.sourceLocation)}`,
+            ...(doc.sourceLocation ? { source_location: toSourceLocation(doc.sourceLocation) } : {}),
           }
           settled = true
         }
@@ -357,7 +384,8 @@ export class AnswerSearchService {
             refs: [{ title: exact.name, url: '' }],
             confidence: Number((exact.score || 0).toFixed(2)),
             // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
-            note: '来自资料库（已定位到这道题的解析段），请打开文件核对后再采纳',
+            note: `来自资料库（已定位到这道题的解析段），请打开文件核对后再采纳${sourceNote(exact.sourceLocation)}`,
+            ...(exact.sourceLocation ? { source_location: toSourceLocation(exact.sourceLocation) } : {}),
           }
           settled = true
         }
@@ -537,7 +565,7 @@ export class AnswerSearchService {
   private async searchLibraryDocs(
     userId: string,
     question: string,
-  ): Promise<{ solution: string; title: string } | null> {
+  ): Promise<{ solution: string; title: string; sourceLocation?: SourceLocation } | null> {
     try {
       const client = getSupabaseClient()
       const clean = extractDistinctive(question).keys
@@ -554,12 +582,19 @@ export class AnswerSearchService {
         .or(ors)
         .limit(30)
       if (error || !data) return null
-      for (const row of data as { name: string | null; text_content: string | null }[]) {
+      for (const row of data as { id: string; name: string | null; text_content: string | null }[]) {
         const text = String(row.text_content || '').slice(0, 60_000)
         if (!text) continue
-        const j = judge(question, text)
+        // P-009 / D-012：与网盘链路共用同一套「一题一对象 + 多因子闸门」，
+        // 硬闸无数据源豁免（M27 有断言）。老 judge() 在整本教辅上会出假 exact。
+        const title = String(row.name || '资料库文档')
+        const j = judgeObjects(question, text, { sourceId: String(row.id), sourceName: title })
         if (j.exact && j.solution) {
-          return { solution: j.solution, title: String(row.name || '资料库文档') }
+          return {
+            solution: j.solution,
+            title,
+            ...(j.sourceLocation ? { sourceLocation: j.sourceLocation } : {}),
+          }
         }
       }
     } catch (e) {

@@ -1285,6 +1285,19 @@ export interface AnswerSearchResult {
   confidence: number
   note?: string
   cached?: boolean
+  /**
+   * P-009 / D-012：exact 的来源位置（出自哪份资料、第几题、原文哪一段）。
+   * 只在 match_level='exact' 时出现；topic / none 一律不带。后端字段同名，
+   * 前端当前只在 note 里展示题号，结构化字段留给后续「跳原文定位」。
+   */
+  source_location?: {
+    source_id?: string
+    source_name?: string
+    object_index: number
+    label: string
+    char_start: number
+    char_end: number
+  }
 }
 
 /**

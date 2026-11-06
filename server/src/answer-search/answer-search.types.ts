@@ -42,6 +42,19 @@ export interface AnswerSearchResult {
   note?: string
   /** 是否命中 24h 缓存 */
   cached?: boolean
+  /**
+   * P-009 / D-012：exact 结果的来源位置，供家长复核「答案出自哪份资料、第几题」。
+   * 只在 match_level='exact' 且确实定位到题目对象时出现；topic / none 一律不带。
+   * ⚠️ 与「双减」合规同向：给答案必须可追溯，不能只给一段无出处的解析。
+   */
+  source_location?: {
+    source_id?: string
+    source_name?: string
+    object_index: number
+    label: string
+    char_start: number
+    char_end: number
+  }
 }
 
 export interface SearchProvider {
