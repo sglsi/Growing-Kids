@@ -156,12 +156,24 @@ async function main() {
     const tables = tbl.rows.map((r) => r.table_name)
     if (!tables.length) throw new Error('public schema 里没有任何表，疑似连错库')
 
+    // 🔴 派生表不进备份（2026-11-07，P1 全量铺量后实测踩到）：
+    //    question_objects 是 netdisk_files / library_docs.text_content 的确定性函数，
+    //    生产 326,680 行 / 275MB 文本会让「整表 lines[] + join」吃满 Node 默认 2GB 堆
+    //    ⇒ FATAL: JavaScript heap out of memory，每日 03:17 的备份会失败且不产出文件。
+    //    它可由 0026 迁移 + question-objects-build.mjs --apply 100% 重建
+    //    （实测：全量指纹复算 0 偏差、幂等重跑 0 写入），故只备份源表。
+    //    ⚠️ 恢复后必须按 manifest.rebuild 跑一次重建，见 QA-16 §6.1.2。
+    const DERIVED_TABLES = ['question_objects']
+    const excludedTables = tables.filter((t) => DERIVED_TABLES.includes(t))
+    const backupTables = tables.filter((t) => !DERIVED_TABLES.includes(t))
+    if (excludedTables.length) log(`[backup] 派生表跳过（可重建）：${excludedTables.join('、')}`)
+
     // ② 逐表分页导出（ctid 键集分页：比 OFFSET 快，大表也不会一次性吃满内存）
     const lines = []
     const tableStats = []
     let totalRows = 0
 
-    for (const name of tables) {
+    for (const name of backupTables) {
       let lastCtid = null
       let rows = 0
       for (;;) {
@@ -195,6 +207,10 @@ async function main() {
       tables: tableStats,
       tableCount: tableStats.length,
       totalRows,
+      excludedTables,
+      rebuild: excludedTables.includes('question_objects')
+        ? 'cd /opt/gk/server && sudo -n -u gk node scripts/question-objects-build.mjs --apply'
+        : '',
       migrations: readMigrations(),
       tool: 'server/scripts/db-backup.mjs',
       node: process.version,
