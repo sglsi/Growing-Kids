@@ -2026,3 +2026,43 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 **每周 timer 追加**：`gk-netdisk-index.timer` 的 ExecStart 在 `library-index-text.mjs` 之后补 `netdisk-text-flat-build.mjs --apply --all`（全量重算，让「正文被重新抽取」的行一周内自愈）。改 timer 前先 `systemctl list-timers gk-netdisk-index*` 确认当前命令串；⚠️ **停 timer＝隐私「每周同步」承诺不兑现**。
 
 **隐私政策 r8 上线**：版本号变化 ⇒ 已同意用户需重新确认；`src/constants/privacy-policy.ts` 与 `docs/legal/隐私政策.md` 两处口径必须一致（M28 断言）。前端文案改了 ⇒ **小程序包要重新 `build:weapp` + 开发者工具重编译 + 真机重扫码**，不能只换后端 dist。
+
+---
+
+## 6.1.6 P2 生产执行记录（2026-11-07 13:40–14:05）
+
+> 思傅 13:40 拍板「执行上述生产动作」。本节**追加式**覆盖 §6.1.5 开头「未执行 / L3 一字未动」的历史状态描述；§6.1.5 的八步表格与判据原样保留，作为执行依据。
+
+| 步 | 实绩 |
+|---|---|
+| 0 备份 | `gk-db-20261107-134812.gkbk`（82M / 21 表 / 80,684 行 / 21.0s），读回自检通过；派生表 `question_objects` 按 §6.1.2 跳过 |
+| 1 归户 | ⚠️ **改判**：预检发现探测号 30 行 `netdisk_files` 与公共 owner **同 `fs_id`（nf_dup=30）**，直接 UPDATE 必撞 `(user_id, fs_id)`；其 593 个对象在 owner 侧**逐 `object_index` 全有等价副本**（`stem_text` / `solution_text` / `source_revision` 593/593 一致；`object_fingerprint` 0 一致是因指纹输入含 `source_id`，属预期）。⇒ 事务内**删除冗余副本**而非 UPDATE，带 593/30 行数与 owner 归一断言；删后两表 `count(distinct user_id)=1`（`question_objects` 326,087 / 10,437 来源；`netdisk_files` 78,400） |
+| 2 迁移 | 13:50:17 执行 `0027`，`NOTIFY pgrst` 已发；`text_flat` 列 + 两索引建成（此刻 GIN 空 16 kB） |
+| 3–5 回填 | dry-run 10,431 份 / 平均 6,836 字；200 行试写 3.7s（GIN 21MB ⇒ 逐行维护外推约 1.1GB）；**改为 DROP 空索引 → 全量回填 → 一次性 CREATE INDEX**。全量写 10,231 行 / 6,952.8 万字 / 32.5s；幂等重跑**写入 0**；`text_updated_at` 最大仍 11-06（证明只写 `text_flat`）；`text_flat` 10,431/10,431 全填充、无非法字符 |
+| 3 索引实测 | 一次性构建 **101.5s / 318MB**（远低于 1GB 阈值，压缩效率远高于逐行插入）；`EXPLAIN ANALYZE`：高频锚点 **142.6ms**、多长锚点 **477.0ms**，均走 `Bitmap Index Scan on netdisk_files_text_flat_trgm_idx`（< 1s）⇒ **保留索引，无需 `NETDISK_TEXT_RECALL=0` 回退** |
+| 7 必检 | `/rest/v1/netdisk_files?select=text_flat&text_status=eq.ok&text_flat=not.is.null&limit=1` 回 **200 + 真实正文行**（兜底路径 `/netdisk_files` 的 200 空 body 已对照，见 §6.1.4）；`service_role` SELECT + `rolbypassrls=t` |
+| 6 换 dist | 完整回滚点 `dist.bak-p011-20261107-1357`；只装 **10 个文件**（新增 `shared/public-library.{js,d.ts,js.map}` + 覆盖 7 个本轮产物）；特征串 `publicLibraryOwner`×6 / `text_flat.ilike`×1 / `v7`×1；部署后 534 文件复比，**剩余差异全是明确排除项**（4 组身份治理 + 上一轮漏传的 `answer-search.types.d.ts` + 纯注释 `jobs.controller.js.map`） |
+| 重启 | `systemctl restart gk-api` → health **200**、Nest 425ms 启动、`journalctl` **0 ERROR**、**0 次「资料正文召回读取失败」回退** |
+| 8 A9 E2E | 自签 `X-Auth-Token`（admin / 匿名 user / admin 三方）查同一道真题：逐字结果 **SAME**（md5 `7f062c1c80`）；`hits=8`、`exact=1`、正文通道召回 `8/8` 份、`sourceLocation=1`、`note=…资料正文召回命中 33 份`。⚠️ 首轮曾出现一次冷态差异（服务刚重启后的首次请求），三方交叉验证确认**稳定态不存在账号差异** |
+
+### 6.1.6.1 与清单的三处执行期偏差（已判据化，不是偷步）
+
+1. **归户 UPDATE → 删除冗余**：唯一键冲突 + 内容 593/593 等价，删除是唯一正确解；两表 owner 判据仍达标。
+2. **索引实测移到回填之后**：迁移完成时 `text_flat` 全 NULL ⇒ 索引空（16 kB），此时测体积/延迟是假通过；且逐行维护外推 1.1GB。改「DROP → 回填 → 一次性 CREATE」后拿到真实 318MB / 142–477ms。
+3. **timer 追加 `--apply` 而非 `--apply --all`**：查 `netdisk-index.mjs` upsert 只更新元数据、**不碰 `text_flat`**，`--full-clean` 只删本轮未见到的孤儿；运行时 `saveCache()` 已同步写 `text_flat`。每周全量重算会无谓重写 7,086 万字并抖动 318MB GIN 索引。⇒ 追加幂等的「只补 null」，`--all` 留作**正文归一化口径变更时手动跑**。unit 备份 `gk-netdisk-index.service.bak-20261107`，timer 仍 `enabled/active`，下次 11-08 04:36。
+
+### 6.1.6.2 仍未完成（别写成「全部搞定」）
+
+- **前端发版最后一步需人工**：`pnpm build:weapp` 已成功（13s），但**微信开发者工具重编译 + 真机重扫码 + 上传发布**须思傅操作；隐私政策 r8 的「已同意用户重新确认」随前端包生效。
+- **真实小程序登录 E2E 未做**：A9 是服务端 HTTP 层用自签令牌验证，非真机两个微信账号。
+- `QUESTION_OBJECTS_STRICT=1`、P3（`MAX_DEEP_FILES=3` / 呈现层前置）、补抽 `.doc` 10,503 份与大 PDF、4 个未批准的身份治理改动，**仍锁**。
+- 「题干 A + 别人解析」张冠李戴残余风险未消除，第二层上线准入（误判归零 + 召回 ≥90% + 定位 100% + P95<3s）**未宣布全绿**。
+
+### 6.1.6.3 回滚
+
+```
+# 代码：mv dist dist.bad && mv dist.bak-p011-20261107-1357 dist && systemctl restart gk-api
+# 数据：text_flat 是派生列，可直接 truncate 该列后重跑 netdisk-text-flat-build.mjs --apply；
+#       归户删除的 593 对象 + 30 索引是冗余副本，如需恢复用 question-objects-build.mjs --apply 重建
+# 备份：gk-db-20261107-134812.gkbk（口令即现网备份口令，丢了备份永久作废）
+```
