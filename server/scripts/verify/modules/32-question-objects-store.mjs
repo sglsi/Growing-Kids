@@ -35,6 +35,7 @@ const SERVICE_AS = 'server/src/answer-search/answer-search.service.ts'
 const REPORT = 'docs/reports/资料库正文召回-检索侧四步方案评审.md'
 const PROPOSAL = 'docs/design/method/proposals/P-010-题目级结构化切分入库.md'
 const DECISION = 'docs/design/method/decision-log.md'
+const BACKUP = 'server/scripts/db-backup.mjs'
 
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')
 const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex')
@@ -319,6 +320,22 @@ m.test('🔴 文档防篡改：§9 / P-010 / D-013 登记残余风险，P2/P3 �
   const d = read(DECISION)
   c.ok(/### D-013/.test(d), '台账缺 D-013')
   c.ok(/D-012/.test(d), 'D-013 没有交代与 D-012 的关系')
+})
+
+m.test('🔴 L3 全量铺量（2026-11-07）：派生表不进备份 + 铺量≠部署 的防篡改登记', (c) => {
+  // 铺量后第一次备份实测 FATAL: heap out of memory（326,680 行 / 275MB 文本把
+  // 「整表 lines[] + join」撑爆 Node 默认 2GB 堆），且失败时不产出任何文件，
+  // 每日 03:17 的备份会静默失效。修法是排除可重建的派生表 + 恢复后重建。
+  const bk = read(BACKUP)
+  c.ok(/const DERIVED_TABLES = \['question_objects'\]/.test(bk), 'db-backup 没显式排除 question_objects，每日备份会 OOM')
+  c.ok(/for \(const name of backupTables\)/.test(bk), '导出循环仍遍历全表，排除规则形同虚设')
+  c.ok(/excludedTables/.test(bk) && /rebuild:[\s\S]{0,220}question-objects-build\.mjs --apply/.test(bk), 'manifest 缺重建命令，恢复后会漏掉派生表')
+  const report = read(REPORT)
+  c.ok(/326,680/.test(report) && /铺量 ≠ 生效/.test(report), '§9.6 没登记 L3 铺量实况或「铺量≠生效」边界')
+  const p = read(PROPOSAL)
+  c.ok(/已批准并执行（2026-11-07）/.test(p), 'P-010 第 10 项没改判为已执行')
+  const d = read(DECISION)
+  c.ok(/D-013 追加记录（2026-11-07/.test(d), 'D-013 没有追加式记录生产铺量')
 })
 
 export default m
