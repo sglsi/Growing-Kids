@@ -282,7 +282,7 @@ m.test('🔴 取数红线：无 RLS 必须带 user_id，两处数据源都走同
   c.ok(as.includes('judgeWithStore(question, text, rows,'), 'library_docs 没接结构化入口')
   c.ok(nd.includes('loadQuestionObjects(') && as.includes('loadQuestionObjects('), '取数口没有共用')
   c.ok(nd.includes('judgeObjects(question, text,') && as.includes('judgeObjects(question, text,'), 'P0 回退路径被删掉')
-  c.ok(/const CACHE_VERSION = 'v6'/.test(as), 'CACHE_VERSION 没 bump 到 v6，老缓存会绕过人工修复')
+  c.ok(/const CACHE_VERSION = 'v7'/.test(as), 'CACHE_VERSION 没 bump 到 v7，老缓存会绕过人工修复')
 })
 
 // ============================================================
@@ -349,7 +349,12 @@ m.test('🔴 netdisk 运行时 source_id 必须是 netdisk_files.id（用 fsId �
   c.ok(/select\('id, text_content, text_status'\)/.test(nd), 'ensureText 没查出 netdisk_files.id')
   c.ok(/sourceId: String\(row\.id \|\| ''\)/.test(nd), 'ensureText 没把 id 带出去')
   c.ok(/const \{ text, sourceId \} = await this\.ensureText/.test(nd), '深挖块没接住 sourceId')
-  c.ok(/loadQuestionObjects\(getSupabaseClient\(\), userId, 'netdisk', sourceId\)/.test(nd), '取数口没用 netdisk_files.id')
+  // P-011 / D-014：owner 从登录 userId 换成固定公共 owner，但「sourceId 必须来自
+  // netdisk_files.id」这条口径不变。断言放宽 owner 参数，不动 source_id 检查。
+  c.ok(/loadQuestionObjects\(getSupabaseClient\(\), (?:userId|publicLibraryOwner\(\)), 'netdisk', sourceId\)/.test(nd),
+    '取数口没用 netdisk_files.id')
+  c.ok(/loadQuestionObjects\(getSupabaseClient\(\), publicLibraryOwner\(\), 'netdisk', sourceId\)/.test(nd),
+    'P-011 后 netdisk 结构化对象取数必须走公共 owner，否则新账号零命中')
   c.ok(!/loadQuestionObjects\([^)]*String\(cand\.fsId\)/.test(nd), '又把 cand.fsId 当成 source_id 了')
   c.ok(/const source = \{ sourceId: sourceId \|\| String\(cand\.fsId\)/.test(nd), '未铺量来源缺 P0 回退所需的 sourceId')
 })
@@ -360,7 +365,7 @@ m.test('🔴 部署新 dist（2026-11-07）：口径修复已登记且 strict �
   const p = read(PROPOSAL)
   c.ok(/部署新 dist|判定链路/.test(p), 'P-010 没登记部署决策')
   const s = read('server/src/answer-search/answer-search.service.ts')
-  c.ok(/const CACHE_VERSION = 'v6'/.test(s), '部署后 result 结构变了但缓存版本没 bump')
+  c.ok(/const CACHE_VERSION = 'v7'/.test(s), '部署后 result 结构变了但缓存版本没 bump')
 })
 
 export default m
