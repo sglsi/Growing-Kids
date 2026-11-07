@@ -338,4 +338,29 @@ m.test('🔴 L3 全量铺量（2026-11-07）：派生表不进备份 + 铺量≠
   c.ok(/D-013 追加记录（2026-11-07/.test(d), 'D-013 没有追加式记录生产铺量')
 })
 
+m.test('🔴 netdisk 运行时 source_id 必须是 netdisk_files.id（用 fsId 会让铺量数据永远读不到）', (c) => {
+  // 2026-11-07 部署前实测踩到：构建脚本按 netdisk_files.id（varchar36）入库，
+  // 而深挖块传的是百度网盘数字 fsId ⇒ loadQuestionObjects 恒返回 [] ⇒ 整条网盘
+  // 链路静默回退 P0，326,680 行结构化对象「备而不用」且**没有任何报错**。
+  // 这类口径错配不会让接口失败，只能靠静态断言钉死。
+  const nd = read('server/src/netdisk/netdisk-search.service.ts')
+  const build = read(BUILD)
+  c.ok(/sourceId: String\(r\.id\)/.test(build), '入库脚本的 source_id 口径变了，不再是 netdisk_files.id')
+  c.ok(/select\('id, text_content, text_status'\)/.test(nd), 'ensureText 没查出 netdisk_files.id')
+  c.ok(/sourceId: String\(row\.id \|\| ''\)/.test(nd), 'ensureText 没把 id 带出去')
+  c.ok(/const \{ text, sourceId \} = await this\.ensureText/.test(nd), '深挖块没接住 sourceId')
+  c.ok(/loadQuestionObjects\(getSupabaseClient\(\), userId, 'netdisk', sourceId\)/.test(nd), '取数口没用 netdisk_files.id')
+  c.ok(!/loadQuestionObjects\([^)]*String\(cand\.fsId\)/.test(nd), '又把 cand.fsId 当成 source_id 了')
+  c.ok(/const source = \{ sourceId: sourceId \|\| String\(cand\.fsId\)/.test(nd), '未铺量来源缺 P0 回退所需的 sourceId')
+})
+
+m.test('🔴 部署新 dist（2026-11-07）：口径修复已登记且 strict 仍锁', (c) => {
+  const report = read(REPORT)
+  c.ok(/source_id 口径错配|netdisk_files\.id/.test(report), '报告没登记 fsId / id 口径错配这一部署前缺陷')
+  const p = read(PROPOSAL)
+  c.ok(/部署新 dist|判定链路/.test(p), 'P-010 没登记部署决策')
+  const s = read('server/src/answer-search/answer-search.service.ts')
+  c.ok(/const CACHE_VERSION = 'v6'/.test(s), '部署后 result 结构变了但缓存版本没 bump')
+})
+
 export default m
