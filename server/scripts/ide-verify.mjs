@@ -170,15 +170,21 @@ if (appservice.length && !pages.length) {
   }
 }
 
+const stalled = () => {
+  const hasProjectWindow = targets.some((t) => /\/html\/index\.html\?/.test(t.url || ''))
+  console.log(`❌ 项目模拟器没起来（appservice ${appservice.length} / 页面 ${pages.length}）`)
+  if (hasProjectWindow) {
+    console.log('   ⚠️ 项目窗口在、但 appservice 没起：常见于先跑过 CLI `auto`／`open`，')
+    console.log('      IDE 被切进自动化模式或停在启动页，reload 启动页救不回来。')
+    console.log('      处理：完全退出微信开发者工具，再跑 `--launch`（不要先跑 CLI auto）。')
+  } else {
+    console.log('   IDE 可能还在启动中，稍后重跑；或完全退出后加 --launch。')
+  }
+  process.exit(2)
+}
+
 console.log(`✅ CDP 已连接 ${BASE}：targets ${targets.length} / appservice ${appservice.length} / 页面 ${pages.length}`)
-if (!appservice.length) {
-  console.log('❌ 没找到 appservice/mainframe，项目可能还没打开')
-  process.exit(2)
-}
-if (!pages.length) {
-  console.log('❌ 没找到页面 target，模拟器可能停在启动页')
-  process.exit(2)
-}
+if (!appservice.length || !pages.length) stalled()
 
 // ③ 8 页冒烟
 if (!flag('--self')) {
