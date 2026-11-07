@@ -135,14 +135,16 @@ m.test('🔴 A5 正文共现数前置排序，且删掉 bigram coverage<0.2 闸�
   const svc = read(SERVICE_ND)
   c.ok(/\(b\.textHits \|\| 0\) - \(a\.textHits \|\| 0\)/.test(svc),
     '正文命中数没有排在文件名命中词数之前（MAX_DEEP_FILES=3 时多召回的文档轮不到判定）')
-  c.ok(/keyHits: nameHits \+ tHits \* 2/.test(svc), '综合信号没有给正文长锚点更高权重')
+  c.ok(/keyHits\s*[:=]\s*nameHits \+ tHits \* 2/.test(svc), '综合信号没有给正文长锚点更高权重')
   c.ok(!/score < 0\.2/.test(svc), 'bigram coverage<0.2 闸门还在 ⇒ 正文召回的最后一步被误杀')
   c.ok(/六条硬闸/.test(svc), '删闸门的理由没有写进源码注释（必须写明「交给判定层」）')
 })
 
-m.test('🔴 A6 P3 / strict 仍锁：深挖上限 3、strict 默认 0、一键回退开关在', (c) => {
+m.test('🔴 A6 P3 深挖上限按 D-015 定为 8、strict 仍锁、一键回退开关在', (c) => {
   const svc = read(SERVICE_ND)
-  c.ok(/NETDISK_DEEP_FILES \?\? 3/.test(svc), 'MAX_DEEP_FILES 默认值被放宽（P3 未批准）')
+  // D-015（2026-11-07 16:15）追加式改判：P3 放行到保守档 8 份；
+  // 原先钉 3 的断言同步改为钉 8 —— 再放宽须另立台账，不许顺手改数字。
+  c.ok(/NETDISK_DEEP_FILES \?\? 8/.test(svc), 'MAX_DEEP_FILES 默认值不是拍板的 8（P3 改动须另立台账）')
   c.ok(/NETDISK_TEXT_RECALL=0/.test(svc), '源码没写一键回退开关')
   c.eq(typeof P.textRecallEnabled, 'function', 'textRecallEnabled 未导出')
   const saved = process.env.NETDISK_TEXT_RECALL
@@ -181,9 +183,9 @@ m.test('🔴 A3 0027 只加列 + 索引；回填脚本默认 dry-run、只写 te
 // 三、缓存版本与合规文案（A7 / A8）
 // ============================================================
 
-m.test('🔴 A7 CACHE_VERSION = v7 且参与 qHash（note 与候选池都变了）', (c) => {
+m.test('🔴 A7 CACHE_VERSION = v8 且参与 qHash（note 与候选池都变了）', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v7'/.test(as), 'CACHE_VERSION 没 bump 到 v7')
+  c.ok(/const CACHE_VERSION = 'v8'/.test(as), 'CACHE_VERSION 没 bump 到 v8')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   c.ok(/公共资料库里找到了这道题的答案/.test(as), '面客 note 还写着「你自己的题库」')
   const nd = read(SERVICE_ND)
