@@ -206,7 +206,7 @@ m.test('🔴 缓存版本已 bump 到 v6（否则老 answer_cache 会绕过后�
   // P-006 v4；P-009 / D-012 v5（新增 source_location、一题一对象）；
   // P-010 / D-013 v6（exact 改走入库结构化对象）：老缓存可能存着「后来被标
   // rejected 的对象」放行的 exact，不 bump 会让人工定点修复对缓存命中无效。
-  c.ok(/const CACHE_VERSION = 'v10'/.test(s), 'CACHE_VERSION 不是 v10（P2 双通道召回改了 note，必须失效 v6 缓存）')
+  c.ok(/const CACHE_VERSION = 'v11'/.test(s), 'CACHE_VERSION 不是 v11（P2 双通道召回改了 note，必须失效 v6 缓存）')
   c.ok(!/const CACHE_VERSION = 'v[1-5]'/.test(s), '还留着旧版本号的赋值')
   c.ok(s.includes('${CACHE_VERSION}:${question}'), 'CACHE_VERSION 必须参与 qHash，否则 bump 无效')
 })

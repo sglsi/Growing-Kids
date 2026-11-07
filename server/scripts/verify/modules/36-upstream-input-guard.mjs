@@ -116,14 +116,14 @@ m.test('🔴 A4 判定层真相源零改动（与 M35 同一 sha256 基线）', 
   c.ok(!/guardQuestionInput|INPUT_GUARD_/.test(src), '闸门逻辑被塞进判定层真相源（必须保持零依赖单文件）')
 })
 
-m.test('🔴 A5 note 文案变了 ⇒ CACHE_VERSION v10 且 6 个旧模块断言同步', (c) => {
+m.test('🔴 A5 note 文案变了 ⇒ CACHE_VERSION v11 且 6 个旧模块断言同步', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v10'/.test(as), 'CACHE_VERSION 没 bump 到 v10（老缓存会吐旧 note）')
+  c.ok(/const CACHE_VERSION = 'v11'/.test(as), 'CACHE_VERSION 没 bump 到 v11（老缓存会吐旧 note）')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   for (const f of VERSION_MODULES) {
     const t = read(f)
-    c.ok(/CACHE_VERSION = 'v10'|CACHE_VERSION v10|CACHE_VERSION 不是 v10|没 bump 到 v10/.test(t),
-      `${path.basename(f)} 的缓存版本断言没同步到 v10`)
+    c.ok(/CACHE_VERSION = 'v11'|CACHE_VERSION v11|CACHE_VERSION 不是 v11|没 bump 到 v11/.test(t),
+      `${path.basename(f)} 的缓存版本断言没同步到 v11`)
     c.ok(!/CACHE_VERSION = 'v9'/.test(t), `${path.basename(f)} 还留着 v9 断言`)
   }
 })
