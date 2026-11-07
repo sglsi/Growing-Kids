@@ -11,12 +11,12 @@
 //   node server/scripts/ide-verify.mjs --launch --marker "某文案"   # 一条命令：冷启动 + 自检 + 8 页冒烟
 //   node server/scripts/ide-verify.mjs                             # 自检 CDP + 跑 8 页冒烟
 //   node server/scripts/ide-verify.mjs --self                       # 只自检，不跑冒烟
-//   node server/scripts/ide-verify.mjs --marker "某文案"             # 额外校验 dist/common.js 是否含特征串
+//   node server/scripts/ide-verify.mjs --marker "某文案"             # 校验 dist 里是否含特征串（common.js 优先，未命中再扫页面 chunk）
 //
 // 前提：IDE 带 --remote-debugging-port=9222；项目没加载时脚本会 reload 启动页自动恢复。
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, writeFileSync, readdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -88,19 +88,38 @@ if (flag('--launch') && !(await cdpUp())) {
   }
 }
 
-// ① 产物新鲜度：确认 dist 里真的有本轮改动，别拿旧包验
+// ① 产物新鲜度：确认 dist 里真的有本轮改动，别拿旧包验。
+//    ⚠️ 2026-11-07 P-014 实测：页面级模块（如 pages/recognize）的文案不在 common.js，
+//    只扫 common.js 会误报「特征串未命中 ⇒ 包没更新」。⇒ common.js 优先，
+//    未命中再递归扫 dist/**/*.js（跳过 node_modules，深度上限 4）。
+function findMarkerInDist(dir, needle, depth = 0) {
+  if (depth > 4) return null
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    if (ent.name === 'node_modules') continue
+    const p = path.join(dir, ent.name)
+    if (ent.isDirectory()) {
+      const found = findMarkerInDist(p, needle, depth + 1)
+      if (found) return found
+    } else if (ent.name.endsWith('.js')) {
+      try { if (readFileSync(p, 'utf8').includes(needle)) return p } catch { /* 二进制/权限跳过 */ }
+    }
+  }
+  return null
+}
 const marker = flag('--marker')
 if (typeof marker === 'string') {
-  const file = path.join(ROOT, 'dist', 'common.js')
+  const dist = path.join(ROOT, 'dist')
+  const common = path.join(dist, 'common.js')
+  let hitFile = null
   try {
-    const text = readFileSync(file, 'utf8')
-    const hit = text.includes(marker)
-    console.log(`${hit ? '✅' : '❌'} dist 特征串「${marker}」：${hit ? '命中' : '未命中'}（${file}）`)
-    if (!hit) process.exit(1)
+    if (existsSync(common) && readFileSync(common, 'utf8').includes(marker)) hitFile = common
+    else hitFile = findMarkerInDist(dist, marker)
   } catch (e) {
-    console.log(`❌ 读不到 ${file}：${e.message}`)
+    console.log(`❌ 扫描 ${dist} 失败：${e.message}`)
     process.exit(1)
   }
+  console.log(`${hitFile ? '✅' : '❌'} dist 特征串「${marker}」：${hitFile ? `命中（${path.relative(ROOT, hitFile)}）` : '未命中'}`)
+  if (!hitFile) process.exit(1)
 }
 
 // ② CDP 连通性

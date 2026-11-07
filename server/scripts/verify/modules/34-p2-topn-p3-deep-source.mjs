@@ -86,9 +86,9 @@ m.test('🔴 B5 来源卡片只在 exact 渲染，不给无出处答案背书', 
     '来源卡片做了点击跳题（会变成拍照搜题形态）')
 })
 
-m.test('🔴 B6 CACHE_VERSION v9、strict 仍锁、六条硬闸未放宽', (c) => {
+m.test('🔴 B6 CACHE_VERSION v10、strict 仍锁、六条硬闸未放宽', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v9'/.test(as),
+  c.ok(/const CACHE_VERSION = 'v10'/.test(as),
     '候选池与结果内容变了却没 bump（answer_cache 会原样吐 v7 旧命中）')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   const store = read(STORE)
