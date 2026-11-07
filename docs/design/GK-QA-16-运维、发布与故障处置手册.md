@@ -2116,3 +2116,33 @@ note: 文件名 / 路径 + 资料正文双通道检索（深挖 8 份）；资�
 ⚠️ 与上一轮（§6.1.6，深挖 3 / `exact=1`）相比，本轮 `exact=2`、正文召回命中 79 份（上轮 33 份）。这是**候选池变宽后有过闸对象**，不是「判定变松」：六条硬闸与 P1 校验一行未动，`question-match.ts` 本轮未改。**不得据此宣称「召回提升 = 更准」或「误判归零」**；「题干 A + 别人解析」残余风险与第二层上线准入仍未全绿。
 
 **回滚**：`mv dist dist.bad && mv dist.bak-p012-20261107-1650 dist && systemctl restart gk-api`。应急开关见 §6.1.7 末尾。
+
+---
+
+## 6.1.8 P-013 召回侧锚点修复部署记录（2026-11-07 22:0x–22:2x）
+
+> 提案 `P-013` / 台账 `D-016`。思傅 21:2x 逐题拍板：A+B 分两步（本轮做 A）、英文一起修、本地做完直接部署、`TEXT_RECALL_KEYS` 保持 4。**本节只记运维实绩，结论与 falsifier 处置见 `D-016 执行记录`**。
+
+| 步 | 实绩 |
+|---|---|
+| 0 差异校准 | 本地 `nest build` 后 **539** 文件 / L3 **536** 文件；完整 sha256 清单（Windows `*` 已归一化）**19 项差异逐个确认归属** ⇒ 本轮 **5 个产物**：`netdisk/netdisk-search.service.{js,js.map,d.ts}`、`answer-search/answer-search.service.{js,js.map}`；其余 **14 项全是 §6.1.7.1 登记的明确排除项**（4 组身份治理 + `anon-bootstrap-guard.*` 仅本地 + 历史漏传 `answer-search.types.d.ts` + 纯注释 `jobs.controller.js.map` + 2 个 `tsbuildinfo`） |
+| 1 回滚点 | `sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-p013-20261107-2216`（`/opt/gk/server` 需 sudo 才能建目录） |
+| 2 精准安装 | `tar` 打包 5 文件 → ssh stdin 写 `/tmp/gk-p013.tgz`（本地/远端 sha256 均 `97b406c8…`）→ 解压后逐个 `sudo -n install -o gk -g gk -m 644`。验包：`pickTextAnchors`×3、`isGenericPointLabel`×3、`LATIN_STOP`×3、`CACHE_VERSION = 'v9'`×1、`TEXT_RECALL_KEYS ?? 4`×1、`MAX_DEEP_FILES ?? 8`×1 |
+| 3 哈希复比 | 本轮 5 个产物哈希与本地**逐一一致**；剩余差异 **14 项全是排除项**，未批准文件 0 |
+| 4 重启 | `systemctl restart gk-api` → 公网 `https://deep-root.cn/api/health` **200**、Nest **1308ms**、`journalctl` **0 ERROR**、`gk-api active`。⚠️ 远端 `http://127.0.0.1:3001/api/health` 回 404 是探测路径口径差异，**不是故障**，判据以公网 200 为准 |
+| 5 门禁 | M27–M35 **111/111**（新增 M35 8/8）、`check:isolation` **150/150**、`method:check` H1/H2/H3、`verify:gate` **37/37**、`nest build` 0。旧模块 `CACHE_VERSION` 断言同步 `v8→v9` |
+| 6 线上开关 | 未新增/修改任何环境变量；`NETDISK_TEXT_RECALL_KEYS` 等仍走默认 4，`CACHE_VERSION v9` 让旧 `answer_cache` 行自然成为孤儿 |
+| 7 数据态 | **本轮未写库、未迁移**；`question_objects` 326,087 行、`text_flat` 10,431/10,431、GIN 318MB 均未变。`--full` 复测会写 6 条 `answer_cache`（用户检索本就会写） |
+| 8 前端 | **本轮只改后端，未 `build:weapp`、未发版**；P-012 来源卡片前端包**仍未上传发版** |
+
+**前后对照**（`node server/scripts/kb-hit-diagnose.mjs`，真实登录令牌）：几何单题正文召回 **43 → 103 份**、英文 **1–7 → 281–357 份**；原题文件从 **0 份进深挖池 → 排第 1、2 位**（`keyHits=9/textHits=4`）；顶层对象锚点共现 **1/17 → 18/18**；**完整库内原题自检 `exact=2` 带来源定位**（判定链路无回归）；单次耗时 **89–2686ms**（<3s）。`keys` 从 `DABC60/C60AB3`／`tsun/unam/swep` 变为判别性点名与英文整词。
+
+🔴 **但 6 条真实录入题 + 5 个手工单题 `exact` 仍全为 0**，用户侧 `answer-search` 全 `verified=false / ans=0字` ⇒ **`P-013 §3 ⑤ falsifier ① 触发`**，处置（保留 / 回滚）待思傅裁决，详见 `D-016 执行记录`。**不得写成「命中已提升 / 误判归零 / 所有用户已可用」**。
+
+**回滚**：
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad
+sudo -n mv /opt/gk/server/dist.bak-p013-20261107-2216 /opt/gk/server/dist
+sudo -n systemctl restart gk-api
+```
+无数据回滚需求；`CACHE_VERSION v9` 缓存行自然成为孤儿。

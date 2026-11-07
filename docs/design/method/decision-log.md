@@ -346,3 +346,40 @@
 | 与 D-012 / D-014 / D-015 的关系 | **五条线仍不合并**：`D-011` 召回通道、`D-012` 判定单元、`D-013` 判定单元身份、`D-014` 数据归属与候选池可得性、`D-015` 候选排序/深挖预算/来源呈现，本条管**粗筛词的选择**。`D-015` 的「召回变宽 ≠ 放行变宽」前提**继续成立**，本条补的是「召回还没变宽到该去的地方」。历史拍板文本原样保留（M31/M32/M33 钉住） |
 | 落地 | 2026-11-07 21:20：本轮**只做只读诊断与建档**——新增 `server/scripts/kb-hit-diagnose.mjs`（默认只读，可重跑）、`P-013`、本条台账、今日日志与 `MEMORY.md` 红线订正。**未改业务代码、未写生产数据（`--full` 未跑）、未部署**。样本 6+5 条仅作方向性证据，**不得据此计算召回率**，唯一够格指标仍是 `0021 review_events`（当前 0 行） |
 
+## D-016 执行记录（2026-11-07 21:2x–22:2x，追加）
+
+> 上方 D-016 表格是**拍板前的评审文本，原样保留**。本小节记录拍板后的实跑结果，含一次 **falsifier 触发**，按 `OPS-22 §3.4` 留痕，**不自行改判、不宣称达标**。
+
+**拍板**（思傅 21:2x 逐题）：① **A+B 分两步**（本轮实施 A，B 另立提案）② **英文题干一起修** ③ **本地做完直接部署后端** ④ **`TEXT_RECALL_KEYS` 保持 4，只换选词策略**。
+
+**执行期偏差（比提案更保守，已判据化）**：提案原写「改 `question-match.ts` 的 `keys` 组装」，实施改为**判定层真相源一行不动**，只在 `netdisk-search.service.ts` 新增 `pickTextAnchors()` / `isGenericPointLabel()` / `LATIN_STOP` 并改 `extractKeys()`。理由：`longAnchors` 由 `anchors` 组装，改 `keys` 虽不影响判定，但不如字面零改动干净 ⇒ M35 用**源码 sha256 + `longAnchors` 逐字快照**双重钉住。另：本轮装了 5 个产物（比 D-015 的 4 个多 `netdisk-search.service.d.ts`，因新增 export 导致 d.ts 变化，保持同组一致）。
+
+**门禁（全绿）**：M27–M35 **111/111**（新增 M35 8/8）、`check:isolation` **150/150**、`method:check` H1/H2/H3、`verify:gate` **37/37**、`nest build` 0。旧模块 M27/M31/M32/M33/M34 的 `CACHE_VERSION` 断言按红线同步 `v8→v9`（脚本批量替换 + 每文件命中数断言）。
+
+**部署**（`QA-16 §6.1.8`）：回滚点 `dist.bak-p013-20261107-2216`；两边完整 sha256 清单本地 539 / L3 536，**19 项差异逐个确认归属** ⇒ 本轮 5 个产物，其余 14 项全是 §6.1.7.1 登记的明确排除项（4 组身份治理、`anon-bootstrap-guard.*`、历史漏传 `answer-search.types.d.ts`、纯注释 `jobs.controller.js.map`、`tsbuildinfo`）。只 `install` 5 个文件；验包 `pickTextAnchors`×3 / `isGenericPointLabel`×3 / `LATIN_STOP`×3 / `CACHE_VERSION = 'v9'`×1 / `TEXT_RECALL_KEYS ?? 4`×1 / `MAX_DEEP_FILES ?? 8`×1；部署后复比 **5 个产物哈希逐一一致、剩余差异 14 项全是排除项**。`systemctl restart gk-api` ⇒ 公网 health **200**、Nest **1308ms** 启动、`journalctl` **0 ERROR**、`gk-api active`。
+
+**前后对照实绩**（`kb-hit-diagnose.mjs`，真实登录令牌，生产只读 + `--full` 用户侧）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 几何单题 `keys` | `DABC60/C60AB3/AB3BC5/BC5MN分`（题干开头碎片） | 判别性点名 + 全题干均匀采样 |
+| 英文题干 `keys` | `tsun/unam/swep/thro/roug/vill`（4 字碎片） | `tsunami/swept/through/village/destroyed/houses` |
+| 几何正文召回 | 43 份 | **103 份**；英语从 1–7 份 → **281–357 份** |
+| 原题文件进深挖池 | **0 份** | **排第 1、2 位**（`keyHits=9 / textHits=4`，「热点07 特殊四边形…解析版/原卷版」） |
+| 顶层对象锚点共现 | `1/17` | `18/18`（ratio=1）、完整原题 `20/20`、`ask=same` |
+| 完整库内原题自检 | — | **`exact=2`、带来源定位 2**（判定链路无回归） |
+| 单次耗时 | 42–1576ms | **89–2686ms**（< 3s 预算） |
+| **6 条真实录入题 `mode=kb`** | `exact=0 / verified=false / ans=0` | **`exact=0 / verified=false / ans=0`（未改善）** |
+| 5 个手工单题 | `exact=0` | **`exact=0`（未改善）** |
+
+🔴 **falsifier ① 触发**：`P-013 §3 ⑤` 写「修复前后同批题 `exact` 数没有上升 ⇒ 判断错了，改实现」。实测 **exact 仍是 0**，6 条用户侧 `answer-search` 全 `source=netdisk / verified=false / 答案 0 字`。**不自行改判、不宣称达标**；按 `OPS-22 §3.4` 留痕，处置交思傅裁决（保留 / 回滚）。回滚命令：`sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad && sudo -n mv /opt/gk/server/dist.bak-p013-20261107-2216 /opt/gk/server/dist && sudo -n systemctl restart gk-api`（`CACHE_VERSION v9` 缓存行自然成为孤儿，无需数据回滚）。
+
+**但召回缺陷确实被修好且可证**（不是「解释数据」）：原题文件从「一份都进不了深挖池」变为**排第 1、2 位**，锚点共现 1/17→18/18；完整库内原题 `exact=2` 证明判定层未退化。⇒ 「修召回 ⇒ exact 上升」这一**因果预期**不成立，因为还有两个此前被召回缺陷遮住的独立瓶颈：
+
+1. **上游题干质量（重新成为第一瓶颈）**：真实题是整页（1 条 17,035 字）／多题连排／OCR 错字，导致**设问一致性硬闸**正确拒绝 —— 截断 320 字题干 `askQuestion=range` vs 资料 `area` 判 conflict，完整 375 字则 `ask=same` 且 `exact=2`。同一批真实题出现「题干问 `existence`、资料问 `area`/`range`」⇒ 多小问串行。⚠️ 这**印证了 20:xx 被证伪的那条判断在第二步成立**：召回修好后，切题质量才浮出水面。
+2. **判定层对英文题干无判定能力**：`extractDistinctive()` 对纯英文返回 `anchors=[]` ⇒ `题干提不出 ≥3 个长锚点，没有判定能力`。这是 `question-match.ts` 的设计限制，动它需新提案且第二层上线准入仍锁。
+
+**本轮不宣称**：「已提升命中」「误判归零」「所有用户已可用」「精准定位到题」；P-013 目标（真实题拿到 exact）**未达成**。样本 6+5 条仍只是方向性证据，**不得计算召回率**，唯一够格指标仍是 `0021 review_events`（当前 0 行）。**仍锁**：`strict=1`、第二层上线准入、「题干 A＋别人解析」残余风险、`.doc`/大 PDF 补抽、4 个身份治理改动、用户贡献通道、双账号真实登录 E2E、P-012 来源卡片前端发版。
+
+**待办（均需另立提案 / 思傅拍板）**：① 上游切题与 OCR 质量（P1，按 20a §5.1 三问 + §6.2 M1–M11）；② 英文题干判定锚点（动判定层，第二层准入未全绿前不得放宽）；③ 方案 B 对象级召回通道；④ 本次 falsifier 的处置（保留 / 回滚）。**未 push**。
+
