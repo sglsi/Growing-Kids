@@ -1261,6 +1261,24 @@ export function searchSolution(question: string) {
 // 题目答案：联网搜答案（思傅 2026-10-21）
 // ============================================================
 
+/**
+ * P-015 / D-018：参考例题（题目不完全一致、但解题思路可借鉴的库内原题）。
+ * 与后端 `server/src/shared/question-reference.ts` 的 ReferenceExample 字段对齐；
+ * 按项目惯例不跨端 import。🔴 stem 与 solution 来自同一道题，绝不拼接。
+ */
+export interface ReferenceExample {
+  stem: string
+  solution: string
+  sourceId: string
+  sourceName: string
+  objectIndex: number
+  label: string
+  charStart: number
+  charEnd: number
+  sharedSignals: string[]
+  solutionChars: number
+}
+
 /** 联网搜答案的返回（与后端 answer-search.service 对齐） */
 export interface AnswerSearchResult {
   /**
@@ -1298,6 +1316,13 @@ export interface AnswerSearchResult {
     char_start: number
     char_end: number
   }
+  /**
+   * P-015 / D-018：没有找到原题答案时，可借鉴解题思路的库内例题。
+   * 🔴 只作展示：answer 仍为空、verified 仍为 false、不提供「采纳」。
+   *    展示前必须先渲染 reference_disclaimer（缺失时用前端镜像兜底）。
+   */
+  references?: ReferenceExample[]
+  reference_disclaimer?: string
 }
 
 /**

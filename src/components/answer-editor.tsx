@@ -17,6 +17,8 @@ import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult } from '@/services/api'
+// P-015 / D-018：事先声明文案的前端镜像（服务端缺字段时兜底，绝不出现「有内容、无声明」）
+import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference-disclaimer'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
 /**
@@ -99,6 +101,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }, [])
   const [candidate, setCandidate] = useState<AnswerSearchResult | null>(null)
+  // P-015 / D-018：参考例题默认折叠，点「展开」才显示完整题目与解题过程
+  const [expandedRefs, setExpandedRefs] = useState<Record<number, boolean>>({})
   // 裁剪：进入编辑器前先记住目标，确认后写回**同一条** item
   const [cropSrc, setCropSrc] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -342,9 +346,13 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }
 
+  // P-015 / D-018：参考例题与原题答案并列，只作展示，不冒充本题答案
+  const hasRefs = !!candidate && (candidate.references?.length ?? 0) > 0
+
   // P-006 / D-009：同主题资料不是这道题的答案，禁止写进题库。
   // 前端隐藏「采纳」按钮 + 保存前再拦一道（双保险），异常返回也拦得住。
-  const canAdopt = !!candidate && candidate.match_level !== 'topic' && candidate.match_level !== 'none'
+  // 🔴 P-015：即使结构将来变化，只要带 references 就一律不给「采纳」。
+  const canAdopt = !!candidate && candidate.match_level !== 'topic' && candidate.match_level !== 'none' && !hasRefs
 
   const handleAdopt = async () => {
     if (!candidate) return
@@ -544,7 +552,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       </View>
 
       {/* 搜到的候选答案：必须「采纳」才入库 */}
-      {candidate && candidate.source !== 'none' ? (
+      {candidate && (candidate.source !== 'none' || hasRefs) ? (
         <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(16, 185, 129, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(16, 185, 129, 0.08)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
             <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND_TEXT }}>
@@ -554,11 +562,13 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                   // P-006 / D-009：按原题判定分档，netdisk 与 kb 一视同仁——
                   // ima 语义检索命中也可能只是同专题不同题，不得无条件叫「资料库检索结果」。
                   // 未带 match_level 的旧契约仍走原文案，避免老结果显示成「没找到」。
-                  ? candidate.match_level === 'exact'
-                    ? '找到这道题的参考答案'
-                    : candidate.match_level === 'topic'
-                      ? '没找到这道题的答案，以下是同主题资料'
-                      : `资料库检索结果（${candidate.refs.length} 条）`
+                  ? hasRefs
+                    ? '没找到原题答案 · 以下是解题思路相近的例题'
+                    : candidate.match_level === 'exact'
+                      ? '找到这道题的参考答案'
+                      : candidate.match_level === 'topic'
+                        ? '没找到这道题的答案，以下是同主题资料'
+                        : `资料库检索结果（${candidate.refs.length} 条）`
                   : candidate.source === 'llm'
                     // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
                     // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写
@@ -568,6 +578,53 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />
           </View>
+          {/* P-015 / D-018：事先声明 —— 必须排在任何参考内容（以及本题 answer）之前渲染。
+              服务端字段缺失时用前端逐字镜像兜底，绝不出现「先给内容、后给声明」。 */}
+          {hasRefs ? (
+            <View className="mb-2 rounded-lg p-2" style={{ borderColor: '#E8A33D', borderWidth: 1, backgroundColor: 'rgba(232,163,61,0.14)' }}>
+              <Text className="block text-xs font-semibold mb-1" style={{ color: '#8A5A12' }}>事先声明</Text>
+              <Text className="block text-xs" style={{ color: '#8A5A12' }}>
+                {candidate?.reference_disclaimer || REFERENCE_DISCLAIMER}
+              </Text>
+            </View>
+          ) : null}
+          {/* P-015 / D-018：参考例题。题目与解题过程均来自资料库里**同一道**原题，
+              服务端同源配对、带来源位置；这里只展示，不写进本题答案、不提供采纳。 */}
+          {hasRefs ? (
+            <View className="mb-2">
+              {candidate?.references?.map((r, i) => {
+                const open = !!expandedRefs[i]
+                const stem = open ? r.stem : r.stem.slice(0, 220) + (r.stem.length > 220 ? '…' : '')
+                const sol = open ? r.solution : r.solution.slice(0, 400) + (r.solution.length > 400 ? '…' : '')
+                return (
+                  <View
+                    key={`${r.sourceId}-${r.objectIndex}-${i}`}
+                    className="mb-2 rounded-lg border p-2"
+                    style={{ borderColor: 'rgba(11,122,85,0.18)', backgroundColor: '#FFFFFF' }}
+                  >
+                    <Text className="block text-xs font-medium mb-1" style={{ color: '#8A5A12' }}>
+                      注意：{REFERENCE_ITEM_HINT}
+                    </Text>
+                    <Text className="block text-xs font-semibold" style={{ color: BRAND_TEXT }}>例题 {i + 1} · 题目</Text>
+                    <Text className="block text-xs mb-1" style={{ color: INK }}>{stem}</Text>
+                    <Text className="block text-xs font-semibold" style={{ color: BRAND_TEXT }}>解题过程</Text>
+                    <Text className="block text-xs mb-1" style={{ color: INK }}>{sol}</Text>
+                    <View onClick={() => setExpandedRefs((v) => ({ ...v, [i]: !v[i] }))}>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
+                        {open ? '收起' : '展开完整题目与解析'}
+                      </Text>
+                    </View>
+                    <Text className="block text-xs text-muted-foreground mt-1">
+                      来源：{r.sourceName || '运营者提供的公共资料库'} · {r.label ? `题号 ${r.label}` : `第 ${r.objectIndex + 1} 题`}
+                    </Text>
+                    <Text className="block text-xs text-muted-foreground">
+                      思路相近的依据：{r.sharedSignals.join('、')}
+                    </Text>
+                  </View>
+                )
+              })}
+            </View>
+          ) : null}
           {/* 搜到的答案/解析常含 LaTeX，用 MathText 渲染成数学式（思傅 2026-10-22） */}
           {candidate.answer ? (
             <View className="mb-1">
