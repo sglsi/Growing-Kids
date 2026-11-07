@@ -2066,3 +2066,53 @@ node scripts/db-restore.mjs --apply --target <url> --yes   # 真恢复（打到�
 #       归户删除的 593 对象 + 30 索引是冗余副本，如需恢复用 question-objects-build.mjs --apply 重建
 # 备份：gk-db-20261107-134812.gkbk（口令即现网备份口令，丢了备份永久作废）
 ```
+
+---
+
+## 6.1.7 P3 后端部署清单（2026-11-07 · P-012 / D-015）
+
+> 思傅 16:15 拍板「本地做完并直接部署后端」。**本轮无迁移、无生产数据写入**：P2 补齐与 P3 全是 `netdisk-search.service.ts` / `answer-search.service.ts` 的应用层改动，只换 dist + 重启。前端来源卡片仍需人工发版。
+
+| 步 | 命令 / 检查 | 判据 |
+|---|---|---|
+| 0 | 本地 `npx nest build`；比两边完整 sha256 清单（Windows 端 `sha256sum` 带 `*`，先归一化） | 只应出现本轮 3 个产物差异：`netdisk/netdisk-search.service.{js,js.map,d.ts}`、`answer-search/answer-search.service.{js,js.map}`；**4 个身份治理文件仍永久排除** |
+| 1 | `cp -a dist dist.bak-p012-<时间戳>` | 完整回滚点 |
+| 2 | 精准 `install` 上述产物到 `/opt/gk/server/dist` | grep 特征串：`NETDISK_DEEP_FILES ?? 8` / `ONLINE_EXTRACT_ENABLED` / `CACHE_VERSION = 'v8'` / `CANDIDATE_TOP_N` |
+| 3 | `systemctl restart gk-api` | health 200、Nest 启动日志、journalctl **0 ERROR**、**0 次「资料正文召回读取失败」回退** |
+| 4 | 部署后 dist 哈希复比 | 剩余差异必须全是明确排除项（4 组身份治理 + 历史漏传类型 + 纯注释 sourcemap） |
+| 5 | A9 复测（自签 `X-Auth-Token`，admin / 匿名 / admin） | 三方逐字一致、`exact` 带 `sourceLocation`、深挖 ≤8 份、`tookMs` < 8s |
+| 6 | 线上环境变量核对（只看开关，不打印密钥） | `NETDISK_DEEP_FILES` / `NETDISK_DEEP_BUDGET_MS` / `NETDISK_ONLINE_EXTRACT` / `NETDISK_TEXT_RECALL` / `QUESTION_OBJECTS_STRICT` 均未设 ⇒ 走默认（8 / 8s / 关 / 开 / 0） |
+| 7 | 前端 `pnpm build:weapp` | 构建成功；**开发者工具重编译 + 真机重扫码 + 上传发布须思傅手动做**，来源卡片随该次发版生效 |
+
+**回滚**：`mv dist dist.bad && mv dist.bak-p012-<时间戳> dist && systemctl restart gk-api`。无数据回滚需求（本轮未写库、未迁移）；`CACHE_VERSION v8` 只让旧 `answer_cache` 行自然成为孤儿。
+
+**应急开关**：`NETDISK_TEXT_RECALL=0` 退回纯文件名召回；`NETDISK_ONLINE_EXTRACT=1` 恢复在线抽取；`NETDISK_DEEP_FILES=3` 可临时退回 P2 时期的深挖上限。三者都不需要回滚代码。
+
+### 6.1.7.1 执行实绩（2026-11-07 16:45–16:55，追加）
+
+> 上方 §6.1.7 是**执行依据清单**，本小节记录实跑结果；原文保留不改。思傅 16:15 已拍板「本地做完并直接部署后端」，无需二次确认。**本轮无迁移、无生产数据写入**。
+
+| 步 | 实绩 |
+|---|---|
+| 0 差异校准 | 本地 537 / L3 534 文件；内容差异 13 项中，**本轮只 4 个产物**（`netdisk-search.service.{js,js.map}`、`answer-search.service.{js,js.map}`）；其余 9 项全是明确排除（4 组身份治理 + 历史漏传 `answer-search.types.d.ts` + 纯注释 `jobs.controller.js.map`）；仅本地有的 3 个 `anon-bootstrap-guard.*` 永久排除 |
+| 1 回滚点 | `dist.bak-p012-20261107-1650` |
+| 2 精准安装 | 只 `install` 4 个文件；验包 `NETDISK_DEEP_FILES ?? 8`×1 / `ONLINE_EXTRACT_ENABLED`×2 / `CANDIDATE_TOP_N`×2 / `CACHE_VERSION = 'v8'`×1；未批准文件 0 |
+| 3 重启 | health **200**、Nest **412ms** 启动、`journalctl` **0 ERROR**、**0 次正文召回回退**、**0 次「达到扫描上限」告警** |
+| 4 哈希复比 | L3 534 文件；本轮 4 个产物哈希与本地**逐一一致**；剩余差异仍是那 9 项明确排除项 |
+| 6 开关核对 | `NETDISK_DEEP_FILES` / `NETDISK_DEEP_BUDGET_MS` / `NETDISK_ONLINE_EXTRACT` / `NETDISK_TEXT_RECALL` / `NETDISK_LOCAL_LIMIT` / `NETDISK_TEXT_LIMIT` / `NETDISK_CANDIDATE_TOP_N` / `QUESTION_OBJECTS_STRICT` **线上均未设置** ⇒ 走默认：8 / 8s / 关 / 开 / 2000 / 2000 / 300 / 0 |
+| 数据态 | `question_objects` 326,087 行 / owner=1 / 10,437 来源；`netdisk_files` 78,400 行 / owner=1；`text_flat` **10,431/10,431**；GIN **318MB**（本轮未动数据） |
+| 7 前端 | `lint:build` 0、`build:weapp` 31.45s 成功。**开发者工具重编译 + 真机重扫码 + 上传发布仍须思傅手动做**，来源卡片随该次发版生效 |
+
+**A9 复测**（自签 `X-Auth-Token`，样本题 `2022年二模几何压轴题（解析版）.docx`）：
+
+```
+[admin1] status=200 hits=8 深挖=8 exact=2 定位=2 tookMs=1044
+[anon]   status=200 hits=8 深挖=8 exact=2 定位=2 tookMs=920
+[admin2] status=200 hits=8 深挖=8 exact=2 定位=2 tookMs=899
+三方逐字一致(剔除耗时) PASS ｜ 深挖份数 <= 8 PASS ｜ tookMs < 8000 PASS ｜ exact 带来源定位 PASS
+note: 文件名 / 路径 + 资料正文双通道检索（深挖 8 份）；资料正文召回命中 79 份；原题判定命中 2 份
+```
+
+⚠️ 与上一轮（§6.1.6，深挖 3 / `exact=1`）相比，本轮 `exact=2`、正文召回命中 79 份（上轮 33 份）。这是**候选池变宽后有过闸对象**，不是「判定变松」：六条硬闸与 P1 校验一行未动，`question-match.ts` 本轮未改。**不得据此宣称「召回提升 = 更准」或「误判归零」**；「题干 A + 别人解析」残余风险与第二层上线准入仍未全绿。
+
+**回滚**：`mv dist dist.bad && mv dist.bak-p012-20261107-1650 dist && systemctl restart gk-api`。应急开关见 §6.1.7 末尾。
