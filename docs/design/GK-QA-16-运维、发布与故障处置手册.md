@@ -2196,3 +2196,55 @@ sudo -n mv /opt/gk/server/dist.bak-p014-20261107-2320 /opt/gk/server/dist
 sudo -n systemctl restart gk-api
 ```
 无数据回滚需求；`CACHE_VERSION v10` 缓存行自然成为孤儿。
+
+---
+
+### 6.1.10 P-015 / D-018：相似例题思路借鉴与事先声明（2026-11-07 23:5x）
+
+> 提案 `P-015`（已批准）｜ 台账 `D-018` ｜ 思傅 23:50 重锚最终目的＝**「检索到该题目的正确解答思路和解答过程」**。
+> 🔴 本轮**判定层 `question-match.ts` 一行未动**，新增的是并列的参考例题层；`answer` 仍只来自 `exact`、`verified` 语义与「采纳」闸门零放宽。**不宣称**命中提升 / 修复有效 / 误判归零。
+
+**本轮要解决的**：`D-017` 后 8 条真实题仍 `exact=0/8`，但 L3 只读取证显示 `question_objects` **326,087** 行、`has_solution` **92,357**、解析 >30 字 **89,192**；几何「中点+60°+面积」相似题 134 道。库内 `BMDN` 例题含完整【分析】【详解】（全等三角形 / 垂线段最短 / sin60°），孩子问的是「面积最大值」、库里是「周长最小值」⇒ **同图形同方法，正是可借鉴的解题思路**。此前 `topic` 只返回 5 个文件名，把内容全锁住了。主流做法对比见 `P-015 §1`（作业帮「一步搞懂同类题」、夸克「从学会一道题到学会一类题」、专利 CN119990146A「试题库规模必然是可穷尽的」）。
+
+| 步 | 实绩 |
+|---|---|
+| 范围 | 新增 `server/src/shared/question-reference.ts`（零业务依赖）+ 前端镜像 `src/constants/reference-disclaimer.ts`；`netdisk-search.service.ts` 深挖循环顺带收集、`answer-search.service.ts` 未 `settled` 时透传；`answer-search.types.ts` / `src/services/api.ts` / `answer-editor.tsx` 契约与呈现 |
+| 判据 | 通过 `validateStoredObject()`（与 `judgeWithStore` 共用 `storeValidationOpts()`）＋ `has_solution` 且解析 ≥60 字 ＋ 共现信号 ≥3（长锚点 / 学科术语 / 变量名）＋ 排除 exact 已放行对象 ＋ 上限 3 条；题干截 500 字、解析截 1200 字；**stem 与 solution 同源配对** |
+| 事先声明 | 服务端 `REFERENCE_DISCLAIMER` 随结果下发，前端**在任何参考内容之前**渲染「事先声明」banner，且每条例题卡片重复「这是资料库里的另一道题，不是本题答案，仅供借鉴解题思路」；服务端字段缺失时用前端逐字镜像兜底 |
+| 不做 | 向量库 / Reranker / 知识点图谱 / 大模型改写讲解 / 自动变式题 / 用户贡献通道 / `strict=1` 解锁 / 改深挖 8/8s/18s / 改 `TEXT_RECALL_KEYS=4` / 改输入闸门 / 写业务库表 / 迁移 |
+| 缓存 | result 结构新增 `references` / `reference_disclaimer` ⇒ `CACHE_VERSION v10 → v11`，同步 **7 个**旧模块断言（M27/M31/M32/M33/M34/M35/M36）；旧缓存会显示成「有内容但没声明」，必须整体失效 |
+| 验收集 | 新增 **M37** 9 组（判定层 sha256 / 判据静态 / 行为反证 / 声明三要素与顺序 / 结构不变量 / 接线 / v11 同步 / 文档 / 宣称词） |
+
+**部署实绩（2026-11-08 00:13–00:22）**
+
+| 步 | 实绩 |
+|---|---|
+| 0 差异校准 | 本地 `nest build` 后 **545** 文件 / L3 **539** 文件；完整 sha256 清单（Windows `*` 已归一化）**25 项差异逐个确认归属** ⇒ 本轮 **11 个产物**（新增 `shared/question-reference.{js,d.ts,js.map}` + 覆盖 `shared/question-object-store.{js,d.ts,js.map}`、`netdisk/netdisk-search.service.{js,d.ts,js.map}`、`answer-search/answer-search.service.{js,js.map}`）；其余 **14 项全是 §6.1.7.1 登记排除项**（4 组身份治理 10 个：`auth/auth.controller.*`、`shared/user-context.*`、`users/users.service.*`、仅本地 `shared/anon-bootstrap-guard.*`；＋`answer-search.types.d.ts`、纯注释 `jobs.controller.js.map`、2 个 `tsbuildinfo`）。⚠️ 本轮两个 `.d.ts` 因新增导出而哈希变化，**必须随包传**，不能沿用上轮「.d.ts 未变不传」的口径 |
+| 1 回滚点 | `sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-p015-20261108-0015` |
+| 2 精准安装 | `tar` 打 11 文件 → ssh stdin 写 `/tmp/gk-p015.tgz`（本地 / 远端 sha256 均 `01d007bb…`）→ 逐个 `sudo -n install -o gk -g gk -m 644`，`INSTALLED=11`。验包：`MIN_SHARED_SIGNALS`×3、`collectReferences`×1、`mergeReferences`×1、`REFERENCE_DISCLAIMER`×1、`disk?.references`×1、`storeValidationOpts`×4、`CACHE_VERSION = 'v11'`×1、`NETDISK_TEXT_RECALL_KEYS ?? 4`×1、`NETDISK_DEEP_FILES ?? 8`×1、`judgeStoredObjects`×1 |
+| 3 哈希复比 | 本轮 **11 个产物哈希逐一一致**；剩余差异 **14 项全是登记排除项**，未批准文件 0 |
+| 4 重启 | `systemctl restart gk-api` → `active`、Nest **420ms** 启动、`journalctl` **0 ERROR**；公网 `https://deep-root.cn/api/health` **200 / 0.21s** |
+| 5 门禁 | M27–M37 **128/128**（新增 M37 9/9）、`method:check` H1/H2/H3（13/140/2）、`verify:gate` **37/37**、`check:isolation` **150/150**、`lint:build` / `tsc` 0、`nest build` 0、`build:weapp` 11.68s 0；声明文案进 `dist/common.js`；`ide-verify --marker "以下不是本题答案"` ⇒ 特征串命中 + **8/8 冒烟** |
+| 6 线上开关 | 未新增/修改任何环境变量；`CACHE_VERSION v11` 让旧 `answer_cache` 行自然成为孤儿 |
+| 7 数据态 | **本轮未写业务库表、未迁移**；`question_objects` / `netdisk_files` / `text_flat` 均未变。端到端验收写了 **2 条 `answer_cache`**（用户检索本就会写），无其他生产写入 |
+| 8 前端上传 | `release-check --dev` **11 通过 / 2 警告 / 0 阻断** ⇒ CLI `islogin`（服务端口 `56654`，`login:true`）⇒ `upload --project "D:/AI/Growing-Kids" -v 2026.11.08.1` ⇒ **`√ upload` 872.0 KB / 892939 Byte**，AppID `wx48bf5ba9bae0bf39`。⚠️ 两次 `code 10` 均自查解决：第一次 `错误 undefined`（IDE 未打开项目）⇒ `cli.js open --project`；第二次 `错误码 -38 当前还有任务在编译中`（`open` 触发重编译）⇒ 等编译完成后重传成功。**上传只产生开发版**；体验版 / 正式版仍须 mp 后台「设为体验版」或提审发布 |
+
+**端到端实绩（验收口径＝参考例题非空且结构不变量不破，不是 exact 上升）**
+
+| 输入 | 链路 | 结果 |
+|---|---|---|
+| 干净几何单题（103 字） | `GET /api/netdisk/search` | 1834ms、`hits=8 / exact=0 / **references=3**`、`referenceDisclaimer` 97 字；note 追加「另有 3 道解题思路相近的例题可供借鉴（不是本题答案，展示前须先声明）」 |
+| 干净几何单题（103 字） | `POST /api/answer-search/:id {mode:"kb"}` | 4484ms、`source=netdisk / match_level=topic / **verified=false** / **answer=0字** / **references=3** / disclaimer 97 字`。⚠️ 4484ms 是整链路（含 ima 串行兜底），**不是**判定层 `P95<3s` 指标，不得混写 |
+| 多小问（242 字）/ 作文要求（57 字） | 两条链路 | 36–100ms / 2451ms、`hits=0 / refs=0` + `D-017` 闸门提示「请把要查的那道小题单独录入后再搜答案」，**未产生无声明内容** |
+
+三条参考例题（真实生产对象，非构造）：①《重难点04 最值问题-2023中考数学专练（解析版）》第 44 题，1101 字解析含【答案】【分析】与全等三角形推导；②《专题26 相似三角形中由动点引起的分类讨论》第 15 题，423 字；③《考点15 等腰三角形》第 71 题，330 字（中位线定理 + 面积 + 勾股）。共现信号均为「中点 / 面积 / ABC / AC / AB / CD / BC / AD」等 ⇒ **同知识点、同方法，符合思傅定义的「思路可借鉴」**。
+
+**falsifier 结论（本轮通过，但只说明这一层可用）**：干净单题参考例题 **非空（3 条）**、抽看三条均为同知识点 / 同方法；`answer` 恒空、`verified` 恒 false、前端隐藏「采纳」；声明先于内容。⚠️ **样本仅 3 类输入，不得据此计算召回率或写成「所有用户已可用」**；唯一够格的结果指标仍是 `0021 review_events`（当前 0 行）。英文 OCR 错字样本（`tsunamie thrqugh`）本期不覆盖，`tsunami` 带解析 0 行。
+
+**回滚**：
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad
+sudo -n mv /opt/gk/server/dist.bak-p015-20261108-0015 /opt/gk/server/dist
+sudo -n systemctl restart gk-api
+```
+无数据回滚需求；`CACHE_VERSION v11` 缓存行自然成为孤儿。前端开发版单槽位不可回退，只能重新上传旧包。
