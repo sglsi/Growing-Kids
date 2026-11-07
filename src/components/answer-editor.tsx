@@ -581,6 +581,28 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
               <MathText text={candidate.solution.slice(0, 200)} size={12} color="#7A736A" />
             </View>
           ) : null}
+          {/* P3 / P-012 / D-015：来源卡片。只在 exact 展示 —— topic/none 一律不展示，
+              否则等于给「没找到原题」的结果背书。只渲染已有的 source_location，
+              不新增答案内容、不做自动跳题；「题干 A + 别人解析」的残余风险仍在，
+              家长必须能按题号回原文核对（报告 §8.4 / §8.5 第 3 条）。 */}
+          {candidate.match_level === 'exact' && candidate.source_location ? (
+            <View className="mb-2 rounded-lg border p-2" style={{ borderColor: 'rgba(11,122,85,0.18)', backgroundColor: 'rgba(11,122,85,0.04)' }}>
+              <Text className="block text-xs font-medium mb-1" style={{ color: BRAND_TEXT }} numberOfLines={2}>
+                来源：{candidate.source_location.source_name || '运营者提供的公共资料库'}
+              </Text>
+              <Text className="block text-xs text-muted-foreground">
+                {candidate.source_location.label
+                  ? `题号 ${candidate.source_location.label}`
+                  : `第 ${candidate.source_location.object_index + 1} 题`}
+                {candidate.source_location.char_start >= 0
+                  ? ` · 原文第 ${candidate.source_location.char_start}–${candidate.source_location.char_end} 字`
+                  : ''}
+              </Text>
+              <Text className="block text-xs text-muted-foreground mt-1">
+                请打开文件核对原题与解析后采纳
+              </Text>
+            </View>
+          ) : null}
           {/* 参考来源：联网搜题的价值就在这——点一下复制链接去浏览器看原文；
               知识库条目没有外链，只列表展示 */}
           {candidate.refs.length ? (
