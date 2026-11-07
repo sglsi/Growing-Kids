@@ -183,9 +183,9 @@ m.test('🔴 A3 0027 只加列 + 索引；回填脚本默认 dry-run、只写 te
 // 三、缓存版本与合规文案（A7 / A8）
 // ============================================================
 
-m.test('🔴 A7 CACHE_VERSION = v8 且参与 qHash（note 与候选池都变了）', (c) => {
+m.test('🔴 A7 CACHE_VERSION = v9 且参与 qHash（note 与候选池都变了）', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v8'/.test(as), 'CACHE_VERSION 没 bump 到 v8')
+  c.ok(/const CACHE_VERSION = 'v9'/.test(as), 'CACHE_VERSION 没 bump 到 v9')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   c.ok(/公共资料库里找到了这道题的答案/.test(as), '面客 note 还写着「你自己的题库」')
   const nd = read(SERVICE_ND)

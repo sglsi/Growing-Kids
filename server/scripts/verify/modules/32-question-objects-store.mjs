@@ -282,7 +282,7 @@ m.test('🔴 取数红线：无 RLS 必须带 user_id，两处数据源都走同
   c.ok(as.includes('judgeWithStore(question, text, rows,'), 'library_docs 没接结构化入口')
   c.ok(nd.includes('loadQuestionObjects(') && as.includes('loadQuestionObjects('), '取数口没有共用')
   c.ok(nd.includes('judgeObjects(question, text,') && as.includes('judgeObjects(question, text,'), 'P0 回退路径被删掉')
-  c.ok(/const CACHE_VERSION = 'v8'/.test(as), 'CACHE_VERSION 没 bump 到 v8，老缓存会绕过人工修复')
+  c.ok(/const CACHE_VERSION = 'v9'/.test(as), 'CACHE_VERSION 没 bump 到 v9，老缓存会绕过人工修复')
 })
 
 // ============================================================
@@ -365,7 +365,7 @@ m.test('🔴 部署新 dist（2026-11-07）：口径修复已登记且 strict �
   const p = read(PROPOSAL)
   c.ok(/部署新 dist|判定链路/.test(p), 'P-010 没登记部署决策')
   const s = read('server/src/answer-search/answer-search.service.ts')
-  c.ok(/const CACHE_VERSION = 'v8'/.test(s), '部署后 result 结构变了但缓存版本没 bump')
+  c.ok(/const CACHE_VERSION = 'v9'/.test(s), '部署后 result 结构变了但缓存版本没 bump')
 })
 
 export default m
