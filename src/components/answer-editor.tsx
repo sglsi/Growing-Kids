@@ -302,7 +302,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     //    ima 知识库找，不做 AI 生成，被「AI 与在线检索」连坐是误伤。但题干确实会
     //    发到腾讯 ima ⇒ 仍需监护人已同意隐私政策（guardPolicy 兜这道）。
     if (searchMode === 'kb') {
-      if (!(await guardPolicy('检索我的资料库'))) return
+      if (!(await guardPolicy('检索公共资料库'))) return
     } else if (!(await ensureAiSetting())) {
       Taro.showToast({ title: AI_DISABLED_HINT, icon: 'none' })
       return
@@ -359,7 +359,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         solution: candidate.solution,
         attachments: atts,
         refs: candidate.refs,
-        // netdisk 命中自己网盘里的资料 ⇒ 记 library（与「从我的资料库插入」同源），
+        // netdisk 命中运营者提供的公共资料库 ⇒ 记 library（与「从资料库插入」同源），
         // 不要落到 mixed：mixed 是「检索+手工混合」的意思，会造成来源统计失真
         source:
           candidate.source === 'netdisk'
@@ -507,7 +507,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
-        {/* 资料库搜题：先查**你自己的**百度网盘资料（文件名+正文两级），未命中再查 ima 知识库；
+        {/* 资料库搜题：先查运营者提供的公共资料库（文件名/路径 + 资料正文双通道），未命中再查 ima 知识库；
             全程只检索、不生成内容、不喂给 AI。
             ⚠️ 不受 AI_PUBLIC_ENTRY 约束（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
             它跟「AI 解题」不是一回事，被一起收起属于误伤。 */}
