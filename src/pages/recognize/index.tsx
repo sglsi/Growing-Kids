@@ -30,6 +30,8 @@ import { nudgeLoginIfAnonymous } from '@/services/auth'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, INK } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
+// P-014 / D-017：录入侧引导（前端镜像，与 server/src/shared/input-guard.ts 逐字一致）
+import { guardQuestionInput } from '@/constants/input-guard'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -1755,6 +1757,13 @@ export default function RecognizePage() {
                       onInput={(ev) => setEntryText(idx, ev.detail.value)}
                     />
                   </View>
+                  {/* P-014 / D-017：只提示、不拦截保存；整页 / 多小问 / 非题目文本
+                      拿去搜答案会撞出「题干 A＋别人解析」的假 exact（20a M10/M11） */}
+                  {e.text.trim() && !guardQuestionInput(e.text).ok ? (
+                    <Text className="block text-xs mt-2" style={{ color: '#B45309' }}>
+                      提示：{guardQuestionInput(e.text).message}
+                    </Text>
+                  ) : null}
                 </View>
               ))}
               <View onClick={addEntry} className="w-full h-10 rounded-xl flex items-center justify-center" style={{ border: '1px dashed #C9C2B8' }}>
