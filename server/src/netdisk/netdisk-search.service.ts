@@ -315,7 +315,7 @@ export class NetdiskSearchService {
         if (!TEXT_EXTS.has(ext)) continue
         if (cand.sizeBytes > MAX_TEXT_BYTES) continue
         try {
-          const text = await this.ensureText(userId, cand)
+          const { text, sourceId } = await this.ensureText(userId, cand)
           if (!text) continue
           const score = coverage(qSet, text)
           if (score < 0.2) continue
@@ -323,10 +323,14 @@ export class NetdiskSearchService {
           // exact 必须同时带来源位置；未达标一律 topic（answer 为空，见报告 §8）。
           // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
           // P-010 / D-013：先查入库时绑定的题目对象（带内容指纹 / 正文版本 / 定点排除）。
-          // 没有可用对象时回退 P0 全文判定，保证铺量期不倒退；
-          // QUESTION_OBJECTS_STRICT=1 时无对象即不给 exact（上线准启用）。
-          const source = { sourceId: String(cand.fsId), sourceName: cand.name }
-          const rows = await loadQuestionObjects(getSupabaseClient(), userId, 'netdisk', source.sourceId)
+          // 🔴 source_id 口径：构建脚本按 netdisk_files.id（varchar36）入库，
+          //    绝不能用 cand.fsId（百度网盘数字 fs_id）——两者对不上会让 rows 恒为空、
+          //    整条网盘链路静默回退 P0，结构化数据等于白铺。M32 有静态断言。
+          //    仅当本次正文刚抽、还没铺量（sourceId=''）时才回退 P0。
+          const source = { sourceId: sourceId || String(cand.fsId), sourceName: cand.name }
+          const rows = sourceId
+            ? await loadQuestionObjects(getSupabaseClient(), userId, 'netdisk', sourceId)
+            : []
           const j = judgeWithStore(question, text, rows,
             () => judgeObjects(question, text, source))
           const snippet = this.snippetFor(question, text)
@@ -494,11 +498,15 @@ export class NetdiskSearchService {
    * 取（必要时抽）某份文件的正文。
    * 命中缓存直接返回；扫描版记 text_status=none，避免每次检索都白下载。
    */
-  private async ensureText(userId: string, cand: NetdiskHit): Promise<string> {
+  private async ensureText(
+    userId: string,
+    cand: NetdiskHit,
+  ): Promise<{ text: string; sourceId: string }> {
     const client = getSupabaseClient()
     const ext = (cand.name.match(/\.([A-Za-z0-9]{1,6})$/) || [, ''])[1].toLowerCase()
 
-    // ① 缓存：已抽过就直接用
+    // ① 缓存：已抽过就直接用。🔴 必须把 netdisk_files.id 一起带出去：
+    //    question_objects.source_id 用的是这一列，不是 cand.fsId（见上方深挖块注释）。
     const { data: cached } = await client
       .from(TABLE)
       .select('id, text_content, text_status')
@@ -506,14 +514,19 @@ export class NetdiskSearchService {
       .eq('fs_id', cand.fsId)
       .maybeSingle()
     const row = cached as CacheRow | null
-    if (row?.text_status === 'ok' && row.text_content) return row.text_content
-    if (row?.text_status === 'none' || row?.text_status === 'skipped') return ''
+    if (row?.text_status === 'ok' && row.text_content) {
+      return { text: row.text_content, sourceId: String(row.id || '') }
+    }
+    if (row?.text_status === 'none' || row?.text_status === 'skipped') {
+      return { text: '', sourceId: '' }
+    }
 
-    // ② 纯文本直接下（不必进 python）
+    // ② 纯文本直接下（不必进 python）。刚抽的正文还没铺量 ⇒ sourceId 留空，
+    //    判定层回退 P0，等下次 question-objects-build.mjs --apply 后自然接上。
     const buf = await this.netdisk.downloadByFsId(cand.fsId)
     if (!buf || buf.length === 0) {
       await this.saveCache(userId, cand, '', 'none')
-      return ''
+      return { text: '', sourceId: '' }
     }
 
     let text = ''
@@ -534,11 +547,11 @@ export class NetdiskSearchService {
         //    写成 none 等于永久判死，环境修好后也再不会重试。保持未抽状态即可。
         if (out.reason === 'no-python' || out.reason === 'no-script' || out.reason === 'timeout') {
           this.logger.warn(`[netdisk] 抽正文环境不可用（${out.reason}）：${cand.name}，本次跳过且不缓存`)
-          return ''
+          return { text: '', sourceId: '' }
         }
         // 内容类失败（解析不了）才按「无正文」缓存，避免每次检索都白下载一遍
         await this.saveCache(userId, cand, '', 'none')
-        return ''
+        return { text: '', sourceId: '' }
       }
       text = out.data.pages.map((p) => p.text).filter(Boolean).join('\n')
       // 全篇几乎没字 = 扫描版：标 none，下次不再下载
@@ -548,7 +561,10 @@ export class NetdiskSearchService {
     }
 
     await this.saveCache(userId, cand, text.slice(0, MAX_TEXT_CHARS), status)
-    return status === 'ok' ? text.slice(0, MAX_TEXT_CHARS) : ''
+    return {
+      text: status === 'ok' ? text.slice(0, MAX_TEXT_CHARS) : '',
+      sourceId: '',
+    }
   }
 
   private async saveCache(
