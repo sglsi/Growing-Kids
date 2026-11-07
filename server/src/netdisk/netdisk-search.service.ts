@@ -42,14 +42,24 @@ import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/publi
  * `text_flat` 正文通道（只用 ≥4 字长锚点），合并去重后按锚点共现数排序。
  * `NETDISK_TEXT_RECALL=0` 可一键退回纯文件名召回。
  *
+ * ## P2 补齐 / P3（报告 §4 P2/P3，P-012 / D-015）
+ * - SQL 两条通道都按 `fs_id` 定序，`limit` 只作**扫描上限**（达上限留痕告警）；
+ *   共现数排序与取 top 一律在 JS 侧、**合并之后**完成，杜绝无排序的任意截断。
+ * - 统一打分：主排序键只有 `keyHits = nameHits + tHits×2`（归一化长锚点共现），
+ *   `score` 是同源共现率、只作展示；bigram `coverage` 退出主排序。
+ * - P3 深挖 3 → **8**，主预算 **8s** + 18s 绝对兜底；默认只消费离线铺量的正文，
+ *   `NETDISK_ONLINE_EXTRACT=1` 才允许实时下载抽取（应急回退）。
+ * - 🔴 **判定层一行未放宽**：`exact` 仍过 P0 六条硬闸 + P1 指纹/版本校验，
+ *   `QUESTION_OBJECTS_STRICT=1` 与第二层上线准入继续锁。
+ *
  * ## 已知边界（别对用户承诺过头）
  * - 扫描版 PDF（无文字层）抽不到正文 ⇒ 只能靠文件名/路径命中；
- * - 🔴 **深挖仍受 `MAX_DEEP_FILES=3` 限制（P3 仍锁）**：P2 只保证「原题能进候选池」，
- *   不保证排在前 3 的一定是它。正文命中数会把它前置，但不等于「都能搜到」；
+ * - 默认关闭在线抽取时，**未铺量正文的文件直接跳过深挖**（等离线抽取或开回退开关）；
+ * - 深挖 8 份仍是**上限**而不是承诺：排序靠共现数，不等于「都能搜到」；
  * - 索引是**快照**：网盘新增的文件要重跑脚本才进得来；删除的文件在
  *   `--full-clean` 完整遍历后才清理；
- * - P2 改的是**谁有资格被审**，不是「审得松一点」：`exact` 仍要过 P0 六条硬闸 +
- *   P1 指纹/版本校验，残余的「题干 A + 别人解析」风险**未消除**（报告 §8.4）。
+ * - P2/P3 改的是**谁有资格被审**，不是「审得松一点」：残余的
+ *   「题干 A + 别人解析」风险**未消除**（报告 §8.4）。
  */
 
 const TABLE = 'netdisk_files'
@@ -59,10 +69,22 @@ export function searchRoot(): string {
   return (process.env.NETDISK_SEARCH_ROOT || '/学生').trim().replace(/\/+$/, '') || '/学生'
 }
 
-/** 单次检索允许深挖正文的候选数（每本都要下载 + 抽文本，别贪多） */
-const MAX_DEEP_FILES = Number(process.env.NETDISK_DEEP_FILES ?? 3)
-/** 整次检索的正文深挖预算（毫秒）：超时就用已有的文件名结果返回 */
-const DEEP_BUDGET_MS = Number(process.env.NETDISK_DEEP_BUDGET_MS ?? 18_000)
+/**
+ * P3 / D-015：单次检索允许深挖正文的候选数。
+ * 8 份是拍板的保守档（报告 §4 原建议 20~30），配合 8s 主预算守住 §4 P0-3 的 P95<3s；
+ * 可用 `NETDISK_DEEP_FILES` 覆盖，但**不得靠放宽它补偿召回不足**。
+ */
+const MAX_DEEP_FILES = Number(process.env.NETDISK_DEEP_FILES ?? 8)
+/** P3：正文深挖主预算（毫秒），用完即按已有结果返回 */
+const DEEP_BUDGET_MS = Number(process.env.NETDISK_DEEP_BUDGET_MS ?? 8_000)
+/** P3：绝对兜底预算——任何配置下单次检索的深挖阶段都不得超过 18s */
+const DEEP_HARD_BUDGET_MS = 18_000
+/**
+ * P3：默认**禁止在线下载/抽取**，只消费离线铺量的 `text_status='ok'` 正文。
+ * 设 `NETDISK_ONLINE_EXTRACT=1` 才恢复原来的实时 downloadByFsId + OCR（应急/灾备回退）。
+ * 理由：C-资源（4 核 4G 不该在检索请求里扛 OCR），且在线路径会顺手写缓存。
+ */
+const ONLINE_EXTRACT_ENABLED = process.env.NETDISK_ONLINE_EXTRACT === '1'
 /** 可抽正文的扩展名（老 .doc 二进制 pdf_tool 解不了，只能按文件名命中） */
 const TEXT_EXTS = new Set(['pdf', 'docx', 'txt', 'md'])
 /** 单文件抽取上限：超大文件不值得为一次检索拉下来 */
@@ -72,11 +94,12 @@ const MAX_TEXT_CHARS = Number(process.env.NETDISK_TEXT_MAX_CHARS ?? 200_000)
 /** 单次检索最多并发几个 search key */
 const MAX_KEYS = 6
 /**
- * 本地索引粗筛的候选上限。
- * 索引里同一个词可能命中几百份（「体积」这种），取太多只会拖慢内存排序；
- * 真正决定排序质量的是 keyHits 与覆盖度，不在候选数量。
+ * P2 补齐：本地索引**扫描上限**（不是候选截断）。
+ * SQL 按 `fs_id` 定序后最多取这么多行，达到上限要留痕告警；
+ * 真正的「按共现数排序取 top」在两条通道合并后的 JS 侧完成。
+ * §3.5 实测 15,123 行曾被 `.limit(500)` 任意截断，正是这里要修的。
  */
-const LOCAL_CANDIDATE_LIMIT = Number(process.env.NETDISK_LOCAL_LIMIT ?? 500)
+const LOCAL_CANDIDATE_LIMIT = Number(process.env.NETDISK_LOCAL_LIMIT ?? 2_000)
 /**
  * 单个 search key 返回条数。
  * ⚠️ 别调小：网盘 search **没有稳定排序**，同一 key 两次调用返回的子集可能不同
@@ -92,8 +115,13 @@ const L1_POOL = 20
  *    10,454 份 / 9,450 万字上单次检索直接超时（报告 §4 P1-4）。
  */
 const TEXT_RECALL_KEYS = Number(process.env.NETDISK_TEXT_RECALL_KEYS ?? 4)
-/** P2 正文通道候选上限（与文件名通道合并后再统一截断） */
-const TEXT_CANDIDATE_LIMIT = Number(process.env.NETDISK_TEXT_LIMIT ?? 300)
+/** P2 补齐：正文通道**扫描上限**（语义同上，达到上限留痕告警） */
+const TEXT_CANDIDATE_LIMIT = Number(process.env.NETDISK_TEXT_LIMIT ?? 2_000)
+/**
+ * P2 补齐：两通道合并去重后，按统一分数排序取 top 的候选数。
+ * 🔴 这一道才是「top-N」——发生在排序**之后**，不是 SQL 的任意截断。
+ */
+const CANDIDATE_TOP_N = Number(process.env.NETDISK_CANDIDATE_TOP_N ?? 300)
 
 // ⚠️ 主题词表 / 噪声前缀已搬到 `shared/question-match.ts`（P-006 单一真相源）：
 //    检索与判定共用一份词表，避免「召回时算主题词、判定时又算一遍」出现口径漂移。
@@ -273,8 +301,9 @@ export class NetdiskSearchService {
     // 以前每次都实时搜网盘：3~7s，且网盘 search 返回的候选子集不稳定
     // ⇒ 同一道题连搜两次排序会变（R-工程-10）。现在文件清单已经预先落库
     // （scripts/netdisk-index.mjs），检索是纯 SQL：毫秒级、结果稳定、网盘抽风也能用。
+    // P2 补齐：粗筛不再需要 bigram qSet（统一打分只有长锚点共现数一个口径）
     const { hits: localHits, total: indexSize, textMatched } = await this.searchLocal(
-      keys, qSet, textAnchors,
+      keys, textAnchors,
     )
     for (const h of localHits) {
       pool.set(h.fsId, h)
@@ -329,9 +358,10 @@ export class NetdiskSearchService {
     }
 
     // P2 排序：正文通道命中的**长锚点数**最优先（与判定层同源），
-    // 其次才是文件名命中词数 / bigram 覆盖度。
-    // 🔴 这是「让原题进得了深挖池」的关键：MAX_DEEP_FILES 仍为 3（P3 锁），
-    //    正文命中的候选不前置的话，多召回的文档根本轮不到被判定。
+    // 其次才是统一共现数（keyCount 来自 searchLocal 的 keyHits）与同源 score。
+    // 🔴 P3 / D-015：深挖上限放宽到 8 后前置排序更重要 —— 8 个名额必须给
+    //    正文共现数最高的候选，否则 P2 多召回的文档依旧轮不到被判定。
+    //    两套分数已合并，bigram 覆盖度不再参与主排序。
     const ranked = [...pool.values()].sort(
       (a, b) =>
         (b.textHits || 0) - (a.textHits || 0) ||
@@ -347,9 +377,13 @@ export class NetdiskSearchService {
     // ---------- L2：对头部候选抽正文，补「文件名没写但正文里有」的情况 ----------
     const deepDone: NetdiskHit[] = []
     if (deep && l1.length > 0) {
+      // P3 / D-015：8s 主预算 + 18s 绝对兜底，两者任一到点即停。
+      // 放宽到 8 份不等于放弃 §4 P0-3 的 P95<3s：排序前置让最相关的先判，
+      // 预算保证「判不完就按已有结果返回」，绝不拖成慢请求。
       const deadline = started + DEEP_BUDGET_MS
+      const hardDeadline = started + DEEP_HARD_BUDGET_MS
       for (const cand of l1.slice(0, MAX_DEEP_FILES)) {
-        if (Date.now() > deadline) {
+        if (Date.now() > deadline || Date.now() > hardDeadline) {
           this.logger.log('[netdisk] 正文深挖超出预算，按已有结果返回')
           break
         }
@@ -453,7 +487,6 @@ export class NetdiskSearchService {
    */
   private async searchLocal(
     keys: string[],
-    qSet: Set<string>,
     textAnchors: string[],
   ): Promise<{
     hits: (NetdiskHit & { keyHits: number })[]
@@ -474,12 +507,18 @@ export class NetdiskSearchService {
       .eq('user_id', ownerId)
       .eq('is_dir', false)
       .or(ors)
+      // P2 补齐：定序消除 PostgREST 无 order 时的随机返回顺序（任意截断的根因）
+      .order('fs_id', { ascending: true })
       .limit(LOCAL_CANDIDATE_LIMIT)
     if (pageRes.error) {
       this.logger.warn(`[netdisk] 本地索引读取失败: ${pageRes.error.message}`)
       return { hits: [], total: 0, textMatched: 0 }
     }
     const rows = (pageRes.data || []) as { fs_id: number; name: string; path: string; size_bytes: number }[]
+    // 🔴 扫描上限只是保护，不是排序依据；到达上限必须留痕，不能静默吞掉可能的高共现候选
+    if (rows.length >= LOCAL_CANDIDATE_LIMIT) {
+      this.logger.warn(`[netdisk] 文件名通道命中达到扫描上限 ${LOCAL_CANDIDATE_LIMIT}，可能漏候选`)
+    }
 
     // ---------- 通道 B：资料正文（P2，只用 ≥4 字长锚点） ----------
     const textClean = [...new Set(
@@ -496,13 +535,18 @@ export class NetdiskSearchService {
         .eq('is_dir', false)
         .eq('text_status', 'ok')
         .or(textOrs)
+        .order('fs_id', { ascending: true })
         .limit(TEXT_CANDIDATE_LIMIT)
       if (textRes.error) {
         // 🔴 正文通道失败（含 0027 未迁移 / 列不存在）不能拖垮整次检索：
         //    留痕后退回纯文件名通道，绝不静默吞错（M18 精神）。
         this.logger.warn(`[netdisk] 资料正文召回读取失败，退回文件名通道: ${textRes.error.message}`)
       } else {
-        for (const r of (textRes.data || []) as (typeof rows[number] & { text_flat: string | null })[]) {
+        const textData = (textRes.data || []) as (typeof rows[number] & { text_flat: string | null })[]
+        if (textData.length >= TEXT_CANDIDATE_LIMIT) {
+          this.logger.warn(`[netdisk] 正文通道命中达到扫描上限 ${TEXT_CANDIDATE_LIMIT}，可能漏候选`)
+        }
+        for (const r of textData) {
           // SQL 侧 ilike 已过滤一遍；这里用同一套归一化复算共现数，
           // 避免 PostgREST 的 ilike 与 JS 的 String.includes 口径漂移。
           const flat = flatText(r.text_flat || '')
@@ -532,27 +576,36 @@ export class NetdiskSearchService {
     for (const r of rows) merged.set(Number(r.fs_id), r)
     for (const r of textRows) if (!merged.has(Number(r.fs_id))) merged.set(Number(r.fs_id), r)
 
-    const hits = [...merged.entries()].map(([fsId, r]) => {
-      const name = r.name || ''
-      const path = r.path || ''
-      const nameHits = clean.filter((k) => name.includes(k) || path.includes(k)).length
-      const tHits = textHitsByFs.get(fsId) || 0
-      return {
-        fsId,
-        name,
-        path,
-        sizeBytes: Number(r.size_bytes) || 0,
-        hit: 'name' as const,
-        // P2：score 与判定层同源——取 bigram 覆盖度与长锚点命中率的较大值
-        score: Number(Math.max(
-          coverage(qSet, name), coverage(qSet, path) * 0.6,
-          textClean.length > 0 ? tHits / textClean.length : 0,
-        ).toFixed(3)),
-        // 正文长锚点共现是比文件名主题词更强的信号（×2）
-        keyHits: nameHits + tHits * 2,
-        textHits: tHits,
-      }
-    })
+    // P2 补齐（D-015）：**统一打分口径**。
+    // 主排序键只有一个 —— 归一化长锚点共现数（正文 ×2，因为它与判定层同源）；
+    // `score` 是同一个分数的归一化比率，只作展示。bigram `coverage` 彻底退出
+    // 主排序（仅在实时兜底与深挖排障里保留），消除「召回按一套、判定按另一套」。
+    // 🔴 top-N 发生在**两通道合并之后、排序之后**，SQL 的 limit 只是扫描上限。
+    const hits = [...merged.entries()]
+      .map(([fsId, r]) => {
+        const name = r.name || ''
+        const path = r.path || ''
+        const nameHits = clean.filter((k) => name.includes(k) || path.includes(k)).length
+        const tHits = textHitsByFs.get(fsId) || 0
+        const keyHits = nameHits + tHits * 2
+        const denominator = Math.max(1, clean.length + textClean.length * 2)
+        return {
+          fsId,
+          name,
+          path,
+          sizeBytes: Number(r.size_bytes) || 0,
+          hit: 'name' as const,
+          score: Number((keyHits / denominator).toFixed(3)),
+          keyHits,
+          textHits: tHits,
+        }
+      })
+      .sort((a, b) =>
+        b.keyHits - a.keyHits ||
+        (b.textHits || 0) - (a.textHits || 0) ||
+        a.fsId - b.fsId,
+      )
+      .slice(0, CANDIDATE_TOP_N)
     return { hits, total, textMatched: textHitsByFs.size }
   }
 
@@ -622,6 +675,15 @@ export class NetdiskSearchService {
       return { text: row.text_content, sourceId: String(row.id || '') }
     }
     if (row?.text_status === 'none' || row?.text_status === 'skipped') {
+      return { text: '', sourceId: '' }
+    }
+
+    // P3 / D-015：默认**禁止在线下载/抽取**，只消费离线铺量的正文。
+    // 命中本分支说明这份资料还没被 question-objects-build / 抽取脚本铺量：
+    // 以前会实时 downloadByFsId + OCR（首次检索数秒且顺手写缓存），现在直接跳过，
+    // 由离线补齐；`NETDISK_ONLINE_EXTRACT=1` 才恢复原行为（应急/灾备回退）。
+    // 🔴 这一段必须放在下载之前，放在后面等于没关。
+    if (!ONLINE_EXTRACT_ENABLED) {
       return { text: '', sourceId: '' }
     }
 
