@@ -47,7 +47,8 @@ export class JobsController {
     //
     // ⚠️ **mode=kb（资料库搜题）单独放行**：与同步端点 `POST /api/answer-search/:id`
     //    同口径（`mode === 'kb' ? requireUserId : requireAiEnabled`）。它只检索用户
-    //    自己的网盘 / ima 资料、不做 AI 生成，不该被「AI 与在线检索」开关连坐。
+    //    运营者提供的公共资料库 / 用户自己的 ima 资料、不做 AI 生成，
+    //    不该被「AI 与在线检索」开关连坐（P-011 / D-014）。
     //    🔴 2026-11-04 修复：此前不分 mode 一律 requireAiEnabled，而 ai_enabled 默认
     //    false ⇒ 点「资料库搜题」提交即 403 AI_DISABLED，前端表现为「点了没反应」。
     //    放行是安全的：执行器（jobs.service）同样按 mode 分流，kb 只走 netdisk + ima。

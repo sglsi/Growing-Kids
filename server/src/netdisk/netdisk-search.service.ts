@@ -12,6 +12,8 @@ import {
 import type { SourceLocation } from '../shared/question-match'
 // P-010 / D-013：优先消费入库时预切分的结构化题目对象（P1），无对象时回退 P0
 import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
+// P-011 / D-014：公共资料库固定 owner + 正文归一化 + 召回开关
+import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/public-library'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -27,12 +29,27 @@ import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-s
  * 网盘 `method=search` 每次返回的候选子集不稳定，同一道题连搜两次排在前面的
  * 文件会变（R-工程-10），而且一次 3~7s。索引化之后这两个问题一起消失。
  *
+ * ## P-011 / D-014：公共资料库（2026-11-07 定稿）
+ * 这批教辅是**运营者提供、所有登录用户共享**的公共资料库，不带用户属性。
+ * 因此本服务对 `netdisk_files` / `question_objects` 的读写一律走
+ * `publicLibraryOwner()`（固定常量），**绝不按登录用户过滤**——否则 326,680 个
+ * 结构化对象对新账号零命中（11-07 L3 体检结论）。私有资料（`library_docs`、
+ * 错题、答案缓存）仍由各自 service 按 `userId` 隔离，不在本文件范围内。
+ * `check-isolation` 门禁仍然看得见 `.eq('user_id', …)`，无需任何豁免。
+ *
+ * ## P2 正文召回（报告 §4 P2）
+ * `searchLocal()` 从「只查 name/path」改为**双通道**：文件名/路径通道 +
+ * `text_flat` 正文通道（只用 ≥4 字长锚点），合并去重后按锚点共现数排序。
+ * `NETDISK_TEXT_RECALL=0` 可一键退回纯文件名召回。
+ *
  * ## 已知边界（别对用户承诺过头）
  * - 扫描版 PDF（无文字层）抽不到正文 ⇒ 只能靠文件名/路径命中；
- * - 正文匹配只在候选里做（`NETDISK_DEEP_FILES` 控制抽几份），题干关键词不出现在
- *   任何文件名里时会漏；
+ * - 🔴 **深挖仍受 `MAX_DEEP_FILES=3` 限制（P3 仍锁）**：P2 只保证「原题能进候选池」，
+ *   不保证排在前 3 的一定是它。正文命中数会把它前置，但不等于「都能搜到」；
  * - 索引是**快照**：网盘新增的文件要重跑脚本才进得来；删除的文件在
- *   `--full-clean` 完整遍历后才清理。
+ *   `--full-clean` 完整遍历后才清理；
+ * - P2 改的是**谁有资格被审**，不是「审得松一点」：`exact` 仍要过 P0 六条硬闸 +
+ *   P1 指纹/版本校验，残余的「题干 A + 别人解析」风险**未消除**（报告 §8.4）。
  */
 
 const TABLE = 'netdisk_files'
@@ -69,6 +86,14 @@ const LOCAL_CANDIDATE_LIMIT = Number(process.env.NETDISK_LOCAL_LIMIT ?? 500)
 const KEY_LIMIT = 100
 /** L1 合并后进入 L2 的候选池大小 */
 const L1_POOL = 20
+/**
+ * P2 正文通道：只用 ≥4 字的**区分性长锚点**，最多 4 个。
+ * 🔴 别把 `extractKeys()` 的 2~4 字主题词 / 滑窗词塞进来：正文 ilike 会命中一大片，
+ *    10,454 份 / 9,450 万字上单次检索直接超时（报告 §4 P1-4）。
+ */
+const TEXT_RECALL_KEYS = Number(process.env.NETDISK_TEXT_RECALL_KEYS ?? 4)
+/** P2 正文通道候选上限（与文件名通道合并后再统一截断） */
+const TEXT_CANDIDATE_LIMIT = Number(process.env.NETDISK_TEXT_LIMIT ?? 300)
 
 // ⚠️ 主题词表 / 噪声前缀已搬到 `shared/question-match.ts`（P-006 单一真相源）：
 //    检索与判定共用一份词表，避免「召回时算主题词、判定时又算一遍」出现口径漂移。
@@ -154,6 +179,8 @@ export interface NetdiskHit {
   solutionExcerpt?: string
   /** 题干长锚点在这份正文里的命中数（排障用） */
   anchorsHit?: number
+  /** P2：`text_flat` 正文通道命中的长锚点数（召回阶段，排障 + 排序用） */
+  textHits?: number
   /** P-009：exact 时定位到的「哪份资料、第几题、原文哪一段」 */
   sourceLocation?: SourceLocation
   /** P-009：多因子明细（排障 / 验收集统计） */
@@ -199,13 +226,17 @@ export class NetdiskSearchService {
   }
 
   /**
-   * 搜网盘。
+   * 搜公共资料库。
+   *
+   * 🔴 P-011：签名里**没有 userId**——公共资料不按登录用户隔离
+   *    （`publicLibraryOwner()` 是常量，M33 有静态断言）。
+   *    鉴权仍由 controller 的 `requireUserId()` 负责：必须登录才能查，
+   *    但登录后看到的都是同一批运营者提供的资料。
    *
    * @param question 题干（原样传，内部自己提 key）
    * @param opts.deep 是否允许深挖正文（默认 true；纯文件名检索更快）
    */
   async search(
-    userId: string,
     question: string,
     opts: { deep?: boolean; limit?: number } = {},
   ): Promise<NetdiskSearchResult> {
@@ -227,6 +258,11 @@ export class NetdiskSearchService {
         note: '题干太短，提不出可用的检索词', tookMs: Date.now() - started,
       }
     }
+    // P2 正文通道：只用 `extractDistinctive()` 产出的 ≥4 字长锚点，
+    // 与判定层同源（report §4 P2「统一打分口径」）。短主题词绝不进正文 ilike。
+    const textAnchors = textRecallEnabled()
+      ? [...new Set(distKeys.filter((k) => k.length >= 4))].slice(0, TEXT_RECALL_KEYS)
+      : []
 
     const qSet = bigrams(question)
     const pool = new Map<number, NetdiskHit>()
@@ -237,7 +273,9 @@ export class NetdiskSearchService {
     // 以前每次都实时搜网盘：3~7s，且网盘 search 返回的候选子集不稳定
     // ⇒ 同一道题连搜两次排序会变（R-工程-10）。现在文件清单已经预先落库
     // （scripts/netdisk-index.mjs），检索是纯 SQL：毫秒级、结果稳定、网盘抽风也能用。
-    const { hits: localHits, total: indexSize } = await this.searchLocal(userId, keys, qSet)
+    const { hits: localHits, total: indexSize, textMatched } = await this.searchLocal(
+      keys, qSet, textAnchors,
+    )
     for (const h of localHits) {
       pool.set(h.fsId, h)
       keyCount.set(h.fsId, h.keyHits)
@@ -290,9 +328,13 @@ export class NetdiskSearchService {
       }
     }
 
-    // 排序优先级：命中关键词数（多 ⇒ 更像「就是这一章」）→ 覆盖度 → 名字长度
+    // P2 排序：正文通道命中的**长锚点数**最优先（与判定层同源），
+    // 其次才是文件名命中词数 / bigram 覆盖度。
+    // 🔴 这是「让原题进得了深挖池」的关键：MAX_DEEP_FILES 仍为 3（P3 锁），
+    //    正文命中的候选不前置的话，多召回的文档根本轮不到被判定。
     const ranked = [...pool.values()].sort(
       (a, b) =>
+        (b.textHits || 0) - (a.textHits || 0) ||
         (keyCount.get(b.fsId) || 0) - (keyCount.get(a.fsId) || 0) ||
         b.score - a.score ||
         b.name.length - a.name.length,
@@ -300,7 +342,7 @@ export class NetdiskSearchService {
     const l1 = ranked.slice(0, Math.max(limit, L1_POOL))
 
     // 实时兜底才需要沉淀（正常路径本来就来自索引，写回去纯属浪费）
-    if (liveFallback) void this.upsertMeta(userId, l1)
+    if (liveFallback) void this.upsertMeta(l1)
 
     // ---------- L2：对头部候选抽正文，补「文件名没写但正文里有」的情况 ----------
     const deepDone: NetdiskHit[] = []
@@ -315,10 +357,13 @@ export class NetdiskSearchService {
         if (!TEXT_EXTS.has(ext)) continue
         if (cand.sizeBytes > MAX_TEXT_BYTES) continue
         try {
-          const { text, sourceId } = await this.ensureText(userId, cand)
+          const { text, sourceId } = await this.ensureText(cand)
           if (!text) continue
+          // P2 / 报告 §4 P2：删掉 bigram `coverage < 0.2` 闸门。
+          // 「是不是这道题」由 judge() 的六条硬闸决定；在粗筛阶段用 bigram 拦截，
+          // 只会把「文件名没写、正文里确有原题」的文档在最后一步误杀。
+          // score 仅作展示，不再参与主排序（主排序＝正文长锚点共现数）。
           const score = coverage(qSet, text)
-          if (score < 0.2) continue
           // P-009 / D-012：一题一对象 + 多因子闸门。整本教辅不再当成一个判定单元，
           // exact 必须同时带来源位置；未达标一律 topic（answer 为空，见报告 §8）。
           // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
@@ -327,9 +372,11 @@ export class NetdiskSearchService {
           //    绝不能用 cand.fsId（百度网盘数字 fs_id）——两者对不上会让 rows 恒为空、
           //    整条网盘链路静默回退 P0，结构化数据等于白铺。M32 有静态断言。
           //    仅当本次正文刚抽、还没铺量（sourceId=''）时才回退 P0。
+          // 🔴 P-011 公共 owner：结构化对象是运营者铺的公共数据，取数必须用
+          //    publicLibraryOwner()；用登录 userId 会让 rows 恒空、静默回退 P0。
           const source = { sourceId: sourceId || String(cand.fsId), sourceName: cand.name }
           const rows = sourceId
-            ? await loadQuestionObjects(getSupabaseClient(), userId, 'netdisk', sourceId)
+            ? await loadQuestionObjects(getSupabaseClient(), publicLibraryOwner(), 'netdisk', sourceId)
             : []
           const j = judgeWithStore(question, text, rows,
             () => judgeObjects(question, text, source))
@@ -373,12 +420,13 @@ export class NetdiskSearchService {
         ? `资料库里没有搜到与这道题相关的资料（按 ${keys.join(' / ')} 检索）`
         : `本库索引里没有匹配的资料（按 ${keys.join(' / ')} 检索）。若资料库里确实有，需先更新资料索引`
     } else if (!deep) {
-      note = '按文件名/路径匹配（未读取正文）'
+      note = '按资料库索引检索（文件名 / 路径 + 资料正文，未读取正文深挖）'
     } else if (deepDone.length === 0) {
-      note = '文件名命中，正文未进一步匹配（可能是扫描版 PDF，无文字层）'
+      note = '文件名或资料正文命中，未进一步匹配到原题（可能是扫描版 PDF，无文字层）'
     } else {
-      note = `文件名 + 正文匹配（正文命中 ${deepDone.length} 份）`
+      note = `文件名 / 路径 + 资料正文双通道检索（深挖 ${deepDone.length} 份）`
     }
+    if (textAnchors.length > 0 && textMatched > 0) note += `；资料正文召回命中 ${textMatched} 份`
     if (exactCount > 0) note += `；原题判定命中 ${exactCount} 份`
     else if (hits.length > 0) note += '；未定位到这道题的答案，仅找到同主题资料'
     if (liveFallback) note += '；⚠️ 索引尚未建立，本次直接读取资料库'
@@ -387,69 +435,125 @@ export class NetdiskSearchService {
   }
 
   /**
-   * 在**本库索引**里检索（唯一检索面）：SQL 粗筛 + 内存精排。
+   * 在**本库索引**里检索（唯一检索面）：**双通道** SQL 粗筛 + 内存精排。
    *
-   * 粗筛：`name ilike` 或 `path ilike` 命中任一检索词。目录名也算——
-   * 「/浮力专题/第3讲.docx」这种，光看文件名看不出是浮力，靠路径才认得出来。
-   * 精排：命中几个检索词（强信号）→ bigram 覆盖度 → 名字长度。
+   * - 通道 A：`name.ilike` / `path.ilike`（0024 trgm 索引）。目录名也算——
+   *   「/浮力专题/第3讲.docx」光看文件名看不出是浮力，靠路径才认得出来。
+   * - 通道 B（P2）：`text_flat.ilike`，**只用 ≥4 字长锚点**（`extractDistinctive()`
+   *   产出，与判定层同源）。题干词不在任何文件名里的原题靠这条通道进候选池。
    *
-   * 为什么要自己算 keyHits：只靠 SQL 的话每行都是「命中」，多词同时命中这个
-   * 最有价值的信息就丢了（以前实时检索时用 keyCount 记，现在本地一次查全，直接算）。
+   * 🔴 两条通道都 `.eq('user_id', publicLibraryOwner())`：公共资料不按登录用户隔离，
+   *    同时 `check-isolation` 门禁仍看得见过滤条件，**无需任何豁免**。
+   * 🔴 PostgREST 的 or 表达式里 `%,()` 是语法字符，两条通道都要剔干净。
+   * 🔴 排序口径：正文长锚点共现数 → 文件名命中词数 → bigram 覆盖度 → 名字长度。
+   *    `MAX_DEEP_FILES` 仍为 3（P3 锁），正文命中不前置的话多召回的文档轮不到判定。
    *
-   * @returns hits 候选；total 该用户索引里的文件总数（0 = 索引还没建）
+   * @returns hits 候选；total 公共索引里的文件总数（0 = 索引还没建）；
+   *          textMatched 正文通道召回的份数（写进 note，排障可见）
    */
   private async searchLocal(
-    userId: string,
     keys: string[],
     qSet: Set<string>,
-  ): Promise<{ hits: (NetdiskHit & { keyHits: number })[]; total: number }> {
+    textAnchors: string[],
+  ): Promise<{
+    hits: (NetdiskHit & { keyHits: number })[]
+    total: number
+    textMatched: number
+  }> {
     // PostgREST 的 or 表达式里逗号/括号/百分号是语法字符，必须剔干净
     const clean = keys.map((k) => k.replace(/[%,()]/g, '')).filter((k) => k.length >= 2)
-    if (clean.length === 0) return { hits: [], total: 0 }
+    if (clean.length === 0) return { hits: [], total: 0, textMatched: 0 }
     const client = getSupabaseClient()
-    // 文件名与路径都参与粗筛（目录名往往比文件名更有信息量）
+    const ownerId = publicLibraryOwner()
+
+    // ---------- 通道 A：文件名 / 路径 ----------
     const ors = clean.flatMap((k) => [`name.ilike.%${k}%`, `path.ilike.%${k}%`]).join(',')
     const pageRes = await client
       .from(TABLE)
       .select('fs_id, name, path, size_bytes')
-      .eq('user_id', userId)
+      .eq('user_id', ownerId)
       .eq('is_dir', false)
       .or(ors)
       .limit(LOCAL_CANDIDATE_LIMIT)
     if (pageRes.error) {
       this.logger.warn(`[netdisk] 本地索引读取失败: ${pageRes.error.message}`)
-      return { hits: [], total: 0 }
+      return { hits: [], total: 0, textMatched: 0 }
     }
     const rows = (pageRes.data || []) as { fs_id: number; name: string; path: string; size_bytes: number }[]
 
-    // ⚠️ 只在「一条都没命中」时才数总数：这一次 count 只为区分
+    // ---------- 通道 B：资料正文（P2，只用 ≥4 字长锚点） ----------
+    const textClean = [...new Set(
+      textAnchors.map((k) => k.replace(/[%,()]/g, '')).filter((k) => k.length >= 4),
+    )].slice(0, TEXT_RECALL_KEYS)
+    const textHitsByFs = new Map<number, number>()
+    const textRows: typeof rows = []
+    if (textClean.length > 0) {
+      const textOrs = textClean.map((k) => `text_flat.ilike.%${k}%`).join(',')
+      const textRes = await client
+        .from(TABLE)
+        .select('fs_id, name, path, size_bytes, text_flat')
+        .eq('user_id', ownerId)
+        .eq('is_dir', false)
+        .eq('text_status', 'ok')
+        .or(textOrs)
+        .limit(TEXT_CANDIDATE_LIMIT)
+      if (textRes.error) {
+        // 🔴 正文通道失败（含 0027 未迁移 / 列不存在）不能拖垮整次检索：
+        //    留痕后退回纯文件名通道，绝不静默吞错（M18 精神）。
+        this.logger.warn(`[netdisk] 资料正文召回读取失败，退回文件名通道: ${textRes.error.message}`)
+      } else {
+        for (const r of (textRes.data || []) as (typeof rows[number] & { text_flat: string | null })[]) {
+          // SQL 侧 ilike 已过滤一遍；这里用同一套归一化复算共现数，
+          // 避免 PostgREST 的 ilike 与 JS 的 String.includes 口径漂移。
+          const flat = flatText(r.text_flat || '')
+          const n = textClean.filter((k) => flat.includes(k)).length
+          if (n === 0) continue
+          textHitsByFs.set(Number(r.fs_id), n)
+          textRows.push({ fs_id: r.fs_id, name: r.name, path: r.path, size_bytes: r.size_bytes })
+        }
+      }
+    }
+
+    // ⚠️ 只在「两条通道一条都没命中」时才数总数：这一次 count 只为区分
     //    「索引是空的（得走实时兜底）」与「索引有货但没匹配上（直接返回空）」。
-    //    正常路径少一次查询——3 万行的 count 也要几百毫秒，白花。
     let total = -1
-    if (rows.length === 0) {
+    if (rows.length === 0 && textRows.length === 0) {
       const countRes = await client
         .from(TABLE)
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
+        .eq('user_id', ownerId)
         .eq('is_dir', false)
       total = countRes.count ?? 0
     }
 
-    const hits = rows.map((r) => {
+    // 合并去重：正文命中的行即使文件名一个词都没命中，也必须进候选池
+    // ——这正是 P2 存在的全部意义（报告 §3.1 `AB=6` 文件名 0 / 正文 196）。
+    const merged = new Map<number, typeof rows[number]>()
+    for (const r of rows) merged.set(Number(r.fs_id), r)
+    for (const r of textRows) if (!merged.has(Number(r.fs_id))) merged.set(Number(r.fs_id), r)
+
+    const hits = [...merged.entries()].map(([fsId, r]) => {
       const name = r.name || ''
       const path = r.path || ''
-      const keyHits = clean.filter((k) => name.includes(k) || path.includes(k)).length
+      const nameHits = clean.filter((k) => name.includes(k) || path.includes(k)).length
+      const tHits = textHitsByFs.get(fsId) || 0
       return {
-        fsId: Number(r.fs_id),
+        fsId,
         name,
         path,
         sizeBytes: Number(r.size_bytes) || 0,
         hit: 'name' as const,
-        score: Number(Math.max(coverage(qSet, name), coverage(qSet, path) * 0.6).toFixed(3)),
-        keyHits,
+        // P2：score 与判定层同源——取 bigram 覆盖度与长锚点命中率的较大值
+        score: Number(Math.max(
+          coverage(qSet, name), coverage(qSet, path) * 0.6,
+          textClean.length > 0 ? tHits / textClean.length : 0,
+        ).toFixed(3)),
+        // 正文长锚点共现是比文件名主题词更强的信号（×2）
+        keyHits: nameHits + tHits * 2,
+        textHits: tHits,
       }
     })
-    return { hits, total }
+    return { hits, total, textMatched: textHitsByFs.size }
   }
 
   /**
@@ -457,12 +561,13 @@ export class NetdiskSearchService {
    * ⚠️ 只写元数据字段：**不带 text_content / text_status**，
    *    否则会把已抽好的正文覆盖成空（PostgREST upsert 只更新 payload 里出现的列）。
    */
-  private async upsertMeta(userId: string, hits: NetdiskHit[]): Promise<void> {
+  private async upsertMeta(hits: NetdiskHit[]): Promise<void> {
     if (hits.length === 0) return
     try {
       const client = getSupabaseClient()
+      const ownerId = publicLibraryOwner()
       const rows = hits.slice(0, 50).map((h) => ({
-        user_id: userId,
+        user_id: ownerId,
         fs_id: h.fsId,
         path: h.path,
         dir_path: h.path.slice(0, h.path.lastIndexOf('/')) || '/',
@@ -499,7 +604,6 @@ export class NetdiskSearchService {
    * 命中缓存直接返回；扫描版记 text_status=none，避免每次检索都白下载。
    */
   private async ensureText(
-    userId: string,
     cand: NetdiskHit,
   ): Promise<{ text: string; sourceId: string }> {
     const client = getSupabaseClient()
@@ -510,7 +614,7 @@ export class NetdiskSearchService {
     const { data: cached } = await client
       .from(TABLE)
       .select('id, text_content, text_status')
-      .eq('user_id', userId)
+      .eq('user_id', publicLibraryOwner())
       .eq('fs_id', cand.fsId)
       .maybeSingle()
     const row = cached as CacheRow | null
@@ -525,7 +629,7 @@ export class NetdiskSearchService {
     //    判定层回退 P0，等下次 question-objects-build.mjs --apply 后自然接上。
     const buf = await this.netdisk.downloadByFsId(cand.fsId)
     if (!buf || buf.length === 0) {
-      await this.saveCache(userId, cand, '', 'none')
+      await this.saveCache(cand, '', 'none')
       return { text: '', sourceId: '' }
     }
 
@@ -550,7 +654,7 @@ export class NetdiskSearchService {
           return { text: '', sourceId: '' }
         }
         // 内容类失败（解析不了）才按「无正文」缓存，避免每次检索都白下载一遍
-        await this.saveCache(userId, cand, '', 'none')
+        await this.saveCache(cand, '', 'none')
         return { text: '', sourceId: '' }
       }
       text = out.data.pages.map((p) => p.text).filter(Boolean).join('\n')
@@ -560,7 +664,7 @@ export class NetdiskSearchService {
       status = 'skipped'
     }
 
-    await this.saveCache(userId, cand, text.slice(0, MAX_TEXT_CHARS), status)
+    await this.saveCache(cand, text.slice(0, MAX_TEXT_CHARS), status)
     return {
       text: status === 'ok' ? text.slice(0, MAX_TEXT_CHARS) : '',
       sourceId: '',
@@ -568,7 +672,6 @@ export class NetdiskSearchService {
   }
 
   private async saveCache(
-    userId: string,
     cand: NetdiskHit,
     text: string,
     status: string,
@@ -577,7 +680,8 @@ export class NetdiskSearchService {
     const ext = (cand.name.match(/\.([A-Za-z0-9]{1,6})$/) || [, ''])[1].toLowerCase()
     const { error } = await client.from(TABLE).upsert(
       {
-        user_id: userId,
+        // P-011：公共索引统一挂固定 owner，绝不写登录用户 ID
+        user_id: publicLibraryOwner(),
         fs_id: cand.fsId,
         path: cand.path,
         dir_path: cand.path.slice(0, cand.path.lastIndexOf('/')) || '/',
@@ -586,6 +690,9 @@ export class NetdiskSearchService {
         is_dir: false,
         size_bytes: cand.sizeBytes,
         text_content: text || null,
+        // P2：运行时现抽的正文也要能进正文召回通道，
+        // 归一化口径与 question-match.ts 的 normalizeForMatch() 逐字一致。
+        text_flat: text ? flatText(text) : null,
         text_status: status,
         text_updated_at: new Date().toISOString(),
         synced_at: new Date().toISOString(),
@@ -596,14 +703,15 @@ export class NetdiskSearchService {
     if (error) this.logger.warn(`[netdisk] 正文缓存写入失败: ${error.message}`)
   }
 
-  /** 已缓存正文的文件数（前端「资料库检索」旁展示索引状态用） */
-  async stats(userId: string): Promise<{ cached: number; scanned: number }> {
+  /** 公共索引里已缓存正文的文件数（前端「资料检索」旁展示索引状态用） */
+  async stats(): Promise<{ cached: number; scanned: number }> {
     const client = getSupabaseClient()
+    const ownerId = publicLibraryOwner()
     const [ok, none] = await Promise.all([
       client.from(TABLE).select('id', { count: 'exact', head: true })
-        .eq('user_id', userId).eq('text_status', 'ok'),
+        .eq('user_id', ownerId).eq('text_status', 'ok'),
       client.from(TABLE).select('id', { count: 'exact', head: true })
-        .eq('user_id', userId).eq('text_status', 'none'),
+        .eq('user_id', ownerId).eq('text_status', 'none'),
     ])
     return { cached: ok.count ?? 0, scanned: none.count ?? 0 }
   }

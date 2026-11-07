@@ -51,7 +51,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // judge() 的旧 exact（实测 0/3 假阳性），不 bump 会继续把别的题解析当答案。
 // v6（P-010 / D-013）：exact 改走入库结构化对象，新增指纹 / 正文版本 / 定点排除校验。
 // 老缓存可能存着「后来被标 rejected 的对象」放行的 exact，不 bump 会绕过人工修复。
-const CACHE_VERSION = 'v6'
+// P-011 / D-014：P2 双通道正文召回改了 note 文案与候选池构成 ⇒ 必须 bump，
+// 否则 answer_cache 会按 (user_id,q_hash,mode) 原样吐出 v6 的旧文案与旧命中。
+const CACHE_VERSION = 'v7'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -349,7 +351,7 @@ export class AnswerSearchService {
           solution: own.solution.slice(0, 500) || `来自：${own.title}`,
           refs: [{ title: own.title, url: '' }],
           confidence: 1,
-          note: '在你自己的题库里找到了这道题的答案，请核对后采纳',
+          note: '在运营者提供的公共资料库里找到了这道题的答案，请按来源核对后采纳',
         }
         settled = true
       }
@@ -371,10 +373,11 @@ export class AnswerSearchService {
         }
       }
 
-      // ③ 网盘资料（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
+      // ③ 公共资料库（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
+      //    P-011：不传 userId —— 运营者提供的公共题库对所有登录用户一致。
       if (!settled) {
         disk = await this.netdiskSearch
-          .search(userId, question)
+          .search(question)
           .catch((e) => {
             this.logger.warn(`[answer-search] 网盘检索异常: ${e instanceof Error ? e.message : e}`)
             return null

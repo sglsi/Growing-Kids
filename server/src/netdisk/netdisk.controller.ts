@@ -20,18 +20,19 @@ export class NetdiskController {
     @Query('q') q?: string,
     @Query('deep') deep?: string,
   ) {
-    const userId = requireUserId(req)
+    // P-011：仍需登录（鉴权），但公共资料库不按登录用户隔离
+    requireUserId(req)
     const question = (q || '').trim()
     if (!question) throw new BadRequestException('q 不能为空')
-    const data = await this.svc.search(userId, question, { deep: deep !== '0' })
+    const data = await this.svc.search(question, { deep: deep !== '0' })
     return { code: 200, msg: 'success', data }
   }
 
   @Get('stats')
   @HttpCode(200)
   async stats(@Req() req: RequestWithUser) {
-    const userId = requireUserId(req)
-    const data = await this.svc.stats(userId)
+    requireUserId(req)
+    const data = await this.svc.stats()
     return { code: 200, msg: 'success', data }
   }
 }
