@@ -1,4 +1,6 @@
 /** 联网搜答案的类型定义（设计见「题目答案功能-设计方案.md」§3） */
+// P-015 / D-018：参考例题与原题判定并列，判定层零改动
+import type { ReferenceExample } from '../shared/question-reference'
 
 /** 检索命中的一条网页 */
 export interface WebItem {
@@ -55,6 +57,15 @@ export interface AnswerSearchResult {
     char_start: number
     char_end: number
   }
+  /**
+   * P-015 / D-018：题目不完全一致但解题思路可借鉴时的库内例题。
+   * 🔴 只在没有 exact 答案时出现；**永不进 answer、不置 verified=true、不提供采纳**。
+   *    每条 stem 与 solution 同源配对（同一个 question_objects 行）。
+   *    ⚠️ 改本结构必须 bump CACHE_VERSION，否则旧缓存会显示成没有声明的裸内容。
+   */
+  references?: ReferenceExample[]
+  /** 事先声明文案；前端必须在渲染任何参考内容之前先渲染 */
+  reference_disclaimer?: string
 }
 
 export interface SearchProvider {

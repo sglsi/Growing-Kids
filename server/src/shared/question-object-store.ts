@@ -60,6 +60,23 @@ export async function loadQuestionObjects(
 const sha256 = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
 
 /**
+ * P-015 / D-018：结构化对象的校验口径唯一真相源。
+ * 参考例题收集（`collectReferences()`）与原题判定（`judgeWithStore()`）必须共用，
+ * 否则两边「对象是否可信」会漂移，出现「判定拒绝但参考层放行」的裂缝。
+ * 🔴 与构建脚本 `question-objects-build.mjs` 逐字一致：先剥 NUL 再算版本，
+ *    否则 PostgreSQL text 里的 U+0000 会让两边 hash 不同 ⇒ 对象全部被判过期。
+ */
+export function storeValidationOpts(text: string): {
+  hash: (s: string) => string
+  expectedRevision: string
+} {
+  return {
+    hash: sha256,
+    expectedRevision: sha256(sourceRevisionInput(text).replace(/\u0000/g, '')),
+  }
+}
+
+/**
  * 统一判定入口。
  * @param fallback P0 全文判定（由调用方以 `() => judgeObjects(question, text, source)` 传入），
  *                 只在「没有可用结构化对象且非 strict」时调用，保证同一时刻只跑一条链路。
@@ -70,12 +87,8 @@ export function judgeWithStore(
   rows: StoredQuestionObject[],
   fallback: () => ObjectJudgement,
 ): ObjectJudgement & { storeMeta?: { total: number; usable: number; rejected: string[] } } {
-  // 🔴 与构建脚本 `question-objects-build.mjs` 逐字一致：先剥 NUL 再算版本，
-  //    否则 PostgreSQL text 里的 U+0000 会让两边 hash 不同 ⇒ 对象全部被判过期。
-  const expectedRevision = sha256(sourceRevisionInput(text).replace(/\u0000/g, ''))
   const j = judgeStoredObjects(question, rows, {
-    hash: sha256,
-    expectedRevision,
+    ...storeValidationOpts(text),
     strict: questionObjectsStrict(),
   })
   if (!j.structured) return fallback()

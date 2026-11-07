@@ -11,11 +11,14 @@ import {
 } from '../shared/question-match'
 import type { Distinctive, SourceLocation } from '../shared/question-match'
 // P-010 / D-013：优先消费入库时预切分的结构化题目对象（P1），无对象时回退 P0
-import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
+import { loadQuestionObjects, judgeWithStore, storeValidationOpts } from '../shared/question-object-store'
 // P-011 / D-014：公共资料库固定 owner + 正文归一化 + 召回开关
 import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/public-library'
 // P-014 / D-017：检索前输入合格性闸门（只读判定，不碰判定层）
 import { guardQuestionInput } from '../shared/input-guard'
+// P-015 / D-018：参考例题（相似题思路借鉴）——与原题判定并列，判定层零改动
+import { collectReferences, mergeReferences, REFERENCE_DISCLAIMER } from '../shared/question-reference'
+import type { ReferenceExample } from '../shared/question-reference'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -324,6 +327,15 @@ export interface NetdiskSearchResult {
   tookMs: number
   /** P-006：判定为「找到了这道题 + 解析段」的份数 */
   exactCount: number
+  /**
+   * P-015 / D-018：题目不完全一致、但解题思路与解题方法具有借鉴意义的库内例题。
+   * ⚠️ 与 exact **完全并列**：只有 exact 才进 answer；这里永远不进 answer、
+   *    不置 verified=true、不提供「采纳」。每条 stem 与 solution 来自同一个
+   *    `question_objects` 行（同源配对），并带来源位置供家长回原文核对。
+   */
+  references?: ReferenceExample[]
+  /** 事先声明文案：前端必须在渲染任何参考内容**之前**先行渲染 */
+  referenceDisclaimer?: string
 }
 
 interface CacheRow {
@@ -408,6 +420,8 @@ export class NetdiskSearchService {
       : []
 
     const qSet = bigrams(question)
+    /** P-015 / D-018：深挖时按来源收集参考例题，最后跨来源去重取 top-N */
+    const referencePools: ReferenceExample[][] = []
     const pool = new Map<number, NetdiskHit>()
     /** 每个候选被几个不同检索词命中——这是比 bigram 覆盖度更强的信号 */
     const keyCount = new Map<number, number>()
@@ -529,6 +543,18 @@ export class NetdiskSearchService {
             : []
           const j = judgeWithStore(question, text, rows,
             () => judgeObjects(question, text, source))
+          // P-015 / D-018：顺带挑出「题目不完全一致、但思路可借鉴」的库内例题。
+          // 🔴 只在本次已加载该来源结构化对象时做：不额外发查询、不扩大召回面、
+          //    不改判定层；校验口径与 judgeWithStore 同源（storeValidationOpts）。
+          // 🔴 exact 已放行的对象排除，避免同一道题既当答案又当参考。
+          if (rows.length > 0) {
+            referencePools.push(collectReferences(question, rows, {
+              ...storeValidationOpts(text),
+              ...(j.exact && j.sourceLocation
+                ? { excludeObjectIndexes: [j.sourceLocation.objectIndex] }
+                : {}),
+            }))
+          }
           const snippet = this.snippetFor(question, text)
           deepDone.push({
             ...cand,
@@ -580,7 +606,17 @@ export class NetdiskSearchService {
     else if (hits.length > 0) note += '；未定位到这道题的答案，仅找到同主题资料'
     if (liveFallback) note += '；⚠️ 索引尚未建立，本次直接读取资料库'
 
-    return { hits, keys, note, exactCount, tookMs: Date.now() - started }
+    // P-015 / D-018：跨来源去重取 top-N。声明文案随结果一起下发，
+    // 保证 `/api/netdisk/search` 直连也不会出现「有内容、无声明」。
+    const references = mergeReferences(referencePools)
+    if (references.length > 0) {
+      note += `；另有 ${references.length} 道解题思路相近的例题可供借鉴（不是本题答案，展示前须先声明）`
+    }
+
+    return {
+      hits, keys, note, exactCount, tookMs: Date.now() - started,
+      ...(references.length > 0 ? { references, referenceDisclaimer: REFERENCE_DISCLAIMER } : {}),
+    }
   }
 
   /**

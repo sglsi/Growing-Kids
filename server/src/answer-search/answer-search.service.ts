@@ -14,6 +14,8 @@ import type { SourceLocation } from '../shared/question-match'
 import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
 // P-014 / D-017：检索前输入合格性闸门（与网盘链路共用同一真相源）
 import { guardQuestionInput } from '../shared/input-guard'
+// P-015 / D-018：事先声明文案（服务端真相源，前端有逐字镜像兜底）
+import { REFERENCE_DISCLAIMER } from '../shared/question-reference'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -63,7 +65,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // P-014 / D-017：检索前输入合格性闸门改变了**用户可见 note 文案**（不合格输入
 // 改为如实提示「请单独录入小题」），且同一道题的结果内容从「没找到答案」变为提示。
 // 按红线「改 note / result 结构必 bump」⇒ v9 → v10，旧缓存行自然成为孤儿。
-const CACHE_VERSION = 'v10'
+// P-015 / D-018：结果结构新增 references / reference_disclaimer ⇒ 旧缓存会显示成
+// 「有内容但没声明」，必须整体失效（§4 红线：改 note/result 结构必 bump）。
+const CACHE_VERSION = 'v11'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -497,6 +501,22 @@ export class AnswerSearchService {
       // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过资料库
       if (result.source === 'none' && disk && disk.keys.length > 0) {
         result.note = `${result.note || ''}（资料库按「${disk.keys.join(' / ')}」也没搜到）`
+      }
+
+      // P-015 / D-018：没有 exact 答案时，并列透传「思路可借鉴」的库内例题。
+      // 🔴 只在 !settled（没有任何来源给出本题答案）时；answer 仍为空、
+      //    verified 仍 false、前端 canAdopt 仍禁 ⇒ 绝不冒充本题答案。
+      //    source='none' 提为 netdisk 只为让结果卡片能渲染「声明 + 例题」；
+      //    match_level 语义不变，前端按 references 单独分档呈现。
+      if (!settled && disk?.references?.length) {
+        result = {
+          ...result,
+          source: result.source === 'none' ? 'netdisk' : result.source,
+          match_level: result.match_level === 'none' ? 'topic' : result.match_level,
+          references: disk.references,
+          reference_disclaimer: disk.referenceDisclaimer || REFERENCE_DISCLAIMER,
+          note: `${result.note || ''}${result.note ? '；' : ''}另有 ${disk.references.length} 道解题思路相近的例题可供借鉴（不是本题答案）`,
+        }
       }
 
       // P-014 / D-017：不合格输入且前面没有任何来源给出答案 ⇒ 如实告知，
