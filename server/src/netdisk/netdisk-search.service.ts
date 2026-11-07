@@ -14,6 +14,8 @@ import type { Distinctive, SourceLocation } from '../shared/question-match'
 import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
 // P-011 / D-014：公共资料库固定 owner + 正文归一化 + 召回开关
 import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/public-library'
+// P-014 / D-017：检索前输入合格性闸门（只读判定，不碰判定层）
+import { guardQuestionInput } from '../shared/input-guard'
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -367,6 +369,20 @@ export class NetdiskSearchService {
     const started = Date.now()
     const limit = Math.min(20, opts.limit ?? 8)
     const deep = opts.deep !== false
+
+    // P-014 / D-017：检索前输入合格性闸门（20a M10 宣称不超能力 / M11 如实告知）。
+    // 整页、多小问连排、非题目文本一律**不送判定**，直接如实提示：
+    // 11-07 晚实测切题后唯一上升的 exact 是「作文要求」片段（20 字、无设问）
+    // 走 askQuestion=unknown 宽松路径命中英语教辅第 80 对象、带 972 字解析 ⇒ 假 exact。
+    // 🔴 只读判定、不改原文任何字符、不放宽任何硬闸、不自动切题、不逐题多次检索。
+    // 🔴 目标不是提升命中（库覆盖 / 字面差异 / 英文锚点仍是主因），是让假 exact 归零。
+    const guard = guardQuestionInput(question)
+    if (!guard.ok) {
+      return {
+        hits: [], keys: [], exactCount: 0,
+        note: guard.message, tookMs: Date.now() - started,
+      }
+    }
 
     // ⚠️ 这里**不**先判 available()：搜索只查本库索引，网盘凭证失效/过期
     //    不该让「搜自己索引过的资料」跟着失灵。只有走实时兜底时才要求凭证可用。

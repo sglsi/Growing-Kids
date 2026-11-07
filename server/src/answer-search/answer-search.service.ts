@@ -12,6 +12,8 @@ import { judgeObjects, isSameQuestion, extractDistinctive } from '../shared/ques
 import type { SourceLocation } from '../shared/question-match'
 // P-010 / D-013：与网盘链路共用同一个结构化取数/判定入口，硬闸无数据源豁免
 import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
+// P-014 / D-017：检索前输入合格性闸门（与网盘链路共用同一真相源）
+import { guardQuestionInput } from '../shared/input-guard'
 import type { AnswerSearchResult, WebItem } from './answer-search.types'
 
 /**
@@ -58,7 +60,10 @@ const CACHE_PREFIX = 'ans:srch:'
 // 整个 result 原样返回 ⇒ 不 bump 会让已搜过的题继续吐 v7 的旧命中/旧解析。
 // P-013 / D-016：召回侧选词策略改变 ⇒ 同一道题可能从 topic 变 exact，
 // 旧缓存必须整体失效，否则用户会继续看到修复前的「没找到答案」。
-const CACHE_VERSION = 'v9'
+// P-014 / D-017：检索前输入合格性闸门改变了**用户可见 note 文案**（不合格输入
+// 改为如实提示「请单独录入小题」），且同一道题的结果内容从「没找到答案」变为提示。
+// 按红线「改 note / result 结构必 bump」⇒ v9 → v10，旧缓存行自然成为孤儿。
+const CACHE_VERSION = 'v10'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -341,6 +346,10 @@ export class AnswerSearchService {
       //    实测（2026-11-04 生产 answer_cache）返回的是**另一道题**的【分析】片段——
       //    同专题教辅 + 一堆文件名。D-009 硬性约束：answer 只能来自 exact 判定。
       // ⚠️ 不做 AI 生成、不改隐私政策 r5、不动 AI 开关（个人主体合规边界）。
+      // P-014 / D-017：整页 / 多小问 / 非题目文本不送公共资料库判定（20a M10/M11）。
+      // 只读判定、不改原文、不放宽硬闸；自有题库 / 自有资料库仍照常查（那是用户自己的内容）。
+      // 🔴 不宣称提升命中：验收目标是不合格输入不再产出假 exact。
+      const inputGuard = guardQuestionInput(question)
       let disk: Awaited<ReturnType<NetdiskSearchService['search']>> | null = null
       let settled = false
       let imaMissNote = ''
@@ -380,7 +389,7 @@ export class AnswerSearchService {
 
       // ③ 公共资料库（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
       //    P-011：不传 userId —— 运营者提供的公共题库对所有登录用户一致。
-      if (!settled) {
+      if (!settled && inputGuard.ok) {
         disk = await this.netdiskSearch
           .search(question)
           .catch((e) => {
@@ -488,6 +497,17 @@ export class AnswerSearchService {
       // 两边都没结果时把情况说全：否则用户只看到「没找到」，不知道我们搜过资料库
       if (result.source === 'none' && disk && disk.keys.length > 0) {
         result.note = `${result.note || ''}（资料库按「${disk.keys.join(' / ')}」也没搜到）`
+      }
+
+      // P-014 / D-017：不合格输入且前面没有任何来源给出答案 ⇒ 如实告知，
+      // 不要用「资料库里没有找到…」掩盖「这段根本不是一道题 / 是整页」。
+      // 只在未 settled 时覆盖，避免抹掉自有题库 / 自有资料库 / ima 的真实命中。
+      if (!inputGuard.ok && !settled) {
+        result = {
+          source: 'none', verified: false, match_level: 'none',
+          answer: '', solution: '', refs: [], confidence: 0,
+          note: inputGuard.message,
+        }
       }
     } else {
       // ---------- 联网搜题：只检索，不喂给 AI ----------
