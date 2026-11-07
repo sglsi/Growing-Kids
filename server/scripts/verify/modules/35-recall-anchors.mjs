@@ -174,8 +174,12 @@ m.test('🔴 A6 结果内容会变 ⇒ CACHE_VERSION 必须 bump', (c) => {
 
 m.test('🔴 A7 文档：六栏 / 拍板 / 诊断脚本 / 不宣称 / 仍锁', (c) => {
   const p = read(PROPOSAL), d = read(DECISION)
-  c.ok(/提案号：P-013/.test(p) && /状态：已批准/.test(p), 'P-013 缺编号或已批准状态')
+  c.ok(/提案号：P-013/.test(p) && /状态：(已批准|已否决)/.test(p), 'P-013 缺编号或合法状态')
   c.ok(/^### [①-⑥]/m.test(p), 'P-013 缺六栏结构')
+  // 22:3x 思傅裁决：falsifier ① 触发 ⇒ 提案改判未达标、代码保留、收益表述撤回
+  c.ok(/改判|裁决/.test(p) && /未达标/.test(p), 'P-013 没记录 falsifier 触发后的改判裁决')
+  c.ok(/所有收益表述撤回/.test(p), 'P-013 改判没撤回收益表述')
+  c.ok(/上游切题 \/ OCR 质量/.test(p), 'P-013 没写下一步方向')
   c.ok(/A\+B 分两步/.test(p) && /英文题干一起修|一起修/.test(p), 'P-013 没记拍板结果')
   c.ok(/D-016/.test(d), '台账缺 D-016')
   c.ok(fs.existsSync(path.join(ROOT, DIAGNOSE)), '缺只读诊断脚本 kb-hit-diagnose.mjs')
