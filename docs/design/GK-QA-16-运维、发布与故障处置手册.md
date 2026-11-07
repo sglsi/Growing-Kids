@@ -2148,3 +2148,51 @@ sudo -n systemctl restart gk-api
 无数据回滚需求；`CACHE_VERSION v9` 缓存行自然成为孤儿。
 
 **2026-11-07 22:3x 裁决（追加）**：思傅选「**保留代码，提案改判为未达标**」⇒ **本轮 5 个产物保留在生产，不执行上述回滚**；`P-013` 状态 `已批准 → 已否决`。🔴 本节与 `D-016 执行记录` 的观测数字只作工程事实留痕，**不作达标依据、不作对外宣称、不据此计算召回率**；后续收益口径以新提案为准。下一步方向＝**上游切题 / OCR 质量**（另立提案，本轮不动）。回滚点 `dist.bak-p013-20261107-2216` 保留备查。
+
+---
+
+### 6.1.9 P-014 / D-017：检索前输入准入闸门（2026-11-07 23:xx）
+
+> 提案 `P-014`（已批准）｜ 台账 `D-017` ｜ 方向 **A 安全闸门＋如实告知** ｜ 验收口径 **「假 exact 归零、其余不变」**。
+> 🔴 本节记录的是**正确性护栏**，不是命中优化：**不宣称提升命中 / 修复有效**，样本 8 条不得计算召回率。
+
+**本轮要解决的**：`D-016` 之后 8 条真实录入题只读实测发现，规则切题会把「作文要求」片段（20 字、无设问）送进判定，走 `askQuestion=unknown` 宽松路径命中英语教辅第 80 对象、带 972 字解析与来源定位 ⇒ 假 `exact`。同时干净单题在 L3 查 `EFC=60` 为 0 行 ⇒ 库里本来就没有原题，`exact=0` 是「未达标不放行」的正确结果。详见 `P-014 §1`。
+
+| 步 | 实绩 |
+|---|---|
+| 范围 | 新增 `server/src/shared/input-guard.ts`（零依赖纯函数：整页 >1200 字 / 行首题号 ≥2 / 题干 <25 字或无设问 ⇒ 不送判定并如实提示）；`netdisk-search.service.ts` 入口与 `answer-search.service.ts` 的 `mode=kb` 各接一道；前端镜像 `src/constants/input-guard.ts` + `pages/recognize` 录入卡片引导。**判定层 `question-match.ts` 一行未动** |
+| 不做 | 不自动切题、不逐题多次检索、不做 OCR 纠错字典、不放宽六条硬闸 / `strict=1`、不改 result 结构、不给 `topic` 答案、不改深挖 8/8s/18s |
+| 缓存 | 用户可见 `note` 文案变化 ⇒ `CACHE_VERSION v9 → v10`，同步 M27/M31/M32/M33/M34/M35 六处断言；旧 `answer_cache` 行自然成为孤儿，无需数据回滚 |
+| 验收集 | 新增 **M36** 8 组（画像 / 假 exact 归零 / 两处接入 / 判定层 sha256 / v10 同步 / 前端镜像逐字一致 / 文档 / 边界与宣称词） |
+| 部署 | ⏳ 见下方「部署实绩」小节（精准换 dist + 重启，4 组身份治理文件永久排除） |
+| 前端 | `build:weapp` 后仍需思傅手动上传发版；P-012 来源卡片前端包**仍未上传发版** |
+
+**部署实绩（2026-11-07 23:20–23:25）**
+
+| 步 | 实绩 |
+|---|---|
+| 0 差异校准 | 本地 `nest build` 后 **542** 文件 / L3 **536** 文件；完整 sha256 清单（Windows `*` 已归一化）**21 项差异逐个确认归属** ⇒ 本轮 **7 个产物**：新增 `shared/input-guard.{js,d.ts,js.map}` + 覆盖 `netdisk/netdisk-search.service.{js,js.map}`、`answer-search/answer-search.service.{js,js.map}`；其余 **14 项全是 §6.1.7.1 登记的明确排除项**（4 组身份治理 + 仅本地 `anon-bootstrap-guard.*` + 历史漏传 `answer-search.types.d.ts` + 纯注释 `jobs.controller.js.map` + 2 个 `tsbuildinfo`）。两个 service 的 `.d.ts` 哈希未变，**不传** |
+| 1 回滚点 | `sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-p014-20261107-2320` |
+| 2 精准安装 | `tar` 打 7 文件 → ssh stdin 写 `/tmp/gk-p014.tgz`（本地 / 远端 sha256 均 `820cdd9f…`）→ 逐个 `sudo -n install -o gk -g gk -m 644`。验包：`guardQuestionInput`×1（netdisk）/×1（answer）、`inputGuard.ok`×2、`INPUT_GUARD_MAX_CHARS`×3、`CACHE_VERSION = 'v10'`×1、`NETDISK_TEXT_RECALL_KEYS ?? 4`×1、`NETDISK_DEEP_FILES ?? 8`×1、`judgeStoredObjects`×1 |
+| 3 哈希复比 | 本轮 **7 个产物哈希逐一一致**；剩余差异 **14 项全是登记排除项**，未批准文件 0 |
+| 4 重启 | `systemctl restart gk-api` → `active`、Nest **390ms** 启动、`journalctl` **0 ERROR**。公网 health 首次 502 是**重启窗口**（服务未就绪），`curl --retry 6` 复测 **200 / 0.175s**；判据以重试后的 200 为准 |
+| 5 门禁 | M27–M36 **119/119**（新增 M36 8/8）、`method:check` H1/H2/H3（12/139/2）、`verify:gate` **37/37**、`check:isolation` **150/150**、`lint:build` / `tsc` 0、`nest build` 0、`build:weapp` 0（8.75s）。旧 6 个模块 `CACHE_VERSION` 断言同步 `v9→v10` |
+| 6 线上开关 | 未新增/修改任何环境变量；`CACHE_VERSION v10` 让旧 `answer_cache` 行自然成为孤儿 |
+| 7 数据态 | **本轮未写业务库表、未迁移**；`question_objects` / `netdisk_files` / `text_flat` 均未变。验收时 `POST /api/answer-search/:id` 写了 **1 条 `answer_cache`**（用户检索本就会写），无其他写入 |
+| 8 前端 | `build:weapp` 成功；引导文案在 `dist/pages/recognize/index.js` **1 处**（⚠️ 不在 `common.js` ⇒ `ide-verify.mjs` ① 已改为 common.js 未命中时递归扫 `dist/**/*.js`）；`node server/scripts/ide-verify.mjs --marker "这段内容像是整页试卷或多道小题连在一起"` ⇒ 特征串命中 + **8/8 冒烟通过**。**前端包仍需思傅手动上传发版** |
+
+**前后对照（验收口径＝假 exact 归零，不是命中上升）**：`kb-upstream-diagnose.mjs --limit 8 --stems 2` 部署后复跑 ⇒ 原样 `exact` **0/8**、切题后 **0/8**（部署前切题后 **1/8**，那 1 条是作文要求片段的假 `exact`）。不合格输入被挡后 **31–35ms 空 hits + note 提示**；合格题干照常检索（干净 103 字几何单题仍 `hits=8 / exact=0 / topic`，**未误伤**）；正常检索 **279–1642ms**（< 3s）。
+
+**两条链路实绩**：
+- `GET /api/netdisk/search?q=文中不得提及真实的人名，校名等相关值息。` ⇒ `hits=0 / exact=0`、note「这段内容不像一道完整的题目，请补全题干或设问后再搜答案」。
+- `POST /api/answer-search/:id {mode:"kb"}`（真实多小问题 `3b30d2e5…`）⇒ `source=none / verified=false / match_level=none / ans=0字`、note「这段内容像是整页试卷或多道小题连在一起，请把要查的那道小题单独录入后再搜答案」。
+
+🔴 **不宣称**：「命中提升 / 修复有效 / 误判归零 / 所有用户已可用 / 精准定位到题」。本轮只消除了**一类已证实的假 `exact` 路径**；「题干 A＋别人解析」残余风险、库覆盖、OCR 字面差异、英文判定锚点**都还没解决**，第二层上线准入仍未全绿。样本 8 条不得计算召回率。
+
+**回滚**：
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad
+sudo -n mv /opt/gk/server/dist.bak-p014-20261107-2320 /opt/gk/server/dist
+sudo -n systemctl restart gk-api
+```
+无数据回滚需求；`CACHE_VERSION v10` 缓存行自然成为孤儿。
