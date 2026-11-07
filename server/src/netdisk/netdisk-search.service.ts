@@ -9,7 +9,7 @@ import {
   extractDistinctive,
   judgeObjects,
 } from '../shared/question-match'
-import type { SourceLocation } from '../shared/question-match'
+import type { Distinctive, SourceLocation } from '../shared/question-match'
 // P-010 / D-013：优先消费入库时预切分的结构化题目对象（P1），无对象时回退 P0
 import { loadQuestionObjects, judgeWithStore } from '../shared/question-object-store'
 // P-011 / D-014：公共资料库固定 owner + 正文归一化 + 召回开关
@@ -51,6 +51,18 @@ import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/publi
  *   `NETDISK_ONLINE_EXTRACT=1` 才允许实时下载抽取（应急回退）。
  * - 🔴 **判定层一行未放宽**：`exact` 仍过 P0 六条硬闸 + P1 指纹/版本校验，
  *   `QUESTION_OBJECTS_STRICT=1` 与第二层上线准入继续锁。
+ *
+ * ## P-013 / D-016：粗筛词选择（2026-11-07 真实题实测）
+ * `11-07 晚` 6 条真实录入题 `mode=kb` 全 `topic`、答案为空；一度归因于上游 OCR/切题质量，
+ * 经只读实测**证伪**：手工切单题 + 修错字后仍 exact=0；L3 库内 `question_objects`
+ * 含 `BMDN` 4 行（有解析、`link_status=ok`）、`text_flat` 含 `BMDN` 47 份；判定层
+ * `store.usable=49` 且拒绝理由是「对象内锚点共现不足 1/17」——它拒绝的是别的题，判对了。
+ * 真断点是**召回选词**：`textAnchors` 取 `dist.keys` 前 4 个，而 `keys` 被 12 个
+ * 6 字滑窗占满截断 ⇒ 几何题用 `DABC60/C60AB3/AB3BC5/BC5MN分`，英文题用
+ * `tsun/unam/swep/thro/roug/vill`，原题文件根本进不了深挖 8 份。
+ * 本轮只改 `extractKeys()`（拉丁整词）与新增 `pickTextAnchors()`（判别性分层），
+ * **`shared/question-match.ts` 一行未动**，深挖 8/8s 与六条硬闸全部不变。
+ * 🔴 仍然只是「让候选有资格被审」，不是「审得松一点」；残余风险与第二层准入仍锁。
  *
  * ## 已知边界（别对用户承诺过头）
  * - 扫描版 PDF（无文字层）抽不到正文 ⇒ 只能靠文件名/路径命中；
@@ -113,6 +125,8 @@ const L1_POOL = 20
  * P2 正文通道：只用 ≥4 字的**区分性长锚点**，最多 4 个。
  * 🔴 别把 `extractKeys()` 的 2~4 字主题词 / 滑窗词塞进来：正文 ilike 会命中一大片，
  *    10,454 份 / 9,450 万字上单次检索直接超时（报告 §4 P1-4）。
+ * P-013 / D-016：数量保持 4（拍板），只换 `pickTextAnchors()` 的**选词策略**，
+ *    不增加 `ilike` OR 数 ⇒ P95<3s 的预算不被改动。
  */
 const TEXT_RECALL_KEYS = Number(process.env.NETDISK_TEXT_RECALL_KEYS ?? 4)
 /** P2 补齐：正文通道**扫描上限**（语义同上，达到上限留痕告警） */
@@ -163,6 +177,14 @@ export function extractKeys(question: string): string[] {
   for (const block of plainBlocks(q)) {
     if (out.length >= MAX_KEYS) break
     if (/^[0-9]+$/.test(block)) continue
+    // P-013 / D-016：拉丁字母块**按整词取**，不再用 4 字滑窗。
+    // 实测英文题干 "The tsunami swept through…" 被切成 tsun/unam/swep/thro/roug/vill，
+    // 正文召回全是英文绘本噪声。短词与功能词直接丢弃（ilike 会命中一大片）。
+    if (/^[A-Za-z]+$/.test(block)) {
+      const w = block.toLowerCase()
+      if (w.length >= 5 && !LATIN_STOP.has(w)) push(w)
+      continue
+    }
     for (let i = 0; i + 4 <= block.length; i += 2) {
       const seg = block.slice(i, i + 4)
       if (isNoise(seg)) continue
@@ -171,6 +193,80 @@ export function extractKeys(question: string): string[] {
     }
   }
   return out.slice(0, MAX_KEYS)
+}
+
+/**
+ * P-013 / D-016：英文高频功能词——不进召回词表。
+ * 这些词在英文绘本 / 文件名里到处都是，做 ilike 只会把扫描上限吃满。
+ */
+const LATIN_STOP = new Set([
+  'with', 'the', 'and', 'for', 'that', 'this', 'from', 'have', 'been', 'were',
+  'what', 'when', 'which', 'there', 'their', 'would', 'could', 'should', 'about',
+  'photo', 'please', 'choose', 'following', 'according',
+])
+
+/**
+ * P-013 / D-016：通用点名判定。
+ * `ABCD`（字母表连续序）在生产 `text_flat` 里命中 **5,027 份**（总共 10,431 份），
+ * `ADDC` 这类相邻重复也是「AD / DC 两个点名粘连」的高频噪声。
+ * 放进 4 个 `ilike` OR 里会把 2,000 行扫描上限吃满，把真正的原题文件挤出去。
+ */
+export function isGenericPointLabel(s: string): boolean {
+  for (let i = 1; i < s.length; i += 1) {
+    if (s.charCodeAt(i) - s.charCodeAt(i - 1) !== 1) {
+      // 非连续序：再看有没有相邻重复（ADDC / MNNN）
+      return /(.)\1/.test(s)
+    }
+  }
+  return true // 整串都是连续字母表序 ⇒ ABCD / BCDE
+}
+
+/**
+ * P-013 / D-016：正文粗筛词选择（**只影响召回，不碰判定**）。
+ *
+ * 修复前：`textAnchors` 直接取 `extractDistinctive().keys` 的前 4 个，而 `keys`
+ * 被 12 个 6 字滑窗占满并截断 ⇒ 几何题实际用的是
+ * `DABC60 / C60AB3 / AB3BC5 / BC5MN分`（归一化删符号后拼出的题干开头碎片），
+ * 英文题是 `tsun / unam / swep`。L3 实测 `text_flat` 含 `BMDN` 的 47 份原题文件
+ * **一份都进不了深挖 8 份**，6 条真实录入题 + 5 个手工单题 exact 全 0。
+ *
+ * 修复后按判别性分层挑，仍只取 `limit` 个、不增加 `ilike` OR 数：
+ *   ① 独立符号锚点（`extractDistinctive` ③ 产出的纯大写点名），排除通用点名；
+ *      实测 `BMDN` DF=47、`DMDN` DF=74，`ABCD` DF=5027 被挡掉。
+ *   ② 拉丁整词（英文题干）；
+ *   ③ 中文长锚点按**全题干均匀采样**，保证覆盖后段的设问与图形标记。
+ *
+ * 🔴 判定层 `shared/question-match.ts` 一行未动：`anchors` / `longAnchors` /
+ *    `judgeObjects` / 六条硬闸全部原样，本函数只重排「拿哪些词去 SQL 粗筛」。
+ *    `GK-SRS-20a M10/M11`：只修候选可得性，不放宽任何放行条件、不新增宣称。
+ */
+export function pickTextAnchors(question: string, dist: Distinctive, limit = TEXT_RECALL_KEYS): string[] {
+  const out: string[] = []
+  const push = (s: string) => {
+    const k = s.replace(/[%,()]/g, '')
+    if (k.length >= 4 && !out.includes(k)) out.push(k)
+  }
+
+  // ① 独立点名最多占 2 个名额，避免挤掉设问片段
+  for (const a of dist.anchors) {
+    if (out.length >= 2) break
+    if (/^[A-Z]{4,6}$/.test(a) && !isGenericPointLabel(a)) push(a)
+  }
+
+  // ② 拉丁整词（英文题干）；中文题干的 `plainBlocks` 产不出纯拉丁 ≥5 字块，天然跳过
+  for (const b of plainBlocks(question)) {
+    if (out.length >= limit) break
+    if (!/^[A-Za-z]{5,}$/.test(b)) continue
+    const w = b.toLowerCase()
+    if (!LATIN_STOP.has(w)) push(w)
+  }
+
+  // ③ 中文长锚点：从头到尾均匀采（原来只取开头 4 个）
+  const cjk = dist.longAnchors.filter((a) => /[\u4e00-\u9fa5]/.test(a))
+  const step = Math.max(1, Math.ceil(cjk.length / Math.max(1, limit)))
+  for (let i = 0; i < cjk.length && out.length < limit; i += step) push(cjk[i])
+
+  return out.slice(0, limit)
 }
 
 /** 中文 bigram 集合（打分用；比分词稳定，不依赖词表） */
@@ -278,7 +374,8 @@ export class NetdiskSearchService {
     // P-006：主题词仍排第一顺位（文件名/路径召回全靠它），只补少量区分性片段。
     // ⚠️ 别把 11 个 6 字长锚点全塞进来：它们不会出现在文件名里，却会把主题词
     //    挤出 keys ⇒ 文件名召回直接归零。原题判定在正文深挖阶段用 judge() 做，不靠粗筛。
-    const { keys: distKeys } = extractDistinctive(question)
+    const dist = extractDistinctive(question)
+    const distKeys = dist.keys
     const keys = [...new Set([...extractKeys(question), ...distKeys.slice(0, 3)])].slice(0, MAX_KEYS + 3)
     if (keys.length === 0) {
       return {
@@ -288,8 +385,10 @@ export class NetdiskSearchService {
     }
     // P2 正文通道：只用 `extractDistinctive()` 产出的 ≥4 字长锚点，
     // 与判定层同源（report §4 P2「统一打分口径」）。短主题词绝不进正文 ilike。
+    // P-013 / D-016：由「按生成顺序取前 4 个」改为 `pickTextAnchors()` 按判别性分层挑选。
+    // 修复前前 4 个恒为题干开头的 6 字滑窗碎片，原题文件一份都进不了深挖池。
     const textAnchors = textRecallEnabled()
-      ? [...new Set(distKeys.filter((k) => k.length >= 4))].slice(0, TEXT_RECALL_KEYS)
+      ? pickTextAnchors(question, dist, TEXT_RECALL_KEYS)
       : []
 
     const qSet = bigrams(question)

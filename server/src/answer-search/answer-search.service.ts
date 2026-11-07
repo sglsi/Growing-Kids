@@ -56,7 +56,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // P-012 / D-015：P2 补齐（统一打分 + SQL top-N）与 P3（深挖 3→8、默认禁在线抽取）
 // 都会改变同一道题能命中的候选与最终 result。虽然 result **结构**没变，但缓存存的是
 // 整个 result 原样返回 ⇒ 不 bump 会让已搜过的题继续吐 v7 的旧命中/旧解析。
-const CACHE_VERSION = 'v8'
+// P-013 / D-016：召回侧选词策略改变 ⇒ 同一道题可能从 topic 变 exact，
+// 旧缓存必须整体失效，否则用户会继续看到修复前的「没找到答案」。
+const CACHE_VERSION = 'v9'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
