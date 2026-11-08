@@ -24,6 +24,8 @@
  *   单份超时 15 分钟；>20MB 的超大 docx 跳过留给专门批次；
  *   必须 `ionice -c3 nice -n19`；同时最多 1 个 worker。
  * 🔴 只写 `question_inline_figures`，绝不改 `question_objects` / `netdisk_files` / `question_figures`。
+ * 🔴 开跑前查 `fc-match Symbol`：LibreOffice 渲染 WMF 公式依赖系统符号字体，别名丢失时
+ *    PDF 转换与 bbox 匹配都会「正常成功」，但 ≠、<、−、≤ 等符号会静默消失（见 P-018 §5.3）。
  */
 import path from 'node:path'
 import fs from 'node:fs'
@@ -282,6 +284,35 @@ async function applyRun(client) {
   console.log(`耗时 ${((Date.now() - t0) / 60000).toFixed(1)} 分钟`)
 }
 
+/**
+ * 🔴 字体闸门（P-018 §5.3 / D-021 二次核对，2026-11-08 实测）
+ *
+ * 同一份 docx 用「有 Symbol 别名」与「排除符号字体」各转一次 PDF，逐 IMAGE 对象比对：
+ *   206 张公式尺寸图中 91 张墨迹明显减少（中位数 -26.9%），0 张出现「多出笔画」。
+ * 肉眼核对：B 版 `x ≠ -2` → `x  2`、`2 - x ≠ 0` → `2  x  0`，即符号整体消失，
+ * 而不是「≤ 被画成 £」。但这类降质对上游完全静默：soffice 返回 0、PDF 生成成功、
+ * bbox 匹配成功、webp 正常入库，只有家长看到残题时才会发现 ⇒ 必须在开跑前拦住。
+ */
+async function assertSymbolFont() {
+  if (process.env.INLINE_SKIP_FONT_CHECK === '1' || process.platform !== 'linux') return
+  let out = ''
+  try {
+    const r = await exec('fc-match', ['Symbol'], { timeout: 10_000 })
+    out = r.stdout || ''
+  } catch (e) {
+    throw new Error(`[inline] 无法执行 fc-match Symbol（需 fontconfig）：${e.message}`)
+  }
+  if (!/symbol/i.test(out)) {
+    throw new Error(
+      `[inline] Symbol 字体别名缺失，公式会静默缺符号，拒绝执行。\n` +
+      `  fc-match Symbol => ${out.trim() || '(空)'}\n` +
+      `  修复：确认 /etc/fonts/conf.d/69-gk-alias.conf 存在后 sudo fc-cache -f；\n` +
+      `  仅作诊断时可设 INLINE_SKIP_FONT_CHECK=1 跳过此闸门`,
+    )
+  }
+  console.log(`[inline] 字体闸门通过：${out.trim()}`)
+}
+
 async function main() {
   const client = new pg.Client({ connectionString: databaseUrl() })
   await client.connect()
@@ -291,6 +322,7 @@ async function main() {
       console.log('（dry-run，加 --apply 才执行）')
       return
     }
+    await assertSymbolFont()
     await applyRun(client)
   } finally {
     await client.end()
