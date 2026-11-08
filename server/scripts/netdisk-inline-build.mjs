@@ -234,7 +234,7 @@ async function applyRun(client) {
           const ph = part.map((it, idx) => {
             const b = idx * cols.length
             vals.push(s.user_id, 'netdisk', s.source_id, it.index, it.seq, it.offset, it.kind,
-              it.key, it.w, it.h, 0, it.page, rev, ENGINE)
+              it.key, it.w, it.h, it.size || 0, it.page, rev, ENGINE)
             return `(${cols.map((_, j) => `$${b + j + 1}`).join(',')})`
           })
           await client.query(
@@ -243,7 +243,8 @@ async function applyRun(client) {
              on conflict (user_id, source_type, source_id, object_index, seq)
              do update set char_offset = excluded.char_offset, kind = excluded.kind,
                storage_key = excluded.storage_key, width = excluded.width,
-               height = excluded.height, page_index = excluded.page_index,
+               height = excluded.height, size_bytes = excluded.size_bytes,
+               page_index = excluded.page_index,
                source_revision = excluded.source_revision,
                engine_version = excluded.engine_version, built_at = now()`,
             vals,

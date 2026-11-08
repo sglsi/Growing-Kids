@@ -399,7 +399,7 @@ def main():
             off = offset_in_stem(stem, pre_ns)
             items.append({
                 'index': o.get('index'), 'seq': seq, 'offset': off,
-                'kind': m['kind'], 'key': key,
+                'kind': m['kind'], 'key': key, 'size': size,
                 'w': img.width, 'h': img.height, 'page': page_no,
             })
             stat['ok'] += 1
