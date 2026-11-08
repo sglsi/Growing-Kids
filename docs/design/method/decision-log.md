@@ -510,3 +510,37 @@
 | 仍锁 | `strict=1`、第二层上线准入、库覆盖 / OCR 字面差异 / 英文锚点 /「题干 A＋别人解析」、`.doc` 与大 PDF 补抽、4 组身份治理、双账号真实登录 E2E、公安联网备案、用户贡献通道；正式版提审/发布仍需思傅在 mp 后台点 |
 | 新登记运维坑 | CLI 连 `127.0.0.1` 被 `HTTP_PROXY` 劫持 ⇒ 必须清代理变量 + `NO_PROXY=127.0.0.1,localhost`；`-38 当前还有任务在编译中` 反复重投无效（云端排队），有效解法＝`taskkill` 全部 `wechatdevtools.exe` → 冷启动 → **重启后第一个动作**即 upload。详见 `GK-QA-16 §6.1.11` |
 
+
+---
+
+## D-020 参考例题原题快照（图形与公式随题一起给出来，2026-11-08 思傅拍板）
+
+| 项 | 内容 |
+|---|---|
+| 触发 | 思傅报障「特别是数学，有很多图形的题目，当前题库中查寻到的相同类型题目只有文字的描述，没有图形」；同时指出「这对于数学或其他科目题目的理解就会有比较大的障碍」 |
+| 只读取证 | `question_objects` **无任何图片字段**；`pdf_tool.py` 走 `text_only=True` **明确不保留图**；docx 公式是 `o:OLEObject`→**WMF 位图**（成都二诊 3,205 个 wmf 中 2,761 个是公式）；库内解析实际残缺成「抛物线中，当时，；当时，或3」；来源分布 docx **3,705 份 / 89,523 对象（97%）**、PDF 440 份 / 2,805 对象；`GET /api/storage/files/*` 在 `PUBLIC_ROUTES` 内且 `PUBLIC_HTTP=200 / image/webp` |
+| 关键判断 | **不是召回问题、不是判定问题，是取数管线第一步就把「非文本」扔了**。公式与几何图一起丢 ⇒ 在 `question-match.ts` 或打分侧做任何事都救不回来；必须从源文件把原题那一块**原样截回来** |
+| 主流方案复检 | MinerU / PP-StructureV3（版面 + bbox + 公式识别）能力最强但需 GPU 或大内存（L3 仅 4 核 / 3.7G / 无 GPU，且 3,705 份跑不动），且输出「整页的图与文本块」**不解决题级映射**；Mathpix 类商用 OCR 收费 + 整份教辅外传；重跑切题已被 `D-017` 证伪。⇒ 选 **docx→PDF→文本锚点定位→裁切原题块**：一次同时救回图形与公式，纯 CPU、可断点续跑 |
+| 决策 | ① 迁移 `0028_question_figures.sql` 建「图↔题目对象」映射表（只存内容寻址 key，不存二进制）；② 离线构建 `netdisk-figure-build.mjs` + `netdisk-figure-crop.py`；③ `ReferenceExample` 增 `figureUrl / figureWidth / figureHeight / figurePage`，由 `attachFigures()` **只读批量挂载**；④ 前端参考例题卡片内嵌缩略图 + `previewImage` 放大；⑤ `CACHE_VERSION v12→v13` + 9 处旧断言同步 + **M39** |
+| 硬约束 | `question-match.ts` **一行不动**；六条硬闸 / `answer` / `verified` / `canAdopt` / `strict=1` 零放宽；`attachFigures()` **不参与召回与打分**、不改 note、不改 `match_level`；**定位不到就不入库不下发，绝不拿相邻题顶替、绝不占位图**；图不得插到 `reference_disclaimer` 之前；不新开需登录的图片端点 |
+| 分档 | **L1**（结果呈现层，不改学习准则、不改判定层、不升 20a、不补 20b）｜依据 `GK-OPS-22 §3.2` **D 降维**（Q3 不可测，`0021 review_events` 0 行 ⇒ 不做指标、不做宣称）、`GK-SRS-20a` M8 / M10 / M11 |
+| falsifier | ①图不是该题所在区域（顶替）；②图片端点需登录 / 小程序 `<Image>` 拿不到；③无图时出现占位图或加载失败框；④图排在声明之前；⑤`question-match.ts` sha256 漂移或 `answer` 非空 / 出现「采纳」；⑥构建脚本写了本表之外的表；⑦缓存未 bump 或旧缓存吐错位结构；⑧出现「所有题都有图 / 全部覆盖图形 / 看懂图形 / 精准定位到题 / 提升命中 / 修复有效」宣称。任一即按 `OPS-22 §3.4` 停下、回滚、登记 |
+| 授权与边界 | 思傅本轮明确授权：**文件访问免询问**、敏感信息走加密通道（ssh）、**可删部分文件**；沿用 `D-018` 的「可操作微信开发者工具上传发版（仅开发版）」与「本目标下自主实施不再逐题回问」。**生产数据删除仍守 `QA-16 §3.1`**（ssh L3 + 备份 + dry-run） |
+| 与既有台账的关系 | **不回溯改判** `D-016`（P-013 已否决）、`D-017`（P-014 假 exact 归零）、`D-018`（P-015 并列第二层）、`D-019`（P-016 闸门作用域）。本条只把「并列第二层」补上它本该有的视觉部分，属**缺陷补全** |
+| 保留形式 | 允许「上图是资料库原题的原样截取（含图形与公式），点一下可放大」「原文档第 N 页」；**禁止**「所有题都有图」「全部覆盖图形」「看懂图形」「精准定位到题」「提升命中 / 修复有效 / 误判归零」「所有用户已可用」 |
+| 待回填 | 执行记录（构建统计 / 门禁 / 部署 / 端到端 / 前端上传 / 不宣称清单）在本条实施完成后追加，不涂改上表 |
+
+**执行记录（2026-11-08 15:0x 回填，一列不改上表）**
+
+| 项 | 实绩 |
+|---|---|
+| 代码 | `migrations/0028_question_figures.sql`（只建本表 + 唯一键 + 2 索引 + 注释）；`server/scripts/netdisk-figure-build.mjs`（node 段：取数/下载/入库，`--shard i/n` 哈希分片幂等）＋ `server/scripts/netdisk-figure-crop.py`（python 段：soffice 批量转 PDF、pypdfium2 取字符框、三重定位兜底、`SCALE=2.0`/`MAX_H=2200`/`WEBP_Q=78`）；`shared/question-reference.ts` 增 `figureUrlFor()` 与 `figureUrl/figureWidth/figureHeight/figurePage`；`netdisk-search.service.ts` 增 `attachFigures()`（一次 `in (source_ids)` 只读挂载）；`answer-editor.tsx` 卡片内嵌 + `previewImage`；`services/api.ts` 契约；`CACHE_VERSION v12 → v13` + 9 处旧断言同步 + **M39**（10 组） |
+| 不变量核对 | `question-match.ts` **sha256 未变**（M39 A1＝`84f998ff…`）；`attachFigures()` 不参与召回/打分、不改 note/`match_level`；短题干（<10 字）跳过且不留顶替；无图不渲染、无占位图 |
+| 迁移 | `0028` 已在 L3 应用（「新增 1 个，跳过 0 个」），**未改任何既有表** |
+| 门禁 | M27–M39 **148/148**（M39 10/10）、`method:check` H1 15 处 / H2 140 处 / H3 2 处三硬门全过、`lint:build` / `tsc` / `nest build` / `build:weapp` 全 0 |
+| 部署 | 差异 19 changed + 3 only_local，扣 14 项登记排除项 ⇒ **8 产物**；回滚点 `dist.bak-p017-20261108-1507`；重启后 `active` / **0 ERROR** / 外网 health **200 / 0.065s** |
+| 端到端 | 真实几何题 `hits=8 / refs=3`，**3 条 reference 全带 `figureUrl`**（page 9/31/57，w=1191）；单图匿名 GET **200 / image/webp / 95,716 B**；肉眼确认裁切块含完整题干 + 数据表 + 描点图 + 公式 + 答案解析，无截断 |
+| 前端 | `build:weapp` 成功；CLI `upload -v 2026.11.08.3` ⇒ **`√ upload` 872.6 KB / 893,571 B**，仅**开发版**。⚠️ 本轮 8 页 CDP 冒烟未跑（IDE 由 CLI 启动未开 9222） |
+| 🔴 事故 | 全量构建三 worker 并发（其中一个启动参数写成 `--shape 2/3`，分片失效从全表重跑）+ `FIGURE_BATCH=8`，把 L3 压到 **load 82 / sshd banner 超时 / 站点与 API 全超时约 15 分钟**。已清进程恢复，并把护栏写进脚本（BATCH 默认 2、内存闸门 700MB、单批超时 8min、`FIGURE_MAX_MB=20` 跳过超大文件、`ionice -c3 nice -n19`、单 worker）。详见 `GK-QA-16 §6.1.12` |
+| 不宣称清单 | 未写「每道题都带图 / 图形全覆盖 / 看得懂图形 / 精准到这道题 / 提升命中 / 修复有效 / 误判归零 / 所有用户已可用」；未算召回率；全量仅完成 121/3,705 份（2.6%）；唯一够格指标 `0021 review_events` 仍 **0 行** |
+| 仍锁 | 全量剩余 3,584 份（单 worker 续跑）、扫描版 PDF 440 份、`.doc` 10,503 份、超大 docx（>20MB）专门批次、正式版 HTTPS 域名与 `downloadFile` 白名单、`strict=1`、第二层上线准入、4 组身份治理、双账号真实登录 E2E、公安联网备案 |

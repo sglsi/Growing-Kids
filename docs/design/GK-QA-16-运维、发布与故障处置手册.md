@@ -2302,3 +2302,56 @@ sudo -n mv /opt/gk/server/dist.bak-p016-20261108-1113 /opt/gk/server/dist
 sudo -n systemctl restart gk-api
 ```
 无数据回滚需求；`CACHE_VERSION v12` 缓存行自然成为孤儿。前端开发版单槽位不可回退，只能重新上传旧包（本轮旧包为 `2026.11.08.1`）。
+
+---
+
+### 6.1.12 P-017 / D-020：参考例题原题快照（图形与公式）2026-11-08 15:0x
+
+> 思傅报障「特别是数学，有很多图形的题目，查到的相同类型题目只有文字、没有图形」。取证结论：不是召回问题，是取数管线第一步就把非文本扔了 —— `question_objects` 无任何图片字段、`pdf_tool.py` 的 `text_only=True` 不保留图、docx 公式是 `o:OLEObject`（WMF 位图）也被一并吞掉。方案：docx → LibreOffice → PDF → 文本锚点定位 → 裁切原题块 → WebP → 内容寻址 → 卡片内嵌。
+
+| 步 | 实绩 |
+|---|---|
+| 0 备份 | 远端 `cp -a dist dist.bak-p017-20261108-1507`（完整回滚点） |
+| 1 迁移 | `0028_question_figures.sql`（只建本表 + 3 索引 + 注释）；列名校验通过；**未改任何既有表** |
+| 2 编译 | 本地 `nest build` 通过；`lint:build` / `tsc` 全 0 |
+| 3 换 dist | 完整 sha256 清单（Windows `*` 归一化）比对：**19 changed + 3 only_local**；扣 14 项登记排除项 ⇒ **本轮 8 个产物**：`answer-search.service.{js,js.map}`、`netdisk-search.service.{js,js.map,d.ts}`、`question-reference.{js,js.map,d.ts}`。验包特征串 `CACHE_VERSION = 'v13'`×1 / `attachFigures`×2 / `figureUrlFor`×2 / `question_figures`×1 / `/api/storage/files/`×1 |
+| 4 重启 | `systemctl restart gk-api` ⇒ `active` / journalctl **0 ERROR** / 外网 `/api/health` **200 / 0.065s** |
+| 5 端到端 | 自签 `X-Auth-Token`（`publicLibraryOwner`，91 字）查真实几何题：`hits=8 / refs=3`，**3 条 reference 全带 `figureUrl`**（页码 9 / 31 / 57，宽 1191）；单张图 **匿名 GET 200 / image/webp / 95,716 B** |
+| 6 肉眼验收 | 下载其中一张亲眼看：**完整题目 + 数据表 + 描点作图 + 公式 + 答案解析，无截断**（物理「盐水沸腾」4 小问） |
+| 7 前端 | `build:weapp` 成功（dist 1,002K / 67 文件，特征串 `原样截取` 命中 `dist/common.js`）；CLI `open --project` → `islogin {"login":true}` → **`upload -v 2026.11.08.3` ⇒ `√ upload` 872.6 KB / 893,571 B**，一次成功 |
+
+#### 🔴 本轮最大的事故：全量构建把生产压垮约 15 分钟（必须记住）
+
+**现象**：`ping` 通（30ms），但 **TCP 22 连上后 banner 超时**、`/api/health` 与站点根全部超时 —— 表现为「整机假死」。持续约 **14:40–14:57**，期间生产不可用。
+
+**取证**：恢复后首次登录拿到 `load average: 56.10, 82.74, 69.48`（4 核），而 **Mem available 仍有 2400MB**（不是纯内存问题）；`vmstat` 显示 `swpd 738484`（进入过 swap），`us 25–28 / id 62–74`；最耗 CPU 单进程 `soffice.bin 96.6%`，另有 python 裁切进程 **RSS 1.9 GB**。
+
+**根因（三条叠加，都是我这边的问题）**：
+1. **跑了 3 个 worker，不是 2 个**：除 `--shard 0/2` 与 `--shard 1/2`，还有一个 **`--shape 2/3`（拼写错误，应为 `--shard`）**。参数名写错 ⇒ `SHARD=''` ⇒ **分片失效，它从全表开头重跑**，与另外两个 worker 重复劳动，等于三份并发。
+2. **`FIGURE_BATCH` 默认 8**：一次 `soffice` 连转 8 份 docx，内存与 CPU 峰值叠加；w2 有一批 **卡了 2284 秒**（38 分钟）仍未结束。
+3. 无 `ionice` / 无内存闸门 / 无单批超时 ⇒ 进程可以无限吃下去，直到整机调度不过来。
+
+**已落地的护栏（脚本已改，哈希 `b45bb976…`）**：
+- `FIGURE_BATCH` 默认 **8 → 2**；
+- 每批开工前读 `/proc/meminfo`，`MemAvailable < 700MB` 就等，等 30 分钟仍不足则整体停止；
+- 单批 `timeout` **30min → 8min**（超时跳过该批并记一笔，不让一个坏文件拖死整轮）；
+- 新增 `FIGURE_MAX_MB`（默认 20）：**跳过 >20MB 的超大 docx**，留给专门的低峰批次；
+- python 段包 `ionice -c3 nice -n19`，每批收尾 `pkill -f soffice.bin` 清残留；
+- 只跑 **1 个 worker**（`FIGURE_WORK_DIR=/tmp/gkfig-r1`）。
+
+**复盘教训**：`nice` 只管 CPU 份额，**管不住内存和 IO**；小机器上「低优先级」不等于「不影响生产」。以后在 L3 上跑批量转换类任务，先算峰值内存、先限并发、先设单批超时，并且**边跑边看 `free -m` 与 `load`**，不要一次投完就走。
+
+#### 回滚
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad
+sudo -n mv /opt/gk/server/dist.bak-p017-20261108-1507 /opt/gk/server/dist
+sudo -n systemctl restart gk-api
+```
+- 数据：`question_figures` 是**派生表**，可直接 `truncate` 后按需重跑；图片本体在 `/var/lib/gk/storage/figures/`，为内容寻址孤儿文件，删不删都不影响判定。
+- 迁移：`0028` 只新增表，不动既有表，回滚无需反向迁移。
+- 前端：开发版单槽位不可回退，只能重传旧包（上一版 `2026.11.08.2`）。
+
+#### 未完成 / 仍锁
+- **全量构建远未跑完**：截至本节撰写，库内 **4,328 张 / 121 份来源 / 197MB**（占 3,705 份的 2.6%），单 worker 安全模式下重新续跑（幂等 `--shard` 不变，无需清库）。
+- **本轮 8 页 CDP 冒烟未跑**：IDE 由 CLI `open` 启动，未开 9222；`dist` 特征串已命中、上传成功，但模拟器回归缺一轮，下次冷启动补。
+- 正式版仍需 HTTPS 域名 + mp 后台 `downloadFile` 合法域名（图片走 `http://42.192.36.120/api/storage/files/*`，与现有 API 同源，未引入新的发布障碍，但**发布前必须一起解决**）。
