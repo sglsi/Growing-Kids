@@ -193,4 +193,18 @@ m.test('🔴 B8 提案六栏 + 台账 D-021 + 保留形式（不宣称）', (c) 
   }
 })
 
+m.test('🔴 B9 字体闸门：--apply 前必查 Symbol 别名（防公式静默缺符号）', (c) => {
+  const t = codeJs(read(BUILDER))
+  c.ok(/async function assertSymbolFont\(\)/.test(t), '缺字体闸门函数')
+  c.ok(/exec\('fc-match', \['Symbol'\]/.test(t), '闸门没有查 fc-match Symbol')
+  c.ok(/!\/symbol\/i\.test\(out\)/.test(t), '闸门没有判定「回退到普通字体」的结果')
+  const fn = (t.split('async function assertSymbolFont()')[1] || '').split('async function main()')[0]
+  c.ok(/throw new Error\(/.test(fn), '字体缺失时未拒绝执行（静默降质会混进题库）')
+  const main = t.slice(t.indexOf('async function main()'))
+  const gateAt = main.indexOf('await assertSymbolFont()')
+  const runAt = main.indexOf('await applyRun(client)')
+  c.ok(gateAt >= 0 && runAt > gateAt, '--apply 分支没有在 applyRun 之前过闸门')
+  c.ok(/if \(!APPLY\)[\s\S]{0,200}return/.test(main), 'dry-run 不应被字体闸门阻断')
+})
+
 export default m
