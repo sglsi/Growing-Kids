@@ -174,17 +174,28 @@ async function applyRun(client) {
   const target = LIMIT > 0 ? sized.slice(0, LIMIT) : sized
   console.log(`[inline] 待处理 ${target.length} 份（候选 ${all.length}，shard=${SHARD || '-'}）`)
 
+  // 🔴 2026-11-08 扩量复盘：2 worker 阶段 28/384 报「无 result.json」，拿失败样本单跑 10s
+  // 就成功、补跑 30 份 0 失败 ⇒ 双 soffice 并发瞬时竞争，不是文档损坏。全量前必须自愈，
+  // 否则 7% × 3,000 ≈ 200 份返工。这里改成「队列可回插」：失败一次就排到队尾重试一次
+  // （重试前先按本 worker profile 清孤儿 soffice，给系统 3s 回收句柄）。
+  const queue = [...target]
+  const tries = new Map()
+  const MAX_TRIES = Number(process.env.INLINE_MAX_TRIES || 2)
+
   const py = process.env.OCR_PYTHON || 'python3'
-  const total = { files: 0, ok: 0, objs: 0, figures: 0, bytes: 0, rows: 0, failed: 0 }
+  const total = { files: 0, ok: 0, objs: 0, figures: 0, bytes: 0, rows: 0, failed: 0, retried: 0, retriedOk: 0 }
   const t0 = Date.now()
 
-  for (let i = 0; i < target.length; i++) {
-    const s = target[i]
+  for (let qi = 0; qi < queue.length; qi++) {
+    const s = queue[qi]
     const dir = path.join(WORK, String(s.source_id))
-    await waitForMemory(`第 ${i + 1}/${target.length} 份`)
+    const attempt = (tries.get(s.source_id) || 0) + 1
+    tries.set(s.source_id, attempt)
+    await waitForMemory(`第 ${qi + 1}/${queue.length} 份`)
     await fss.rm(dir, { recursive: true, force: true }).catch(() => {})
     await fss.mkdir(path.join(dir, 'src'), { recursive: true })
     total.files++
+    if (attempt > 1) total.retried++
 
     try {
       const buf = await nd.downloadByFsId(s.fs_id)
@@ -272,15 +283,30 @@ async function applyRun(client) {
         )
       }
       total.ok++
+      if (attempt > 1) total.retriedOk++
       const secs = ((Date.now() - t0) / 1000).toFixed(0)
       console.log(
-        `[inline] ${i + 1}/${target.length} ${String(s.name).slice(0, 28)} ` +
+        `[inline] ${total.ok}/${target.length} ${String(s.name).slice(0, 28)} ` +
           `对象 ${objs.length} → 图 ${items.length}` +
-          `${items.length ? '' : '（本份无可内联图，记 empty）'}（${secs}s 累计）`,
+          `${items.length ? '' : '（本份无可内联图，记 empty）'}` +
+          `${attempt > 1 ? `（重试${attempt - 1}次后成功）` : ''}（${secs}s 累计）`,
       )
     } catch (e) {
-      total.failed++
-      console.warn(`[inline] 失败 ${String(s.name).slice(0, 30)}: ${e instanceof Error ? e.message : e}`)
+      const msg = e instanceof Error ? e.message : String(e)
+      // 🔴 失败一次就回插队尾重试（默认 2 次机会），避免并发瞬时竞争变成永久缺图。
+      if (attempt < MAX_TRIES) {
+        console.warn(`[inline] 失败重试 ${String(s.name).slice(0, 28)}: ${msg}`)
+        // 按本 worker profile 精确清掉可能残留的孤儿 soffice，再给它 3s 回收句柄；
+        // 否则重试会连到同一个挂死的实例上（11-08 首轮就是这么连着失败两次的）。
+        await exec('/usr/bin/pkill', ['-9', '-f', `UserInstallation=file://${LO_PROFILE}`])
+          .catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        queue.push(s)
+      } else {
+        total.failed++
+        // 2026-11-09：失败只有文件名时无法在库里定位重跑，补 source_id（可直接 --source 复现）。
+        console.warn(`[inline] 失败 ${String(s.name).slice(0, 30)} [${s.source_id}]: ${msg}`)
+      }
     } finally {
       await fss.rm(dir, { recursive: true, force: true }).catch(() => {})
     }
