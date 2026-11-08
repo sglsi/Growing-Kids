@@ -167,7 +167,7 @@ m.test('🔴 A5 几何题粗筛词含判别性点名、不含高频通用点名'
 
 m.test('🔴 A6 结果内容会变 ⇒ CACHE_VERSION 必须 bump', (c) => {
   const svc = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v12'/.test(svc), 'CACHE_VERSION 不是 v12（旧缓存会继续返回 topic）')
+  c.ok(/const CACHE_VERSION = 'v13'/.test(svc), 'CACHE_VERSION 不是 v13（旧缓存会继续返回 topic）')
   c.ok(/P-013 \/ D-016/.test(svc), '没写明 bump 原因')
   c.ok(!/const CACHE_VERSION = 'v8'/.test(svc), '还留着 v8')
 })

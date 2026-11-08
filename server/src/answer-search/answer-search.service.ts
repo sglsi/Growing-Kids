@@ -70,7 +70,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // P-016 / D-019：不合格输入的 result 从「source:none + 一句闸门提示」变为
 // 「提示 + references + 声明」，且用户可见 note 文案改变 ⇒ v11 → v12。
 // 不 bump 会让 11-08 10:42 那类已缓存的题继续吐「什么都没有」的旧结果。
-const CACHE_VERSION = 'v12'
+// P-017 / D-020：参考例题新增「原题快照」字段（figureUrl / figureWidth / figureHeight /
+// figurePage）⇒ result 结构再变一次，旧缓存会把「有例题、无图」一直吐出来，必须整体失效。
+const CACHE_VERSION = 'v13'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */

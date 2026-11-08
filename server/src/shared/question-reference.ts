@@ -48,6 +48,27 @@ export interface ReferenceExample {
   sharedSignals: string[]
   /** 去空白后的解析长度，用于排序（过程更完整的优先） */
   solutionChars: number
+  /**
+   * P-017 / D-020：原题快照（含图形与公式）的可访问 URL。
+   * 缺失即「这道题没有快照」（转换失败 / 题干定位不到），前端不得用相邻题目的图顶替。
+   */
+  figureUrl?: string
+  figureWidth?: number
+  figureHeight?: number
+  /** 该题在原文档里的页码（1 起），仅用于「查看原页」与人工核对 */
+  figurePage?: number
+}
+
+/**
+ * P-017 / D-020：原题快照 URL。
+ *
+ * 走**已公开**的 `GET /api/storage/files/*`：小程序 `<Image src>` / `previewImage`
+ * 只发 GET、不带任何头部，令牌到不了服务端（见 `user-context.ts` PUBLIC_ROUTES 说明）。
+ * local 驱动下 `STORAGE_PUBLIC_BASE_URL` 必须配成公网可达基址，否则前端拿到相对路径。
+ */
+export function figureUrlFor(key: string): string {
+  const base = (process.env.STORAGE_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
+  return `${base}/api/storage/files/${key}`
 }
 
 export interface ReferenceValidation {

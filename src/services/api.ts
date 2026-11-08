@@ -1277,6 +1277,14 @@ export interface ReferenceExample {
   charEnd: number
   sharedSignals: string[]
   solutionChars: number
+  /**
+   * P-017 / D-020：原题快照（含图形与公式）的公开 URL。
+   * 缺失 = 这道题没有快照（转换失败 / 题干定位不到），前端不得用别的题顶替。
+   */
+  figureUrl?: string
+  figureWidth?: number
+  figureHeight?: number
+  figurePage?: number
 }
 
 /** 联网搜答案的返回（与后端 answer-search.service 对齐） */

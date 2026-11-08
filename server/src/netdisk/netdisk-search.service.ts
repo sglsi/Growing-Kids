@@ -17,7 +17,7 @@ import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/publi
 // P-014 / D-017：检索前输入合格性闸门（只读判定，不碰判定层）
 import { guardQuestionInput } from '../shared/input-guard'
 // P-015 / D-018：参考例题（相似题思路借鉴）——与原题判定并列，判定层零改动
-import { collectReferences, mergeReferences, REFERENCE_DISCLAIMER } from '../shared/question-reference'
+import { collectReferences, mergeReferences, REFERENCE_DISCLAIMER, figureUrlFor } from '../shared/question-reference'
 import type { ReferenceExample } from '../shared/question-reference'
 
 /**
@@ -364,6 +364,45 @@ export class NetdiskSearchService {
   }
 
   /**
+   * P-017 / D-020：给参考例题补「原题快照」（图形 + 公式）。
+   *
+   * 一次批量查询 `question_figures`，按 `source_id#object_index` 对齐。
+   * 🔴 查不到就是**没有图**：不构造占位图、不拿相邻题目的图顶替、不影响判定与排序。
+   * 查询失败只告警降级（少一张图不该让整次检索失败）。
+   */
+  private async attachFigures(refs: ReferenceExample[]): Promise<void> {
+    const ids = [...new Set(refs.map((r) => r.sourceId).filter(Boolean))]
+    if (ids.length === 0) return
+    try {
+      const { data, error } = await getSupabaseClient()
+        .from('question_figures')
+        .select('source_id,object_index,storage_key,width,height,page_index')
+        .eq('user_id', publicLibraryOwner())
+        .eq('source_type', 'netdisk')
+        .in('source_id', ids)
+      if (error) {
+        this.logger.warn(`[netdisk] 取原题快照失败（本次不带图）：${error.message}`)
+        return
+      }
+      const map = new Map<string, Record<string, unknown>>()
+      for (const r of (data || []) as Record<string, unknown>[]) {
+        map.set(`${String(r.source_id)}#${String(r.object_index)}`, r)
+      }
+      for (const ref of refs) {
+        const hit = map.get(`${ref.sourceId}#${ref.objectIndex}`)
+        const key = hit?.storage_key ? String(hit.storage_key) : ''
+        if (!key) continue
+        ref.figureUrl = figureUrlFor(key)
+        ref.figureWidth = Number(hit?.width) || undefined
+        ref.figureHeight = Number(hit?.height) || undefined
+        ref.figurePage = Number(hit?.page_index) || undefined
+      }
+    } catch (e) {
+      this.logger.warn(`[netdisk] 取原题快照异常（本次不带图）：${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  /**
    * 搜公共资料库。
    *
    * 🔴 P-011：签名里**没有 userId**——公共资料不按登录用户隔离
@@ -628,7 +667,10 @@ export class NetdiskSearchService {
     // P-015 / D-018：跨来源去重取 top-N。声明文案随结果一起下发，
     // 保证 `/api/netdisk/search` 直连也不会出现「有内容、无声明」。
     const references = mergeReferences(referencePools)
+    // P-017 / D-020：给命中的参考例题补「原题快照」（图形 + 公式）。
+    // 🔴 只读 `question_figures`，不改判定层、不改召回；缺失就是没有图，绝不拿别的题顶替。
     if (references.length > 0) {
+      await this.attachFigures(references)
       note += `；另有 ${references.length} 道解题思路相近的例题可供借鉴（不是本题答案，展示前须先声明）`
     }
 

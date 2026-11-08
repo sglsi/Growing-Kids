@@ -622,6 +622,29 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                     </Text>
                     <Text className="block text-xs font-semibold" style={{ color: BRAND_TEXT }}>例题 {i + 1} · 题目</Text>
                     <Text className="block text-xs mb-1" style={{ color: INK }}>{stem}</Text>
+                    {/* P-017 / D-020：原题快照（图形 + 公式）。没有就是没有图，绝不拿别的题顶替。
+                        点击全屏放大；小程序 <Image> 不发头部 ⇒ URL 必须是公开可匿名 GET 的。 */}
+                    {r.figureUrl ? (
+                      <View className="mb-1">
+                        <TaroImage
+                          src={r.figureUrl}
+                          mode="widthFix"
+                          style={{
+                            width: '100%',
+                            borderRadius: '6px',
+                            border: '1px solid rgba(11,122,85,0.18)',
+                            backgroundColor: '#FFFFFF',
+                          }}
+                          onClick={() =>
+                            Taro.previewImage({ current: r.figureUrl as string, urls: [r.figureUrl as string] })
+                          }
+                        />
+                        <Text className="block text-xs text-muted-foreground mt-1">
+                          上图是资料库原题的原样截取（含图形与公式），点一下可放大
+                          {r.figurePage ? ` · 原文档第 ${r.figurePage} 页` : ''}
+                        </Text>
+                      </View>
+                    ) : null}
                     <Text className="block text-xs font-semibold" style={{ color: BRAND_TEXT }}>解题过程</Text>
                     <Text className="block text-xs mb-1" style={{ color: INK }}>{sol}</Text>
                     <View onClick={() => setExpandedRefs((v) => ({ ...v, [i]: !v[i] }))}>
