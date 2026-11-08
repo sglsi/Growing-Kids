@@ -2339,6 +2339,20 @@ sudo -n systemctl restart gk-api
 - python 段包 `ionice -c3 nice -n19`，每批收尾 `pkill -f soffice.bin` 清残留；
 - 只跑 **1 个 worker**（`FIGURE_WORK_DIR=/tmp/gkfig-r1`）。
 
+**再加一道硬保险（cgroup，不靠脚本自觉）**：把整轮跑成受内存上限约束的临时服务，超限只 OOM 掉这个 unit，绝不波及 PG / `gk-api` / sshd。
+
+```bash
+sudo systemd-run --unit=gk-fig --uid=gk --gid=gk \
+  -p MemoryMax=1800M -p CPUQuota=200% -p WorkingDirectory=/opt/gk/server \
+  --setenv=FIGURE_WORK_DIR=/tmp/gkfig-r1 --setenv=FIGURE_BATCH=2 \
+  --setenv=OCR_PYTHON=/opt/gk/.venv-py/bin/python \
+  --description="P-017 figure build safe" \
+  /usr/bin/nice -n 19 /usr/bin/node scripts/netdisk-figure-build.mjs --apply
+# 看进度：sudo journalctl -u gk-fig -f
+# 看占用：systemd-cgtop -n 1 -b | grep gk-fig      （实测 224M / 上限 1800M）
+# 停止：  sudo systemctl stop gk-fig
+```
+
 **复盘教训**：`nice` 只管 CPU 份额，**管不住内存和 IO**；小机器上「低优先级」不等于「不影响生产」。以后在 L3 上跑批量转换类任务，先算峰值内存、先限并发、先设单批超时，并且**边跑边看 `free -m` 与 `load`**，不要一次投完就走。
 
 #### 回滚
