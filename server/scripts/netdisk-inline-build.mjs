@@ -214,6 +214,13 @@ async function applyRun(client) {
         // 实例上继续挂死。这里按本 worker 的 profile 目录精确清理。
         await exec('/usr/bin/pkill', ['-9', '-f', `UserInstallation=file://${LO_PROFILE}`])
           .catch(() => {})
+        // 🔴 2026-11-08 扩量复盘：python 失败时 traceback 全在 stderr，只留 stdout 会得到
+        // 「无 result.json（）」这种无信息量的报错，28 份失败无法定位。这里把退出码/信号/
+        // stderr 尾部打进日志（只诊断、不改变失败处理逻辑）。
+        const diag = [e.code != null ? `code=${e.code}` : '',
+          e.signal ? `signal=${e.signal}` : '',
+          String(e.stderr || '').trim().slice(-800)].filter(Boolean).join(' | ')
+        if (diag) console.warn(`[inline] python 异常：${diag}`)
         return { stdout: e.stdout || '' }
       })
 
