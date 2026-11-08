@@ -593,3 +593,17 @@
 | 不宣称 | 未写「命中提升 / 图形全覆盖 / 看懂图形 / 修复有效 / 误判归零 / 所有用户已可用」；未算召回率；`0021 review_events` 仍 **0 行**。6.9% 覆盖率下**多数参考例题仍无图**，这是如实状态不是链路故障 |
 | 仍锁 | 全量 7,169 份、192 份 >6MB 专门批次、`.doc` 10,503 份、扫描 PDF、`m:oMath`、正式版发布、`strict=1`、第二层准入、身份治理；⚠️ 手机看效果还需确认 `https://deep-root.cn` 已在 mp 后台 **downloadFile 合法域名**（开发管理托管未解除，见 `GK-00 v1.3`），或开发版关 `urlCheck` |
 
+
+**执行记录（2026-11-09 02:1x 回填，一列不改上表）— 思傅「可以看到图，继续扩到 3000 份」**
+
+| 项 | 实绩 |
+|---|---|
+| 规模 | `question_inline_done` **504 → 3,007 份**（+2,503）、`question_inline_figures` **18,252 → 130,361 张**（+112,109）、**2,054 份**真有图（68.3%）、**630 MB**；覆盖率 **3,007 / 7,286 ≈ 41.3%**（原 6.9%）。公式 91,828 张 / 104 MB、几何图 38,533 张 / 527 MB；`status='empty'` **953 份**（31.7%，本身无内联图） |
+| 磁盘 | 落盘 `/var/lib/gk/storage/figures` **2.2 G / 101,177 个文件** ⇒ 130,361 行内容寻址去重省 **22%**；`/` 仍 37 G 可用 |
+| 跑法 | 2 worker（`--shard 0/2`、`1/2` 各 `--limit 1248`）**164 分钟**跑 2,736 次尝试；单 worker 串行补跑 60 份 **8.6 分钟**。cgroup（`MemoryMax=1500M`／`CPUQuota=100%→150%`）、`nice 19`＋`ionice -c3`、独立 `INLINE_WORK_DIR`（独立 LO profile）、`INLINE_MAX_MB=6`（跳 192 份）、`fc-match Symbol` 闸门、`INLINE_MAX_TRIES=2` |
+| 提速实测 | `CPUQuota` 100%→150%（`systemctl set-property`，逐 unit 单独执行，一次传两个 unit 会报 `Not an assignment`）⇒ 合计速率 **10.6 → 14.6–18 份/分钟**，`MemAvailable` 稳定 1.8–2.4 G、`gk-api` 全程 `health 200`、无 OOM |
+| 🔴 失败根因（新） | 2 worker：`ok=2443 / failed=53 / retried=240 / retriedOk=187`（重试救回 **78%**）。失败**集中在后半程**（0→3→24→53 递增，重试成功率骤降）⇒ **不是文档损坏，是 worker 长跑后 LO profile / soffice 状态退化**。判据：同一批失败项用**全新 `INLINE_WORK_DIR` 串行**跑 60 份 ⇒ **60/60 全成功、0 失败、0 重试、8.6 分钟**。⚠️ 运维结论：**每跑约 1,000 份或每 ~2 小时重启 worker（换新 profile）**，比调大重试次数有效；重试只在瞬时竞争（单份偶发）上有效 |
+| 诊断补强 | `build.mjs` 失败行补 `source_id`（可用 `--source <id>` 直接复现）、python 异常补 `code/signal/stderr`，均为诊断不改处理逻辑 |
+| 端到端 | 自签令牌打生产 `/api/netdisk/search` 5 条真实题干：`refs` 合计 10、**8 条带图**、图合计 **45 张**（单条最多 21 张 formula）；URL 全为 `https://deep-root.cn/...`；图片自检 `200 image/webp 9648 B`。**130,361 条 `char_offset` 全库校验越界 0 条** |
+| 不宣称 | 未写命中提升／图形全覆盖／看懂图形／修复有效／误判归零；未算召回率；`0021 review_events` 仍 **0 行**。41.3% 覆盖下仍有 58.7% 文档未处理、31.7% 已处理文档本身无内联图 |
+| 仍锁 | 余 4,279 份（含 192 份 >6MB 专门批次、`.doc` 10,503 份、扫描 PDF、`m:oMath`）、正式版发布、`strict=1`、第二层准入、身份治理、mp 后台 `downloadFile` 合法域名确认 |
