@@ -57,7 +57,32 @@ export interface ReferenceExample {
   figureHeight?: number
   /** 该题在原文档里的页码（1 起），仅用于「查看原页」与人工核对 */
   figurePage?: number
+  /**
+   * P-018 / D-021：题干**原位**图片（公式 / 几何图），按 `charOffset` 升序。
+   *
+   * 与 `figureUrl` 的区别：`figureUrl` 是整题块级快照（兜底，读起来要来回对照），
+   * 这里是把 docx 里的公式与图形**插回题干的原字符位置**，让用户顺着题干读下去。
+   *
+   * 🔴 缺失即「这道题没抠到图」，前端按纯文本渲染；**绝不拿相邻题目的图顶替**。
+   */
+  inlineFigures?: InlineFigure[]
 }
+
+/** P-018 / D-021：题干原位图片的一项。 */
+export interface InlineFigure {
+  /**
+   * 插入点：相对 `stem` 的 **UTF-16** 索引（服务端已把脚本侧的码点偏移换算过）。
+   * 前端 `stem.slice(0, charOffset)` + 图片 + `stem.slice(charOffset)`。
+   */
+  charOffset: number
+  /** formula＝行内公式（Mathtype OLE）；figure＝几何图 / 图片 */
+  kind: 'formula' | 'figure'
+  url: string
+  /** 原始像素宽高（已按渲染倍率算好），前端按比例缩放用 */
+  width: number
+  height: number
+}
+
 
 /**
  * P-017 / D-020：原题快照 URL。

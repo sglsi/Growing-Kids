@@ -18,7 +18,26 @@ import { publicLibraryOwner, flatText, textRecallEnabled } from '../shared/publi
 import { guardQuestionInput } from '../shared/input-guard'
 // P-015 / D-018：参考例题（相似题思路借鉴）——与原题判定并列，判定层零改动
 import { collectReferences, mergeReferences, REFERENCE_DISCLAIMER, figureUrlFor } from '../shared/question-reference'
-import type { ReferenceExample } from '../shared/question-reference'
+import type { InlineFigure, ReferenceExample } from '../shared/question-reference'
+
+/**
+ * P-018 / D-021：把「码点偏移」换成「UTF-16 偏移」。
+ *
+ * 抠图脚本是 Python（`str` 按 Unicode 码点计数），前端 `String.prototype.slice`
+ * 按 UTF-16 码元计数；遇到补充平面字符（如数学斜体 𝑥 / 部分符号）两者会差 1。
+ * 偏移错一位就会把图片插到字的中间，所以**换算必须做**，不能赌题库里没有星平面字符。
+ */
+function cpToUtf16(s: string, cpIndex: number): number {
+  if (cpIndex <= 0) return 0
+  let u16 = 0
+  let cp = 0
+  for (const ch of s) {
+    if (cp === cpIndex) return u16
+    u16 += ch.length
+    cp += 1
+  }
+  return s.length
+}
 
 /**
  * 百度网盘资料检索（「资料库搜题」的第一顺位来源）。
@@ -403,6 +422,61 @@ export class NetdiskSearchService {
   }
 
   /**
+   * P-018 / D-021：给参考例题补「题干原位图」（公式 / 几何图）。
+   *
+   * 一次批量读 `question_inline_figures`，按 `source_id#object_index` 分组，
+   * 每条按 `charOffset` 升序挂到参考例题上，让前端能把图**插回题干的原位置**。
+   *
+   * 🔴 只读挂载：不改 `stem` / `solution` 文本、不参与判定、不影响排序。
+   * 🔴 查不到 / 偏移越界就是**没有这张图**（前端退化为纯文本），绝不拿别的题顶替。
+   * 查询失败只告警降级（少一张图不该让整次检索失败）。
+   */
+  private async attachInlineFigures(refs: ReferenceExample[]): Promise<void> {
+    const ids = [...new Set(refs.map((r) => r.sourceId).filter(Boolean))]
+    if (ids.length === 0) return
+    try {
+      const { data, error } = await getSupabaseClient()
+        .from('question_inline_figures')
+        .select('source_id,object_index,seq,char_offset,kind,storage_key,width,height')
+        .eq('user_id', publicLibraryOwner())
+        .eq('source_type', 'netdisk')
+        .in('source_id', ids)
+        .order('object_index', { ascending: true })
+        .order('seq', { ascending: true })
+      if (error) {
+        this.logger.warn(`[netdisk] 取题干原位图失败（本次按纯文本展示）：${error.message}`)
+        return
+      }
+      const grouped = new Map<string, InlineFigure[]>()
+      for (const r of (data || []) as Record<string, unknown>[]) {
+        const key = r.storage_key ? String(r.storage_key) : ''
+        if (!key) continue
+        const k = `${String(r.source_id)}#${String(r.object_index)}`
+        const list = grouped.get(k) || []
+        list.push({
+          // 先原样存脚本侧的码点偏移，挂载到具体 stem 时再换算成 UTF-16
+          charOffset: Number(r.char_offset) || 0,
+          kind: r.kind === 'figure' ? 'figure' : 'formula',
+          url: figureUrlFor(key),
+          width: Number(r.width) || 0,
+          height: Number(r.height) || 0,
+        })
+        grouped.set(k, list)
+      }
+      for (const ref of refs) {
+        const raw = grouped.get(`${ref.sourceId}#${ref.objectIndex}`)
+        if (!raw?.length) continue
+        const out = raw
+          .map((f) => ({ ...f, charOffset: cpToUtf16(ref.stem, f.charOffset) }))
+          .filter((f) => f.charOffset >= 0 && f.charOffset <= ref.stem.length)
+        if (out.length > 0) ref.inlineFigures = out
+      }
+    } catch (e) {
+      this.logger.warn(`[netdisk] 取题干原位图异常（本次按纯文本展示）：${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  /**
    * 搜公共资料库。
    *
    * 🔴 P-011：签名里**没有 userId**——公共资料不按登录用户隔离
@@ -670,7 +744,8 @@ export class NetdiskSearchService {
     // P-017 / D-020：给命中的参考例题补「原题快照」（图形 + 公式）。
     // 🔴 只读 `question_figures`，不改判定层、不改召回；缺失就是没有图，绝不拿别的题顶替。
     if (references.length > 0) {
-      await this.attachFigures(references)
+      // P-017 整题快照与 P-018 题干原位图是两张独立的派生表，并行取，互不阻塞。
+      await Promise.all([this.attachFigures(references), this.attachInlineFigures(references)])
       note += `；另有 ${references.length} 道解题思路相近的例题可供借鉴（不是本题答案，展示前须先声明）`
     }
 

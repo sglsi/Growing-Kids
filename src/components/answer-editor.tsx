@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { View, Text, Image as TaroImage } from '@tarojs/components'
+import { View, Text, Image as TaroImage, RichText } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { Plus, Trash2, Crop, Globe, FileText, Check, X, Bot, BookOpen } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
@@ -16,7 +16,7 @@ import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 import type { AnswerAttachment, TimelineItem } from '@/types'
-import type { AnswerSearchResult } from '@/services/api'
+import type { AnswerSearchResult, InlineFigure } from '@/services/api'
 // P-015 / D-018：事先声明文案的前端镜像（服务端缺字段时兜底，绝不出现「有内容、无声明」）
 import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference-disclaimer'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
@@ -31,6 +31,62 @@ import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
  *    定位，编辑器顶部常驻「答案将存入：…」目标锚，杜绝裁给错的题。
  *  - 「联网搜答案」的结果**不自动入库**，必须用户点「采纳」（安全阀）。
  */
+
+/**
+ * P-018 / D-021：把「题干 + 原位图」拼成 rich-text 的 HTML 串。
+ *
+ * 为什么不用「`<Text>` 里塞 `<Image>`」：微信 `<text>` 只认嵌套 text，image 会被丢弃，
+ * 公式只能另起一行，题干被切得支离破碎。rich-text 的 img 才能真正行内混排，
+ * 公式才会落在句子里原来的位置。
+ *
+ * 🔴 只做展示：偏移越界 / 图缺失就退化成纯文本，不猜位置、不拿别的题的图顶替。
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\n/g, '<br/>')
+}
+
+/** 单张原位图的 img 标签：行内公式按行高缩放，几何图独占一行。 */
+function inlineImgTag(f: InlineFigure): string {
+  const src = (f.url || '').replace(/"/g, '%22').replace(/\s/g, '')
+  if (!src) return ''
+  const w = Number(f.width) || 0
+  const h = Number(f.height) || 0
+  if (f.kind === 'figure') {
+    return `<img src="${src}" style="display:block;max-width:100%;margin:8px 0;" />`
+  }
+  // 行内公式：高度归一到正文行高附近（16px），再受最宽 150px 约束，等比例缩放
+  const s = Math.min(w > 0 ? 150 / w : 1, h > 0 ? 16 / h : 1, 1)
+  const dw = Math.max(6, Math.round(w * s))
+  const dh = Math.max(6, Math.round(h * s))
+  return `<img src="${src}" style="width:${dw}px;height:${dh}px;vertical-align:middle;margin:0 1px;" />`
+}
+
+/**
+ * @param limit 收起态只渲染前 N 个字符（与原 220 字摘要一致），图也只保留落在范围内的
+ */
+function stemHtml(stem: string, figures: InlineFigure[] | undefined, limit: number): string {
+  const cut = Math.max(0, Math.min(limit, stem.length))
+  const list = (figures || [])
+    .filter((f) => Number.isFinite(f.charOffset) && f.charOffset >= 0 && f.charOffset <= cut)
+    .slice()
+    .sort((a, b) => a.charOffset - b.charOffset)
+  if (list.length === 0) return escapeHtml(stem.slice(0, cut))
+  const parts: string[] = []
+  let last = 0
+  for (const f of list) {
+    const off = Math.max(last, f.charOffset)
+    if (off > last) parts.push(escapeHtml(stem.slice(last, off)))
+    parts.push(inlineImgTag(f))
+    last = off
+  }
+  if (last < cut) parts.push(escapeHtml(stem.slice(last, cut)))
+  return parts.join('')
+}
 
 interface Props {
   item: TimelineItem
@@ -609,7 +665,10 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             <View className="mb-2">
               {candidate?.references?.map((r, i) => {
                 const open = !!expandedRefs[i]
-                const stem = open ? r.stem : r.stem.slice(0, 220) + (r.stem.length > 220 ? '…' : '')
+                const stemLimit = open ? r.stem.length : Math.min(220, r.stem.length)
+                // P-018 / D-021：题干按原位图切段渲染（公式落回原句位置）
+                const stemNodes = stemHtml(r.stem, r.inlineFigures, stemLimit) + (stemLimit < r.stem.length ? '…' : '')
+                const inlineUrls = (r.inlineFigures || []).map((f) => f.url).filter(Boolean)
                 const sol = open ? r.solution : r.solution.slice(0, 400) + (r.solution.length > 400 ? '…' : '')
                 return (
                   <View
@@ -621,7 +680,19 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                       注意：{REFERENCE_ITEM_HINT}
                     </Text>
                     <Text className="block text-xs font-semibold" style={{ color: BRAND_TEXT }}>例题 {i + 1} · 题目</Text>
-                    <Text className="block text-xs mb-1" style={{ color: INK }}>{stem}</Text>
+                    {/* P-018 / D-021：题干 + 原位公式/图形。rich-text 才能让公式行内混排，
+                        图缺失时 stemHtml 自然退化成纯文本，不猜位置。 */}
+                    <RichText className="block text-xs mb-1" style={{ color: INK, lineHeight: '1.75' }} nodes={stemNodes} />
+                    {inlineUrls.length > 0 ? (
+                      <View
+                        className="mb-1"
+                        onClick={() => Taro.previewImage({ current: inlineUrls[0], urls: inlineUrls })}
+                      >
+                        <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
+                          看不清题干里的公式/图形？点这里放大（共 {inlineUrls.length} 张）
+                        </Text>
+                      </View>
+                    ) : null}
                     {/* P-017 / D-020：原题快照（图形 + 公式）。没有就是没有图，绝不拿别的题顶替。
                         点击全屏放大；小程序 <Image> 不发头部 ⇒ URL 必须是公开可匿名 GET 的。 */}
                     {r.figureUrl ? (

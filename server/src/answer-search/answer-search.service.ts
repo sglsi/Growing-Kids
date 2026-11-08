@@ -72,7 +72,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // 不 bump 会让 11-08 10:42 那类已缓存的题继续吐「什么都没有」的旧结果。
 // P-017 / D-020：参考例题新增「原题快照」字段（figureUrl / figureWidth / figureHeight /
 // figurePage）⇒ result 结构再变一次，旧缓存会把「有例题、无图」一直吐出来，必须整体失效。
-const CACHE_VERSION = 'v13'
+// P-018 / D-021：参考例题新增「题干原位图」`inlineFigures`（公式/几何图按 charOffset 插回题干）
+// ⇒ result 结构再变；不 bump 的话用户会一直看到「纯文字残串」的旧缓存。
+const CACHE_VERSION = 'v14'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */

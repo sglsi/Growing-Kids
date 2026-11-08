@@ -1285,6 +1285,23 @@ export interface ReferenceExample {
   figureWidth?: number
   figureHeight?: number
   figurePage?: number
+  /**
+   * P-018 / D-021：题干**原位**图片（公式 / 几何图），按 `charOffset` 升序。
+   * 与 `figureUrl`（整题块级快照）不同：这些图要按偏移插回题干文字中间。
+   * 🔴 缺失 = 这道题没抠到图，按纯文本渲染；**不得拿相邻题目的图顶替**。
+   */
+  inlineFigures?: InlineFigure[]
+}
+
+/** P-018 / D-021：题干原位图片（与后端 `question-reference.ts` 对齐，不跨端 import）。 */
+export interface InlineFigure {
+  /** 相对 `stem` 的 UTF-16 索引：`stem.slice(0, charOffset)` + 图 + `stem.slice(charOffset)` */
+  charOffset: number
+  /** formula＝行内公式；figure＝几何图/图片 */
+  kind: 'formula' | 'figure'
+  url: string
+  width: number
+  height: number
 }
 
 /** 联网搜答案的返回（与后端 answer-search.service 对齐） */
