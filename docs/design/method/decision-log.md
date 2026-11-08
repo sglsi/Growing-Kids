@@ -544,3 +544,36 @@
 | 🔴 事故 | 全量构建三 worker 并发（其中一个启动参数写成 `--shape 2/3`，分片失效从全表重跑）+ `FIGURE_BATCH=8`，把 L3 压到 **load 82 / sshd banner 超时 / 站点与 API 全超时约 15 分钟**。已清进程恢复，并把护栏写进脚本（BATCH 默认 2、内存闸门 700MB、单批超时 8min、`FIGURE_MAX_MB=20` 跳过超大文件、`ionice -c3 nice -n19`、单 worker）。详见 `GK-QA-16 §6.1.12` |
 | 不宣称清单 | 未写「每道题都带图 / 图形全覆盖 / 看得懂图形 / 精准到这道题 / 提升命中 / 修复有效 / 误判归零 / 所有用户已可用」；未算召回率；全量仅完成 121/3,705 份（2.6%）；唯一够格指标 `0021 review_events` 仍 **0 行** |
 | 仍锁 | 全量剩余 3,584 份（单 worker 续跑）、扫描版 PDF 440 份、`.doc` 10,503 份、超大 docx（>20MB）专门批次、正式版 HTTPS 域名与 `downloadFile` 白名单、`strict=1`、第二层上线准入、4 组身份治理、双账号真实登录 E2E、公安联网备案 |
+
+---
+
+## D-021 题干原位重建（公式与图形回到文字中间，2026-11-08 思傅拍板「走 C」）
+
+| 项 | 内容 |
+|---|---|
+| 触发 | `D-020` 上线后思傅三问：① 裁切尺寸是否符合要求；② 为什么不直接从 doc 抠图（「这样不管是公式还是图形都特别合适，不用再进行裁剪了」）；③ 抠出来的图能否插回题干最适当的位置。随后拍板：**「走C，直接从 doc 抠图，如果缺工具可安装工具，重点是保证题目可靠、正确，能让用户看懂」**；再追加「如缺 Symbol/Times 字体可直接装字体，这样效果更好，也更简便」 |
+| 只读取证 | `question_objects.char_start` 与「docx `word/document.xml` 剥标签文字流」**同一坐标系**（37 / 288 / 526 分毫不差）⇒ 插入点可算到字符级；30 份教辅：`w:drawing` **1,085**（png 3,293 / jpeg 79 可直取）、`w:object` MathType 公式 **15,965**（wmf 10,916）、`m:oMath` 仅 27（0.17%）；docx `v:shape` 自带 `width/height`(pt) 显示尺寸；L3 已装字体别名后 `wmf2svg` **10 个样本 9 个可渲染**但仍有字符级错乱（`≤`→`£`、`△`→`D̂`、多元素重叠）⇒ 公式仍必须由 LibreOffice 渲染 |
+| 关键判断 | `D-020` 的真实边界是**没插进文字流**（整页横带贴在题干下方）；而库内题干本身是残的（`<w:object>` 被当标签剥掉）。正解＝**从 docx 取图 + 用字符偏移原位插回**，不是继续改裁切尺寸 |
+| 决策 | ① 迁移 `0029_question_inline_figures.sql` 只存「图↔题目对象↔插入点」映射；`0030_question_inline_done.sql` 记已扫描来源（含 0 图文档，避免反复重试）；② 离线构建 `netdisk-inline-crop.py`（几何图取 docx 原图、公式按 PDF `IMAGE` bbox 精确裁切）+ `netdisk-inline-build.mjs`（`--apply --force --limit --shard --source`）；③ `ReferenceExample` 增 `inlineFigures[]`（`charOffset/kind/url/width/height`），由 `attachInlineFigures()` **只读批量挂载**；④ 前端 `RichText` 按 `charOffset` 切段行内混排 + `previewImage` 放大；⑤ `CACHE_VERSION v13→v14` + 旧断言同步 + **M40**；⑥ `0028` 与 `D-020` 保留不退，作兜底 |
+| 硬约束 | `question-match.ts` **一行不动**（sha256 `84f998ff…`）；六条硬闸 / `answer` / `verified` / `canAdopt` / `strict=1` 零放宽；内联图**不参与召回与打分**、不改 note、不改 `match_level`；**定位失败就不入库不下发，绝不拿相邻行/相邻题顶替**；`charOffset` 必须是该题 stem 内偏移，且服务端把脚本侧**码点索引换算成 UTF-16 索引**，越界丢弃；图不得插到 `reference_disclaimer` 之前；不新开需登录的图片端点 |
+| 分档 | **L1**（结果呈现层，不改学习准则、不改判定层、不升 20a、不补 20b）｜依据 `GK-OPS-22 §3.2` **D 降维**（Q3 不可测，`0021 review_events` 0 行 ⇒ 不做指标、不做宣称）、`GK-SRS-20a` M8 / M10 / M11 |
+| falsifier | ①插入点错位（插进汉字中间 / 掉到选项外）；②裁切带进相邻文字或上一行；③图不是该题的（跨题顶替）；④该有图处出现空块却未如实退回纯文本；⑤判定层 sha256 漂移或 `answer` 非空 / 出现「采纳」；⑥构建脚本写了 `0029`/`0030` 之外的表；⑦缓存未 bump 或旧缓存吐错位结构；⑧码点→UTF-16 换算缺失；⑨拿 `wmf2svg` 产物入库；⑩出现「每道题都带图 / 图形全覆盖 / 看懂图形 / 精准定位到题 / 提升命中 / 修复有效 / 误判归零 / 所有用户已可用」宣称。任一即按 `OPS-22 §3.4` 停下、回滚、登记 |
+| 授权与边界 | 沿用 `D-020`：文件访问免询问、敏感信息走 ssh 加密通道、生产数据删除仍守 `QA-16 §3.1`（ssh L3 + 备份 + dry-run）；仅开发版上传，不代发正式版 |
+| 与既有台账的关系 | **不回溯改判** `D-020`（整块快照仍保留作兜底）、`D-018`（并列第二层）、`D-019`（闸门作用域）、`D-016`/`D-017`（已否决路径）。本条属 `D-020` 的**呈现精度补全** |
+| 保留形式 | 允许「公式与图形已按原文位置还原」「原文档第 N 页」；**禁止**上表第 ⑩ 条全部表述 |
+| 待回填 | 压测结论（worker 数）、全量覆盖、门禁、部署、端到端与前端上传记录，实施完成后追加，不涂改上表 |
+
+**执行记录（2026-11-08 17:5x 回填，一列不改上表）**
+
+| 项 | 实绩 |
+|---|---|
+| 代码 | `migrations/0029_question_inline_figures.sql` + `0030_question_inline_done.sql`（只建本表 + 唯一键 + 注释）；`server/scripts/netdisk-inline-crop.py`（docx 解压 + PDF `IMAGE` bbox 匹配 + 白化 242 trim + 内容寻址 `figures/<2>/<sha>.webp`）＋ `netdisk-inline-build.mjs`；`shared/question-reference.ts` 增 `InlineFigure` 与 `inlineFigures[]`；`netdisk-search.service.ts` 增 `cpToUtf16()` 与 `attachInlineFigures()`（与 `attachFigures()` 并行只读挂载）；`answer-editor.tsx` 改 `RichText` 行内混排 + `previewImage`；`services/api.ts` 契约；`CACHE_VERSION v13 → v14` + 10 个模块旧断言同步 + **M40** |
+| 单文档验收 | 成都二诊 A 卷：164 个题目对象 → **755 张（677 公式 + 78 几何）/ 932KB / 13s**；题干区间 1,086 个标记，成功 755（**69.5%**），331 个跨行/浮动**跳过不入库**；肉眼确认「若〔公式〕是一元二次方程〔公式〕的一个根，则…」「A．0，〔公式〕 B．0，0 C．〔公式〕， D．，0」位置正确 |
+| 已证伪 | `wmf2svg` + `rsvg-convert`：未装字体时 8/10 直接解析失败（libwmf 输出非 UTF-8）；**装 Symbol/Times 字体别名 + 修编码后 9/10 可渲染、根号分式完整，但仍有字符级错乱**（`(x≤300)`→`(x£ 300¼)`、`S_{△EOF}`→`S_D̂ΔEÖF`、多元素重叠）⇒ 不可作为入库来源。GBK 优先解码亦无效（字节是真实 latin-1）。`wmf2gd` 低分辨率、`soffice --convert-to png/html` 均失败 |
+| 迁移 | `0029` / `0030` 已在 L3 应用；当前库内 **1,017 张 / 2 份文档** |
+| 部署 | 差异 9 文件中 7 个实际变化（`question-reference.js` 无运行时变化）；旧产物备份 `/opt/gk/dist-bak-20261108-174618`；重启后 `active`，特征串 `question_inline_figures` / `cpToUtf16` / `v14` 均命中 |
+| 端到端 | 生产 `/api/netdisk/search` 真实题：`refs=3`、`note` 正常；`inlineFigures` 挂载链路已验证（切段预览图落原句位置）。⚠️ 因当前仅 2 份文档有内联数据，召回的 3 条参考例题来自其它未处理文档 ⇒ 本轮**未观察到** `inlineFigures` 非空的真实返回 |
+| 压测 | 2 worker（`--shard 0/2` / `1/2`，各 `--limit 50`，`MemoryMax=1100M` / `CPUQuota=150%` / `ionice -c3 nice -n19`）测 100 份：进度与峰值内存见下方补充 |
+| 不宣称清单 | 未写「每道题都带图 / 图形全覆盖 / 看得懂图形 / 精准到题 / 提升命中 / 修复有效 / 误判归零 / 所有用户已可用」；未算召回率；唯一够格指标 `0021 review_events` 仍 **0 行** |
+| 仍锁 | 全量 7,273 份 docx（本轮只跑 100 份压测）、扫描版 PDF 440 份、`.doc` 10,503 份、`m:oMath` 27 处、超大 docx（>20MB）专门批次、正式版发布、`strict=1`、第二层上线准入、身份治理、公安联网备案 |
+
