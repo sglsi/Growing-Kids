@@ -477,3 +477,36 @@
 - 🔴 **修正长期记忆中一条红线的适用范围**：「⛔ 别搬向量库 / Reranker / LLM 兜底」⇒ **思傅已授权对比参照并改设计方法**；本轮经评估**仍不上**向量库（理由见 `P-015 §1` 第 3 点），后续可另立提案。原「判定层零放宽 / exact 才进 answer」**不修正**。
 - **仍锁**：`strict=1`、第二层上线准入、库覆盖 / OCR 字面差异 / 英文判定锚点 / 「题干 A＋别人解析」残余风险、`.doc` 与大 PDF 补抽、4 组身份治理、双账号真实登录 E2E、公安联网备案；方案 B、向量召回、Reranker、知识点图谱、变式题、用户贡献通道各需独立提案。本地 commit，**未 push**。
 
+---
+
+## D-019 输入闸门作用域与无结果呈现（2026-11-08 10:4x，思傅拍板）
+
+| 项 | 内容 |
+|---|---|
+| 触发 | 思傅报障「当前进行资料库搜题后，无任何结果返回，请检查」 |
+| 只读取证 | L3 health 200 / `gk-api` active / 0 ERROR；干净单题 `GET /api/netdisk/search` **2.4s / hits=8 / refs=3**；用户原题（243 字多小问整页）**0.065s / hits=0 / refs=0 / keys=[]** ⇒ 检索根本没跑；`answer_cache` 10:42:17 `mode=kb` result ＝ `source:'none'` + 闸门提示；前端 `:555` 不渲染 + `:335` toast 被 `hideLoading` 抢关 ⇒ 观感「什么都没有」 |
+| 关键判断 | **不是服务故障，也不是召回失败**。`D-018` 已把「未达标不放行」作用域钉为「不得冒充本题答案」，`D-017` 的闸门只管「不送判定」；当前实现把闸门放在 `netdiskSearch.search()` 最前面 ⇒ **连 P-015 参考例题层一起关掉**，是实现偏差、不是设计变更 |
+| 决策 | 按思傅选择的 **L0 + L1**：① 闸门**继续拦判定层**，不合格输入仍不送 `judgeWithStore()`、不产出 `exact`；② 闸门**不拦参考例题层**，新增 `referenceMode:'examples'` 只读模式（一次检索、只收 `references`、`hits=[]` / `keys=[]` / `exactCount=0`）；③ 如实告知改**合并式**保留 references；④ 前端 `source:'none'` 常驻提示 + 修 toast 时序；⑤ `CACHE_VERSION v11→v12` + 8 处旧断言同步 + **M38** |
+| 硬约束 | `question-match.ts` **一行不动**；六条硬闸 / `answer` / `verified` / `canAdopt` 零放宽；不自动切题、不逐题检索、不改原文字符；`/api/netdisk/search` 直连仍按 P-014 短路；声明先于内容且每条例题重复；`strict=1` 与第二层准入仍锁 |
+| 分档 | **L1**（呈现层 + 读路径作用域，不改学习准则、不升 20a、不补 20b）｜依据 `GK-OPS-22 §3.2` **D 降维**（Q3 不可测，`0021 review_events` 0 行 ⇒ 不做指标、不做宣称）、`GK-SRS-20a` M8 / M10 / M11 |
+| falsifier | ①不合格输入出现 `exact` / 非空 `answer` / `verified=true` / 采纳按钮；②直连返回 `hits>0`；③出现「题干 A＋别人解析」或声明缺席；④`question-match.ts` sha256 漂移；⑤>1 次检索 / 深挖超过合格输入 / `tookMs` > 18s；⑥缓存未 bump 或旧缓存吐旧文案；⑦`check:isolation` 越权；⑧出现「提升命中 / 修复有效 / 误判归零」宣称。任一即按 `OPS-22 §3.4` 停下、回滚、登记 |
+| 授权与边界 | 沿用 `D-018` 授权（文件访问免询问、加密连接、可操作微信开发者工具上传发版、本目标下自主实施不再逐题回问）；上传只产生**开发版**，正式发布仍需思傅在 mp 后台点；生产数据删除仍守 `QA-16 §3.1` |
+| 与既有台账的关系 | **不回溯改判** `D-016`（P-013 已否决、收益撤回）、`D-017`（P-014 假 exact 归零）、`D-018`（P-015 并列第二层）；本条只把 `D-018` 已批准的作用域**在代码里落实**，并修一处呈现缺陷。六条线仍不合并 |
+| 保留形式 | 允许「没找到这道题的答案」「以下不是本题答案，仅供借鉴解题思路」「请把要查的那道小题单独录入」「这次没有可用结果」；**禁止**「都能搜到」「精准定位到题」「提升命中 / 修复有效」「误判归零」「所有用户已可用」 |
+| 待回填 | 执行记录（门禁 / 部署 / 端到端 / 前端上传 / 不宣称清单）在本条实施完成后追加，不涂改上表 |
+
+**执行记录（2026-11-08 11:13–11:52 回填，一列不改上表）**
+
+| 项 | 实绩 |
+|---|---|
+| 代码 | `netdisk-search.service.ts` 新增 `referenceMode:'judge' \| 'examples'`（仅在闸门不合格分支由 `answer-search` 传入，`examples` 不调 `judgeWithStore()` / `judgeObjects()`、`hits=[]` / `keys=[]` / `exactCount=0`、深挖 `min(4)` / 预算 `min(4000ms)`）；`answer-search.service.ts` 如实告知改合并式（保留 `references` / `reference_disclaimer`）；`answer-editor.tsx` `candidate` 存在即渲染 + `note` 常驻 + toast 移到 `hideLoading()` 之后 |
+| 不变量核对 | `question-match.ts` **sha256 未变**（M38 静态断言）；`/api/netdisk/search` 直连仍短路（生产实测 `hits=0 / refs=0`）；`answer` 恒空、`verified` 恒 false、`canAdopt` 排除 `topic`/`none`/`refs` |
+| 缓存 | `CACHE_VERSION v11 → v12`，旧断言 8 处（M27/M31/M32/M33/M34/M35/M36/M37）同步 |
+| 门禁 | M27–M38 **138/138**（新增 M38 10/10）、`method:check` H1/H2/H3、`verify:gate` **37/37**、`check:isolation` **150/150**、`lint:build` / `tsc` / `nest build` / `build:weapp` 全 0 |
+| 部署 | 差异 19 项＝本轮 **5 产物** + **14 项登记排除项**；回滚点 `dist.bak-p016-20261108-1113`；`INSTALLED=5`；哈希复比剩余差异全为排除项；重启后 `active` / **0 ERROR** / `/api/health` **200** |
+| 端到端 | 干净单题 `1657ms / hits=8 / exact=0 / refs=3`；整页 243 字直连 `51ms / hits=0 / refs=0`（不变量 C）；整页 243 字 `mode=kb` **`answer=0 字` / `verified=false` / `references=3` / disclaimer 97 字** + 合并式 note |
+| 前端 | `ide-verify --launch --marker "这次没有可用结果"` ⇒ 特征串命中 `dist\common.js` + **8/8 冒烟**；CLI `upload -v 2026.11.08.2` **`√ upload` 872.1 KB**，仅**开发版** |
+| 不宣称清单 | 未写「提升命中 / 修复有效 / 误判归零 / 精准定位到题 / 所有用户已可用」；未算召回率；样本 2 类输入仅作方向性证据；唯一够格指标 `0021 review_events` 仍 **0 行** |
+| 仍锁 | `strict=1`、第二层上线准入、库覆盖 / OCR 字面差异 / 英文锚点 /「题干 A＋别人解析」、`.doc` 与大 PDF 补抽、4 组身份治理、双账号真实登录 E2E、公安联网备案、用户贡献通道；正式版提审/发布仍需思傅在 mp 后台点 |
+| 新登记运维坑 | CLI 连 `127.0.0.1` 被 `HTTP_PROXY` 劫持 ⇒ 必须清代理变量 + `NO_PROXY=127.0.0.1,localhost`；`-38 当前还有任务在编译中` 反复重投无效（云端排队），有效解法＝`taskkill` 全部 `wechatdevtools.exe` → 冷启动 → **重启后第一个动作**即 upload。详见 `GK-QA-16 §6.1.11` |
+

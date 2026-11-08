@@ -2248,3 +2248,57 @@ sudo -n mv /opt/gk/server/dist.bak-p015-20261108-0015 /opt/gk/server/dist
 sudo -n systemctl restart gk-api
 ```
 无数据回滚需求；`CACHE_VERSION v11` 缓存行自然成为孤儿。前端开发版单槽位不可回退，只能重新上传旧包。
+
+### 6.1.11 P-016 / D-019：输入闸门作用域收窄与无结果常驻呈现（2026-11-08 11:13–11:52）
+
+> 提案 `P-016`（已批准）｜ 台账 `D-019` ｜ 起因：思傅报「资料库搜题后无任何结果返回」。
+> 🔴 本轮**判定层 `question-match.ts` 一行未动**；改的是**闸门作用域**（从「不检索」收回到「不送判定、不冒充本题答案」）与**前端呈现**。`answer` 仍只来自 `exact`、`verified` 语义与「采纳」闸门零放宽。**不宣称**命中提升 / 修复有效 / 误判归零。
+
+**根因（只读取证，取自 L3 现网）**：`https://deep-root.cn/api/health` 200 / `gk-api` active / 无 ERROR ⇒ 不是服务故障。真实请求（10:42:17，题干「1 图形分折 如图 ①在RT△ABC中…」）在 `answer_cache` 落库为 `source:"none"` / `answer:""` / `note:"这段内容像是整页试卷或多道小题连在一起…"` ⇒ 三重叠加：① `answer-search.service.ts` 要求 `inputGuard.ok` 才调 `netdiskSearch.search()`，把闸门作用域从「不送判定」扩大成「不检索」；② `answer-editor.tsx` 结果卡片条件是 `candidate.source !== 'none' || hasRefs`，`source:'none'` 且无 refs ⇒ **整块不渲染**，卡片内的 `note` 跟着看不到；③ 唯一提示是 `showToast`，紧接着 `finally` 里 `hideLoading()` 抢关（微信下 toast 与 loading 共用实例）⇒ 观感就是「点了什么都没有」。
+
+| 步 | 实绩 |
+|---|---|
+| 范围 | `netdisk-search.service.ts` 新增 `referenceMode:'judge' \| 'examples'`（只在闸门不合格分支由 `answer-search` 传入）；`answer-search.service.ts` 的如实告知改**合并式**（只换 `note` 前缀，保留 `references` / `reference_disclaimer`）；`answer-editor.tsx` 常驻卡片 + toast/hideLoading 时序 |
+| `examples` 模式行为 | 不短路闸门判定、**不调用** `judgeWithStore()` / `judgeObjects()`（`score=0`、`snippet=''`）、深挖上限 `min(MAX_DEEP_FILES,4)`、预算 `min(DEEP_BUDGET_MS,4000)`、`hits=[] / keys=[] / exactCount=0`、专属 `note` |
+| 防绕过（不变量 C） | `/api/netdisk/search` 直连**不传** `referenceMode` ⇒ 不合格输入仍按 P-014 短路（本轮实测直连 `refs=0`，是设计而非漏接，见 `P-016 §50`） |
+| 缓存 | 用户可见 `note` 与 result 结构变化 ⇒ `CACHE_VERSION v11 → v12`，同步 **8 个**旧模块版本断言（M27/M31/M32/M33/M34/M35/M36/M37） |
+| 验收集 | 新增 **M38** 10 组（作用域 / 声明 / 空答案 / 判定层未动 / 防绕过 / v12 同步 / 宣称词） |
+
+**部署实绩（2026-11-08 11:13）**
+
+| 步 | 实绩 |
+|---|---|
+| 0 差异校准 | 本地 `nest build` 与 L3 完整 sha256 清单（Windows `*` 已归一化）**19 项差异逐个确认归属** ⇒ 本轮 **5 个产物**（`answer-search/answer-search.service.{js,js.map}`、`netdisk/netdisk-search.service.{js,d.ts,js.map}`）；其余 **14 项全是 §6.1.7.1 登记排除项**（4 组身份治理 10 个 + `answer-search.types.d.ts` + 纯注释 `jobs.controller.js.map` + 2 个 `tsbuildinfo`） |
+| 1 回滚点 | `sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-p016-20261108-1113` |
+| 2 精准安装 | `tar` 打 5 文件 → ssh stdin 写 `/tmp/gk-p016.tgz`（本地 / 远端 sha256 一致）→ 逐个 `sudo -n install -o gk -g gk -m 644`，`INSTALLED=5`。验包：`referenceMode`×2（js/d.ts）、`examplesOnly`、`P-016 仅参考例题模式`、`CACHE_VERSION = 'v12'`×1、`referenceMode: 'examples'`×1、`const exact = inputGuard.ok`×1；旧串 `CACHE_VERSION = 'v11'` **必须为 0** |
+| 3 哈希复比 | 本轮 **5 个产物哈希逐一一致**；剩余差异 **14 项全是登记排除项**，未批准文件 0 |
+| 4 重启 | `systemctl restart gk-api` → `active`、Nest 启动正常、`journalctl` **0 ERROR**；公网 `/api/health` **200** |
+| 5 门禁 | M27–M38 **138/138**（新增 M38 10/10）、`method:check` H1/H2/H3 通过、`verify:gate` **37/37**、`check:isolation` **150/150**、`lint:build` / `tsc` / `nest build` / `build:weapp` 全 0；`ide-verify --launch --marker "这次没有可用结果"` ⇒ 特征串命中 `dist\common.js` + **8/8 冒烟** |
+| 6 线上开关 | 未新增/修改任何环境变量；`CACHE_VERSION v12` 让旧 `answer_cache` 行自然成为孤儿 |
+| 7 数据态 | **未写业务库表、未迁移**；`question_objects` / `netdisk_files` / `text_flat` 均未变。端到端验收只写了 `answer_cache`（用户检索本就会写） |
+| 8 前端上传 | `release-check --dev` 通过 ⇒ CLI `islogin` `{"login":true}`（服务端口 `34046`）⇒ `upload -v 2026.11.08.2` ⇒ **`√ upload` 872.1 KB / 893009 Byte**，AppID `wx48bf5ba9bae0bf39`。**只产生开发版**；体验版 / 正式版仍须 mp 后台「设为体验版」或提审发布 |
+
+**端到端实绩（验收口径＝整页/多小问也能拿到参考例题且绝不冒充本题答案，不是 exact 上升）**
+
+| 输入 | 链路 | 结果 |
+|---|---|---|
+| 干净几何单题（103 字） | `GET /api/netdisk/search` | 200 / **1657ms** / `hits=8` / `exact=0` / **`refs=3`** / disclaimer 97 字 / `keys=9` ⇒ P-015 链路未被本轮破坏 |
+| 整页多小问（243 字） | `GET /api/netdisk/search` 直连 | 200 / **51ms** / `hits=0` / `refs=0` + P-014 闸门提示 ⇒ **不变量 C 生效**（直连不得绕过双入口） |
+| 整页多小问（243 字） | `POST /api/answer-search/:id {mode:"kb"}` | 200 / **85ms**（`v12` 缓存命中）/ `source=netdisk` / `match_level=topic` / **`answer=0 字`** / **`verified=false`** / **`references=3`** / disclaimer 97 字；note 为合并式：「…请把要查的那道小题单独录入后再搜答案；**下面是解题思路相近的例题，不是本题答案，仅供借鉴**」 |
+
+⇒ 思傅报的现象在**用户实际走的那条链路**（`mode=kb`）已消除：既如实说明「这段不是一道题」，又给出可借鉴的思路例题，且 `answer` 恒空、`verified` 恒 false、前端不显示「采纳」。⚠️ 样本仅 2 类输入，**不得据此计算召回率或写成「所有用户已可用」**；唯一够格的结果指标仍是 `0021 review_events`（当前 0 行）。
+
+**本轮新增的上传踩坑（已可复用，别再摸索一遍）**
+
+1. **`wait IDE port timeout` 不是 IDE 没起来**——是本机 `HTTP_PROXY` 让 CLI 连 `127.0.0.1` 时走了代理。解法：所有 CLI 调用前置 `HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost`。
+2. **`refreshTicket abort due to no userinfo`** ⇒ 该 IDE 实例根本没登录（与代理无关）。先 `islogin` 看 `{"login":true}` 再传，别在未登录实例上反复试。
+3. **`code 10 / 错误码 -38 当前还有任务在编译中` 卡住不清时，反复重投无效**（每投一次都在云端 `wxa-dev/commitsource` 重新排队，反而一直占着队）。实测静默等 180s 仍 `-38`。**有效解法**：`taskkill //F //IM wechatdevtools.exe` → `ide-verify --launch` 冷启动（顺便 8/8 冒烟）→ **把 upload 作为重启后的第一个动作** ⇒ 一次成功。
+4. `.ide` 文件里的端口每次冷启动都会变（本轮 `10831` → 重启后 `34046`），不要写死。
+
+**回滚**：
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad
+sudo -n mv /opt/gk/server/dist.bak-p016-20261108-1113 /opt/gk/server/dist
+sudo -n systemctl restart gk-api
+```
+无数据回滚需求；`CACHE_VERSION v12` 缓存行自然成为孤儿。前端开发版单槽位不可回退，只能重新上传旧包（本轮旧包为 `2026.11.08.1`）。
