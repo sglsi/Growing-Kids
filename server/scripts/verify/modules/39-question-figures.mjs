@@ -125,13 +125,13 @@ m.test('🔴 A5 后端只读挂载：缺失即没有图，不构造占位', (c) 
   c.ok(/figureUrl\?: string/.test(ref), 'ReferenceExample 缺 figureUrl 字段')
 })
 
-m.test('🔴 A6 缓存 v13 且旧断言同步（结构变更必 bump）', (c) => {
+m.test('🔴 A6 缓存 v14 且旧断言同步（结构变更必 bump）', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v13'/.test(as), 'CACHE_VERSION 未 bump 到 v13')
+  c.ok(/const CACHE_VERSION = 'v14'/.test(as), 'CACHE_VERSION 未 bump 到 v14')
   for (const rel of VERSION_MODULES) {
     const t = read(rel)
-    c.ok(/CACHE_VERSION = 'v13'/.test(t), `${path.basename(rel)} 未同步 v13 断言`)
-    c.ok(!/CACHE_VERSION = 'v1[12]'/.test(t.replace(/CACHE_VERSION = 'v13'/g, '')), `${path.basename(rel)} 还留着旧版本断言`)
+    c.ok(/CACHE_VERSION = 'v14'/.test(t), `${path.basename(rel)} 未同步 v14 断言`)
+    c.ok(!/CACHE_VERSION = 'v1[23]'/.test(t.replace(/CACHE_VERSION = 'v14'/g, '')), `${path.basename(rel)} 还留着旧版本断言`)
   }
 })
 

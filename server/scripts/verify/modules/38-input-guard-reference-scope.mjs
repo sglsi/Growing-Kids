@@ -111,15 +111,15 @@ m.test('🔴 A6 前端 source=none 常驻渲染 + toast 与 hideLoading 时序',
     'canAdopt 闸门被动过，参考例题可能被采纳成本题答案')
 })
 
-m.test('🔴 A7 CACHE_VERSION v13、9 个旧模块断言同步、无 v11/v12 残留', (c) => {
+m.test('🔴 A7 CACHE_VERSION v14、9 个旧模块断言同步、无 v11/v12 残留', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v13'/.test(as), 'CACHE_VERSION 不是 v13（旧缓存会继续吐「什么都没有」）')
+  c.ok(/const CACHE_VERSION = 'v14'/.test(as), 'CACHE_VERSION 不是 v14（旧缓存会继续吐「什么都没有」）')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   for (const f of VERSION_MODULES) {
     const t = read(f)
-    c.ok(/CACHE_VERSION = 'v13'|CACHE_VERSION v13|CACHE_VERSION 不是 v13|没 bump 到 v13/.test(t),
-      `${path.basename(f)} 的缓存版本断言没同步到 v13`)
-    c.ok(!/CACHE_VERSION = 'v1[12]'/.test(t), `${path.basename(f)} 还留着上一版断言（P-017 已 bump v13）`)
+    c.ok(/CACHE_VERSION = 'v14'|CACHE_VERSION v14|CACHE_VERSION 不是 v14|没 bump 到 v14/.test(t),
+      `${path.basename(f)} 的缓存版本断言没同步到 v14`)
+    c.ok(!/CACHE_VERSION = 'v1[23]'/.test(t), `${path.basename(f)} 还留着上一版断言（P-017 已 bump v14）`)
   }
 })
 

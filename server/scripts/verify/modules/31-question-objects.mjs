@@ -325,7 +325,7 @@ m.test('🔴 残余风险已登记，且 P1/P2/P3 明示未批准（防后人误
 
 m.test('🔴 缓存版本 v6 参与 qHash（P1 结构化判定后老缓存必须失效）', (c) => {
   const sv = read('server/src/answer-search/answer-search.service.ts')
-  c.ok(/const CACHE_VERSION = 'v13'/.test(sv), 'CACHE_VERSION 不是 v13（P2 双通道召回后老缓存会吐旧文案）')
+  c.ok(/const CACHE_VERSION = 'v14'/.test(sv), 'CACHE_VERSION 不是 v14（P2 双通道召回后老缓存会吐旧文案）')
   c.ok(sv.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
 })
 
