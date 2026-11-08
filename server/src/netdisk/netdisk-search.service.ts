@@ -376,11 +376,16 @@ export class NetdiskSearchService {
    */
   async search(
     question: string,
-    opts: { deep?: boolean; limit?: number } = {},
+    opts: { deep?: boolean; limit?: number; referenceMode?: 'judge' | 'examples' } = {},
   ): Promise<NetdiskSearchResult> {
     const started = Date.now()
     const limit = Math.min(20, opts.limit ?? 8)
     const deep = opts.deep !== false
+    // P-016 / D-019：闸门的作用域只到「判定层」。'examples' 是给 answer-search 在
+    // 不合格输入时用的**只读参考例题模式**：照常召回、照常收集同源配对的例题，
+    // 但全程不送判定、不输出任何 hits / exact。/api/netdisk/search 直连不传该参数
+    // ⇒ P-014 双入口短路行为原样不变（M38 有静态断言）。
+    const examplesOnly = opts.referenceMode === 'examples'
 
     // P-014 / D-017：检索前输入合格性闸门（20a M10 宣称不超能力 / M11 如实告知）。
     // 整页、多小问连排、非题目文本一律**不送判定**，直接如实提示：
@@ -389,7 +394,9 @@ export class NetdiskSearchService {
     // 🔴 只读判定、不改原文任何字符、不放宽任何硬闸、不自动切题、不逐题多次检索。
     // 🔴 目标不是提升命中（库覆盖 / 字面差异 / 英文锚点仍是主因），是让假 exact 归零。
     const guard = guardQuestionInput(question)
-    if (!guard.ok) {
+    // 🔴 不合格输入：**默认模式不送判定并如实告知**（D-017 原样）；
+    //    examples 模式继续往下走，但下面所有判定调用都会被跳过（D-019 不变量 C）。
+    if (!guard.ok && !examplesOnly) {
       return {
         hits: [], keys: [], exactCount: 0,
         note: guard.message, tookMs: Date.now() - started,
@@ -509,9 +516,13 @@ export class NetdiskSearchService {
       // P3 / D-015：8s 主预算 + 18s 绝对兜底，两者任一到点即停。
       // 放宽到 8 份不等于放弃 §4 P0-3 的 P95<3s：排序前置让最相关的先判，
       // 预算保证「判不完就按已有结果返回」，绝不拖成慢请求。
-      const deadline = started + DEEP_BUDGET_MS
+      // P-016：不合格输入只收参考例题，给更保守的份数与主预算（绝不超过合格输入），
+      // 硬兜底仍 18s。判定层常量与合格输入的 8 份 / 8s 口径**一个都没改**。
+      const deepFileLimit = examplesOnly ? Math.min(MAX_DEEP_FILES, 4) : MAX_DEEP_FILES
+      const deepBudgetMs = examplesOnly ? Math.min(DEEP_BUDGET_MS, 4_000) : DEEP_BUDGET_MS
+      const deadline = started + deepBudgetMs
       const hardDeadline = started + DEEP_HARD_BUDGET_MS
-      for (const cand of l1.slice(0, MAX_DEEP_FILES)) {
+      for (const cand of l1.slice(0, deepFileLimit)) {
         if (Date.now() > deadline || Date.now() > hardDeadline) {
           this.logger.log('[netdisk] 正文深挖超出预算，按已有结果返回')
           break
@@ -526,7 +537,7 @@ export class NetdiskSearchService {
           // 「是不是这道题」由 judge() 的六条硬闸决定；在粗筛阶段用 bigram 拦截，
           // 只会把「文件名没写、正文里确有原题」的文档在最后一步误杀。
           // score 仅作展示，不再参与主排序（主排序＝正文长锚点共现数）。
-          const score = coverage(qSet, text)
+          const score = examplesOnly ? 0 : coverage(qSet, text)
           // P-009 / D-012：一题一对象 + 多因子闸门。整本教辅不再当成一个判定单元，
           // exact 必须同时带来源位置；未达标一律 topic（answer 为空，见报告 §8）。
           // snippet 只留给排障端点看，answer-search 不再拿它当答案（D-009 硬性约束）。
@@ -541,8 +552,16 @@ export class NetdiskSearchService {
           const rows = sourceId
             ? await loadQuestionObjects(getSupabaseClient(), publicLibraryOwner(), 'netdisk', sourceId)
             : []
-          const j = judgeWithStore(question, text, rows,
-            () => judgeObjects(question, text, source))
+          // 🔴 P-016 / D-019：examples 模式**绝不调用判定层**（不合格输入不送判定）。
+          //    空判定对象只为复用下面的「同源例题收集 + deepDone 组装」代码，
+          //    exact 恒 false ⇒ 不产出 solutionExcerpt / sourceLocation / matchLevel=exact。
+          const j = examplesOnly
+            ? ({
+                exact: false, solution: '', anchorsHit: 0, factors: {},
+                rejectReason: 'P-016 仅参考例题模式：未送原题判定',
+              } as unknown as ReturnType<typeof judgeWithStore>)
+            : judgeWithStore(question, text, rows,
+              () => judgeObjects(question, text, source))
           // P-015 / D-018：顺带挑出「题目不完全一致、但思路可借鉴」的库内例题。
           // 🔴 只在本次已加载该来源结构化对象时做：不额外发查询、不扩大召回面、
           //    不改判定层；校验口径与 judgeWithStore 同源（storeValidationOpts）。
@@ -555,7 +574,7 @@ export class NetdiskSearchService {
                 : {}),
             }))
           }
-          const snippet = this.snippetFor(question, text)
+          const snippet = examplesOnly ? '' : this.snippetFor(question, text)
           deepDone.push({
             ...cand,
             hit: 'content',
@@ -611,6 +630,19 @@ export class NetdiskSearchService {
     const references = mergeReferences(referencePools)
     if (references.length > 0) {
       note += `；另有 ${references.length} 道解题思路相近的例题可供借鉴（不是本题答案，展示前须先声明）`
+    }
+
+    // P-016 / D-019：仅参考例题模式 —— 不输出任何命中、不暴露检索词、不给 exact，
+    // note 明说「这段输入未做原题判定」。answer-search 只取 references 与事先声明，
+    // 用户可见的「请单独录入小题」由 answer-search 的如实告知层补上。
+    if (examplesOnly) {
+      return {
+        hits: [], keys: [], exactCount: 0, tookMs: Date.now() - started,
+        note: references.length > 0
+          ? '这段输入未做原题判定（整页 / 多小问 / 非题目文本）；以下是解题思路相近的例题，不是本题答案'
+          : '这段输入未做原题判定（整页 / 多小问 / 非题目文本），也没有找到思路相近的例题',
+        ...(references.length > 0 ? { references, referenceDisclaimer: REFERENCE_DISCLAIMER } : {}),
+      }
     }
 
     return {

@@ -202,13 +202,14 @@ m.test('🔴 A5 结构不变量：参考例题永不进 answer / 不置 verified
   c.ok(!/verified:\s*true/.test(seg), '透传段把 verified 置 true')
   c.ok(/!settled/.test(seg), '没有 exact 答案时之外的分支也会塞参考例题')
   c.ok(/reference_disclaimer/.test(seg), '透传段没带声明')
-  c.ok(/const CACHE_VERSION = 'v11'/.test(as), 'CACHE_VERSION 没 bump（旧缓存会吐无声明内容）')
+  c.ok(/const CACHE_VERSION = 'v12'/.test(as), 'CACHE_VERSION 没 bump（旧缓存会吐无声明内容）')
   c.ok(/references\?: ReferenceExample\[\]/.test(types), '后端结果类型缺 references')
   c.ok(/reference_disclaimer\?: string/.test(types), '后端结果类型缺声明字段')
   c.ok(/references\?: ReferenceExample\[\]/.test(api), '前端契约缺 references')
   c.ok(/reference_disclaimer\?: string/.test(api), '前端契约缺声明字段')
   c.ok(/&& !hasRefs/.test(ed), '带参考例题时仍可能显示「采纳」按钮')
-  c.ok(/candidate && \(candidate\.source !== 'none' \|\| hasRefs\)/.test(ed), 'source=none 但有参考例题时结果卡片不渲染')
+  // P-016 / D-019：source='none' 也必须渲染（如实告知常驻），见 M38 A4
+  c.ok(/\{candidate \? \(/.test(ed), 'source=none 时结果卡片不渲染（如实告知会只剩转瞬即逝的 toast）')
   // 网盘直连也必须带声明
   c.ok(/referenceDisclaimer: REFERENCE_DISCLAIMER/.test(nd), '/api/netdisk/search 直连会返回无声明的内容')
   c.ok(/references\?: ReferenceExample\[\]/.test(nd), '网盘检索结果类型缺 references')
@@ -234,15 +235,15 @@ m.test('🔴 A6 接线：与判定共用校验口径、只在深挖已有 rows �
   c.ok(/export const INPUT_GUARD_MAX_ITEM_MARKS = 1/.test(g), 'P-014 输入闸门被改动')
 })
 
-m.test('🔴 A7 CACHE_VERSION v11 且 7 个旧模块断言同步、无 v10 残留', (c) => {
+m.test('🔴 A7 CACHE_VERSION v12 且 7 个旧模块断言同步、无 v10 残留', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v11'/.test(as), 'CACHE_VERSION 不是 v11')
+  c.ok(/const CACHE_VERSION = 'v12'/.test(as), 'CACHE_VERSION 不是 v12')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash')
   for (const f of VERSION_MODULES) {
     const t = read(f)
-    c.ok(/CACHE_VERSION = 'v11'|CACHE_VERSION v11|CACHE_VERSION 不是 v11|没 bump 到 v11/.test(t),
-      `${path.basename(f)} 的缓存版本断言没同步到 v11`)
-    c.ok(!/CACHE_VERSION = 'v10'/.test(t), `${path.basename(f)} 还留着 v10 断言`)
+    c.ok(/CACHE_VERSION = 'v12'|CACHE_VERSION v12|CACHE_VERSION 不是 v12|没 bump 到 v12/.test(t),
+      `${path.basename(f)} 的缓存版本断言没同步到 v12`)
+    c.ok(!/CACHE_VERSION = 'v1[1]'/.test(t), `${path.basename(f)} 还留着上一版断言（P-016 已 bump v12）`)
   }
 })
 

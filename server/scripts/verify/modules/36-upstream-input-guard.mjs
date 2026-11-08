@@ -98,12 +98,16 @@ m.test('🔴 A3 后端两条链路都接了闸门，且不改原文 / 不自动�
   c.ok(/import \{ guardQuestionInput \} from '\.\.\/shared\/input-guard'/.test(nd), '网盘检索服务没引入闸门')
   c.ok(/import \{ guardQuestionInput \} from '\.\.\/shared\/input-guard'/.test(as), '答案服务没引入闸门')
   c.ok(/const guard = guardQuestionInput\(question\)/.test(nd), '网盘检索入口没调闸门')
-  c.ok(/if \(!guard\.ok\) \{/.test(nd), '网盘检索不合格时没有提前返回')
+  // P-016 / D-019：闸门作用域收窄到判定层。默认模式（/api/netdisk/search 直连）
+  // 仍提前返回；answer-search 在不合格输入时改走 examples 模式，只收参考例题、
+  // 结构上不给 exact。判定层零放行由 M38 A4 再钉一道。
+  c.ok(/if \(!guard\.ok && !examplesOnly\) \{/.test(nd), '网盘检索默认模式不合格时没有提前返回')
   c.ok(/note: guard\.message/.test(nd), '网盘检索没有把提示写进 note')
   c.ok(/const inputGuard = guardQuestionInput\(question\)/.test(as), '答案服务没调闸门')
-  c.ok(/if \(!settled && inputGuard\.ok\)/.test(as), '不合格输入仍会去查公共资料库')
+  c.ok(/inputGuard\.ok \? \{\} : \{ referenceMode: 'examples' \}/.test(as), '不合格输入没改走仅参考例题模式')
+  c.ok(/const exact = inputGuard\.ok\s*\?\s*disk\?\.hits\.find/.test(as), '不合格输入仍可能拿 exact 判定结果')
   c.ok(/if \(!inputGuard\.ok && !settled\)/.test(as), '不合格输入没被如实告知')
-  c.ok(/note: inputGuard\.message/.test(as), '答案服务提示没写进 note')
+  c.ok(/\$\{inputGuard\.message\}/.test(as), '答案服务提示没写进 note')
   c.ok(!/splitRealWorldStems|OCR_.*DICT|纠错字典/.test(nd + as), '顺手做了自动切题 / OCR 纠错字典（拍板明确不做）')
   c.ok(!/for \(const stem of|stems\.map\(/.test(nd), '出现逐候选多次检索（与 P95<3s 冲突）')
 })
@@ -116,15 +120,15 @@ m.test('🔴 A4 判定层真相源零改动（与 M35 同一 sha256 基线）', 
   c.ok(!/guardQuestionInput|INPUT_GUARD_/.test(src), '闸门逻辑被塞进判定层真相源（必须保持零依赖单文件）')
 })
 
-m.test('🔴 A5 note 文案变了 ⇒ CACHE_VERSION v11 且 6 个旧模块断言同步', (c) => {
+m.test('🔴 A5 note 文案变了 ⇒ CACHE_VERSION v12 且 6 个旧模块断言同步', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v11'/.test(as), 'CACHE_VERSION 没 bump 到 v11（老缓存会吐旧 note）')
+  c.ok(/const CACHE_VERSION = 'v12'/.test(as), 'CACHE_VERSION 没 bump 到 v12（老缓存会吐旧 note）')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   for (const f of VERSION_MODULES) {
     const t = read(f)
-    c.ok(/CACHE_VERSION = 'v11'|CACHE_VERSION v11|CACHE_VERSION 不是 v11|没 bump 到 v11/.test(t),
-      `${path.basename(f)} 的缓存版本断言没同步到 v11`)
-    c.ok(!/CACHE_VERSION = 'v9'/.test(t), `${path.basename(f)} 还留着 v9 断言`)
+    c.ok(/CACHE_VERSION = 'v12'|CACHE_VERSION v12|CACHE_VERSION 不是 v12|没 bump 到 v12/.test(t),
+      `${path.basename(f)} 的缓存版本断言没同步到 v12`)
+    c.ok(!/CACHE_VERSION = 'v1[1]'/.test(t), `${path.basename(f)} 还留着上一版断言（P-016 已 bump v12）`)
   }
 })
 

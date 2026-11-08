@@ -60,7 +60,9 @@ m.test('🔴 B3 P3 深挖：8 份 / 8s 主预算 / 18s 硬兜底', (c) => {
   c.ok(/DEEP_HARD_BUDGET_MS = 18_000/.test(svc), '缺 18s 绝对兜底')
   c.ok(/Date\.now\(\) > deadline \|\| Date\.now\(\) > hardDeadline/.test(svc),
     '循环里没有同时检查主预算与硬兜底')
-  c.ok(/l1\.slice\(0, MAX_DEEP_FILES\)/.test(svc), '深挖没走上限')
+  // P-016 / D-019：上限改为按模式取值（examples 更保守，judge 仍是 MAX_DEEP_FILES）
+  c.ok(/l1\.slice\(0, deepFileLimit\)/.test(svc), '深挖没走上限')
+  c.ok(/Math\.min\(MAX_DEEP_FILES, 4\)/.test(svc), 'examples 模式深挖上限未收紧到 4 份')
   c.ok(/P95<3s|P95 < 3s/.test(svc), '源码没写 §4 P0-3 的性能约束理由')
 })
 
@@ -86,9 +88,9 @@ m.test('🔴 B5 来源卡片只在 exact 渲染，不给无出处答案背书', 
     '来源卡片做了点击跳题（会变成拍照搜题形态）')
 })
 
-m.test('🔴 B6 CACHE_VERSION v11、strict 仍锁、六条硬闸未放宽', (c) => {
+m.test('🔴 B6 CACHE_VERSION v12、strict 仍锁、六条硬闸未放宽', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v11'/.test(as),
+  c.ok(/const CACHE_VERSION = 'v12'/.test(as),
     '候选池与结果内容变了却没 bump（answer_cache 会原样吐 v7 旧命中）')
   c.ok(as.includes('${CACHE_VERSION}:${question}'), '版本没参与 qHash，bump 无效')
   const store = read(STORE)

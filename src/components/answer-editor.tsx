@@ -318,6 +318,10 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     //    反复点又会撞上后端的并发闸门（429），观感更差。
     Taro.showLoading({ title: `${searchLabel}中…`, mask: true })
     let shownAt = 0
+    // P-016 / D-019：微信下 showToast 与 showLoading 共用同一个实例，
+    // try/catch 里先弹 toast、finally 立刻 hideLoading ⇒ 提示会被抢关，
+    // 用户连「失败原因」都看不到。统一收进变量，等 hideLoading 之后再弹。
+    let pendingToast = ''
     try {
       const res = await searchAnswer(item.id, false, searchMode, {
         onProgress: ({ waitedMs }) => {
@@ -331,18 +335,17 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         shouldAbort: () => unmountedRef.current,
       })
       setCandidate(res)
-      if (res.source === 'none') {
-        Taro.showToast({ title: res.note || `${searchLabel}未成功`, icon: 'none' })
-      }
+      // source='none' 的如实告知已由常驻结果卡片承载，不再依赖转瞬即逝的 toast
     } catch (e) {
       // 面板已卸载 ⇒ 不是失败，静默收尾（弹 toast 会出现在别的页面上）
       if (isJobAborted(e) || unmountedRef.current) return
       console.error(`${searchLabel}失败`, e)
       const msg = e instanceof Error ? e.message : ''
-      Taro.showToast({ title: msg.slice(0, 30) || `${searchLabel}失败，请稍后重试`, icon: 'none', duration: 2500 })
+      pendingToast = msg.slice(0, 30) || `${searchLabel}失败，请稍后重试`
     } finally {
       Taro.hideLoading()
       setSearching(null)
+      if (pendingToast) Taro.showToast({ title: pendingToast, icon: 'none', duration: 2500 })
     }
   }
 
@@ -551,14 +554,19 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         ) : null}
       </View>
 
-      {/* 搜到的候选答案：必须「采纳」才入库 */}
-      {candidate && (candidate.source !== 'none' || hasRefs) ? (
+      {/* 搜到的候选答案：必须「采纳」才入库。
+          🔴 P-016 / D-019：source='none' 也要渲染 —— 旧实现把「没找到 / 请单独录入小题」
+          只塞进一个转瞬即逝的 toast，用户观感就是「点了资料库搜题什么都没有」。
+          如实告知必须常驻（GK-SRS-20a M11：告知不是拦截）。 */}
+      {candidate ? (
         <View className="mt-3 rounded-xl border p-3" style={{ borderColor: candidate.verified ? 'rgba(16, 185, 129, 0.25)' : '#E8A33D', backgroundColor: candidate.verified ? 'rgba(16, 185, 129, 0.08)' : 'rgba(232,163,61,0.08)' }}>
           <View className="flex flex-row items-center justify-between mb-1">
             <Text className="block text-xs font-semibold" style={{ color: candidate.source === 'llm' ? '#B4761F' : BRAND_TEXT }}>
-              {candidate.source === 'search'
-                ? `网络检索结果（${candidate.refs.length} 条来源）`
-                : candidate.source === 'netdisk' || candidate.source === 'kb'
+              {candidate.source === 'none'
+                ? '这次没有可用结果'
+                : candidate.source === 'search'
+                  ? `网络检索结果（${candidate.refs.length} 条来源）`
+                  : candidate.source === 'netdisk' || candidate.source === 'kb'
                   // P-006 / D-009：按原题判定分档，netdisk 与 kb 一视同仁——
                   // ima 语义检索命中也可能只是同专题不同题，不得无条件叫「资料库检索结果」。
                   // 未带 match_level 的旧契约仍走原文案，避免老结果显示成「没找到」。
@@ -578,6 +586,13 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />
           </View>
+          {/* P-016 / D-019：如实告知常驻且排在最前。source='none' 时这是卡片里唯一的内容，
+              不能只靠 toast；有参考例题时也让「请单独录入小题」先于任何学习内容。 */}
+          {candidate.note ? (
+            <View className="mb-2 rounded-lg p-2" style={{ backgroundColor: 'rgba(232,163,61,0.10)' }}>
+              <Text className="block text-xs" style={{ color: '#8A5A12' }}>{candidate.note}</Text>
+            </View>
+          ) : null}
           {/* P-015 / D-018：事先声明 —— 必须排在任何参考内容（以及本题 answer）之前渲染。
               服务端字段缺失时用前端逐字镜像兜底，绝不出现「先给内容、后给声明」。 */}
           {hasRefs ? (
@@ -690,9 +705,6 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                 </View>
               ))}
             </View>
-          ) : null}
-          {candidate.note ? (
-            <Text className="block text-xs text-muted-foreground mb-2">{candidate.note}</Text>
           ) : null}
           <View className="flex flex-row gap-2">
             {/* 🔴 P-006：topic 只找到同主题资料 ⇒ 不提供「采纳」，

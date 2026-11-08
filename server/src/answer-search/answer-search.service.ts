@@ -67,7 +67,10 @@ const CACHE_PREFIX = 'ans:srch:'
 // 按红线「改 note / result 结构必 bump」⇒ v9 → v10，旧缓存行自然成为孤儿。
 // P-015 / D-018：结果结构新增 references / reference_disclaimer ⇒ 旧缓存会显示成
 // 「有内容但没声明」，必须整体失效（§4 红线：改 note/result 结构必 bump）。
-const CACHE_VERSION = 'v11'
+// P-016 / D-019：不合格输入的 result 从「source:none + 一句闸门提示」变为
+// 「提示 + references + 声明」，且用户可见 note 文案改变 ⇒ v11 → v12。
+// 不 bump 会让 11-08 10:42 那类已缓存的题继续吐「什么都没有」的旧结果。
+const CACHE_VERSION = 'v12'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -393,14 +396,20 @@ export class AnswerSearchService {
 
       // ③ 公共资料库（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
       //    P-011：不传 userId —— 运营者提供的公共题库对所有登录用户一致。
-      if (!settled && inputGuard.ok) {
+      // P-016 / D-019：闸门的作用域只到「判定层」。合格输入照常检索 + 判定；
+      // 不合格输入改走「仅参考例题」只读模式（不送判定、hits 恒空），仍能把
+      // 思路相近的库内例题带出来 —— 与 D-018「不得冒充本题答案 ≠ 不得给学习材料」一致。
+      if (!settled) {
         disk = await this.netdiskSearch
-          .search(question)
+          .search(question, inputGuard.ok ? {} : { referenceMode: 'examples' })
           .catch((e) => {
             this.logger.warn(`[answer-search] 网盘检索异常: ${e instanceof Error ? e.message : e}`)
             return null
           })
-        const exact = disk?.hits.find((h) => h.matchLevel === 'exact' && h.solutionExcerpt)
+        // 🔴 结构上钉死：不合格输入永远拿不到 exact（examples 模式 hits 本就恒空）。
+        const exact = inputGuard.ok
+          ? disk?.hits.find((h) => h.matchLevel === 'exact' && h.solutionExcerpt)
+          : undefined
         if (exact?.solutionExcerpt) {
           result = {
             source: 'netdisk', verified: true, match_level: 'exact',
@@ -521,12 +530,18 @@ export class AnswerSearchService {
 
       // P-014 / D-017：不合格输入且前面没有任何来源给出答案 ⇒ 如实告知，
       // 不要用「资料库里没有找到…」掩盖「这段根本不是一道题 / 是整页」。
-      // 只在未 settled 时覆盖，避免抹掉自有题库 / 自有资料库 / ima 的真实命中。
+      // P-016 / D-019：**只换告知文案，不再整体覆盖清空** —— 上面 P-015 透传的
+      // references / reference_disclaimer 必须留着，那是 D-018 已批准的并列第二层；
+      // 旧实现这一行把它们全抹了，正是「搜题什么都没有」的直接原因之一。
+      // answer / solution / refs / verified / confidence 仍强制清空，采纳仍禁。
       if (!inputGuard.ok && !settled) {
+        const hasExamples = (result.references?.length ?? 0) > 0
         result = {
-          source: 'none', verified: false, match_level: 'none',
+          ...result,
+          ...(hasExamples ? {} : { source: 'none' as const, match_level: 'none' as const }),
+          verified: false,
           answer: '', solution: '', refs: [], confidence: 0,
-          note: inputGuard.message,
+          note: `${inputGuard.message}${hasExamples ? '；下面是解题思路相近的例题，不是本题答案，仅供借鉴' : ''}`,
         }
       }
     } else {
