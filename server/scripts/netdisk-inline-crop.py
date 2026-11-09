@@ -131,9 +131,14 @@ def ensure_pdf(docx, pdf):
     **soffice 并不会干净退出**——实测留下一个 100% CPU 转了 15 分钟的孤儿进程，
     而同 worker 的下一份会连到这个孤儿实例上继续挂死（共用 profile）。
     所以改成 Popen + 独立进程组 + `killpg(SIGKILL)`，超时一定连子孙一起清掉。
+
+    ⚠️ 2026-11-09 全量收尾：默认仍 480s（保持既有护栏），仅 >6MB 超大文档
+    专门批次通过 INLINE_PDF_TIMEOUT_S 放宽；node 侧 DOC_TIMEOUT_MS 必须更大，
+    否则 node 会先杀 python 而留下半截 PDF。
     """
     if os.path.exists(pdf) and os.path.getsize(pdf) > 0:
         return True
+    pdf_timeout = int(os.environ.get('INLINE_PDF_TIMEOUT_S') or '480')
     proc = None
     try:
         proc = subprocess.Popen(
@@ -142,7 +147,7 @@ def ensure_pdf(docx, pdf):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        proc.wait(timeout=480)
+        proc.wait(timeout=pdf_timeout)
     except subprocess.TimeoutExpired:
         pass
     except Exception:
