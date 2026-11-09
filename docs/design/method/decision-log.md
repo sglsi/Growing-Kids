@@ -675,3 +675,25 @@
 | 下一道门（待思傅逐题确认） | ① 是否按本报告进入阶段 1（**仍只 dry-run**）；② 50 字判据是否加薄文本复核队列；③ 全量并发配置（2 worker 起步 / 1 worker 保守）；④ 双次转换哈希实验是否列为阶段 2 硬门。**四项未回复前不写实现代码、不写生产库** |
 | 不宣称 | 未写命中提升／修复有效／误判归零／所有用户已可用／图形全覆盖／看懂图形；**不计算召回率**；94% 与 9.5–10 h 均带样本/外推限定；库覆盖扩大 ≠ P0 六条硬闸放行，`question-match.ts` 一行未动，`CACHE_VERSION` 仍 v14；唯一够格指标 `0021 review_events` 仍 **0 行** |
 | 仍锁 | 阶段 1 `--apply`、阶段 2 切题入库、阶段 3 图能力；扫描 PDF 440 份、`pdf ≥1MB`、`m:oMath` 27 处、`.wps` 13 份各属独立提案；`strict=1`、第二层准入、正式版发布 10 项前提、4 组身份治理、双账号真实登录 E2E、公安联网备案、mp 后台 `downloadFile` 合法域名 |
+
+---
+
+## D-024 · P-019 阶段 1 拍板与 dry-run 实现（2026-11-09 21:xx，思傅「1进入阶段1；2加；3为2worker；4列为阶段2硬门」）
+
+> 上一条 D-023 的「下一道门」四项已逐题回复；历史行保留不涂改。**批准范围推进到阶段 1 的 dry-run / 只读 `--probe`，`--apply` 写生产库、阶段 2 切题、阶段 3 图能力仍未预授权。**
+
+| 项 | 内容 |
+|---|---|
+| 拍板四项 | ① **进入阶段 1**（仍只 dry-run / 只读探测）／② **加**「50–199 字薄文本复核队列」／③ 全量 **2 worker**／④ **双次转换哈希对比列为阶段 2 硬门** |
+| 🔴 阶段 2 硬门（本条核心） | 跑 `question-objects-build.mjs --apply` **之前**必须完成：同一份 `.doc` 用**两个全新独立 LO profile 各转一次**，两次产物分别走 `extract_docx` 抽文字流并比对 sha256；样本 ≥20 份且含 `w:object>0`、≥5 MB、scan 层各档。**通过判据＝文字流哈希一致率 100%**；出现不一致须逐份查明并标 `failed` 不得入索引，且阶段 3 抠图改为「复用同一份 docx 产物 + `text_sha256` 校对」，禁止两次转换各自对齐。实验结论与样本清单写入台账后方可申请阶段 2。**M41 B7 静态钉住**；阶段 1 的小样本预实验只是基线证据，**不替代正式验收** |
+| 新增文件 | `migrations/0031_doc_convert_done.sql`（记账 + `text_sha256` / `docx_sha256` / `drawing_count` / `object_count` / `omath_count` / `convert_ms` / `engine_version`，`status` CHECK 五态 `ok/none/review/failed/too_big`，主键 `(user_id, source_id)`）；`server/scripts/verify/modules/41-doc-extract.mjs`（M41，10 条静态门） |
+| 脚本改动 | `server/scripts/netdisk-extract-text.mjs` 加 `--doc` **opt-in**：不带它时 `BASE_SCOPE_SQL` 与方案 A 历史口径逐字一致（docx/pdf<1MB/txt **零回归**）；新增 `--probe N` 只读探测（下载+转换+抽取全链路，`writeRow` / `writeDocDone` 双 guard ⇒ **零写库**）；`--doc --apply` 由 `main()` 与 `applyDocRun()` **双重闸门硬拦**，须单独批准并显式设 `DOC_EXTRACT_APPLY_APPROVED=1`；`--apply` 前还查 `to_regclass('doc_convert_done')` |
+| 薄文本复核队列（②） | `REVIEW_MIN_CHARS = MIN_MEANINGFUL_CHARS(50)`、`REVIEW_MAX_CHARS = 200`；`50 ≤ 有效字 < 200` ⇒ `text_status='review'`，写正文供人工复核但**不进 `question_objects`**（`question-objects-build.mjs` 候选只取 `text_status='ok'`，**零改动**）；`netdisk-search.service.ts::ensureText()` 默认 `ONLINE_EXTRACT_ENABLED=false` ⇒ `review` 不会被在线重抽覆盖。`<50` 仍判 `none`，`text_content` 写 `null` 不留空串 |
+| 同源钉子 | 每份 `.doc` **只转一次**（`await convertDocToDocx` 仅 1 个调用点，超时/长尾走 `DOC_MAX_TRIES=2` 换 profile 回插重试）；正文走 `extractDocContent({kind:'docx'})` ⇒ 与 `extract_docx` 同一文字流口径；`text_sha256 = sha256(stripNul(text).slice(0,MAX_TEXT_CHARS))` 钉的是**真正写入 `text_content` 的那份文本**，`docx_sha256` 钉转换产物；转换产物用完即删，不入库、不进 `blob_objects` |
+| 并发与护栏（③） | `--doc` 下 `CONCURRENCY` 默认 **2**，仍压在 `Math.min(2, Math.max(1,…))` 事故铁律内；每 worker 独立 `UserInstallation` LO profile + 独立输出目录；`nice -n19 ionice -c3`；`spawn(detached) + killpg(SIGKILL)` 防孤儿；单份超时 120 s / ≥20 MB 300 s；`fc-match Symbol` 字体闸门；`GAP_MS ≥300`。阶段 0 实测 74 s 长尾（5.48 MB / 2,391 drawing）由回插重试隔离 |
+| 写库白名单（未执行） | 即便日后批准 `--apply`，也只写 `netdisk_files.text_content / text_status / text_updated_at` 三列 + `doc_convert_done` 幂等 upsert；`writeRow` 带 `where id=$3 and user_id=$4` 并校 `rowCount===1`；**不碰** `name/path/size_bytes/mtime/synced_at`、`question_objects`、任何图表与 `blob_objects` |
+| 静态门 M41（10 条） | B1 判定层 sha256 不变／B2 0031 表与枚举／B3 dry-run 与 `--probe` 零写库／B4 `--apply` 双闸门／B5 白名单三列与幂等／B6 `review` 不进索引也不被重抽／B7 单次转换 + `text_sha256` + 阶段 2 硬门／B8 2 worker 与护栏／B9 方案 A 零回归／B10 `CACHE_VERSION` 仍 v14 + 提案状态 + D-024 + 不宣称 |
+| 验证实绩（**全部只读**，独立报告 `docs/reports/P-019-阶段1-dryrun验证报告.md`） | ① `.doc` dry-run：10,499 份 / 7,211 MB 全 pending、0031 未建；② 旧 P-008 线性模型不含转换、曾输出误导性「3.2 h」⇒ 改用阶段 0 实测外推 9.5 h；③ 不带 `--doc` 的零回归通过（方案 A 口径逐字不变）；④ `--doc --apply` 闸门 **rc=1**；⑤ `--doc --probe 20`（cgroup 1800M/150%）：**ok=19 / review=1 / none=0 / failed=0 / 环境失败=0 / 下载失败=0**，字体闸门通过、`health=200`、收尾 `soffice=0`，**薄文本复核队列真实命中 1 份**；⑥ 零写库基线探测前后均 `10499/0/no_table`（有正文行数 0）；⑦ 本地与 L3 脚本 sha256 一致 `b5fcb5082b5efa2e`；⑧ `npm run verify -- M41` **10/10** |
+| 🔴 阶段 2 硬门的 12 份预实验（**不替代正式验收**） | 分层 `big 2 / normal 4 / object_like 4 / scan 2`，每份用两个全新独立 LO profile 各转一次：**文字流 `text_sha256` same=12 / diff=0 / other=0（100% 一致）**，但 **docx 二进制 `docx_sha256` 12/12 全不同** ⇒ ① 同源校对**只能钉文字流**，`docx_sha256` 降级为诊断列（已写进 0031 列注释）；② 阶段 3 抠图必须复用同一次转换的同一份 docx 产物，不得重转再对齐；③ 74 s 长尾两次 69.3/69.5 s 稳定复现，是对象数导致非随机退化；④ **两套文字流口径不同**：压测 `zipfile+re.sub(document.xml)` 判某扫描版 0 字、阶段 1 `extract_docx`（含页眉页脚）判 84 字 ⇒ 阶段 0 的 94% 与阶段 1 status 分布**不可直接对比**，且 `netdisk-inline-crop.py` 仅读 document.xml，与 `extract_docx` 的坐标系在 `.doc` 转换产物上**未验证** ⇒ 列为**阶段 3 二次评审的专项硬门** |
+| 不宣称 | 未写命中提升／修复有效／误判归零／所有用户已可用／图形全覆盖／看懂图形；**不计算召回率**；库覆盖扩大 ≠ P0 六条硬闸放行，`question-match.ts` 一行未动，`CACHE_VERSION` 仍 v14；唯一够格指标 `0021 review_events` 仍 **0 行**。阶段 0 的 94% 与 9.5–10 h 仍带样本/外推限定；12/12 文字流一致只限这 12 份样本，不外推全库 |
+| 仍锁 | 阶段 1 `--apply` 写生产库、阶段 2 切题入库（须先过硬门）、阶段 3 图能力（须阶段 2 通过后二次评审）；0031 迁移**尚未在生产执行**；扫描 PDF 440 份、`pdf ≥1MB`、`m:oMath` 27 处、`.wps` 13 份各属独立提案；`strict=1`、第二层准入、正式版发布 10 项前提、4 组身份治理、双账号真实登录 E2E、公安联网备案、mp 后台 `downloadFile` 合法域名 |

@@ -39,6 +39,13 @@
  *   node scripts/netdisk-extract-text.mjs --apply                # 全量（低峰窗口，并发 ≤2）
  *   node scripts/netdisk-extract-text.mjs --apply --force        # 连已抽过的重抽
  *
+ * P-019 阶段 1（2026-11-09，思傅逐题确认「1进入阶段1；2加；3为2worker；4列为阶段2硬门」）：
+ *   node scripts/netdisk-extract-text.mjs --doc                  # .doc dry-run（只读统计）
+ *   node scripts/netdisk-extract-text.mjs --doc --probe 20       # 只读探测 20 份（下载+转换+抽取，零写库）
+ *   node scripts/netdisk-extract-text.mjs --doc --apply          # 🔴 闸门硬拦：写生产库未授权
+ *   全量默认 2 worker；薄文本 50~199 字标 review 不进索引；同源钉子 text_sha256 落 0031 记账表；
+ *   阶段 2 硬门＝双次转换文字流哈希对比未通过不得切题入库（D-024）。
+ *
  * 🔴 写库只碰三列：`text_content` / `text_status` / `text_updated_at`。
  *    绝不改 `name` / `path` / `size_bytes` / `mtime` / `synced_at`（P-008 §④⑤、报告 §10-5）。
  *
@@ -46,6 +53,9 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
+import crypto from 'node:crypto'
+import { spawn, execFileSync } from 'node:child_process'
 import pg from 'pg'
 import dotenv from 'dotenv'
 
@@ -59,8 +69,16 @@ const arg = (name, fallback = '') => {
 const USER_ID = arg('--user')
 const LIMIT = Number(arg('--limit', '0')) || 0
 
-// 并发 ≤2（网盘个人号 QPS 上限实测约 9，留足余量）、每份之间 ≥300ms
-const CONCURRENCY = Math.min(2, Math.max(1, Number(arg('--concurrency', '1')) || 1))
+// ============ P-019 阶段 1：老式 .doc（思傅 2026-11-09 逐题确认「1进入阶段1；2加；3为2worker；4列为阶段2硬门」）============
+// 🔴 本轮只批准 dry-run 与只读 --probe；`--apply` **未授权**，由 main() 的闸门硬拦，
+//    须思傅单独批准并显式设置 DOC_EXTRACT_APPLY_APPROVED=1 才可写库。
+// `--doc` 是 opt-in：不带它时 SCOPE_SQL 与历史行为逐字一致（docx/pdf<1MB/txt 零回归）。
+const DOC_MODE = process.argv.includes('--doc')
+const PROBE = Number(arg('--probe', '0')) || 0
+const DOC_APPLY_APPROVED = process.env.DOC_EXTRACT_APPLY_APPROVED === '1'
+
+// 全量并发配置按思傅拍板 = 2 worker；非 .doc 路径历史默认仍是 1。
+const CONCURRENCY = Math.min(2, Math.max(1, Number(arg('--concurrency', DOC_MODE ? '2' : '1')) || 1))
 const GAP_MS = Math.max(300, Number(arg('--gap', '300')) || 300)
 const BATCH = 50
 
@@ -71,6 +89,15 @@ const MAX_TEXT_CHARS = Number(process.env.NETDISK_TEXT_MAX_CHARS ?? 200_000)
 const MIN_MEANINGFUL_CHARS = 50 // 去掉空白后 < 50 字 ⇒ 判为扫描版（与 ensureText 一致）
 const MAX_TEXT_BYTES = 40 * 1024 * 1024 // 超 40MB 不下载，直接标 too_big
 const PDF_MAX_BYTES = 1 * 1024 * 1024 // 方案 A 边界：pdf 只抽 < 1MB
+
+// ---- P-019 阶段 1 口径（D-024；改这里等于改判定口径，必须同步 M41 与提案）----
+const DOC_ENGINE_VERSION = 'doc-convert-v1'
+const REVIEW_MIN_CHARS = MIN_MEANINGFUL_CHARS // 50：< 50 判 none（与 ensureText 一致）
+const REVIEW_MAX_CHARS = 200 // 50~199 字进「薄文本复核队列」⇒ text_status='review'
+const DOC_MAX_TRIES = 2 // 长尾隔离：转换超时/失败换 profile 回插重试一次（P-018 INLINE_MAX_TRIES 经验）
+const DOC_CONVERT_TIMEOUT_BASE_MS = 120_000
+const DOC_CONVERT_TIMEOUT_BIG_MS = 300_000
+const DOC_BIG_BYTES = 20 * 1024 * 1024
 
 // 环境类失败：**绝不能**记 none（none 的语义是「确认这份文档没有文字层」，记错就永久判死）
 const ENV_FAIL_REASONS = new Set(['no-python', 'no-script', 'timeout'])
@@ -101,11 +128,19 @@ function databaseUrl() {
   return line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')
 }
 
-/** 方案 A 的候选条件：docx 全量 + pdf < 1MB + txt */
-const SCOPE_SQL = `is_dir = false
+/** 方案 A 的候选条件（历史口径；不带 --doc 时逐字不变，保证零回归） */
+const BASE_SCOPE_SQL = `is_dir = false
   and coalesce(size_bytes, 0) > 0
   and coalesce(size_bytes, 0) <= ${MAX_TEXT_BYTES}
   and (ext = 'docx' or ext = 'txt' or (ext = 'pdf' and coalesce(size_bytes, 0) < ${PDF_MAX_BYTES}))`
+
+/** P-019 阶段 1：只取 ext='doc'，单独成批，不混入既有 docx/pdf/txt 全量流程 */
+const DOC_SCOPE_SQL = `is_dir = false
+  and ext = 'doc'
+  and coalesce(size_bytes, 0) > 0
+  and coalesce(size_bytes, 0) <= ${MAX_TEXT_BYTES}`
+
+const SCOPE_SQL = DOC_MODE ? DOC_SCOPE_SQL : BASE_SCOPE_SQL
 
 const userClause = (params) => {
   if (!USER_ID) return ''
@@ -118,8 +153,10 @@ async function dryRun(client) {
   const params = []
   const uq = userClause(params)
 
-  console.log('================ 方案 A dry-run（只读，不写库）================')
-  console.log(`【范围】docx 全量 + pdf < 1MB + txt（P-008 §④②）`)
+  console.log(`================ ${DOC_MODE ? 'P-019 阶段 1 · .doc' : '方案 A'} dry-run（只读，不写库）================`)
+  console.log(
+    `【范围】${DOC_MODE ? '仅 ext=doc（soffice→docx 后复用 extract_docx 口径）' : 'docx 全量 + pdf < 1MB + txt（P-008 §④②）'}`,
+  )
   console.log(`【用户】${USER_ID || '全部用户'}`)
   console.log('')
 
@@ -214,9 +251,23 @@ async function dryRun(client) {
   console.log('')
   console.log('--- 不在本轮范围（如实排除）---')
   console.log(`  pdf ≥ 1MB      ${fmt(o.pdf_big || 0).padStart(7)} 份  （实测可抽率 0~12.5%，不划算）`)
-  console.log(`  .doc           ${fmt(o.doc || 0).padStart(7)} 份  （转换工具未装，需单独立项）`)
+  console.log(`  .doc           ${fmt(o.doc || 0).padStart(7)} 份  （${DOC_MODE ? '本轮范围，见下' : 'P-019 已立项，不并入方案 A'}）`)
   console.log(`  视频/音频/图片 ${fmt(o.media || 0).padStart(7)} 份  （无文字层）`)
   console.log(`  > 40MB         ${fmt(o.too_big || 0).padStart(7)} 份  （docx/txt 超抽取上限，标 too_big 不下载）`)
+
+  // ④-2 P-019 阶段 1 专属：记账表状态、复核队列、硬门清单（全部只读）
+  if (DOC_MODE) {
+    const { rows: tbl } = await client.query(`select to_regclass('doc_convert_done') is not null as ok`)
+    console.log('')
+    console.log('--- P-019 阶段 1 约束（只读）---')
+    console.log(`  0031 记账表 doc_convert_done : ${tbl[0]?.ok ? '已建' : '未建（本轮不执行迁移、不写库）'}`)
+    console.log(`  薄文本复核队列              : ${REVIEW_MIN_CHARS} ≤ 有效字 < ${REVIEW_MAX_CHARS} ⇒ text_status='review'（不进 question_objects）`)
+    console.log(`  并发配置                    : ${CONCURRENCY} worker（思傅拍板全量 2 worker）`)
+    console.log('  同源钉子                    : text_sha256 = sha256(写入 text_content 的文本)，阶段 3 抠图前必须校对')
+    console.log('  阶段 2 硬门                 : 双次转换文字流哈希对比未通过 ⇒ 不得启动切题入库（D-024）')
+    console.log('  --probe N                   : 只读探测 N 份（下载+转换+抽取，绝不写库）')
+    console.log('  --apply                     : 未授权，main() 闸门硬拦')
+  }
 
   // ⑤ 用户分布（多用户后按用户串行跑）
   const p5 = []
@@ -239,13 +290,23 @@ async function dryRun(client) {
     (0.9 * pending + pendingBytes / 1024 / 1024 / 10 + pending * EXTRACT_SECONDS) / 3600
 
   console.log('')
-  console.log('--- 量-本预估（实测模型：下载 0.9s + size_MB/10，抽取 0.12s/份）---')
-  console.log(`  候选合计      ${fmt(totalFiles)} 份 / ${gb(totalBytes).toFixed(1)} GB  ⇒ 串行约 ${hours.toFixed(1)} 小时`)
-  console.log(`  其中待处理    ${fmt(pending)} 份 / ${gb(pendingBytes).toFixed(1)} GB  ⇒ 串行约 ${pendingHours.toFixed(1)} 小时`)
-  console.log(`  预计可抽      ≈ ${fmt(yieldOk)} 份（docx 95% / pdf<1MB 90% / txt 100%，按实测可抽率保守估）`)
-  console.log(`  正文字节      ≈ ${fmt(mb(yieldOk * 9000))} MB 原始（按 9,000 字/份）`)
+  if (DOC_MODE) {
+    // 🔴 P-008 的「下载 0.9s + size/10 + 抽取 0.12s」不含 .doc→docx 的 soffice 转换，
+    //    照搬会给出约 3.2h 的错误低估（阶段 0 实测外推 9.5–10h），故 .doc 分支不输出旧模型。
+    console.log('--- 量-本参照（P-008 线性模型不含转换，不适用；改用阶段 0 实测）---')
+    console.log(`  候选合计      ${fmt(totalFiles)} 份 / ${gb(totalBytes).toFixed(1)} GB（全部待处理）`)
+    console.log(`  阶段 0 实测外推 10,499 份 × 3.27 s/份（2 worker）≈ ${(10_499 * 3.27 / 3600).toFixed(1)} h；` +
+      '含长跑 profile 退化/重试余量约 9.5–10.0 h，**不作承诺**')
+    console.log('  阶段 0 样本内可抽 94/100（scan 层超配约 10 倍，**不外推全库、不作承诺**）')
+  } else {
+    console.log('--- 量-本预估（实测模型：下载 0.9s + size_MB/10，抽取 0.12s/份）---')
+    console.log(`  候选合计      ${fmt(totalFiles)} 份 / ${gb(totalBytes).toFixed(1)} GB  ⇒ 串行约 ${hours.toFixed(1)} 小时`)
+    console.log(`  其中待处理    ${fmt(pending)} 份 / ${gb(pendingBytes).toFixed(1)} GB  ⇒ 串行约 ${pendingHours.toFixed(1)} 小时`)
+    console.log(`  预计可抽      ≈ ${fmt(yieldOk)} 份（docx 95% / pdf<1MB 90% / txt 100%，按实测可抽率保守估）`)
+    console.log(`  正文字节      ≈ ${fmt(mb(yieldOk * 9000))} MB 原始（按 9,000 字/份）`)
+  }
   console.log('')
-  console.log('[dry-run] 未传 --apply，一行都没写。')
+  console.log(`[dry-run] 未传 --apply，一行都没写。${DOC_MODE ? '（--probe N 只做只读探测，同样不写库）' : ''}`)
   console.log('===========================================================')
 }
 
@@ -419,6 +480,8 @@ function stripNul(text) {
 }
 
 async function writeRow(client, row, text, status) {
+  // 🔴 P-019 --probe 只读：走完整链路但绝不写库（M41 B3 静态钉住）
+  if (PROBE > 0) return
   const { rowCount } = await client.query(
     `update netdisk_files
         set text_content = $1, text_status = $2, text_updated_at = now()
@@ -430,6 +493,290 @@ async function writeRow(client, row, text, status) {
   }
 }
 
+// ============================================================================
+// P-019 阶段 1：老式 .doc 补抽（L1 · 本轮仅 dry-run / 只读 --probe 获批）
+//
+// 🔴 同源铁律：.doc 是转换产物。抽正文与后续抠图必须复用「同一次转换」的
+//    同一份 docx 文字流；本轮把写入 text_content 的文本 sha256 钉进
+//    doc_convert_done.text_sha256，阶段 3 抠图前必须先校对（D-024）。
+// 🔴 单次转换：每份 .doc 只转一次，docx 用完即删，不入库、不进 blob_objects。
+// 🔴 薄文本：50~199 字标 review，写正文但不进 question_objects（只认 ok）。
+// ============================================================================
+
+/** 只数对象；文字流口径以 extractDocContent(extract_docx) 为准，不另起一套 */
+const DOC_PROBE_PY = `import zipfile,sys
+z=zipfile.ZipFile(sys.argv[1])
+x=z.read('word/document.xml').decode('utf8','ignore')
+print('%d %d %d' % (x.count('<w:drawing'),x.count('<w:object'),x.count('<m:oMath')))
+`
+
+const emptyDocRec = (row) => ({
+  status: 'failed',
+  meaningful_chars: 0,
+  text_sha256: null,
+  docx_sha256: null,
+  drawing_count: 0,
+  object_count: 0,
+  omath_count: 0,
+  convert_ms: 0,
+  bytes: Number(row.size_bytes) || 0,
+  engine_version: DOC_ENGINE_VERSION,
+  notes: null,
+})
+
+function docWorkDir(worker) {
+  const dir = path.join(os.tmpdir(), `gk-doc-stage1-w${worker}`)
+  fs.mkdirSync(path.join(dir, 'out'), { recursive: true })
+  fs.mkdirSync(path.join(dir, 'profile'), { recursive: true })
+  return dir
+}
+
+/** 每个 worker 独立 LO profile；超时 killpg 防孤儿（P-018 事故护栏） */
+function convertDocToDocx(src, outDir, profile, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'nice',
+      ['-n', '19', 'ionice', '-c3', 'soffice',
+        `-env:UserInstallation=file://${profile}`, '--headless', '--norestore',
+        '--convert-to', 'docx', '--outdir', outDir, src],
+      { detached: true, stdio: 'ignore' },
+    )
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* 已退出 */ }
+      reject(new Error('doc_convert_timeout'))
+    }, timeoutMs)
+    child.on('error', (e) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(e)
+    })
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(`doc_convert_exit_${code}`))
+    })
+  })
+}
+
+function probeDocxObjects(docxPath) {
+  try {
+    const out = execFileSync('python3', ['-c', DOC_PROBE_PY, docxPath], {
+      encoding: 'utf8', timeout: 30_000,
+    }).trim().split(' ')
+    return {
+      drawing: Number(out[0]) || 0,
+      object: Number(out[1]) || 0,
+      oMath: Number(out[2]) || 0,
+    }
+  } catch {
+    return { drawing: 0, object: 0, oMath: 0 }
+  }
+}
+
+/** 字体闸门：跑转换前必查 Symbol 别名，防公式静默缺符号（P-018 M40 B9） */
+function assertDocFontGate() {
+  if (process.platform !== 'linux' || process.env.DOC_SKIP_FONT_CHECK === '1') return
+  const out = execFileSync('fc-match', ['Symbol'], { encoding: 'utf8' }).trim()
+  if (!/symbol/i.test(out)) {
+    throw new Error(`Symbol 字体别名缺失（fc-match Symbol => ${out}），拒绝执行`)
+  }
+  console.log(`字体闸门通过：${out}`)
+}
+
+async function writeDocDone(client, row, rec) {
+  if (PROBE > 0) return // 🔴 --probe 只读，连记账表也不写
+  await client.query(
+    `insert into doc_convert_done
+       (user_id, source_id, status, meaningful_chars, text_sha256, docx_sha256,
+        drawing_count, object_count, omath_count, convert_ms, bytes, engine_version, notes)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     on conflict (user_id, source_id) do update set
+       status = excluded.status, meaningful_chars = excluded.meaningful_chars,
+       text_sha256 = excluded.text_sha256, docx_sha256 = excluded.docx_sha256,
+       drawing_count = excluded.drawing_count, object_count = excluded.object_count,
+       omath_count = excluded.omath_count, convert_ms = excluded.convert_ms,
+       bytes = excluded.bytes, engine_version = excluded.engine_version,
+       notes = excluded.notes, scanned_at = now()`,
+    [row.user_id, row.id, rec.status, rec.meaningful_chars, rec.text_sha256,
+      rec.docx_sha256, rec.drawing_count, rec.object_count, rec.omath_count,
+      rec.convert_ms, rec.bytes, rec.engine_version, rec.notes],
+  )
+}
+
+async function processDocRow(client, row, deps, stat, worker) {
+  const rec = emptyDocRec(row)
+  const wdir = docWorkDir(worker)
+  const safeId = String(row.fs_id).replace(/[^\w.-]/g, '_')
+  const src = path.join(wdir, `${safeId}.doc`)
+  const outDir = path.join(wdir, 'out')
+  const profile = path.join(wdir, 'profile')
+  const docx = path.join(outDir, `${safeId}.docx`)
+  try {
+    const buf = await deps.nd.downloadByFsId(row.fs_id)
+    if (!buf || !buf.length) {
+      stat.dlFail++
+      return // 下载失败保持 pending，下次重试
+    }
+    rec.bytes = buf.length
+    stat.bytes += buf.length
+    if (buf.subarray(0, 8).toString('hex') !== 'd0cf11e0a1b11ae1') {
+      rec.notes = 'not_ole'
+      stat.failed++
+      await writeDocDone(client, row, rec)
+      return
+    }
+    fs.writeFileSync(src, buf)
+
+    const timeoutMs = Number(row.size_bytes) >= DOC_BIG_BYTES
+      ? DOC_CONVERT_TIMEOUT_BIG_MS : DOC_CONVERT_TIMEOUT_BASE_MS
+    let converted = false
+    for (let t = 0; t < DOC_MAX_TRIES && !converted; t++) {
+      fs.rmSync(docx, { force: true })
+      fs.rmSync(profile, { recursive: true, force: true })
+      fs.mkdirSync(profile, { recursive: true }) // 换 profile 隔离长尾/退化
+      const t0 = Date.now()
+      try {
+        await convertDocToDocx(src, outDir, profile, timeoutMs)
+        rec.convert_ms = Date.now() - t0
+        converted = true
+      } catch (e) {
+        rec.notes = `convert_try${t + 1}:${String(e.message || e).slice(0, 80)}`
+        if (t + 1 >= DOC_MAX_TRIES) {
+          stat.envFail++ // 环境/长尾类：不写库，保持 pending
+          return
+        }
+      }
+    }
+    const docxBuf = fs.readFileSync(docx)
+    rec.docx_sha256 = crypto.createHash('sha256').update(docxBuf).digest('hex')
+    const objs = probeDocxObjects(docx)
+    rec.drawing_count = objs.drawing
+    rec.object_count = objs.object
+    rec.omath_count = objs.oMath
+
+    // 与 docx 侧完全同一个抽取口径（extract_docx），char_start 坐标系天然一致
+    const out = await deps.extractDocContent({
+      kind: 'docx', content: docxBuf, textOnly: true,
+      maxPages: MAX_PAGES, timeoutMs: 60_000,
+    })
+    if (!out.ok || !out.data) {
+      if (ENV_FAIL_REASONS.has(out.reason)) {
+        stat.envFail++ // 环境类不写 none，避免永久判死
+        return
+      }
+      rec.notes = `extract:${out.reason || 'unknown'}`
+      stat.failed++
+      await writeDocDone(client, row, rec)
+      return
+    }
+    const text = (out.data.pages || []).map((p) => p.text).filter(Boolean).join('\n')
+    const meaningful = text.replace(/\s+/g, '').length
+    const written = stripNul(text).slice(0, MAX_TEXT_CHARS)
+    rec.meaningful_chars = meaningful
+    // 🔴 同源钉子：钉的是「真正写进 text_content 的那份文本」
+    rec.text_sha256 = crypto.createHash('sha256').update(written, 'utf8').digest('hex')
+    rec.status = meaningful < REVIEW_MIN_CHARS ? 'none'
+      : meaningful < REVIEW_MAX_CHARS ? 'review' : 'ok'
+    if (rec.status === 'none') stat.none++
+    else if (rec.status === 'review') { stat.review++; rec.notes = 'thin_text_review' }
+    else stat.ok++
+
+    await writeRow(client, row, rec.status === 'none' ? null : written, rec.status)
+    await writeDocDone(client, row, rec)
+  } catch (e) {
+    stat.envFail++
+    console.warn(`  ⚠️ .doc 处理异常：${row.name} — ${e instanceof Error ? e.message : e}`)
+  } finally {
+    fs.rmSync(src, { force: true })
+    fs.rmSync(docx, { force: true })
+  }
+}
+
+async function applyDocRun(client) {
+  // 闸门再拦一次：即使绕过 main 的分支也不允许未授权写库
+  if (APPLY && !DOC_APPLY_APPROVED) {
+    throw new Error(
+      'P-019 阶段 1 只批准 dry-run / --probe；--apply 写生产库需思傅单独批准，' +
+      '并显式设置 DOC_EXTRACT_APPLY_APPROVED=1（D-024）',
+    )
+  }
+  assertDocFontGate()
+  const { pathToFileURL } = await import('node:url')
+  const dist = (p) => pathToFileURL(path.resolve(process.cwd(), 'dist', p)).href
+  const { BaiduNetdiskService } = await import(dist('storage/baidu-netdisk.service.js'))
+  const { extractDocContent } = await import(dist('ocr/pdf-tool.js'))
+  const nd = new BaiduNetdiskService()
+  if (!nd.enabled()) throw new Error('网盘未启用（缺 BAIDU_APP_KEY / BAIDU_SECRET_KEY）')
+
+  if (APPLY) {
+    const { rows } = await client.query(`select to_regclass('doc_convert_done') is not null as ok`)
+    if (!rows[0]?.ok) throw new Error('0031_doc_convert_done 迁移未执行，拒绝 --apply')
+  }
+
+  const stat = { ok: 0, none: 0, review: 0, failed: 0, tooBig: 0, envFail: 0, dlFail: 0, bytes: 0 }
+  const limit = PROBE > 0 ? PROBE : LIMIT
+  let cursor = ''
+  let processed = 0
+
+  for (;;) {
+    if (limit > 0 && processed >= limit) break
+    const params = [cursor, BATCH]
+    const uq = userClause(params)
+    const statusFilter = FORCE ? '' : ` and coalesce(text_status, 'pending') = 'pending'`
+    const { rows } = await client.query(
+      `select id, user_id, fs_id, name, ext, size_bytes
+         from netdisk_files
+        where ${SCOPE_SQL}${statusFilter}
+          and id > $1${uq}
+        order by id limit $2`,
+      params,
+    )
+    if (!rows.length) break
+    cursor = rows[rows.length - 1].id
+
+    let idx = 0
+    const runners = Array.from({ length: CONCURRENCY }, async (_, w) => {
+      while (idx < rows.length) {
+        if (limit > 0 && processed >= limit) return
+        const row = rows[idx++]
+        processed++
+        if (Number(row.size_bytes) > MAX_TEXT_BYTES) {
+          stat.tooBig++
+          const rec = emptyDocRec(row)
+          rec.status = 'too_big'
+          await writeRow(client, row, null, 'too_big')
+          await writeDocDone(client, row, rec)
+          continue
+        }
+        await processDocRow(client, row, { nd, extractDocContent }, stat, w)
+        await sleep(GAP_MS)
+      }
+    })
+    await Promise.all(runners)
+    console.log(
+      `  游标 ${cursor.slice(0, 8)}…｜本批候选 ${rows.length} 份｜累计实处理 ${processed}：` +
+        `ok=${stat.ok} review=${stat.review} none=${stat.none} failed=${stat.failed} ` +
+        `too_big=${stat.tooBig} 环境失败=${stat.envFail} 下载失败=${stat.dlFail}`,
+    )
+  }
+
+  console.log('\n================ .doc 正文补抽结果 ================')
+  console.log(`${PROBE > 0 ? '[只读探测 --probe]' : '[写库 --apply]'} 处理 ${processed} 份：` +
+    `ok=${stat.ok} review=${stat.review} none=${stat.none} failed=${stat.failed} too_big=${stat.tooBig}`)
+  console.log(`跳过：环境失败=${stat.envFail}（保持 pending） 下载失败=${stat.dlFail}（保持 pending）`)
+  console.log(`下载量 ${gb(stat.bytes).toFixed(2)} GB`)
+  console.log(PROBE > 0
+    ? '🔴 --probe 只读：一行都没写（netdisk_files 三列与 0031 记账表均未动）'
+    : '写入：netdisk_files.text_content / text_status / text_updated_at 三列 + doc_convert_done')
+  console.log('===================================================')
+}
+
 async function main() {
   dotenv.config({ path: path.resolve(process.cwd(), '.env') })
   dotenv.config({ path: path.resolve(process.cwd(), '.env.secrets') })
@@ -437,6 +784,17 @@ async function main() {
   const client = new pg.Client({ connectionString: databaseUrl() })
   await client.connect()
   try {
+    // 🔴 P-019 阶段 1 闸门：--apply 未获授权（思傅 2026-11-09 只批 dry-run / 只读探测）
+    if (DOC_MODE && APPLY && !DOC_APPLY_APPROVED) {
+      throw new Error(
+        'P-019 阶段 1 只批准 dry-run / --probe；--apply 写生产库需思傅单独批准，' +
+        '并显式设置 DOC_EXTRACT_APPLY_APPROVED=1（D-024）',
+      )
+    }
+    if (DOC_MODE && (APPLY || PROBE > 0)) {
+      await applyDocRun(client)
+      return
+    }
     if (!APPLY) {
       await dryRun(client)
       return
