@@ -714,3 +714,23 @@
 | 三个环境坑（根因修，不打补丁） | ① 探针 `ModuleNotFoundError: pypdfium2` ⇒ 改走 `OCR_PYTHON=/opt/gk/.venv-py/bin/python`（与 `netdisk-inline-build.mjs` 同口径），不给系统 python 补包，修后 24/24 出数；② 含 `systemctl stop` 的复合 SSH 命令被 SIGTERM ⇒ 拆成单独调用；③ 生产缺 `question-objects-build.mjs` ⇒ 用现成 `qobj-run` 目录，不新增/覆盖生产文件 |
 | 不宣称 | 未写命中提升／修复有效／误判归零／所有用户已可用／图形全覆盖／看懂图形；**不计算召回率**；`question-match.ts` 一行未动、`CACHE_VERSION` 仍 **v14**、`0021 review_events` 仍 **0 行**；30 份试点与 24 份实验均为样本结论不外推全库；全量数字是「试点＋开局」快照而非终值 |
 | 仍锁 / 后续 | 全量完成后须再跑一次 `question-objects-build.mjs --apply`（幂等）；阶段 3 抠图须独立二次评审；`w:object` 性质定性、`m:oMath`、扫描 PDF 440 份、`pdf ≥1MB`、`.wps` 13 份各另案；正式版 10 项前提、`strict=1`、第二层准入、身份治理、公安联网备案、`0021` 出数死锁**不动**（继续开发态）；本地 commit 未 push |
+
+---
+
+## D-026 · P-019 阶段 3 复判 / P-020 独立专项立项（2026-11-09 23:5x，思傅「继续阶段3」）
+
+> D-025 的「阶段 3 坐标系专项不通过」为**历史行保留不涂改**；本条记录复判证据：其判据（逐字同源）不适用于 P-018 的 `norm()` 锚点重定位链路。**抠图仍不放行**，F0–F4 五道闸门与 Q1–Q5 待拍板。独立提案 `P-020`、报告 `docs/reports/P-019-阶段3-坐标系复判与定位链路实证报告.md`。
+
+| 项 | 内容 |
+|---|---|
+| 拍板 | 思傅「继续阶段3」；继续开发态（不碰 mp 后台、不发版、`urlCheck`/隐私开关与 `0021` 出数死锁不动） |
+| 🔴 判据复判 | D-025 用逐字 `identical` / `common_prefix` 判定，但 P-018 主链路是 `norm()` 去空白 + `ns.find(ns_stem)` + `offset_in_stem`，**从不依赖逐字对齐**；D-025 自己记录的差异全部是空白折叠 ⇒ **判据选错参照系** |
+| 实证设计 | 生产 28 份 `text_status='ok'` 且已有题对象的 `.doc`、1,250 个真实 stem；直接 `importlib` 加载 L3 两个真相源（mtime 未变、未覆盖生产脚本）；`systemd-run --unit=gk-p019-s3`（`MemoryMax=900M` / `CPUQuota=100%` / 串行 / 独立 profile / `nice19` / `ionice -c3`）；**零写库、零产图、未改 dist、未重启 `gk-api`** |
+| 文字流同源 | `raw_identical` 9/28；`norm_identical` 15/28，且 **13 份有页眉页脚的全部 `norm_prefix == nb_len`（严格前缀追加）**、`hf=0` 的 15/15 全一致 ⇒ document 正文非空白流 **28/28 一致**；首差异均为 `right635PAGE5PAGE`、`www.youyi100.com` 等页眉页脚；`stemInHeaderFooter=0` |
+| 重转稳定性 | 图对象数 == `doc_convert_done` 记账 **28/28**；去空白流与写入 `text_content` 一致 27/28；唯一异常 i=10（82,430 字 / 495 stem）双次独立转换 `two_passes_same=true`、`db_matches_recorded=true` ⇒ **排除转换非确定性**，根因是写入 CLI 把「知」写成 2 个 `U+FFFD`（82430 vs 82429），与坐标系无关 |
+| 真实定位链路 | 1,250 stem：短 stem 81（P-018 本就跳过）、命中 **1,160**、未命中 9（按护栏丢图）；题干内图标记 **408**（几何 380 / 被标 formula 的 OLE 28）；`offset_in_stem` 越界 **0**、`offset=0` 1；插入点上下文抽查无串题 |
+| 🔴 新发现：多重匹配串题 | `ns.count>1` 共 **65**（5 份）；F2 消歧实证 244 对象：`q_exp=len(norm(text_content[:char_start]))` **244 / 244** 正确、唯一最近 243/244、`dist=0` 243/244、**抓到 3 处 `ns.find()` 首次命中选择错误**；消歧后题干内图 100 |
+| 结论 | 「不通过」修正为「判据错 + 链路可用但需闸门」；**抠图仍不放行**、`question_inline_figures` 一行未写、图一张未下发。F0 同源硬闸 / F1 判据修正 / F2 `char_start` 消歧 / F3 OLE 定性 / F4 候选扩展，全部待 `P-020` Q1–Q5 拍板 |
+| 落地文件 | 新增 `P-020-老式doc题干抠图坐标系专项.md`（状态草稿）、`docs/reports/P-019-阶段3-坐标系复判与定位链路实证报告.md`、`server/scripts/verify/modules/42-doc-inline-guard.mjs`（M42 未放行守卫）；P-019 §7/§8 追加复判指针（历史行不涂改） |
+| 不宣称 | 未写命中提升／修复有效／误判归零／所有用户已可用／图形全覆盖／看懂图形；**不计算召回率**；28 份 / 1,250 stem 样本结论不外推 10,499 份；`question-match.ts` 一行未动、`CACHE_VERSION` 仍 **v14**、`0021 review_events` **0 行** |
+| 仍锁 / 后续 | `P-020` Q1–Q5 待逐题回复；阶段 1 全量 `gk-p019-stage1` **仍进行中**，完成后须再跑 `question-objects-build.mjs --apply`；`w:object` 定性、`m:oMath`、扫描 PDF 440 份另案；正式版 10 项前提、`strict=1`、第二层准入、身份治理、公安联网备案、`0021` 出数死锁**不动**；本地 commit 未 push |
