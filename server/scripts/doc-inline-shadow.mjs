@@ -5,14 +5,18 @@
  * 🔴 授权边界（思傅 2026-11-10 逐题拍板）：
  *   Q1 ① 用重转产物 + F0 同源硬闸；Q2 ① char_start 唯一最近消歧；
  *   Q3 ① OLE（w:object）未定性全跳过；Q4 ① 授权阶段 1 影子脚本实现 F0/F1/F2；
- *   Q5 **未授权** --apply ⇒ 本脚本遇到 --apply 直接拒绝，且源码里没有任何
- *      INSERT / UPDATE / DELETE、`question_inline_figures` 写入、storage 写入或产图调用。
- *   F4 候选 SQL 扩展 **未实现**（`netdisk-inline-build.mjs` 仍只认 ext='docx'）。
+ *   Q5：D-032 已授权 --apply，但**不由本影子链路执行**（C② 又让写库顺延）。
+ *      本脚本**永久只读**，遇到 --apply 直接拒绝，源码里没有任何
+ *      INSERT / UPDATE / DELETE、内联图写入、storage 写入或产图调用。
+ *   F4：A 授权另建独立 `.doc` 产图链路实现；本脚本与 `netdisk-inline-build.mjs`
+ *      仍一行不改（后者候选 SQL 依旧只认 ext='docx'，docx 侧零回归）。
  *
  * 只读纪律：
  *   · DB 只有 SELECT；网盘只下载；docx 只在 /tmp 转换且用完即删；
  *   · 真相源 `netdisk-inline-crop.py` / `ocr-engine/pdf_tool.py` 只被 import，mtime/sha 不变；
- *   · 不写 `question_inline_figures` / `question_inline_done` / 任何表，不落图片。
+ *   · 不写内联图 / 记账表 / 任何表，不落图片。
+ * 🔴 2026-11-10（D-032 B②）：`doc-inline-shadow.py` 新增 F5b「换行 + 短数字串」专项规则，
+ *    本驱动把 F5b 配置随 `r.f5` 全量带出，便于同 seed 前后对照；仍零写入。
  *
  * 用法（在 L3 生产，由 systemd-run 起，见 docs/reports/P-020-阶段1-影子链路闸门验证报告.md）：
  *   NODE_PATH=/opt/gk/server/node_modules OCR_PYTHON=/opt/gk/.venv-py/bin/python \
@@ -37,7 +41,8 @@ import { createRequire } from 'node:module'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--apply')) {
-  console.error('[p020-shadow] 拒绝执行：Q5 未授权 --apply（阶段 2 写入未放行）')
+  // 本影子链路永久只读：写库统一由独立 .doc 产图链路执行，且其 --apply 当前硬锁。
+  console.error('[p020-shadow] 拒绝执行：本影子链路永久只读，--apply 须走独立 .doc 产图链路')
   process.exit(3)
 }
 const has = (f) => argv.includes(f)
@@ -387,12 +392,15 @@ async function main() {
     engine: STAGE3 ? 'p020-shadow-stage3' : 'p020-shadow-stage1',
     q: { Q1: '①重转产物+F0', Q2: '①char_start唯一最近', Q3: '①OLE未定性全跳过',
          Q4: '①授权阶段1影子脚本',
-         Q5: '已授权 --apply，但由另链路执行；本影子脚本仍只读、仍硬拒 --apply' },
-    f4_implemented: false, apply_authorized: false,
+         Q5: 'D-032 已授权 --apply，但由另链路执行且 C② 顺延；本影子脚本永久只读、硬拒 --apply' },
+    // 这两个字段描述的是「本影子链路」，不是全项目：独立 .doc 产图链路另计。
+    f4_in_this_script: false, apply_in_this_script: false,
     f5_semantic_gate: {
-      note: 'F5 只读判定：不清洗原文、不重映射 char_offset、不改 F0 同源铁律',
-      config_source: 'P020_F5_WINDOW / P020_F5_NEIGHBOR / P020_F5_MAX_STEM',
-      selftest: 'python doc-inline-shadow.py --gate-selftest（15/15，零依赖）',
+      note: 'F5 / F5b 只读判定：不清洗原文、不重映射 char_offset、不改 F0 同源铁律',
+      config_source: 'P020_F5_WINDOW / P020_F5_NEIGHBOR / P020_F5_MAX_STEM / '
+        + 'P020_F5B_WINDOW / P020_F5B_CONTEXT',
+      f5b: 'D-032 B②：换行 + ≥6 位纯数字残串一律丢图；导学号/准考证/编号/ISBN 等允许词放行',
+      selftest: 'python doc-inline-shadow.py --gate-selftest（25/25，零依赖；原 15 条零回归）',
       coverage: 'candidate_details 全量逐条输出判定理由与上下文，不再只留 3 条 samples',
     },
     truth_before: truthBefore, truth_after: { crop: shaFile(CROP_PY), pdfTool: shaFile(PDF_PY) },

@@ -7,6 +7,12 @@
 🔴 2026-11-10 晚追加：思傅「首先完成『看得懂』目标的实现」⇒ 新增 F5 语义闸。
    F5 是**只读判定层**：只决定「这张图发不发」，不清洗文字流、不改 char_offset、
    不碰 text_content / text_sha256，因此不破坏 F0 同源铁律与既有坐标系。
+🔴 2026-11-10 追加：思傅 D-032 拍板 B②「加『换行+短数字串』专项规则并重跑」⇒ 新增 F5b。
+   D-032 §4① 实证 4 条宽窗口漏网：前 3 条是 VML 尺寸残串「\n043815」「\n0240030」
+   「\n1714500」，因距插点恰好 9 字（> F5 neighbor=8）漏网；第 4 条是「导学号 58504170」
+   被插点切断的正常内容。F5b 不简单放宽 F5 阈值（会误伤 `_` / 年份 / 题号），
+   而是**只认「换行 + ≥6 位纯数字串 + 后接行尾/空白/标点」这一 VML 特征**，
+   并对「导学号/准考证/编号/学号/ISBN」等允许词整条放行。仍是只读判定，零清洗。
 
 设计铁律（P-020 §2 不变量）：
   · **不覆盖生产真相源**：直接 importlib 加载 `netdisk-inline-crop.py`（parse_docx /
@@ -87,13 +93,31 @@ F5_NEIGHBOR = int(os.environ.get('P020_F5_NEIGHBOR') or '8')
 F5_MAX_STEM = int(os.environ.get('P020_F5_MAX_STEM') or '3000')
 F5_NOISE_NUM = re.compile(r'-?\d{7,}\.?')
 
+# ---- F5b（D-032 B②）：换行 + 短数字串专项规则 --------------------------------
+# VML/OLE 尺寸残串的真实形态：换行后紧跟 6~8 位纯数字，数字后面是行尾、空白或
+# 标点（不是「年/月/日/届/版/页/题/分」等正常量词）。D-032 §4① 的 3 条漏网
+# 全部是这个形态，且都因距离插点 9 字（比 F5 neighbor=8 多 1 字）溜过。
+# 🔴 故意不放宽 F5_NOISE_NUM 的位数或 neighbor：那会误伤年份「2017年」、
+# 下划线填空「______」、题号「1.」等正常内容。F5b 只补这一条形态。
+F5B_WINDOW = int(os.environ.get('P020_F5B_WINDOW') or '32')
+# 后随只排除「还是数字」：`\n2017年`（4 位）、`\n(1)2016` 天然不命中；
+# 6 位以上独立数字行在真实题干里几乎只有 VML 尺寸残串，按 fail-closed 拦下更稳。
+F5B_NOISE = re.compile(r'[\r\n]+[ \t]*(-?\d{6,})(?!\d)')
+# 带这些标识词的数字串是题目的正常编号（导学号/准考证/ISBN 等），整条放行。
+F5B_ALLOW_WORDS = ('导学号', '准考证', '编号', '学号', '考号', 'ISBN', '书号',
+                   '条码', '书编号', '试卷编号')
+F5B_CONTEXT = int(os.environ.get('P020_F5B_CONTEXT') or '48')
+
 
 def semantic_gate(stem, off, window=F5_WINDOW, neighbor=F5_NEIGHBOR,
                   max_stem=F5_MAX_STEM):
-    """F5「看得懂」语义闸：判断图的插入点是否落在可理解的题干文字里。
+    """F5 + F5b「看得懂」语义闸：判断图的插入点是否落在可理解的题干文字里。
 
     只读判定，返回 (ok, reason, evidence)。**绝不修改 stem，也不重映射 char_offset**：
     F0 钉的是入库文字流，任何清洗都会让 10,147 份正文与 656,898 个题目对象坐标失效。
+
+    判定顺序刻意固定：F5 既有判据优先，F5b 只补漏，保证 D-032 的 drop_reasons
+    基线与 9 个已知残串的命中口径不变、可前后对照。
     """
     stem = stem or ''
     n = len(stem)
@@ -120,6 +144,22 @@ def semantic_gate(stem, off, window=F5_WINDOW, neighbor=F5_NEIGHBOR,
         if m.start() <= neighbor:
             ev['noise'] = m.group(0)
             return False, 'vml_number_noise_after', ev
+
+    # ---- F5b：换行 + ≥6 位纯数字残串（宽窗口，仍只读） ----
+    # 允许词在更宽的上下文里找：如「(导学号 58|504170)」被插点切断时，
+    # 「导学号」在 before、数字在 after，必须拼起来看才不会误杀正常内容。
+    ctx = stem[max(0, off - F5B_CONTEXT):off + F5B_CONTEXT]
+    if not any(w in ctx for w in F5B_ALLOW_WORDS):
+        b_win = stem[max(0, off - F5B_WINDOW):off]
+        a_win = stem[off:off + F5B_WINDOW]
+        for side, text in (('after', a_win), ('before', b_win)):
+            m = F5B_NOISE.search(text)
+            if m:
+                ev['f5b_noise'] = m.group(1)
+                ev['f5b_side'] = side
+                return False, f'newline_short_number_{side}', ev
+    else:
+        ev['f5b_allow_word'] = next(w for w in F5B_ALLOW_WORDS if w in ctx)
     return True, 'ok', ev
 
 
@@ -264,6 +304,12 @@ def run_shadow(mf):
         'window': F5_WINDOW, 'neighbor': F5_NEIGHBOR, 'max_stem': F5_MAX_STEM,
         'drop_reasons': drop_reasons,
         'rule': 'offset_zero / offset_oob / 邻域长数字残串 / U+FFFD / 超长 stem 一律丢图；不清洗原文',
+        'f5b': {
+            'window': F5B_WINDOW, 'context': F5B_CONTEXT,
+            'noise': F5B_NOISE.pattern, 'allow_words': list(F5B_ALLOW_WORDS),
+            'rule': '换行 + ≥6 位纯数字残串（VML 尺寸）一律丢图；'
+                    '导学号/准考证/编号/学号/ISBN 等标识词整条放行；仍不清洗原文',
+        },
     }
     base['candidates'] = candidates
     return base
@@ -350,7 +396,13 @@ def selftest():
 
 
 def gate_selftest():
-    """F5 纯函数自测：用二次评审实证的 VML/OLE 残串做反例，零依赖本地可跑。"""
+    """F5 + F5b 纯函数自测：二次评审实证残串 + D-032 §4① 4 条边界候选，零依赖本地可跑。
+
+    前 15 条是 D-032 的 F5 基线（一条不改、必须继续全绿）；后 10 条是 B② 新增的
+    F5b 专项：3 条真实漏网形态必须 drop，第 4 条「导学号」必须 pass，
+    另加年份 / 题号 / 无换行短数字 / 允许词 / 插点前残串等防误伤反例。
+    """
+    pad = '在三角形中' * 20          # 造出 off>100 的深插点，不影响窗口判据
     cases = [
         ('zero_offset', '已知平行四边形面积为24，求阴影部分面积。', 0, False, 'offset_zero'),
         ('negative_offset', '已知平行四边形面积为24，求阴影部分面积。', -3, False, 'offset_zero'),
@@ -367,6 +419,26 @@ def gate_selftest():
         ('normal_year', '2026年中考数学模拟题，已知抛物线y=x²+2x，求顶点坐标。', 16, True, 'ok'),
         ('normal_question_no', '1. 已知三角形ABC中AB=AC，求角B的度数。', 4, True, 'ok'),
         ('far_long_number', '准考证号1234567890，已知平行四边形面积为24，求阴影部分面积。', 30, True, 'ok'),
+        # ---- F5b（D-032 §4① 4 条宽窗口边界候选） ----
+        ('f5b_leak_1', '6.读“长江三角洲”图完成。' + '\n043815\n\n1983740' + '读图回答下列问题。',
+         14, False, 'newline_short_number_after'),
+        ('f5b_leak_2', pad + '不含点）上任取一点（，，），记，' + '的内心分别为，，\n0240030' + '求证三点共线。',
+         len(pad) + 16, False, 'newline_short_number_after'),
+        ('f5b_leak_3', pad + '点,连结交圆于点,连结并延长与边' + '交于点,证明:\n\n1714500' + '求证结论成立。',
+         len(pad) + 16, False, 'newline_short_number_after'),
+        ('f5b_allow_导学号', pad + '化合反应的是(B)(导学号 58' + '504170)\nA．2Na＋2H' + '属于化合反应。',
+         len(pad) + 16, True, 'ok'),
+        # ---- F5b 防误伤 / 方向反例 ----
+        ('f5b_normal_year', '已知如图，' + '\n2017年中考数学模拟题，求抛物线顶点坐标。',
+         5, True, 'ok'),
+        ('f5b_normal_question_no', '已知三角形ABC，' + '\n(1)求角B的度数；(2)求边长。',
+         8, True, 'ok'),
+        ('f5b_allow_word_explicit', '已知(导学号 58' + '\n504170)下列说法中正确的是',
+         9, True, 'ok'),
+        ('f5b_no_newline', '已知面积043815平方厘米，求阴影部分的面积。', 8, True, 'ok'),
+        ('f5b_noise_before', '已知如图\n043815求阴影部分面积。', 11, False, 'newline_short_number_before'),
+        ('f5b_underscore_fill', '填空：______' + '\n已知平行四边形ABCD面积为24，求阴影面积。',
+         9, True, 'ok'),
     ]
     out = []
     for name, stem, off, want_ok, want_reason in cases:
