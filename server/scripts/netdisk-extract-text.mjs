@@ -43,6 +43,9 @@
  *   node scripts/netdisk-extract-text.mjs --doc                  # .doc dry-run（只读统计）
  *   node scripts/netdisk-extract-text.mjs --doc --probe 20       # 只读探测 20 份（下载+转换+抽取，零写库）
  *   node scripts/netdisk-extract-text.mjs --doc --apply          # 🔴 闸门硬拦：写生产库未授权
+ * D-029 断点续跑（精确定位无记账 pending，不连带重跑 failed）：
+ *   node scripts/netdisk-extract-text.mjs --doc --probe 11 --only-ids /tmp/ids.txt
+ *   node scripts/netdisk-extract-text.mjs --doc --apply --limit 11 --only-ids /tmp/ids.txt
  *   全量默认 2 worker；薄文本 50~199 字标 review 不进索引；同源钉子 text_sha256 落 0031 记账表；
  *   阶段 2 硬门＝双次转换文字流哈希对比未通过不得切题入库（D-024）。
  *
@@ -68,6 +71,20 @@ const arg = (name, fallback = '') => {
 }
 const USER_ID = arg('--user')
 const LIMIT = Number(arg('--limit', '0')) || 0
+
+// ---- P-019 断点续跑白名单（D-029，思傅「11 份无记账 pending 断点续跑」）----
+// 只处理文件里逐行列出的 id；不带 --only-ids 时候选口径逐字不变（零回归）。
+// 目的：精确限定到 11 份「无记账 pending」，不连带重跑同 user 下 181 份 failed。
+const ONLY_IDS_FILE = arg('--only-ids')
+const ONLY_IDS = ONLY_IDS_FILE
+  ? new Set(fs.readFileSync(ONLY_IDS_FILE, 'utf8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
+  : new Set()
+if (ONLY_IDS_FILE && ONLY_IDS.size === 0) throw new Error(`--only-ids 白名单为空：${ONLY_IDS_FILE}`)
+for (const id of ONLY_IDS) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error(`--only-ids 含非法 id：${id}`)
+  }
+}
 
 // ============ P-019 阶段 1：老式 .doc（思傅 2026-11-09 逐题确认「1进入阶段1；2加；3为2worker；4列为阶段2硬门」）============
 // 🔴 本轮只批准 dry-run 与只读 --probe；`--apply` **未授权**，由 main() 的闸门硬拦，
@@ -729,10 +746,16 @@ async function applyDocRun(client) {
     const params = [cursor, BATCH]
     const uq = userClause(params)
     const statusFilter = FORCE ? '' : ` and coalesce(text_status, 'pending') = 'pending'`
+    // D-029 断点续跑：白名单为空时 idFilter 为空串，历史行为逐字不变。
+    let idFilter = ''
+    if (ONLY_IDS.size) {
+      params.push([...ONLY_IDS])
+      idFilter = ` and id::text = any($${params.length}::text[])`
+    }
     const { rows } = await client.query(
       `select id, user_id, fs_id, name, ext, size_bytes
          from netdisk_files
-        where ${SCOPE_SQL}${statusFilter}
+        where ${SCOPE_SQL}${statusFilter}${idFilter}
           and id > $1${uq}
         order by id limit $2`,
       params,
