@@ -280,9 +280,13 @@ async function main() {
       r.f0 = out.f0
       r.f1 = out.f1
       r.stat = out.f2_f3
+      r.f5 = out.f5
       r.candidates = out.candidates?.length || 0
       r.non_figure = (out.candidates || []).filter((c) => c.kind !== 'figure').length
       r.samples = (out.candidates || []).slice(0, 3)
+      r.candidate_details = out.candidates || []
+      r.semantic_pass = (out.candidates || []).filter((c) => c.semantic === 'pass').length
+      r.semantic_dropped = (out.candidates || []).filter((c) => c.semantic === 'drop').length
       r.reason = out.reason
     } catch (e) {
       r.status = 'error'
@@ -329,6 +333,14 @@ async function main() {
     figure_candidates: sum((r) => r.candidates),
     offset_oob: sum((r) => r.stat?.offset_oob),
     offset_zero: sum((r) => r.stat?.offset_zero),
+    semantic_pass: sum((r) => r.semantic_pass),
+    semantic_dropped: sum((r) => r.semantic_dropped),
+    semantic_drop_reasons: ok.reduce((acc, r) => {
+      for (const [k, v] of Object.entries(r.f5?.drop_reasons || {})) acc[k] = (acc[k] || 0) + v
+      return acc
+    }, {}),
+    semantic_gate_active: sum((r) => r.semantic_pass) + sum((r) => r.semantic_dropped)
+      === sum((r) => r.candidates),
     marks_match_all: ok.every((r) => r.f1?.marks_match),
     f0_all_ok: ok.every((r) => r.f0?.ok),
     f1_all_ok: ok.every((r) => r.f1?.ok),
@@ -342,6 +354,8 @@ async function main() {
     cross_question_0: g.chosen_not_expected === 0 && g.exp_mismatch_drops === 0
       && g.beyond_body_drops === 0,
     f3_no_formula_output: g.non_figure_candidates === 0,
+    f5_all_candidates_judged: g.semantic_gate_active,
+    f5_zero_offset_zero_downstream: g.semantic_dropped >= g.offset_zero,
     cgroup_ok: g.errors === 0,
     sample_coverage: sampling ? g.docs >= Math.ceil(sampling.ids.length * 0.9) : true,
   } : {
@@ -372,8 +386,15 @@ async function main() {
     at: new Date().toISOString(),
     engine: STAGE3 ? 'p020-shadow-stage3' : 'p020-shadow-stage1',
     q: { Q1: '①重转产物+F0', Q2: '①char_start唯一最近', Q3: '①OLE未定性全跳过',
-         Q4: '①授权阶段1影子脚本', Q5: '未授权 --apply' },
+         Q4: '①授权阶段1影子脚本',
+         Q5: '已授权 --apply，但由另链路执行；本影子脚本仍只读、仍硬拒 --apply' },
     f4_implemented: false, apply_authorized: false,
+    f5_semantic_gate: {
+      note: 'F5 只读判定：不清洗原文、不重映射 char_offset、不改 F0 同源铁律',
+      config_source: 'P020_F5_WINDOW / P020_F5_NEIGHBOR / P020_F5_MAX_STEM',
+      selftest: 'python doc-inline-shadow.py --gate-selftest（15/15，零依赖）',
+      coverage: 'candidate_details 全量逐条输出判定理由与上下文，不再只留 3 条 samples',
+    },
     truth_before: truthBefore, truth_after: { crop: shaFile(CROP_PY), pdfTool: shaFile(PDF_PY) },
     sampling: sampling ? {
       seed: SEED, requested: SAMPLE, idsPicked: sampling.ids.length,

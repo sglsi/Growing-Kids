@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""P-020 阶段 1「影子链路」：F0 / F1 / F2 / F3 四道闸门（只读）。
+"""P-020 影子链路：F0 / F1 / F2 / F3 四道闸门 + F5「看得懂」语义闸（只读）。
 
 🔴 思傅 2026-11-10 逐题拍板：Q1 ① 重转产物 + F0；Q2 ① char_start 唯一最近；
    Q3 ① OLE 未定性全跳过；Q4 ① 授权阶段 1 影子脚本实现 F0/F1/F2；
    Q5 未授权 --apply（本文件不含任何写库 / 产图 / 写 storage 路径）。
+🔴 2026-11-10 晚追加：思傅「首先完成『看得懂』目标的实现」⇒ 新增 F5 语义闸。
+   F5 是**只读判定层**：只决定「这张图发不发」，不清洗文字流、不改 char_offset、
+   不碰 text_content / text_sha256，因此不破坏 F0 同源铁律与既有坐标系。
 
 设计铁律（P-020 §2 不变量）：
   · **不覆盖生产真相源**：直接 importlib 加载 `netdisk-inline-crop.py`（parse_docx /
@@ -11,12 +14,22 @@
   · **零写库、零写 storage、零产图**：只输出 JSON；本文件里没有 INSERT/UPDATE、
     没有 PDF 渲染、没有 save_webp。图候选只给「插入点坐标 + 类型」。
   · **定位不到不入库不下发**：F0 哈希不符 / F1 判据不过 / F2 无唯一最近或最近
-    不在期望位置 / F3 未定性 OLE ⇒ 一律丢图，绝不拿相邻题、相邻行顶替。
+    不在期望位置 / F3 未定性 OLE / F5 插入点语义不正 ⇒ 一律丢图，
+    绝不拿相邻题、相邻行顶替。
   · **F4 未实现**：候选 SQL 仍只认 ext='docx'，见 netdisk-inline-build.mjs。
+
+F5 方法依据（2026-11-10 检索主流做法，见 docs/reports/P-020-主流设计方法调研与F5语义闸.md）：
+  · offset-preserving normalization：清洗文本必须维护 original↔normalized 映射；
+    本实现走更保守的分支——**根本不改原文**，只做「发不发」的判定，无需重映射。
+  · span grounding / fail-closed：每个落点必须能在原文取到真实、可回放的上下文，
+    取不到或落在噪声里就丢，不猜、不补位。
+  · surface its own failures：全量候选逐条输出判定理由与上下文，而非只报聚合数。
+  · keep original surface form：绝不为「看起来干净」而重写入库正文。
 
 用法：
   python doc-inline-shadow.py <manifest.json>     # 单文档影子核验，JSON 打 stdout
-  python doc-inline-shadow.py --selftest          # 合成 docx 自测四道闸门（需生产 Python 依赖）
+  python doc-inline-shadow.py --selftest          # 合成 docx 自测（需生产 Python 依赖）
+  python doc-inline-shadow.py --gate-selftest     # F5 纯函数自测（零依赖，本地可跑）
 
 manifest 字段：
   id, name, docx, cropPath, pdfToolPath, textContent, textSha256,
@@ -67,6 +80,47 @@ def all_matches(ns, needle):
         out.append(k)
         k += 1
     return out
+
+
+F5_WINDOW = int(os.environ.get('P020_F5_WINDOW') or '24')
+F5_NEIGHBOR = int(os.environ.get('P020_F5_NEIGHBOR') or '8')
+F5_MAX_STEM = int(os.environ.get('P020_F5_MAX_STEM') or '3000')
+F5_NOISE_NUM = re.compile(r'-?\d{7,}\.?')
+
+
+def semantic_gate(stem, off, window=F5_WINDOW, neighbor=F5_NEIGHBOR,
+                  max_stem=F5_MAX_STEM):
+    """F5「看得懂」语义闸：判断图的插入点是否落在可理解的题干文字里。
+
+    只读判定，返回 (ok, reason, evidence)。**绝不修改 stem，也不重映射 char_offset**：
+    F0 钉的是入库文字流，任何清洗都会让 10,147 份正文与 656,898 个题目对象坐标失效。
+    """
+    stem = stem or ''
+    n = len(stem)
+    if n > max_stem:
+        return False, 'stem_too_long', {'stem_len': n, 'max_stem': max_stem}
+    if off is None or off <= 0:
+        return False, 'offset_zero', {'off': off, 'stem_len': n}
+    if off > n:
+        return False, 'offset_oob', {'off': off, 'stem_len': n}
+    lo = max(0, off - window)
+    before = stem[lo:off]
+    after = stem[off:off + window]
+    ev = {'off': off, 'stem_len': n, 'insert_before': before[-16:],
+          'insert_after': after[:16]}
+    if '\ufffd' in before or '\ufffd' in after:
+        return False, 'replacement_char_nearby', ev
+    for m in F5_NOISE_NUM.finditer(before):
+        tail = len(before) - m.end()
+        head = len(before) - m.start()
+        if tail <= neighbor or (head >= neighbor >= tail):
+            ev['noise'] = m.group(0)
+            return False, 'vml_number_noise_before', ev
+    for m in F5_NOISE_NUM.finditer(after):
+        if m.start() <= neighbor:
+            ev['noise'] = m.group(0)
+            return False, 'vml_number_noise_after', ev
+    return True, 'ok', ev
 
 
 def run_shadow(mf):
@@ -128,7 +182,9 @@ def run_shadow(mf):
         'no_exact': 0, 'exp_mismatch': 0, 'beyond_body': 0, 'corrected': 0,
         'chosen_not_expected': 0, 'in_stem_marks': 0, 'ole_skipped': 0,
         'offset_zero': 0, 'offset_oob': 0, 'figure_candidates': 0,
+        'semantic_pass': 0, 'semantic_dropped': 0,
     }
+    drop_reasons = {}
     candidates = []
     for o in mf.get('objects') or []:
         st['objects'] += 1
@@ -184,17 +240,31 @@ def run_shadow(mf):
                 st['offset_zero'] += 1
             if off > len(stem):
                 st['offset_oob'] += 1
+            sem_ok, sem_reason, sem_ev = semantic_gate(stem, off)
+            if sem_ok:
+                st['semantic_pass'] += 1
+            else:
+                st['semantic_dropped'] += 1
+                drop_reasons[sem_reason] = drop_reasons.get(sem_reason, 0) + 1
             candidates.append({
                 'index': o.get('index'), 'q': q, 'q_exp': q_exp,
                 'char_offset': off, 'stem_len': len(stem), 'kind': 'figure',
                 'mark_offset': pp,
                 'insert_before': stem[max(0, off - 16):off],
                 'insert_after': stem[off:off + 16],
+                'semantic': 'pass' if sem_ok else 'drop',
+                'drop_reason': None if sem_ok else sem_reason,
+                'semantic_evidence': sem_ev,
             })
             st['figure_candidates'] += 1
 
     base['status'] = 'ok'
     base['f2_f3'] = st
+    base['f5'] = {
+        'window': F5_WINDOW, 'neighbor': F5_NEIGHBOR, 'max_stem': F5_MAX_STEM,
+        'drop_reasons': drop_reasons,
+        'rule': 'offset_zero / offset_oob / 邻域长数字残串 / U+FFFD / 超长 stem 一律丢图；不清洗原文',
+    }
     base['candidates'] = candidates
     return base
 
@@ -279,9 +349,42 @@ def selftest():
         return 0 if all(checks.values()) else 2
 
 
+def gate_selftest():
+    """F5 纯函数自测：用二次评审实证的 VML/OLE 残串做反例，零依赖本地可跑。"""
+    cases = [
+        ('zero_offset', '已知平行四边形面积为24，求阴影部分面积。', 0, False, 'offset_zero'),
+        ('negative_offset', '已知平行四边形面积为24，求阴影部分面积。', -3, False, 'offset_zero'),
+        ('offset_oob', '已知平行四边形面积为24，求阴影部分面积。', 999, False, 'offset_oob'),
+        ('stem_too_long', '题目' * 2000, 12, False, 'stem_too_long'),
+        ('residual_1', '1088390010947400已知平行四边形面积，求阴影面积。', 16, False, 'vml_number_noise_before'),
+        ('residual_2', '98107568580已知平行四边形面积，求阴影面积。', 11, False, 'vml_number_noise_before'),
+        ('residual_3', '1205230012509500已知平行四边形面积，求阴影面积。', 16, False, 'vml_number_noise_before'),
+        ('residual_4', '1146810011391900已知平行四边形面积，求阴影面积。', 16, False, 'vml_number_noise_before'),
+        ('residual_neg', '-37147512763528已知平行四边形面积，求阴影面积。', 15, False, 'vml_number_noise_before'),
+        ('residual_after', '已知平行四边形面积30861007861303.求阴影面积。', 10, False, 'vml_number_noise_after'),
+        ('replacement_char', '已知\ufffd平行四边形面积为24，求阴影部分面积。', 10, False, 'replacement_char_nearby'),
+        ('normal_mid', '已知平行四边形ABCD的面积为24，求阴影部分的面积最大值。', 12, True, 'ok'),
+        ('normal_year', '2026年中考数学模拟题，已知抛物线y=x²+2x，求顶点坐标。', 16, True, 'ok'),
+        ('normal_question_no', '1. 已知三角形ABC中AB=AC，求角B的度数。', 4, True, 'ok'),
+        ('far_long_number', '准考证号1234567890，已知平行四边形面积为24，求阴影部分面积。', 30, True, 'ok'),
+    ]
+    out = []
+    for name, stem, off, want_ok, want_reason in cases:
+        ok, reason, _ = semantic_gate(stem, off)
+        out.append({'case': name, 'want': want_ok, 'got': ok,
+                    'reason': reason, 'pass': ok == want_ok and reason == want_reason})
+    summary = {'gate_selftest': out, 'total': len(out),
+               'passed': sum(1 for x in out if x['pass']),
+               'all_pass': all(x['pass'] for x in out)}
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0 if summary['all_pass'] else 2
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == '--selftest':
         return selftest()
+    if len(sys.argv) > 1 and sys.argv[1] == '--gate-selftest':
+        return gate_selftest()
     mf = json.load(open(sys.argv[1], encoding='utf-8'))
     print(json.dumps(run_shadow(mf), ensure_ascii=False))
     return 0
