@@ -20,6 +20,12 @@
  *   NODE_PATH=/opt/gk/server/node_modules OCR_PYTHON=/opt/gk/.venv-py/bin/python \
  *     node /tmp/gk-p020-shadow/doc-inline-shadow.mjs --out /tmp/gk-p020-shadow-summary.json
  * 可选：--limit N / --source <id> / --work <dir> / --crop-py <path> / --pdf-py <path>
+ *
+ * P-020 阶段 3（D-029，思傅「在 33 万 .doc stem 上重抽样做全量评估」）：
+ *   node doc-inline-shadow.mjs --stage3 --sample 120 --seed p020-stage3-v1 \
+ *     --out /tmp/gk-p020-stage3.json
+ *   --stage3 只做确定性分层抽样 + 只读影子链路评估；仍然零写库、零产图、
+ *   拒绝 --apply、不扩 F4 候选 SQL。抽样框架先只取轻量计数，不把 33 万 stem 拉进内存。
  */
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
@@ -50,9 +56,47 @@ const PY = process.env.OCR_PYTHON || 'python3'
 const LIMIT = Number(val('--limit', 0))
 const SOURCE = val('--source', '')
 const SELFTEST = has('--selftest')
+const SAMPLE = Number(val('--sample', 0))
+const SEED = val('--seed', 'p020-stage3-v1')
+const STAGE3 = has('--stage3')
 const MIN_FREE_KB = 700_000
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const shaFile = (p) => crypto.createHash('sha256').update(fsSync.readFileSync(p)).digest('hex').slice(0, 16)
+const hashId = (id) => crypto.createHash('sha256').update(`${id}:${SEED}`).digest('hex')
+
+/** 确定性分层抽样：按「有无图标记 / stem 密度 / 体积」分 12 层，层内按 hash 排序轮转取配额 */
+function pickSample(frame, n) {
+  const key = (r) => {
+    const marks = Number(r.marks_expected) > 0 ? 'M' : 'Z'
+    const s = Number(r.stems)
+    const density = s < 10 ? 'D0' : s < 50 ? 'D1' : 'D2'
+    const size = Number(r.size_bytes) < 1048576 ? 'B0' : 'B1'
+    return `${marks}/${density}/${size}`
+  }
+  const groups = new Map()
+  for (const r of frame) {
+    const k = key(r)
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k).push(r)
+  }
+  const strata = []
+  const queues = []
+  for (const [k, arr] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    arr.sort((a, b) => hashId(a.id).localeCompare(hashId(b.id)))
+    queues.push({ k, arr, i: 0 })
+    strata.push({ stratum: k, frame: arr.length, picked: 0 })
+  }
+  const picked = []
+  while (picked.length < n && queues.some((q) => q.i < q.arr.length)) {
+    for (const q of queues) {
+      if (picked.length >= n) break
+      if (q.i >= q.arr.length) continue
+      picked.push(q.arr[q.i++].id)
+      strata.find((s) => s.stratum === q.k).picked++
+    }
+  }
+  return { ids: picked, strata, frameSize: frame.length, layers: strata.length }
+}
 
 const require = createRequire(path.join(ROOT, 'package.json'))
 const pg = require('pg')
@@ -115,27 +159,66 @@ async function main() {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL })
   await client.connect()
   let docs, objRows
+  let sampling = null
   try {
-    // 🔴 只读：全脚本唯一的 DB 交互就是下面两条 SELECT。
-    ;({ rows: docs } = await client.query(`
-      select n.id::text as id, n.user_id::text as user_id, n.fs_id::text as fsid,
-             n.name, n.size_bytes::bigint::text as size_bytes, n.text_content,
-             d.text_sha256,
-             coalesce(d.drawing_count, 0) + coalesce(d.object_count, 0) as marks_expected
-        from netdisk_files n
-        join doc_convert_done d on d.source_id = n.id and d.user_id = n.user_id
-       where n.ext = 'doc' and n.text_status = 'ok' and d.status = 'ok'
-         and d.text_sha256 is not null
-         and exists (select 1 from question_objects q
-                      where q.source_id = n.id and q.user_id = n.user_id)
-       order by n.id`))
-    ;({ rows: objRows } = await client.query(`
-      select q.source_id::text as source_id, q.object_index as index,
-             coalesce(q.char_start, 0)::int as start, q.stem_text as stem
-        from question_objects q
-        join netdisk_files n on n.id = q.source_id and n.user_id = q.user_id
-       where n.ext = 'doc' and n.text_status = 'ok'
-       order by q.source_id, q.object_index`))
+    // 🔴 只读：全脚本的 DB 交互只有 SELECT，阶段 3 额外多一条轻量抽样框架查询。
+    if (STAGE3 && SAMPLE > 0) {
+      // 框架只取计数与体积，不取正文/题干 ⇒ 33 万 stem 不全量进内存。
+      const { rows: frame } = await client.query(`
+        select n.id::text as id, n.size_bytes::bigint::text as size_bytes,
+               coalesce(d.drawing_count, 0) + coalesce(d.object_count, 0) as marks_expected,
+               (select count(*) from question_objects q
+                 where q.source_id = n.id and q.user_id = n.user_id)::int as stems
+          from netdisk_files n
+          join doc_convert_done d on d.source_id = n.id and d.user_id = n.user_id
+         where n.ext = 'doc' and n.text_status = 'ok' and d.status = 'ok'
+           and d.text_sha256 is not null
+           and exists (select 1 from question_objects q
+                        where q.source_id = n.id and q.user_id = n.user_id)
+         order by n.id`)
+      sampling = pickSample(frame, SAMPLE)
+      sampling.frameStemsTotal = frame.reduce((s, r) => s + Number(r.stems || 0), 0)
+      sampling.frameWithMarks = frame.filter((r) => Number(r.marks_expected) > 0).length
+      const ids = sampling.ids
+      ;({ rows: docs } = await client.query(`
+        select n.id::text as id, n.user_id::text as user_id, n.fs_id::text as fsid,
+               n.name, n.size_bytes::bigint::text as size_bytes, n.text_content,
+               d.text_sha256,
+               coalesce(d.drawing_count, 0) + coalesce(d.object_count, 0) as marks_expected
+          from netdisk_files n
+          join doc_convert_done d on d.source_id = n.id and d.user_id = n.user_id
+         where n.ext = 'doc' and n.text_status = 'ok' and d.status = 'ok'
+           and n.id::text = any($1::text[])
+         order by n.id`, [ids]))
+      ;({ rows: objRows } = await client.query(`
+        select q.source_id::text as source_id, q.object_index as index,
+               coalesce(q.char_start, 0)::int as start, q.stem_text as stem
+          from question_objects q
+          join netdisk_files n on n.id = q.source_id and n.user_id = q.user_id
+         where n.ext = 'doc' and n.text_status = 'ok'
+           and q.source_id::text = any($1::text[])
+         order by q.source_id, q.object_index`, [ids]))
+    } else {
+      ;({ rows: docs } = await client.query(`
+        select n.id::text as id, n.user_id::text as user_id, n.fs_id::text as fsid,
+               n.name, n.size_bytes::bigint::text as size_bytes, n.text_content,
+               d.text_sha256,
+               coalesce(d.drawing_count, 0) + coalesce(d.object_count, 0) as marks_expected
+          from netdisk_files n
+          join doc_convert_done d on d.source_id = n.id and d.user_id = n.user_id
+         where n.ext = 'doc' and n.text_status = 'ok' and d.status = 'ok'
+           and d.text_sha256 is not null
+           and exists (select 1 from question_objects q
+                        where q.source_id = n.id and q.user_id = n.user_id)
+         order by n.id`))
+      ;({ rows: objRows } = await client.query(`
+        select q.source_id::text as source_id, q.object_index as index,
+               coalesce(q.char_start, 0)::int as start, q.stem_text as stem
+          from question_objects q
+          join netdisk_files n on n.id = q.source_id and n.user_id = q.user_id
+         where n.ext = 'doc' and n.text_status = 'ok'
+         order by q.source_id, q.object_index`))
+    }
   } finally {
     await client.end()
   }
@@ -146,16 +229,20 @@ async function main() {
   }
   let target = SOURCE ? docs.filter((d) => d.id === SOURCE) : docs
   if (LIMIT > 0) target = target.slice(0, LIMIT)
-  console.log(`P020_START docs=${target.length} objects=${[...objMap.values()].reduce((s, a) => s + a.length, 0)} ` +
-    `netdisk=${new BaiduNetdiskService().enabled()} py=${PY}`)
+  console.log(`P020_START mode=${STAGE3 ? 'stage3' : 'stage1'} docs=${target.length} ` +
+    `objects=${[...objMap.values()].reduce((s, a) => s + a.length, 0)} ` +
+    `frame=${sampling ? sampling.frameSize : 0} layers=${sampling ? sampling.layers : 0} ` +
+    `seed=${STAGE3 ? SEED : '-'} netdisk=${new BaiduNetdiskService().enabled()} py=${PY}`)
 
   const nd = new BaiduNetdiskService()
   const results = []
+  let minMemKb = Infinity
   for (const [i, s] of target.entries()) {
     const r = { i, id: s.id, name: String(s.name).slice(0, 40), bytes: Number(s.size_bytes) }
     let src = '', docx = '', mfPath = ''
     try {
       const mem = await memAvailableKb()
+      minMemKb = Math.min(minMemKb, mem)
       if (mem < MIN_FREE_KB) {
         console.log(`P020_MEMWAIT ${i} mem=${mem}kB`)
         for (let k = 0; k < 12 && (await memAvailableKb()) < MIN_FREE_KB; k++) await sleep(10_000)
@@ -246,7 +333,18 @@ async function main() {
     f0_all_ok: ok.every((r) => r.f0?.ok),
     f1_all_ok: ok.every((r) => r.f1?.ok),
   }
-  const accept = {
+  const convertMs = results.map((r) => r.convert_ms).filter(Number.isFinite).sort((a, b) => a - b)
+  const pctMs = (p) => convertMs.length
+    ? convertMs[Math.min(convertMs.length - 1, Math.ceil(convertMs.length * p) - 1)] : null
+  const accept = STAGE3 ? {
+    zero_write: true,
+    offset_oob_0: g.offset_oob === 0,
+    cross_question_0: g.chosen_not_expected === 0 && g.exp_mismatch_drops === 0
+      && g.beyond_body_drops === 0,
+    f3_no_formula_output: g.non_figure_candidates === 0,
+    cgroup_ok: g.errors === 0,
+    sample_coverage: sampling ? g.docs >= Math.ceil(sampling.ids.length * 0.9) : true,
+  } : {
     zero_write: true,
     offset_oob_0: g.offset_oob === 0,
     cross_question_0: g.chosen_not_expected === 0 && g.exp_mismatch_drops === 0
@@ -256,16 +354,40 @@ async function main() {
     cgroup_ok: g.errors === 0,
   }
   accept.all = Object.values(accept).every(Boolean)
+  const scaleHint = sampling ? {
+    note: '仅作资源预算的量级参考；不作结论、不作放行依据、不代表全量结果、不宣称全量通过',
+    frameSize: sampling.frameSize,
+    frameStemsTotal: sampling.frameStemsTotal,
+    frameWithMarks: sampling.frameWithMarks,
+    sampledDocs: g.docs,
+    figureCandidatesOnSample: g.figure_candidates,
+    avgCandidatesPerOkDoc: g.ok ? +(g.figure_candidates / g.ok).toFixed(2) : null,
+    convertMs: {
+      n: convertMs.length, p50: pctMs(0.5), p95: pctMs(0.95), max: convertMs.at(-1) ?? null,
+      sum: convertMs.reduce((s, x) => s + x, 0),
+    },
+    minMemKb: Number.isFinite(minMemKb) ? minMemKb : null,
+  } : null
   const summary = {
-    at: new Date().toISOString(), engine: 'p020-shadow-stage1',
+    at: new Date().toISOString(),
+    engine: STAGE3 ? 'p020-shadow-stage3' : 'p020-shadow-stage1',
     q: { Q1: '①重转产物+F0', Q2: '①char_start唯一最近', Q3: '①OLE未定性全跳过',
          Q4: '①授权阶段1影子脚本', Q5: '未授权 --apply' },
     f4_implemented: false, apply_authorized: false,
     truth_before: truthBefore, truth_after: { crop: shaFile(CROP_PY), pdfTool: shaFile(PDF_PY) },
-    gates: g, accept, results,
+    sampling: sampling ? {
+      seed: SEED, requested: SAMPLE, idsPicked: sampling.ids.length,
+      frameSize: sampling.frameSize, layers: sampling.layers,
+      frameStemsTotal: sampling.frameStemsTotal, strata: sampling.strata,
+    } : null,
+    scaleHint, gates: g, accept, results,
   }
   await fs.writeFile(OUT, JSON.stringify(summary, null, 2))
-  console.log('P020_SUMMARY ' + JSON.stringify({ gates: g, accept }))
+  console.log('P020_SUMMARY ' + JSON.stringify({
+    engine: summary.engine, gates: g, accept,
+    sampling: sampling ? { frame: sampling.frameSize, picked: sampling.ids.length, layers: sampling.layers } : null,
+    scaleHint: scaleHint ? { avg: scaleHint.avgCandidatesPerOkDoc, convert: scaleHint.convertMs, minMemKb: scaleHint.minMemKb } : null,
+  }))
   console.log('P020_DONE ' + OUT)
   return accept.all ? 0 : 2
 }
