@@ -186,6 +186,8 @@
 
 **阶段 1 / 2 实施实绩补记（2026-11-09 22:2x，D-025，原表行不涂改）**：写库前备份 `gk-db-20261109-223444.gkbk`（读回自检通过并保留）、`0031` 经 `migrate.mjs --only` 上生产。30 份 `--apply` 试点 `ok=28 / review=1 / failed=1`，独立 SQL 核对「`sha256(text_content)` vs `doc_convert_done.text_sha256` **0 行不符**、`ok` 但空文本 **0**、`question_objects` 未变」。全量 `--apply` 以 `systemd-run` 启动（unit `gk-p019-stage1`，2 worker / `MemoryMax=1800M` / `CPUQuota=150%` / 每份重建独立 profile / `nice19`+`ionice -c3`），**本轮仍在进行中（预计 9.5–10 h，不作承诺）**，候选只取 `pending` ⇒ 天然断点续跑。阶段 2 切题走 `/opt/gk/qobj-run/server/`（生产无 `server/src/`；脚本与编译产物哈希均与本地/现网一致），dry-run `sources=10465 / skipped=10437`（差值 28 正是试点 `ok` 行），`--apply` **written=1250 / deleted=0**；数据门 `char_start` 越界 0、唯一键冲突 0、`review` 泄漏 0。**全量完成后须再跑一次 `question-objects-build.mjs --apply`（幂等）处理剩余约 10,000 份，本轮未做。**
 
+**阶段 1 全量收口 + 阶段 2 全量幂等切题补记（2026-11-10 10:1x，D-028，上文历史行不涂改）**：`gk-p019-stage1` 已 `inactive / Result=success`（实处理 10,470 份、`ok=10116 / review=65 / none=97 / failed=181`、环境失败 8 + 下载失败 3 保持 `pending`、下载 7.02 GB）。思傅「按 D-025 执行全量幂等切题」解除 D-025 与 D-027 的口径冲突 ⇒ 新备份 `gk-db-20261110-101549.gkbk`（读回自检通过）后，零写入 dry-run `sources=20581 / rows=329313 / skipped=10465`，`--apply` **written=329,313 / deleted=0**（100.4 s、`MemoryMax=900M` / `CPUQuota=100%`）。`qo_total` 327,337 → **656,650**、`.doc` 28 份/1,250 行 → **10,144 份/330,563 行**、表 459→846 MB；数据门 `.doc` 坐标越界 **0**、唯一键冲突 **0**、非 `ok` 泄漏 **0**、删除 **0**；`verify:gate` 37/37、`method:check` 三门、`check:isolation` 152 处零缺口。🔴 检索侧只读 GET 回归 `exact=0/5`、无假 exact，但合并 10 次采样 P95 **3705 ms ≥ 3s**（复采 max 2382 ms，指向冷启动；不归因、不宣称达标、不回滚）；库覆盖探针 `BMDN` 4→4、`ABC=60` 33→33 ⇒ **不宣称命中变化、不计算召回率**。历史 111/97 行坐标越界（11-07 老对象）、142 份 `U+FFFD`、2 行 `rejected` 均另案登记。**抠图仍不放行**：Q5 / F4 / 阶段 3 资源评估未授权。详见 `docs/reports/P-019-阶段2-全量幂等切题验收报告.md`。
+
 ---
 
 ## 5. 边界与不宣称
