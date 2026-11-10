@@ -734,3 +734,25 @@
 | 落地文件 | 新增 `P-020-老式doc题干抠图坐标系专项.md`（状态草稿）、`docs/reports/P-019-阶段3-坐标系复判与定位链路实证报告.md`、`server/scripts/verify/modules/42-doc-inline-guard.mjs`（M42 未放行守卫）；P-019 §7/§8 追加复判指针（历史行不涂改） |
 | 不宣称 | 未写命中提升／修复有效／误判归零／所有用户已可用／图形全覆盖／看懂图形；**不计算召回率**；28 份 / 1,250 stem 样本结论不外推 10,499 份；`question-match.ts` 一行未动、`CACHE_VERSION` 仍 **v14**、`0021 review_events` **0 行** |
 | 仍锁 / 后续 | `P-020` Q1–Q5 待逐题回复；阶段 1 全量 `gk-p019-stage1` **仍进行中**，完成后须再跑 `question-objects-build.mjs --apply`；`w:object` 定性、`m:oMath`、扫描 PDF 440 份另案；正式版 10 项前提、`strict=1`、第二层准入、身份治理、公安联网备案、`0021` 出数死锁**不动**；本地 commit 未 push |
+
+---
+
+## D-027 · P-020 逐题拍板与阶段 1 影子链路验收（2026-11-10 08:1x）
+
+> 思傅逐题回复「Q1 用重转产物+F0；Q2 char_start 消歧；Q3 OLE 未定性全跳过；Q4 授权阶段 1 影子脚本实现 F0/F1/F2；Q5 是否授权 --apply 写 question_inline_figures」。**前四题按选项 ① 批准，Q5 是问句未授权 ⇒ 按「暂不授权」处理**。本条只放行阶段 1 零写库影子链路；**抠图仍不放行**。报告 `docs/reports/P-020-阶段1-影子链路闸门验证报告.md`。
+
+| 项 | 内容 |
+|---|---|
+| 拍板 | Q1 ① 重转产物 + F0 同源硬闸（不重跑 10h 全量）；Q2 ① `char_start` 唯一最近消歧；Q3 ① OLE 未定性全跳过；Q4 ① 授权阶段 1 影子脚本；**Q5 未授权**（问句，按 ① 暂不授权处理，阶段 2 不启动） |
+| 实现 | 新增 `server/scripts/doc-inline-shadow.mjs` + `.py`：`importlib` 直接加载 L3 两个真相源（`netdisk-inline-crop.py` / `pdf_tool.py`），实现 F0/F1/F2/F3；`--apply` 直接拒绝（退出码 3），源码无 INSERT/UPDATE、无产图、无 storage 写入；**未覆盖任何生产脚本** |
+| 静态门 | M42 同步升级 v2：守 `question-match.ts` sha256、`CACHE_VERSION` v14、候选 SQL 仍 `ext='docx'`（F4 未实现）、crop.py 未混 F0/F2、P-020 状态与 Q1–Q4/Q5 口径、影子脚本四闸齐备且零写库；D-027 建档。**先补门再动代码** |
+| 合成反例自测 | 生产 Python 上 10/10：F0 篡改哈希 ⇒ `f0_reject` 且 0 候选；F2 `char_start` 错位 ⇒ 丢图；F3 题干内 3 个标记只出 2 个 `figure` 候选；F2 纠正 `ns.find()` 首次命中 1 处 |
+| 生产 28 份影子验收 | `ok=25 / f0_reject=1 / no_marks=2 / f1_reject=0 / 环境错误=0`；有效 stem **681**、短 57、未命中 9、多重匹配 **65**、F2 纠正 **3** 处、歧义/非期望/exp 不符/越正文边界丢图 **0/0/0/0**；题干内标记 396（OLE 跳过 **28**）、`figure` 候选 **368**；`offset_in_stem` 越界 **0**、串题 **0**；图对象对账、F0、F1 均 25/25；硬门 `accept.all=true` |
+| F0 实证 | 拦下 `00258cd4…`（中考语文复习必考文言文解读全集（二），82,429 字）：重转流哈希 `1bd0b3ace84fb016` ≠ 记账 `1b214a12c65a432b` ⇒ D-026 定位的写入流 `U+FFFD` 瑕疵被零成本拦住，整份跳过 |
+| 生产零写入 | `question_inline_figures` 273,037 → **273,037**，`.doc` 来源 **0 → 0**；`question_objects` 327,337、`doc_convert_done` 10,488、`text_status='ok'` 10,144 全不变；真相源 sha256 前后一致（crop `dd34209a8eb06c96` / pdf_tool `6af9c25c0208ea51`）；`/api/health=200`、`MemAvailable` 最低 2.89 GB、孤儿 soffice 0 |
+| 资源纪律 | `systemd-run --unit=gk-p020-shadow --uid=gk`（`MemoryMax=900M` / `CPUQuota=100%` / `RuntimeMaxSec=1800`）；串行、`nice19` / `ionice -c3`、每份独立 LO profile、`MemAvailable<700MB` 等待；unit 内 source `.env.secrets` + `.env.migrate`；踩坑：临时目录属 ubuntu 导致 `EACCES` ⇒ `chown -R gk:gk` 后重跑 |
+| 交叉一致性 | 65 多重匹配 / 3 处选错 / 9 未命中 / 28 OLE / 0 越界，五项独立复现 D-026；候选 408→368 是 F0 跳 1 份 + F3 跳 28 个 OLE 的**按设计丢图**，不是链路退化 |
+| P-019 全量收口 | `gk-p019-stage1` 已 `inactive`：实处理 **10,470** 份、`ok=10116 / review=65 / none=97 / failed=181`、环境失败 8 + 下载失败 3 保持 `pending`、下载 7.02 GB；🔴 **全量幂等切题尚未重跑**，28 份样本仍来自首批 30 份试点 |
+| 不宣称 | 不写宣称词、**不计算召回率**；28 份 / 681 有效 stem 不外推 10,144 份；`question-match.ts` 一行未动、`CACHE_VERSION` 仍 **v14**、`0021 review_events` **0 行**、第二层准入未全绿 |
+| 仍锁 / 后续 | **Q5（`--apply`）／F4 候选扩展／阶段 2 小批量试点／全量幂等切题／阶段 3 资源评估**均未授权；`w:object` 定性、`m:oMath`、扫描 PDF 440 份各另案；正式版 10 项前提、`strict=1`、身份治理、公安联网备案、`0021` 出数死锁**不动**；继续开发态、未部署、未 push |
+
