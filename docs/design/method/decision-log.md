@@ -1059,3 +1059,31 @@
 | 🔴 **验证实绩（本轮执行）** | 开发库 `--ping` 连接成功（PostgreSQL 17.11，Supabase 云开发库，**非现网**）；`migrate.mjs --only 0032_curriculum_topics.sql` **执行成功**，`schema_migrations` 登记 1 条；幂等重跑显示「跳过 0032（已执行过）」、新增 0。回查：**720 行**、`distinct subject_code` 恰 9 个、学段 小学 135／初中 468／高中 117、`framework_verified` true 521／false 199、`term_origin<>'project'` **0**、禁入学科 **0**、待官方核对 118 行、`question_objects` 未改动。`method:check` H1/H2/H3 全绿（H1 检查 25 处）、`verify:gate` **37/37**、`M43` **12/12**、`npm run build:server`（nest build）成功、TS 模块 tsc 单编零错误。 |
 | **零改动复核** | `question-match.ts`（sha 与 M42 B1 基线 `84f998ff…` 一致）／`question-reference.ts`（`TOPIC_TERMS` 仍 55 词）／`answer-search.service.ts` 的 `CACHE_VERSION='v14'`／前端契约／`subjects` 表结构 **全部零改动**；🔴 **生产库 L3 未写、未 ssh、未备份/迁移/换 dist/重启 `gk-api`、未部署、未发版、未 push**。 |
 
+---
+
+## D-040 · 按建议继续实施：T0 度量闭环三件套落地、16 问汇总、发货预案、P-028 草稿（2026-11-13 00:0x，思傅「按建议继续进行项目实施」）
+
+> 🔴 **本轮是实施动作**：产出 3 个可复跑只读算子 + 1 份固化盲测样本 + 4 份文档 + 1 份提案草稿 + 实测读数。
+> 🔴 **生产库操作＝全加密 SSH + 纯 `SELECT` + `sudo -n -u gk -H`，零写入、零 DDL/DML、未读凭据值、未删任何文件**；判定层／契约／门禁／数据门一行未动；未部署、未发版、未 push。
+> 🔴 **T0 硬门仍未过**：本轮只把「独立盲测样本」与「可复跑前后对照算子」两样前置物做出来；`review_events` 仍 **0 行**、协议未在任一实施上实跑 ⇒ **不解锁任何算子实施**，本轮未豁免、未替代。
+
+| 项 | 实绩 / 结论 |
+|---|---|
+| **触发 / 范围** | 思傅「按建议继续进行项目实施」⇒ 按上一轮推荐顺序执行 **P0（清阻塞）→ P1（T0 三件套）→ P2（P-028 草稿）**；**不含**生产发货、不含 16 问替拍、不含接入检索链路、不含 push。按 `GK-OPS-22` 先建档（本 D 号）再实施。 |
+| **P0-1 交付** | `docs/design/method/在途待拍板问题汇总表-16问.md`：`P-023` Q1–Q5(5) ＋ `P-024` Q1–Q4＋C1–C3(7) ＋ `P-025` Q1–Q4(4) ＝ **16 问**，逐题给建议答案与依据、一次性回复模板。🔴 **只是汇总，不代替拍板、不自动解锁**；推荐回法 `P-023 Q1①Q2①Q3①Q4①Q5①`／`P-024 Q1①Q2①Q3②Q4①C1①C2①C3③`／`P-025 Q1①Q2①Q3①Q4①`。 |
+| **P0-2 交付** | `docs/reports/D-039-生产发货预案（只写不执行）.md`：现状核对、G1–G8 发货前置门、六步命令、`④是否换 dist` 判据、⑥ 期望回查 720 行/9 科、回退流程。🔴 **核心判断：维度表零引用，单独发货面客收益 0 却多一次重启风险 ⇒ 建议随 `P-028` 一起发**。 |
+| **T0-1 实绩** | `server/scripts/measure-blind-sample.sql` ⇒ L3 只读实跑，固化 `t0-blind-v1` **200 条**（S1–S4 各 50），`ORDER BY md5(id), id` 确定性、无 `setseed`；排除 D-034 清单去重后 **20 个 `source_id`**、`rejected`、含 `U+FFFD`、归一长度 <10 ⇒ 与 D-034 40 条/20 份**物理分离**。只输出 `stem_sha256` + 前 60 字摘要 + `(source_id, object_index)`，**不输出完整题干、不输出 `user_id`**；产物落 `.tmp/t0-blind-sample/`（gitignore）。sha256 `59116b0a…`。声明「只用于最终验收、永不用于调参」。 |
+| 🔴 **口径修正 ①** | 上一轮建议的「跨 9 科分层抽样」**做不到**：复核 `migrations/0026_question_objects.sql` 确认题目表**无学科/学段/年级/知识点字段**（D-038 亦已 grep 0 命中）。⇒ 改为「题干归一长度 × 是否含解析」四层，样本 `subject_label` 恒 `null` 留作事后人工标注；**不冒称按课标学科分层、不外推多科目覆盖度**。 |
+| **T0-2 实绩** | `server/scripts/measure-baseline-paired.sql`（41 行输出，5 分层 × 8 指标 + 反馈分母），sha `7faab99d…`；产物 sha `888fd9b4…`。🔴 **`measure-baseline.sql` 一字未改**（前后同口径真相源，sha `53007f7b…`），新算子只补「分层可配对」一块。 |
+| 🔴 **交叉校验全绿** | 新算子独立实现，分层加总与 D-036「前」基线逐项一致：`qo` **656,898**／`has_solution` **144,316**／`norm_lt6` **52,852**／`norm_lt10` **67,152**／`no_han` **70,220**／`has_fffd` **2,007**／`rejected` **2**／`review_events` **0** ⇒ **归一口径无漂移**。配对差分须同层相减，禁用中位数之差（D-030 双峰陷阱、`P-025 P3`）。 |
+| **T0-3 实绩（新证据）** | `server/scripts/measure-feedback-readiness.sql`（3 行输出，sha `6ae82da9…`；产物 sha `25cc7742…`）。L3 实测：`timeline_items` **625**／`questions` **45**／`users` **80**；🔴 **`ti_with_due` 167、`ti_overdue_now` 167（全部逾期）、`ti_ever_reviewed` 88、`ti_in_review_book` 187、`ti_last_reviewed_at` = 2026-10-30 08:37:35+08**；`review_events` 0 行、`last_event=null`。`query_like_tables` ＝ `login_tickets`＋`review_events`（仍无真实 query 日志表）。 |
+| 🔴 **三假设定性（推进但不越界）** | **H_b 路径未触达基本排除**（167 到期题、88 道曾作答、35 用户有条目／15 用户有题）；**H_a 时间窗内无触发为主因方向**（最后累计作答 10-30，此后测试期禁真登录、正式版未发；⚠️ 无法区分「埋点在该日期前/后上线」，**不下定论**）；**H_c 数据清空仅保留旁证**（`pg_stat` `n_tup_ins=2`／`n_tup_del=2`／`n_live_tup=0`，2 行更像联调，且 `pg_stat` 可 reset/轮转，**不得断言人为清空**）。⇒ 0 行仍是**出数条件**问题，不是代码缺陷；**不承诺出数、不新增采集、不改埋点、不做真登录**。沿用 D-036：埋点在 `timeline.service.ts:1018`、生产 dist 含特征串（构建 11-04）、近 7 天零写入报错。 |
+| **P2 交付** | `docs/design/method/proposals/P-028-知识点讲解标签展示层.md`（**草稿**，六栏齐备、F1–F12、验收 8 条、Q1–Q5 待拍）：把 `curriculum_topics` 做成参考例题卡片的**知识点讲解标签，只展示、不参与排序**、默认关＋开关可控＋事先声明常驻。推荐路线 **② 独立只读端点**。 |
+| 🔴 **口径修正 ②** | 上一轮「不必 bump `CACHE_VERSION`」**只对路线 ①② 成立**：路线 ③ 把 `topicLabels` 塞进检索 result ⇒ 改 `note`/result 结构 ⇒ **必须 bump v14→v15 + 同步 M37 + 前后端同步发货**（旧缓存留存旧 Top-3）。`P-028 §1.1` 已按三条路线分别标清代价，写入 F3/F12 falsifier。 |
+| **生产 / 权限** | 全加密 SSH；`scp` 三个 SQL + 驱动脚本到 `/tmp`；`sudo -n chmod 644`；`sudo -n -u gk -H bash /tmp/run-t0.sh`。⚠️ 直连 ubuntu 用户会同时撞 `.env.migrate` Permission denied 与 `role "ubuntu" does not exist` ⇒ 按 D-036 的 `User=gk` 路径解决。纯 `SELECT`＋`information_schema`＋`pg_stat_user_tables`，**零写入**；未读凭据值、未删任何文件。 |
+| **踩坑 / 修复** | ① `measure-blind-sample.sql` 初版 `VALUES` 多行漏括号 ⇒ `syntax error at or near '01257d4b…'`，改为 `('id'),('id')` 后 200 行正常；② 远端驱动脚本 `printf` 走 stdout 会污染 JSONL ⇒ 改 `>&2`；③ `measure-feedback-readiness.sql` 初版为避免猜列名只输出列清单，列名实证存在后补入 `ti_with_due`／`ti_overdue_now`／`ti_ever_reviewed`／`ti_last_reviewed_at`／`ti_in_review_book` 五个确定统计并同步注释。 |
+| **零改动复核** | `question-match.ts`（sha 与 M42 B1 `84f998ff…` 一致）／`question-reference.ts`（`TOPIC_TERMS` 仍 55 词）／`curriculum-topics.ts`（仍零引用）／`CACHE_VERSION v14`／`strict=1`／第二层准入／M42 v3／前端契约／数据门 14 项 **全部零改动**；未接入检索链路、未新建端点/路由、未写库（生产仅 SELECT）、未备份/迁移/换 dist/重启 `gk-api`、未部署、未发版、**未 push**。 |
+| **仍锁** | **T0 度量闭环（未过）**、结果指标出数、16 问逐题拍板、`P-028` 转「待批准」与任何实现、Q5 30 份 `--apply`、M42 v4、F6／整题快照实施、J1 归一实施、J2 出数与新增 query 采集、双线 A/B 任一算子、面客集成与逐科官方文本复核＋法务复核、生产库发货、`w:object`/`m:oMath` 定性、身份治理／公安备案／正式版 10 项前提 —— **全部不动**。 |
+| **待思傅** | ① **16 问逐题回**（`在途待拍板问题汇总表-16问.md`）；② 确认 T0-1 抽样口径（S1–S4 × 50＝200、`subject_label` 留空）；③ `P-028` Q1–Q5，尤其是路线与「随 P-028 一起发货」；④ `git push` 仍等明确指示。 |
+| **不外推 / 不宣称** | 本轮所有读数均为**代理/诊断指标**，按 20a §5.5 不得作成功证据；不计算召回率/准确率、不宣称命中提升／修复有效／误判归零／图形全覆盖／所有用户可用；样本集不外推全库；`pg_stat` 旁证不作定论。 |
+
