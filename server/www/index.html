@@ -6,7 +6,8 @@
 <!-- 站名必须与腾讯云备案记录的「服务名称(网站)」逐字一致：深度扎根。
      2026-11-05 核对腾讯云备案详情页原文确认，此前写成「学习记录」属于站名不一致，
      是公安联网备案的常见驳回原因之一。改站名前先去备案系统做变更，别直接改这里。
-     2026-11-12 补充说明：主旨与副标题可以调整，但 <title> 与 <h1> 的「深度扎根」不动。 -->
+     2026-11-12 补充说明：主旨与副标题可以调整，但 <title> 与 <h1> 的「深度扎根」不动；
+     <h1> 内不要附加角标或其它文字，保持逐字一致。 -->
 <title>深度扎根</title>
 <meta name="description" content="深度扎根 · 由人工智能协助创建的学习工具使用网站">
 <!-- 低调处理：不主动寻求搜索引擎收录（与「不对外传播、不发布面向公众内容」的自述一致）。
@@ -14,138 +15,165 @@
 <meta name="robots" content="noindex, nofollow">
 <style>
   :root{
-    --fg:#1f2328; --muted:#656d76; --line:#e3e7ec; --bg:#fff;
-    --soft:#f7f9fb; --accent:#0b3d2e; --accent-soft:#eef4f1;
+    --fg:#1c2b26; --muted:#63736c; --line:#e2e9e5; --bg:#fff;
+    --soft:#f5f8f6; --accent:#0b3d2e; --accent-2:#1d7a5c; --accent-soft:#e8f2ed;
   }
   *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
   body{margin:0;background:var(--bg);color:var(--fg);
        font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-       line-height:1.8;-webkit-font-smoothing:antialiased}
-  main{max-width:46rem;margin:0 auto;padding:4rem 1.5rem 2rem}
-  h1{font-size:1.65rem;margin:0 0 .35rem;letter-spacing:.02em}
-  .sub{color:var(--muted);font-size:.95rem;margin:0 0 1rem}
-  .badge{display:inline-block;font-size:.78rem;line-height:1.6;padding:.1rem .55rem;
-         border:1px solid var(--line);border-radius:999px;background:var(--soft);
-         color:var(--muted);vertical-align:2px;margin-left:.4rem}
-  h2{font-size:1.02rem;margin:2.4rem 0 .8rem;padding-bottom:.4rem;border-bottom:1px solid var(--line)}
-  p,li{font-size:.96rem}
-  ul{padding-left:1.25rem;margin:.4rem 0}
-  li{margin:.3rem 0}
-  .lead{background:var(--soft);border:1px solid var(--line);border-radius:10px;
-        padding:1rem 1.1rem;margin:1.2rem 0 0}
-  .lead p{margin:.25rem 0}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.7rem;margin:.6rem 0 0}
-  .card{border:1px solid var(--line);border-radius:10px;padding:.85rem .95rem;background:#fff}
-  .card h3{font-size:.94rem;margin:0 0 .25rem;font-weight:600}
-  .card p{font-size:.88rem;color:var(--muted);margin:0;line-height:1.65}
-  .steps{counter-reset:s;list-style:none;padding:0;margin:.6rem 0 0}
-  .steps li{counter-increment:s;position:relative;padding-left:2rem;margin:.55rem 0;font-size:.94rem}
-  .steps li::before{content:counter(s);position:absolute;left:0;top:.15rem;
-        width:1.35rem;height:1.35rem;border-radius:50%;background:var(--accent-soft);
-        color:var(--accent);font-size:.76rem;font-weight:600;line-height:1.35rem;
-        text-align:center}
-  .box{border:1px solid var(--line);border-left:3px solid var(--accent);
-       border-radius:8px;padding:.7rem .9rem;margin:.8rem 0 0;background:var(--soft)}
-  .box p{margin:.2rem 0;font-size:.9rem}
-  table{width:100%;border-collapse:collapse;margin:.6rem 0 0;font-size:.9rem}
-  th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
-  th{color:var(--muted);font-weight:600;font-size:.85rem}
-  td:first-child{white-space:nowrap;color:var(--muted)}
-  footer{margin-top:3.6rem;padding-top:1.2rem;border-top:1px solid var(--line);
-         color:var(--muted);font-size:.84rem}
-  footer p{margin:.35rem 0}
+       line-height:1.75;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:60rem;margin:0 auto;padding:0 1.5rem}
+  .topbar{height:4px;background:var(--accent)}
+  .hero{background:var(--soft);border-bottom:1px solid var(--line);padding:4.5rem 0 3.5rem}
+  .eyebrow{display:flex;align-items:center;gap:.55rem;font-size:.8rem;
+           color:var(--accent-2);letter-spacing:.08em;margin-bottom:1.1rem}
+  .mark{width:10px;height:10px;border-radius:3px;background:var(--accent);display:inline-block}
+  h1{font-size:clamp(2rem,5vw,2.8rem);line-height:1.2;margin:0 0 .6rem;
+     letter-spacing:.02em;font-weight:600}
+  .sub{font-size:1.05rem;color:var(--accent-2);margin:0 0 1.4rem}
+  .intro{max-width:38rem;font-size:1rem;color:var(--muted);margin:0 0 2rem}
+  .jump{display:flex;flex-wrap:wrap;gap:.6rem}
+  .jump a{font-size:.88rem;text-decoration:none;color:var(--fg);
+          border:1px solid var(--line);background:#fff;border-radius:999px;
+          padding:.35rem .9rem;transition:border-color .15s,color .15s}
+  .jump a:hover{border-color:var(--accent);color:var(--accent)}
+  main{padding:1rem 0 4rem}
+  section{padding-top:3.5rem;scroll-margin-top:1.5rem}
+  .sec-head{display:flex;align-items:center;gap:.7rem;margin-bottom:.5rem}
+  .sec-head::before{content:"";width:18px;height:3px;border-radius:2px;background:var(--accent)}
+  h2{font-size:1.3rem;margin:0;font-weight:600}
+  .sec-desc{color:var(--muted);font-size:.95rem;margin:.5rem 0 1.6rem}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.9rem}
+  .card{border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.15rem;
+        background:#fff;transition:border-color .15s,transform .15s}
+  .card:hover{border-color:var(--accent-2);transform:translateY(-2px)}
+  .card h3{font-size:1rem;margin:0 0 .45rem;font-weight:600;
+           display:flex;align-items:center;gap:.5rem}
+  .card h3::before{content:"";width:6px;height:6px;border-radius:50%;
+                   background:var(--accent-2);flex:none}
+  .card p{font-size:.9rem;color:var(--muted);margin:0;line-height:1.7}
+  .steps{list-style:none;counter-reset:s;display:grid;
+         grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:.9rem;padding:0;margin:0}
+  .steps li{counter-increment:s;position:relative;border:1px solid var(--line);
+            border-radius:12px;padding:1.4rem 1.15rem 1.2rem;background:var(--soft);
+            font-size:.94rem;line-height:1.7}
+  .steps li::before{content:"0" counter(s);display:block;font-size:1.4rem;
+                    font-weight:600;color:var(--accent-2);margin-bottom:.5rem;
+                    letter-spacing:.02em}
+  .notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1.2rem}
+  .note{border-left:3px solid var(--accent-soft);padding:.15rem 0 .15rem 1rem}
+  .note h3{font-size:.95rem;margin:0 0 .3rem;font-weight:600}
+  .note p{font-size:.9rem;color:var(--muted);margin:0;line-height:1.7}
+  footer{border-top:1px solid var(--line);background:var(--soft);
+         padding:2.2rem 0 2.5rem;color:var(--muted);font-size:.85rem}
+  .foot-top{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;
+            color:var(--fg);font-size:.95rem;margin-bottom:.9rem}
+  .foot-note,.foot-meta{margin:.35rem 0;line-height:1.7}
   footer a{color:var(--muted);text-decoration:none;border-bottom:1px dotted var(--line)}
-  footer a:hover{color:var(--fg)}
-  code{background:#f2f5f8;padding:.1em .35em;border-radius:4px;font-size:.88em}
+  footer a:hover{color:var(--accent)}
+  @media(max-width:600px){
+    .hero{padding:3rem 0 2.5rem}
+    main{padding-bottom:2.5rem}
+    section{padding-top:2.5rem}
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>深度扎根<span class="badge">开发测试阶段</span></h1>
-  <p class="sub">由人工智能协助创建的学习工具使用网站</p>
+<div class="topbar"></div>
 
-  <div class="lead">
-    <p>本站由个人开发者借助人工智能辅助工具搭建与维护，用来说明一套自用学习工具的用途与使用方法：把平时手写的题目与答案整理归档，并按间隔安排回顾。</p>
-    <p>目前处于<b>自用与内部测试阶段，尚未公开提供使用</b>。</p>
+<!-- ⛔ 改文案前必读（见 docs/reports/公安联网备案操作指引.md §2.2、§7.8）：
+     个人主体办不了前置审批类目，本站文案**不得出现该类目的敏感字样**。
+     具体清单只写在文档里，**不要抄进本文件** —— 核查会扫源码，注释同样算。
+     也别写宣称对外提供公共服务、或开放账号注册之类的表述：本站备案为非经营性个人网站。
+     2026-11-12：只说明建站方式，不宣称本站对外提供智能服务；
+     首页按正常展示页组织，不再上墙自查表、变更记录与接口说明；
+     事实约束不变：无 form、无 script、无 Cookie、无统计脚本，页脚保留最小自证。 -->
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow"><span class="mark" aria-hidden="true"></span>个人学习工具</div>
+    <h1>深度扎根</h1>
+    <p class="sub">由人工智能协助创建的学习工具使用网站</p>
+    <p class="intro">把平时手写的题目与答案整理归档，按间隔安排回顾。本站由个人开发者借助人工智能辅助工具搭建与维护，用来介绍这套自用工具的用途与用法。</p>
+    <nav class="jump" aria-label="页面导航">
+      <a href="#features">功能一览</a>
+      <a href="#how">使用方法</a>
+      <a href="#data">关于数据</a>
+    </nav>
   </div>
+</header>
 
-  <!-- ⛔ 改文案前必读（见 docs/reports/公安联网备案操作指引.md §2.2）：
-       个人主体办不了前置审批类目，本站文案**不得出现该类目的敏感字样**。
-       具体清单只写在文档里，**不要抄进本文件** —— 核查会扫源码，注释同样算。
-       也别写宣称对外提供公共服务、或开放账号注册之类的表述：本站备案为非经营性个人网站。
-       2026-11-12 新主旨同样受此约束：只说明建站方式，不宣称本站对外提供智能服务。 -->
-
-  <h2>能做什么</h2>
-  <div class="cards">
-    <div class="card">
-      <h3>拍照整理题目</h3>
-      <p>把纸面上的题目和手写答案拍下来，自动识别成可编辑的文字，省去逐个打字。</p>
+<main class="wrap">
+  <section id="features">
+    <div class="sec-head"><h2>功能一览</h2></div>
+    <p class="sec-desc">从记录到回顾，围绕一次练习把零散的纸面内容收拢起来。</p>
+    <div class="cards">
+      <div class="card">
+        <h3>拍照整理题目</h3>
+        <p>把纸面上的题目和手写答案拍下来，自动识别成可编辑的文字，省去逐个打字。</p>
+      </div>
+      <div class="card">
+        <h3>按学科归档</h3>
+        <p>按学科、按年级分类保存，查找时可以先限定范围，再看具体条目。</p>
+      </div>
+      <div class="card">
+        <h3>标记做错的题</h3>
+        <p>做错的题单独标记，方便之后集中回看，不必翻遍所有记录。</p>
+      </div>
+      <div class="card">
+        <h3>到期提醒回顾</h3>
+        <p>按 1、3、7、14、28 天的间隔安排回顾，到期后在列表里提示。</p>
+      </div>
+      <div class="card">
+        <h3>汇总导出</h3>
+        <p>把选中的条目合成为 PDF 或 Word 文件，方便打印或在别的设备上查看。</p>
+      </div>
+      <div class="card">
+        <h3>找回自己的资料</h3>
+        <p>在自己导入的资料里按题目内容检索，找到出处后打开核对。</p>
+      </div>
     </div>
-    <div class="card">
-      <h3>按学科归档</h3>
-      <p>按学科、按年级分类保存，查找时可以先限定范围，再看具体条目。</p>
+  </section>
+
+  <section id="how">
+    <div class="sec-head"><h2>使用方法</h2></div>
+    <p class="sec-desc">三步走完一次记录，后面的回顾交给时间。</p>
+    <ol class="steps">
+      <li>拍照或导入题目图片，确认识别出的文字后保存。</li>
+      <li>选择学科与年级，保存时自动归档；做错的题加上标记。</li>
+      <li>之后按提示到期回顾；需要时把若干条目汇总导出。</li>
+    </ol>
+  </section>
+
+  <section id="data">
+    <div class="sec-head"><h2>关于数据</h2></div>
+    <p class="sec-desc">这一页只做说明，不涉及账号、提交或访客信息采集。</p>
+    <div class="notes">
+      <div class="note">
+        <h3>内容由本人录入</h3>
+        <p>站内内容均由使用者本人录入，用于个人整理，不对外传播，也不公开发布。</p>
+      </div>
+      <div class="note">
+        <h3>资料留在自有服务器</h3>
+        <p>照片与文档只保存在自有服务器上，不提供给第三方。</p>
+      </div>
+      <div class="note">
+        <h3>访问不留痕迹</h3>
+        <p>本页为静态说明页，不使用 Cookie，不收集访客信息。</p>
+      </div>
     </div>
-    <div class="card">
-      <h3>标记做错的题</h3>
-      <p>做错的题单独标记，方便之后集中回看，不必翻遍所有记录。</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-top">
+      <span>深度扎根</span>
+      <span>个人开发 · 非经营性</span>
     </div>
-    <div class="card">
-      <h3>到期提醒回顾</h3>
-      <p>按 1、3、7、14、28 天的间隔安排回顾，到期后在列表里提示。</p>
-    </div>
-    <div class="card">
-      <h3>汇总导出</h3>
-      <p>把选中的条目合成为 PDF 或 Word 文件，方便打印或在别的设备上查看。</p>
-    </div>
-    <div class="card">
-      <h3>找回自己的资料</h3>
-      <p>在自己导入的资料里按题目内容检索，找到出处后打开核对。</p>
-    </div>
-  </div>
-
-  <h2>大致怎么用</h2>
-  <ol class="steps">
-    <li>拍照或导入题目图片，确认识别出的文字后保存。</li>
-    <li>选择学科与年级，保存时自动归档；做错的题加上标记。</li>
-    <li>之后按提示到期回顾；需要时把若干条目汇总导出。</li>
-  </ol>
-
-  <h2>关于内容与数据</h2>
-  <ul>
-    <li>站内内容均由本人（及家人）录入，用于个人整理，<b>不对外传播，也不公开发布</b>。</li>
-    <li>照片与文档只保存在本人自己的服务器上，不提供给第三方。</li>
-    <li>本站为个人开发的<b>免费工具</b>，不设付费项目，也不投放广告。</li>
-  </ul>
-
-  <h2>本站的边界</h2>
-  <table>
-    <tr><th>项目</th><th>说明</th></tr>
-    <tr><td>账号</td><td>不提供账号注册，没有登录入口，也没有会员体系</td></tr>
-    <tr><td>互动</td><td>不提供评论、留言板、社区、论坛、私信等公开互动功能</td></tr>
-    <tr><td>交易</td><td>不提供任何商品、付费、打赏、充值或撮合服务</td></tr>
-    <tr><td>推广</td><td>不投放广告，不嵌入第三方统计脚本</td></tr>
-    <tr><td>访客信息</td><td>本页为静态说明页，不使用 Cookie，不收集访客个人信息</td></tr>
-  </table>
-
-  <h2>意见与建议</h2>
-  <div class="box">
-    <p>本页为静态说明页，<b>不设任何提交表单</b>，也不收集访客信息——这样它才能一直是一张静态说明页。</p>
-    <p>目前不提供在线反馈入口；如需联系开发者，请以备案主体公示的信息为准。</p>
-  </div>
-
-  <h2>服务状态</h2>
-  <p>本站的后端服务使用 <code>/api/</code> 前缀，供配套的工具程序调用；普通浏览器打开时只会看到这一页说明。</p>
-
-  <h2>更新记录</h2>
-  <table>
-    <tr><td>2026-11-12</td><td>调整首页主旨为「由人工智能协助创建的学习工具使用网站」，精简展示文案</td></tr>
-    <tr><td>2026-11-05</td><td>优化资料检索的结果呈现，能区分“找到这道题”与“只找到相关资料”</td></tr>
-    <tr><td>2026-11-04</td><td>新增按年级归档与筛选；完成网站备案</td></tr>
-  </table>
-
-  <footer>
-    <p>个人开发 · 非经营性 · 不提供付费服务</p>
-    <p>网站名称：深度扎根 ｜ 备案主体：个人</p>
+    <p class="foot-note">目前为个人自用与内部测试阶段，尚未公开提供使用；不设付费项目，也不投放广告。本页为静态说明页，不使用 Cookie，不收集访客信息。</p>
+    <p class="foot-meta">网站名称：深度扎根 ｜ 备案主体：个人</p>
 
     <!-- ============================================================
          ICP 备案号（工信部）：管局要求必须悬挂在首页底部，
@@ -180,7 +208,7 @@
       </a>
     </p>
     -->
-  </footer>
-</main>
+  </div>
+</footer>
 </body>
 </html>
