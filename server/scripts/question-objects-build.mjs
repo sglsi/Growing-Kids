@@ -80,9 +80,14 @@ if (!fs.existsSync(COMPILED_PATH)) {
   console.error(`✗ 找不到编译产物 ${COMPILED_PATH}\n  先跑：cd server && npx nest build`)
   process.exit(2)
 }
-if (fs.statSync(COMPILED_PATH).mtimeMs < fs.statSync(SRC).mtimeMs) {
+// 源码新鲜度检查：仅在源码存在时生效。生产部署通常不带完整 src，
+// 此时该检查无意义（且 statSync 会 ENOENT 直接崩），退化为跳过并留一行提示。
+if (fs.existsSync(SRC) && fs.statSync(COMPILED_PATH).mtimeMs < fs.statSync(SRC).mtimeMs) {
   console.error('✗ 编译产物比源码旧，拒绝运行（防止切分规则静默漂移）\n  先跑：cd server && npx nest build')
   process.exit(2)
+}
+if (!fs.existsSync(SRC)) {
+  console.warn(`[warn] 未找到源码 ${SRC}，跳过「编译产物是否过期」检查（生产部署常见）`)
 }
 const Q = require(COMPILED_PATH)
 if (typeof Q.splitQuestionObjects !== 'function' || !Q.OBJECT_ENGINE_VERSION) {
