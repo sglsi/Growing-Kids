@@ -40,13 +40,12 @@ import * as fs from 'fs';
 }
 
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
-import { AppModule } from '@/app.module';
-import { AppController } from '@/app.controller';
+import { AppModule } from './app.module';
+import { AppController } from './app.controller';
 import * as express from 'express';
-import { HttpStatusInterceptor } from '@/interceptors/http-status.interceptor';
-import { AllExceptionsFilter } from '@/filters/all-exceptions.filter';
-import { accessLog, installLogTee } from '@/shared/logger';
+import { HttpStatusInterceptor } from './interceptors/http-status.interceptor';
+import { AllExceptionsFilter } from './filters/all-exceptions.filter';
+import { accessLog, installLogTee } from './shared/logger';
 
 function parsePort(): number {
   const args = process.argv.slice(2);
@@ -193,12 +192,16 @@ async function bootstrap() {
     exposedHeaders: ['X-User-Id', 'X-Auth-Token'],
   });
   app.setGlobalPrefix('api');
-  // 全局输入校验（代码审查 P1）：启用 transform；whitelist 保持 false —— 现有控制器
-  // 多直接消费请求体、尚无带装饰器的 DTO，开启 whitelist 会误删字段。后续应给关键
-  // 端点补 class-validator DTO 并开启 whitelist。transform 让类型化参数/查询自动转换。
-  app.useGlobalPipes(
-    new ValidationPipe({ transform: true, whitelist: false, transformOptions: { enableImplicitConversion: true } }),
-  );
+  // 全局输入校验：**当前不启用**（D-051）。
+  //   P1 曾加 `new ValidationPipe({ transform: true, whitelist: false,
+  //   transformOptions: { enableImplicitConversion: true } })`，实测有两条硬伤：
+  //   ① ValidationPipe 启动时强制 require `class-validator`，而本项目**没装也没用**
+  //      （全仓没有任何带装饰器的 DTO）⇒ Nest 启动直接抛
+  //      `PackageLoader: The "class-validator" package is missing` ⇒ 服务起不来；
+  //   ② `enableImplicitConversion` 会按 TS 声明类型强制转换参数（例如把 `?limit=abc`
+  //      这类原样字符串变成 NaN、把 "0" 变成 false），**改变现有端点行为**，并非零变更。
+  //   真要上校验，正确顺序是：先 `pnpm add class-validator class-transformer` +
+  //   逐个端点补 DTO 与装饰器，验证通过后再开 whitelist；届时务必先跑一遍回归。
   // P2 安全：JSON / urlencoded body 上限从 50mb 下调到 5mb。
   // 单请求体积过大叠加并发会放大内存压力（DoS 面）；文件上传走 multipart
   // （multer 单独 20mb 限制），不受此限。AI 聊天内联 data: 图片极少见（前端走 TOS URL）。

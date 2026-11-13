@@ -1,8 +1,8 @@
 import { Controller, Get } from '@nestjs/common';
-import { AppService } from '@/app.service';
-import { cacheBackendInfo } from '@/shared/cache-store';
-import { authTokenEnabled } from '@/shared/auth-token';
-import { strictTokenEnabled } from '@/shared/user-context';
+import { AppService } from './app.service';
+import { cacheBackendInfo } from './shared/cache-store';
+import { authTokenEnabled } from './shared/auth-token';
+import { strictTokenEnabled } from './shared/user-context';
 
 @Controller()
 export class AppController {

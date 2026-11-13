@@ -124,6 +124,49 @@ m.test('server 构建产物存在且非空', async (c) => {
   c.ok(fs.existsSync(path.join(d, 'main.js')), 'server/dist/main.js 缺失')
 })
 
+m.test('🔴 服务端禁止 `@/` 路径别名（否则构建产物起不来）', async (c) => {
+  // 2026-11-13 实测踩坑（D-051）：`tsconfig.json` 里有 `paths: { "@/*": ["./src/*"] }`，
+  // 但 `nest build` 走的是 tsc，**tsc 不会把 paths 别名改写成相对路径**，
+  // 于是 dist 里留下 `require("@/app.service")` —— `node dist/main` 直接
+  // `MODULE_NOT_FOUND` 起不来。而生产 dist 是别名重构**之前**构建的（全是相对路径），
+  // 所以线上一直正常，坑被掩盖到第一次「本地构建→上传 dist」才暴露。
+  // 结论：服务端源码一律用相对路径；本闸门钉住，防止再有人图方便写 `@/`。
+  const problems = []
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) { walk(p); continue }
+      if (!e.name.endsWith('.ts') || e.name.endsWith('.d.ts')) continue
+      const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/)
+      lines.forEach((ln, i) => {
+        const t = ln.trim()
+        if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) return
+        if (/from\s+'@\//.test(ln) || /require\(\s*'@\//.test(ln)) {
+          problems.push(`${path.relative(SERVER, p)}:${i + 1}`)
+        }
+      })
+    }
+  }
+  walk(path.join(SERVER, 'src'))
+  c.eq(problems.length, 0, `以下源码用了 @/ 别名：${problems.slice(0, 8).join(', ')}`)
+
+  // 产物侧再兜一道：即便源码干净，也要确认 build 后没有别名残留。
+  const dist = path.join(SERVER, 'dist')
+  if (fs.existsSync(dist)) {
+    const leftover = []
+    const walkDist = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name)
+        if (e.isDirectory()) { walkDist(p); continue }
+        if (!e.name.endsWith('.js')) continue
+        if (fs.readFileSync(p, 'utf8').includes('require("@/')) leftover.push(path.relative(SERVER, p))
+      }
+    }
+    walkDist(dist)
+    c.eq(leftover.length, 0, `构建产物仍含 @/ 引用：${leftover.slice(0, 8).join(', ')}`)
+  }
+})
+
 m.test('上传名判机器名：随机串不落成标题', async (c) => {
   // 2026-11-01 在思傅真实账户里发现一条标题是
   // `GkljMPoGQP2a8e0a7d51647c149a1c87f1a132b49ef1.jpg` —— 初版守卫只认
