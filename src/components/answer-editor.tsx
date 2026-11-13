@@ -6,6 +6,8 @@ import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
+// P-028 / D-045：参考例题卡片上的知识点讲解标签（只展示、默认关、事先声明常驻）
+import CurriculumTags from '@/components/curriculum-tags'
 import { Textarea } from '@/components/ui/textarea'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
@@ -658,6 +660,12 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                 {candidate?.reference_disclaimer || REFERENCE_DISCLAIMER}
               </Text>
             </View>
+          ) : null}
+          {/* P-028 / D-045：知识点讲解标签。只在有参考例题时挂载，不扩大面客范围；
+              标签按用户当前题干字面匹配，只展示不排序，事先声明常驻且默认关。
+              主检索 result 结构零改动 ⇒ CACHE_VERSION 保持 v14。 */}
+          {hasRefs ? (
+            <CurriculumTags stem={item?.content?.question || item?.title || ''} />
           ) : null}
           {/* P-015 / D-018：参考例题。题目与解题过程均来自资料库里**同一道**原题，
               服务端同源配对、带来源位置；这里只展示，不写进本题答案、不提供采纳。 */}

@@ -20,10 +20,13 @@ import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview, GradeScope,
   SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource,
 } from '@/types'
+// P-028 / D-045：知识点讲解标签只读字典（Q1② 独立端点，主 result 零改动）
+import type { CurriculumTopicsPayload, CurriculumTopicRow } from '@/lib/curriculum-tags'
 
 export type {
   TimelineItem, Subject, LibraryDoc, DocItem, Overview, Paged, ReviewSummary, ReviewPlan, GradeScope,
 }
+export type { CurriculumTopicsPayload, CurriculumTopicRow }
 export { getUserId } from '@/services/net'
 
 /** 构造带身份头的请求头（首次为匿名，后端回传 X-User-Id 后续用） */
@@ -314,6 +317,20 @@ export async function uploadImage(
 // ============================================================
 export function fetchSubjects() {
   return unwrap<Subject[]>(Network.request({ url: '/api/subjects', method: 'GET', header: authHeaders() }))
+}
+
+/**
+ * P-028 / D-045 · Q1②：拉取国家课标维度表字典（只读）。
+ *
+ * 🔴 只在用户打开「知识点提示」开关时才调用；主检索 result 结构零改动，
+ *    `CACHE_VERSION` 保持 v14。服务端表未上生产时返回 `available:false`，
+ *    前端据此不渲染标签，不抛错、不 toast 打扰。
+ * 🔴 请求走 `authHeaders()` ⇒ 带 `X-Auth-Token`；端点**刻意不在 PUBLIC_ROUTES**。
+ */
+export function fetchCurriculumTopics() {
+  return unwrap<CurriculumTopicsPayload>(
+    Network.request({ url: '/api/curriculum/topics', method: 'GET', header: authHeaders() }),
+  )
 }
 
 export function createSubject(payload: { name: string; color?: string; sort_order?: number }) {

@@ -12,6 +12,8 @@ import { UserContextMiddleware } from './shared/user-context'
 // 业务模块（v4：统一 timeline）
 import { AuthModule } from './auth/auth.module'
 import { SubjectsModule } from './subjects/subjects.module'
+// P-028 / D-045：知识点讲解标签只读字典端点（Q1② 路线，主 result 零改动）
+import { CurriculumModule } from './curriculum/curriculum.module'
 import { TimelineModule } from './timeline/timeline.module'
 import { LibraryModule } from './library/library.module'
 import { UploadModule } from './upload/upload.module'
@@ -41,6 +43,7 @@ import { JobsModule } from './jobs/jobs.module'
     SettingsModule, // 用户设置：AI 外发开关（R-合规-02）
     AuthModule,
     SubjectsModule,
+    CurriculumModule, // P-028 / D-045：GET /api/curriculum/topics（只读、fail-closed）
     TimelineModule,
     LibraryModule,
     UploadModule,
