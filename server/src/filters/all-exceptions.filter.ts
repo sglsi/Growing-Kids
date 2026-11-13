@@ -49,10 +49,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const req = ctx.getRequest<Request>();
     const res = ctx.getResponse<Response>();
 
-    const status =
-      exception instanceof HttpException
-        ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+    const status = this.statusOf(exception);
 
     // 4xx：业务正常返回（参数错误/未登录/配额超限等）——不落盘，但响应仍要由本过滤器发。
     // ⚠️ 曾经在这里提前 return（以为「交给 Nest 默认行为」），但 useGlobalFilters
@@ -82,6 +79,24 @@ export class AllExceptionsFilter implements ExceptionFilter {
         error: exception instanceof HttpException ? exception.name.replace('Exception', '') : 'Internal Server Error',
       });
     }
+  }
+
+  /**
+   * 取响应状态码。
+   *
+   * 🔴 D-051：不能只认 `HttpException`。Express/body-parser 这类**非 Nest 异常**
+   * 自带 `status`/`statusCode`（如请求体超限的 `PayloadTooLargeError` 是 413、
+   * 非法 JSON 的 `SyntaxError` 是 400）。旧实现一律当 500：既不告诉调用方真实原因，
+   * 又把客户端错误写进 error-YYYY-MM-DD.log 污染日志、误导排障。
+   * 故：先认 HttpException，再认普通异常的 4xx `status`，其余才回落 500。
+   */
+  private statusOf(exception: unknown): number {
+    if (exception instanceof HttpException) return exception.getStatus();
+    const raw = (exception as { status?: unknown; statusCode?: unknown } | null) || {};
+    for (const v of [raw.status, raw.statusCode]) {
+      if (typeof v === 'number' && v >= 400 && v <= 599) return v;
+    }
+    return HttpStatus.INTERNAL_SERVER_ERROR;
   }
 
   private messageOf(e: unknown): string {
