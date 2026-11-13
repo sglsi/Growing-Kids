@@ -21,7 +21,7 @@ WITH bad AS (
   FROM question_objects
   WHERE btrim(stem_text) !~ '[一-龥]'
     AND btrim(stem_text) !~ '[a-zA-Z]'
-    AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
+    AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
 )
 SELECT
   (SELECT count(*) FROM question_objects)                                   AS total_objects,
@@ -37,7 +37,7 @@ WITH bad AS (
   FROM question_objects
   WHERE btrim(stem_text) !~ '[一-龥]'
     AND btrim(stem_text) !~ '[a-zA-Z]'
-    AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
+    AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
   GROUP BY 1
 )
 SELECT source_type, n, round(100.0 * n / SUM(n) OVER (), 2) AS pct_of_hits
@@ -52,7 +52,7 @@ SELECT
 FROM question_objects
 WHERE btrim(stem_text) !~ '[一-龥]'
   AND btrim(stem_text) !~ '[a-zA-Z]'
-  AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
+  AND btrim(stem_text) ~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$'
 ORDER BY md5(id)
 LIMIT 30;
 
@@ -61,4 +61,4 @@ SELECT count(*) AS excluded_as_encoding_broken
 FROM question_objects
 WHERE btrim(stem_text) !~ '[一-龥]'
   AND btrim(stem_text) !~ '[a-zA-Z]'
-  AND btrim(stem_text) !~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$';
+  AND btrim(stem_text) !~ '^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$';

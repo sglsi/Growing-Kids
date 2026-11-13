@@ -63,7 +63,9 @@ const LIMIT = Number(arg('--limit', '0')) || 0
 /** 与 measure-object-meaningless.sql / isStemMeaningless() 同口径（M45 A5 守漂移） */
 const RE_NO_CJK = String.raw`[一-龥]`
 const RE_NO_LATIN = String.raw`[a-zA-Z]`
-const RE_ALLOWED_ONLY = String.raw`^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$`
+// D-053：补全角句点 `．`(U+FF0E)——QUESTION_START 认 `N．` 作题号，旧白名单漏收，
+// 使 `1．` 这类纯题号空壳逃过标记。与 build.mjs / measure sql 三处必须逐字同口径（M45 A5）。
+const RE_ALLOWED_ONLY = String.raw`^[[:space:]0-9.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$`
 const REASON = '题干无实义（纯题号/纯数值碎片），切题边界不可信'
 
 const WHERE_HIT = `
