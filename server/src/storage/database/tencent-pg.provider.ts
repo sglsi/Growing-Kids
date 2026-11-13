@@ -21,9 +21,12 @@ export class TencentPgDbProvider implements DbProvider {
     const url = process.env.TENCENT_PG_URL;
     if (!url) throw new Error('TENCENT_PG_URL is not set');
     const ssl = process.env.TENCENT_PG_SSL !== 'false';
+    // P3 安全：默认校验证书（rejectUnauthorized=true），防中间人；
+    // 仅在显式 TENCENT_PG_SSL_REJECT=0 时降级（自签证书/应急连通性排查）。
+    const rejectCert = process.env.TENCENT_PG_SSL_REJECT !== '0';
     this.pool = new Pool({
       connectionString: url,
-      ssl: ssl ? { rejectUnauthorized: false } : false,
+      ssl: ssl ? { rejectUnauthorized: rejectCert } : false,
       max: Number(process.env.TENCENT_PG_POOL_MAX ?? 5),
     });
     return this.pool;

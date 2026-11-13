@@ -3,7 +3,9 @@ import {
   UploadedFile, BadRequestException, HttpException, HttpStatus,
 } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
-import { memoryStorage } from 'multer'
+import { diskStorage } from 'multer'
+import * as os from 'os'
+import * as fs from 'fs'
 import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
 import { sha256 } from '../storage/image-pipeline'
@@ -40,6 +42,50 @@ function decodeUploadFileName(raw: string): string {
   return s.trim()
 }
 
+/**
+ * 按魔数识别真实文件类型（与 storage.controller 的 MIME 映射口径保持一致）。
+ * 返回标准 MIME，无法识别返回 null。目标：拦截 exe/脚本/HTML 等危险或无关类型，
+ * 防存储滥用与潜在的 XSS 载体（未知扩展名经 serveFile 落为 octet-stream，仍应源头拒绝）。
+ */
+function detectFileType(buf: Buffer): string | null {
+  if (!buf || buf.length < 12) return null
+  const sig = (b: number[]) => b.every((x, i) => buf[i] === x)
+  if (sig([0x89, 0x50, 0x4e, 0x47])) return 'image/png'
+  if (sig([0xff, 0xd8, 0xff])) return 'image/jpeg'
+  if (sig([0x47, 0x49, 0x46, 0x38])) return 'image/gif' // GIF8
+  if (sig([0x42, 0x4d])) return 'image/bmp'
+  if (sig([0x49, 0x49, 0x2a, 0x00]) || sig([0x4d, 0x4d, 0x00, 0x2a])) return 'image/tiff'
+  if (sig([0x25, 0x50, 0x44, 0x46])) return 'application/pdf' // %PDF
+  if (sig([0x50, 0x4b, 0x03, 0x04])) return 'application/docx' // zip：资料库仅收 docx
+  if (sig([0x1a, 0x45, 0xdf, 0xa3])) return 'video/webm' // EBML：webm/mka
+  if (sig([0x49, 0x44, 0x33])) return 'audio/mpeg' // ID3→mp3
+  if (sig([0xff, 0xfb]) || sig([0xff, 0xf3]) || sig([0xff, 0xf2])) return 'audio/mpeg'
+  if (sig([0x4f, 0x67, 0x67, 0x53])) return 'audio/ogg'
+  if (sig([0x52, 0x49, 0x46, 0x46])) {
+    // RIFF 容器：WEBP / WAVE 接受，其余（AVI 等）拒绝
+    const sub = buf.slice(8, 12).toString('ascii')
+    if (sub === 'WEBP') return 'image/webp'
+    if (sub === 'WAVE') return 'audio/wav'
+    return null
+  }
+  if (buf.slice(4, 8).toString('ascii') === 'ftyp') {
+    // ISO BMFF：MP4 / MOV / M4A
+    const brand = buf.slice(8, 12).toString('ascii')
+    if (brand.startsWith('M4A') || brand.startsWith('M4V')) return 'audio/mp4'
+    return 'video/mp4'
+  }
+  return null
+}
+
+function assertAllowedFileType(buffer: Buffer): void {
+  const t = detectFileType(buffer)
+  if (!t) {
+    throw new BadRequestException(
+      '不支持的文件类型：仅允许图片(PNG/JPEG/GIF/WebP/BMP/TIFF)、PDF、Word(docx)、常见音频与视频',
+    )
+  }
+}
+
 @Controller('upload')
 export class UploadController {
   constructor(
@@ -54,7 +100,13 @@ export class UploadController {
   @HttpCode(200)
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: memoryStorage(),
+      // P2 性能/安全：改 diskStorage —— 大文件先落临时盘再读入，避免 20MB 全量缓冲进
+      // 进程内存（并发上传叠无频控曾是内存 DoS 面）。读入后即删临时文件防磁盘堆积。
+      storage: diskStorage({
+        destination: os.tmpdir(),
+        filename: (_req, _file, cb) =>
+          cb(null, `gk-upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+      }),
       limits: { fileSize: 20 * 1024 * 1024 },
     }),
   )
@@ -65,14 +117,21 @@ export class UploadController {
     }
     let buffer: Buffer
     if (file.buffer) {
+      // diskStorage 下不会走此分支，保留以兼容潜在的其他 storage 策略
       buffer = file.buffer
     } else if (file.path) {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require('fs')
-      buffer = await fs.promises.readFile(file.path)
+      try {
+        buffer = await fs.promises.readFile(file.path)
+      } finally {
+        // 读入后立即删除临时文件，避免磁盘堆积（diskStorage 不会自动清理）
+        await fs.promises.unlink(file.path).catch(() => {})
+      }
     } else {
       throw new BadRequestException('未接收到文件内容')
     }
+
+    // 文件类型校验：按魔数识别，拒绝可执行文件/脚本/HTML 等非预期类型（防存储滥用与 XSS 载体）
+    assertAllowedFileType(buffer)
 
     const nameParts = file.originalname.split('.')
     const ext = (nameParts.length > 1 ? nameParts.pop()! : 'jpg').toLowerCase()

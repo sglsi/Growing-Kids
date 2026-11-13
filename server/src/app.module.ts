@@ -1,7 +1,9 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common'
+import { APP_GUARD } from '@nestjs/core'
 import { ScheduleModule } from '@nestjs/schedule'
 import { AppController } from './app.controller'
 import { AppService } from './app.service'
+import { ThrottleGuard } from './shared/throttle.guard'
 
 // 基础设施
 import { StorageModule } from './storage/storage.module'
@@ -64,7 +66,11 @@ import { JobsModule } from './jobs/jobs.module'
     JobsModule, // 异步任务（R-上线-01：长任务提交+轮询，绕开微信 60s 超时天花板）
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // 全局速率限制（代码审查 P1）：按用户/IP 限流，放行 /api/health
+    { provide: APP_GUARD, useClass: ThrottleGuard },
+  ],
 })
 export class AppModule implements NestModule {
   // 全站注入用户上下文（匿名自动创建 / 已登录按 header 识别）

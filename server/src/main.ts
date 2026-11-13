@@ -40,6 +40,7 @@ import * as fs from 'fs';
 }
 
 import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from '@/app.module';
 import { AppController } from '@/app.controller';
 import * as express from 'express';
@@ -75,6 +76,35 @@ async function bootstrap() {
   // 0. 接管 console.* → 同时落盘 server/logs/app-YYYY-MM-DD.log（保留 7 天）
   //    必须早于 NestFactory.create：否则模块初始化阶段的日志抓不到。
   installLogTee();
+
+  // 0.1 安全启动闸门（代码审查 P0）：AUTH_TOKEN_SECRET 缺失 ⇒ 令牌无法签发/验签，
+  // 严格令牌模式退回「信任裸 X-User-Id」，任何人都可伪造身份越权(IDOR)。
+  //   - 始终高亮告警；
+  //   - 生产环境（NODE_ENV=production）默认拒绝以不安全配置启动，
+  //     除非显式置 ALLOW_INSECURE_AUTH=1（仅应急，会再次告警）。
+  if (!process.env.AUTH_TOKEN_SECRET) {
+    const prod = process.env.NODE_ENV === 'production'
+    const msg =
+      '[SECURITY] ⚠️ AUTH_TOKEN_SECRET 未配置：身份令牌无法签发/验签，严格令牌模式退回「信任裸 X-User-Id」，存在越权(IDOR)风险。'
+    if (prod && process.env.ALLOW_INSECURE_AUTH !== '1') {
+      console.error(
+        msg + ' 生产环境已禁止以不安全配置启动。请在 .env.secrets 配置 AUTH_TOKEN_SECRET（≥16 位）后重启。',
+      )
+      process.exit(1)
+    }
+    console.error(msg + (prod ? '（已用 ALLOW_INSECURE_AUTH=1 强行启动，仅应急！）' : ' 请尽快配置。'))
+  }
+
+  // 0.2 多实例缓存一致性告警（P2 性能）：本项目内存缓存（角色/AI 开关/用户 flags）
+  // 为进程内 Map，代码已支持 REDIS_URL 共享。单实例无虞；一旦水平扩展（多副本）
+  // 却未配 REDIS_URL，各实例缓存独立、回源各自打 DB，且配置变更最多 60s 才在某实例
+  // 生效。生产若计划多副本，务必配置 REDIS_URL（并装 ioredis）。
+  if (process.env.NODE_ENV === 'production' && !process.env.REDIS_URL) {
+    console.warn(
+      '[SECURITY/PERF] 生产环境未配置 REDIS_URL：当前为进程内缓存，水平扩展多副本会导致缓存不一致与回源放大。单实例可忽略；多副本前请配置 REDIS_URL。',
+    )
+  }
+
   const app = await NestFactory.create(AppModule);
 
   // 0.5 API 版本前缀：`/api/v2/xxx` → `/api/xxx`（OPS-18 R-工程-06）
@@ -117,18 +147,45 @@ async function bootstrap() {
     next();
   });
 
+  // 0.8 安全响应头（P3，轻量无新增依赖）：防 MIME 嗅探 / 点击劫持 /  referrer 泄露。
+  //   - 本服务是 API（响应多为 JSON）+ H5 扫码页后端；frame-ancestors/ X-Frame-Options
+  //     阻止把接口页面嵌进第三方 iframe 做点击劫持；default-src 'none' 收紧资源加载。
+  //   - 这些头打在 API 响应上，不影响前端 H5 站点自身的 CSP（H5 是独立源）。
+  app.use((_req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    );
+    next();
+  });
+
   // CORS 来源白名单：小程序端请求不带 Origin 头，同源策略对它无效；
   // 真正受约束的是 **H5 扫码登录页**（浏览器环境）。生产环境应在
-  // `CORS_ORIGINS` 里只放行该 H5 域名（逗号分隔），未配置时保持放开
-  // （本地开发与首次部署的默认行为不变，避免一改就断）。
+  // `CORS_ORIGINS` 里只放行该 H5 域名（逗号分隔）。
+  // P2 安全：凭据(credentials)仅在显式配置来源时才开启 —— 浏览器禁止
+  // `Access-Control-Allow-Credentials: true` 与通配/反射源共存，旧配置
+  // `origin:true + credentials:true` 既违反规范又构成「任意源可带凭据」隐患。
+  // 未配置 CORS_ORIGINS 时：反射请求来源但**不开凭据**（不破坏本地/H5 开发），
+  // 并高亮告警，提醒生产设白名单。
   const corsOrigins = (process.env.CORS_ORIGINS || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const corsCredentials = corsOrigins.length > 0;
+
+  if (!corsCredentials) {
+    console.warn(
+      '[SECURITY] CORS 未配置 CORS_ORIGINS：当前反射任意来源且不允许凭据。生产 H5 扫码页请在 CORS_ORIGINS 配置具体域名以收紧跨域。',
+    );
+  }
 
   app.enableCors({
     origin: corsOrigins.length ? corsOrigins : true,
-    credentials: true,
+    credentials: corsCredentials,
     // 允许前端读取身份回传头（跨域场景下非简单响应头必须显式暴露）：
     //  - X-User-Id：匿名建号回传（小程序不受同源策略限制，本来就能读到）
     //  - X-Auth-Token：每次响应滑动续签的令牌。⚠️ 曾漏配，导致 H5 扫码登录页
@@ -136,8 +193,17 @@ async function bootstrap() {
     exposedHeaders: ['X-User-Id', 'X-Auth-Token'],
   });
   app.setGlobalPrefix('api');
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  // 全局输入校验（代码审查 P1）：启用 transform；whitelist 保持 false —— 现有控制器
+  // 多直接消费请求体、尚无带装饰器的 DTO，开启 whitelist 会误删字段。后续应给关键
+  // 端点补 class-validator DTO 并开启 whitelist。transform 让类型化参数/查询自动转换。
+  app.useGlobalPipes(
+    new ValidationPipe({ transform: true, whitelist: false, transformOptions: { enableImplicitConversion: true } }),
+  );
+  // P2 安全：JSON / urlencoded body 上限从 50mb 下调到 5mb。
+  // 单请求体积过大叠加并发会放大内存压力（DoS 面）；文件上传走 multipart
+  // （multer 单独 20mb 限制），不受此限。AI 聊天内联 data: 图片极少见（前端走 TOS URL）。
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
   // 全局拦截器：统一将 POST 请求的 201 状态码改为 200
   app.useGlobalInterceptors(new HttpStatusInterceptor());

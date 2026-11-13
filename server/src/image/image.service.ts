@@ -9,6 +9,7 @@ import * as https from 'https'
 import sharp from 'sharp'
 import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
+import { assertSafeHttpUrl } from '../shared/ssrf-guard'
 import { TimelineService } from '../timeline/timeline.service'
 import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource, RecropWrongDto, RecropWrongResult, BoxFeedback, PageBox, PageTextSegment, OcrPageDto, OcrPageResult } from './image.types'
 import {
@@ -328,7 +329,9 @@ export class ImageService {
     }
   }
 
-  private download(url: string, forwardHeaders?: Record<string, string>): Promise<Buffer> {
+  private async download(url: string, forwardHeaders?: Record<string, string>): Promise<Buffer> {
+    // SSRF 防护：拦截指向内网 / 链路本地 / 回环的地址（含每一跳重定向）
+    await assertSafeHttpUrl(url)
     return new Promise((resolve, reject) => {
       // 地址形态预检：历史上有调用方把对象 key（`tmp/…`）或开发者工具临时路径
       // （`http://tmp/wx…`）当图片 URL 传进来，此时会被当成主机名去 DNS 解析，
@@ -427,9 +430,12 @@ export class ImageService {
     // 兜底：裸对象 key —— 直接按 key 取，别再拿去当主机名解析
     const bare = ImageService.asStorageKey(url)
     if (bare) {
-      const buf = await this.storageService.readLocalObject(bare)
-      if (buf) return buf
-      return this.download(await this.storageService.getPublicUrl(bare), forwardHeaders)
+      // 裸对象 key 直接按 key 读盘/读对象存储（local 读盘、supabase 服务端 download），
+      // 不再绕一圈 HTTP 回 127.0.0.1：既修「容器回环地址打不通」的故障，也消除 SSRF 面
+      //（download 从此只接真正的公网地址，loopback 由 assertSafeHttpUrl 一并拦截）。
+      const buf = await this.storageService.readObject(bare)
+      if (!buf) throw new Error(`读取对象失败（${bare}）`)
+      return buf
     }
     return this.download(url, forwardHeaders)
   }
