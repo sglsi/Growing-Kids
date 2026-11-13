@@ -94,6 +94,43 @@ const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex'
 const stripNul = (s) => (s || '').replace(/\u0000/g, '')
 
 /**
+ * 题干是否「无实义」：切题边界把纯题号 / 纯数值碎片当成了题干。
+ *
+ * 为什么必须有这道闸（D-047 只读实测，2026-11-13）：生产库 656,898 个对象里，
+ * **12,938 条题干只有一个题号**（`19.` / `28.` / `63.`），**30,556 条连一个汉字
+ * 或拉丁字母都没有**（`5.50` / `0.307` / `0.231/10` / `30.（1）`）。抽样 24 条
+ * 无一例外是公式与答案区的数字碎片被题号边界误切。
+ * `stem_text` 非空 ⇒ 现有三道闸（空题干 / 超长 / 解析串题号）一条都拦不住；
+ * `validateStoredObject()` 也只查「非空」，于是它们一路以 `link_status='ok'`
+ * 入库、占用检索候选位。
+ *
+ * 判据刻意取「有没有实义字符」而不是「长度」：
+ *   - 长度阈值会误杀短真题干（「求 x 的值」只有 6 字）；
+ *   - 「是否含汉字或拉丁字母」是**确定性**判据：不含的必然不是一道题。
+ * 边界（本条**不**覆盖，别据此宣称已解决）：
+ *   - 纯英文题（`1. A`）、含字母公式（`x²+2x+1=0`）→ 有字母，不拦；
+ *   - 含汉字但其实是答案行（`3、做功 内能 10 20`）→ 有汉字，不拦（另一条风险）。
+ */
+const STEM_MEANINGFUL_RE = /[\u4e00-\u9fa5\u3400-\u4dbfa-zA-Z]/
+/**
+ * 第③条：整串只由「无害字符」构成才叫碎片。白名单里只放空白/数字/常用标点/数学符号。
+ *
+ * 为什么要这一步、而不是「不含汉字字母就算碎片」：实测有 5,610 条 stem_text 含
+ * 编码损坏产生的替换字符与 Latin-1 残字（GBK 被误当 latin1 解码），原文其实是
+ * 真题目（知识／文化／信息交流…）。它们同样不含汉字与拉丁字母，只按①②判会被
+ * 当成碎片拒掉，把「编码缺陷」错误地伪装成「切题缺陷」。白名单把它们排除在外。
+ */
+const STEM_ALLOWED_ONLY_RE = /^[0-9\s.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$/
+// 刻意不 export：本脚本顶层直接执行，被 import 会连带跑一次构建。
+// 验证走 `--from-fixture` 黑盒（M45），不引入跨文件副作用。
+function isStemMeaningless(stem) {
+  const t = stripNul(String(stem || '')).trim()
+  if (!t) return false
+  if (STEM_MEANINGFUL_RE.test(t)) return false
+  return STEM_ALLOWED_ONLY_RE.test(t)
+}
+
+/**
  * 把一份正文切成结构化对象行。
  * 指纹只吃「内容 + 位置 + 规则版本」，重跑必须得同一个值。
  */
@@ -133,6 +170,7 @@ function buildRows(text, meta, maxChars = 0) {
     // 且可按 object_fingerprint 定点排查 / 人工改 link_status。
     let reason = ''
     if (!stem.trim()) reason = '题干为空'
+    else if (isStemMeaningless(stem)) reason = '题干无实义（纯题号/纯数值碎片），切题边界不可信'
     else if (stem.length + solution.length > MAX_OBJECT_CHARS) reason = '对象超长，题号边界可能没切开'
     else if (o.hasSolution && Q.solutionBoundaryBroken(solution)) reason = '解析段混入下一题题号'
     if (reason) {

@@ -1,0 +1,34 @@
+{
+  "meta": {
+    "origin": "D-047 构建侧第四道闸验证（人造最小样本，非生产语料）",
+    "note": "只测「题干是否含实义字符」这一条闸门，不涉及切分规则本身；文字为人工构造，不改动任何生产语料",
+    "purpose": "M45：纯题号/纯数值碎片必须 rejected，含汉字或字母的题干必须 ok"
+  },
+  "documents": [
+    {
+      "id": "gate-pure-mark",
+      "name": "纯题号碎片（生产实测形态：19. / 20. / 28.）",
+      "text": "19.\n20.\n28.\n"
+    },
+    {
+      "id": "gate-pure-number",
+      "name": "纯数值碎片（生产实测形态：0.307 / 5.50 / 0.231/10）",
+      "text": "0.307\n5.50\n0.231/10\n"
+    },
+    {
+      "id": "gate-normal-stem",
+      "name": "正常题目（含汉字，必须放行）",
+      "text": "1、如图，在△ABC 中，AB=AC=5，BC=6，求△ABC 的面积。\n"
+    },
+    {
+      "id": "gate-latin-stem",
+      "name": "纯英文题干（含拉丁字母，必须放行）",
+      "text": "1. Choose the correct answer: where is the library?\n"
+    },
+    {
+      "id": "gate-mojibake-stem",
+      "name": "编码损坏题干（生产实测 5,610 条：GBK 乱码，原文是真题目，必须放行）",
+      "text": "2.3 \ufffd\ufffd\ufffd\ufffd \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\n"
+    }
+  ]
+}
