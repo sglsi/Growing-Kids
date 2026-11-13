@@ -1377,3 +1377,76 @@
 | **门禁** | M13 **10/10**、`verify:gate` **37/37**（M12 13、M13 10、M16 4、M18 11）、M45/M46 RC=0、`build` RC=0。 |
 | 🔴 **仍未部署** | 本节全部为**本地**验证。生产仍跑旧 dist（别名重构前 + 无 P0–P3）。发货需把整份新 dist 上传（这是**第一次**具备可运行性），属写生产，须思傅单独拍板；且换前必须核对 `dist` 里 **`curriculum/*`、`shared/curriculum-topics.js`、`shared/anon-bootstrap-guard.js` 等仍锁功能是否要一并带上**（它们现在是本地有、生产无）。 |
 | **不宣称** | 不宣称「安全加固已上线」——**一行代码都还没进生产**。本轮只声称：这批改动原本会因两处启动缺陷导致生产不可用，现已修好并通过本地冒烟；构建链路从此可正常发货。 |
+
+---
+
+## D-052 · 选择 2：整份 dist 首次发货（curriculum 一起上），并查出「8080 假健康探针」（2026-11-13 23:31–23:50，思傅「选择2」）
+
+> 授权范围＝D-051 末尾选项 ②「整份发，curriculum 一起上」。⚠️ **不等于**解锁 `0032` 上生产：那是 G8 合规门（D-045 判定未过：seed 720 行 `source_url` 全转载 / 0 官方直链、教材〔2025〕1号依申请公开），属另一把独立的锁，未获授权，本轮**未做**。
+
+| 步 | 实绩与复核 |
+|---|---|
+| **发货前尽调：清单分类** | 全量 `dist/**` sha256 清单比对：本地 566 / 生产 544 文件。**仅本地有 24**（`curriculum/*` 12、`shared/{anon-bootstrap-guard,curriculum-topics,ssrf-guard,throttle.guard}.{js,d.ts,js.map}` 12）；**仅生产有 2**（D-050 留的 `*.bak-20261113-204119` 回滚文件）；**同名内容不同 28**（多数是 `.map`/`.d.ts`/`tsbuildinfo`）。`shared/question-match.js` 与 `answer-search.service.js` **不在差异里** ⇒ D-050 换的两个文件本地与生产已逐字一致。 |
+| **9 个运行时 js 逐个 diff** | 全部归属已知改动：`app.module`（ThrottleGuard APP_GUARD + CurriculumModule 注册）、`main`（P0 闸门 + P3 响应头 + CORS）、`auth.controller`（匿名建号拒绝 429）、`all-exceptions.filter`（413）、`image.service`（SSRF + `readObject`）、`user-context` / `users.service`（建号闸门）、`tencent-pg.provider`（TLS）、`upload.controller`（diskStorage + 魔数白名单）。无半截功能。 |
+| **`image.service` 那处非安全加固改动** | `readLocalObject` + 回源下载 → `readObject`。查实 `storage.service.ts:187` 的 `readObject` 是前者**超集**（local 驱动下完全等价），去掉的是源码注释里明确记载「托管环境常 404」的回源兜底 ⇒ 行为不退化。属 21:13 的历史未发货改动，随整份发一并带上。 |
+| 🔴 **P0 启动闸门实证** | 整份换 `main.js` 后闸门**首次真正生效**。`dotenv` 在模块顶层 block 执行、`bootstrap()` 在第 74 行、闸门在第 84 行 ⇒ 顺序安全。但 `/proc/<pid>/environ` 只反映**启动时**环境，看不到进程内 dotenv 注入，不能据此判断。故在生产实跑一段复刻加载顺序的脚本：`NODE_ENV=production`、`AUTH_TOKEN_SECRET len 64` ⇒ **放行**。`DATABASE_URL` / `REDIS_URL` 为空是既有事实（生产走 PostgREST via Caddy，不直连 PG）。 |
+| **curriculum 缺表不会挂** | `curriculum.service.ts` 是**设计内 fail-closed**：表不存在 / 查询失败 / 超行数 / 行结构不全，一律返回 `available:false` + 空数组，不抛 500、不进检索链路、不改 `CACHE_VERSION`。生产 `to_regclass('curriculum_topics')` 为空 ⇒ 端点走降级。**0032 未上生产**（803 行幂等 INSERT，但 G8 未过）。 |
+| **备份** | 23:43:28 成功：25 表 / 403,156 行 / gzip 209,647.7 KB，`gk-db-20261113-234328.gkbk`，**读回自检通过**，84.5s。 |
+| **整份替换** | 旧 dist 整体 `mv` 为 `dist.bak-20261113-234502`（544 文件，内含 3 个 `.bak`，全部保留）→ 解压新 dist 566 文件 → `chown -R gk:gk`。包上传前后 sha256 `886e52a0…` 一致。 |
+| ⚠️ **清单复比第一次是假阳性** | 直接 `diff` 两个有序清单报一堆差异，逐条看全是**同一 sha+路径在两侧成对出现**：Windows Git Bash 与 Linux 的 `sort` locale 不同，`-`(0x2D) 与 `.`(0x2E) 排序位置不一样。改用**集合比对**：566/566、仅期望 0、仅生产 0、内容不同 0 ⇒ **逐字一致**才放行重启。 |
+| **重启与验包** | `systemctl restart gk-api` → active，`Nest application successfully started`，34 模块全部 initialized，无 ERROR。特征串：`qobj-2`、`CACHE_VERSION v15`、`curriculum.service.js` 存在、`require("@/` 残留 0、4 个安全守卫齐全。 |
+| 🔴 **发现：8080 是「假健康探针」（长期误判）** | `curl 127.0.0.1:8080/api/health` 一直返回 200，但响应头只有 `Server: Caddy` + `Content-Length: 0`、连 `Content-Type` 都没有。查 Caddyfile：`http://127.0.0.1:8080` 站点块**只有** `handle_path /rest/v1/*` 转 PostgREST，其余路径无匹配 handler ⇒ Caddy 回空 200，**根本没到 Nest**。此前所有「生产健康 200、安全头缺失」的判断都建立在这个假探针上。**真后端是 `127.0.0.1:3000`**，实打有 5 个 P3 头（nosniff / DENY / no-referrer / DNS-Prefetch off / CSP）。 |
+| ⚠️ **待办：对外站点响应头重复冲突** | `curl 127.0.0.1/api/health`（Caddy :80 站点块）同时返回 `X-Frame-Options: SAMEORIGIN` 与 `DENY`、`Referrer-Policy` 两个值、`X-Content-Type-Options` 两条 —— Caddyfile 两个站点块的 `header {}` 指令与新后端头叠加。浏览器对重复头取值不确定。**未改 Caddy 配置**（不擅自扩大变更面），登记待办。 |
+| **curriculum 端点** | `GET /api/curriculum/topics` 返回 200（非 500），符合 fail-closed 降级。⚠️ **不宣称 curriculum 已可用**：`0032` 未上生产 ⇒ `available:false`、前端不渲染标签。 |
+| **不宣称 / 仍锁** | 不宣称解锁了 G8、不宣称 curriculum 面客可用、不宣称任何检索效果。`strict=1`、第二层准入、T0 判定、G1–G8 发货、面客集成、`0032` 上生产**全部仍锁**。前端 `build:weapp` 未发版（本轮前端零改动）。 |
+
+---
+
+## D-053 · 题库整理：去除空题与重复题（2026-11-13 23:50–11-14 00:10，思傅「完成后对当前题库的内容进行整理」）
+
+> 授权＝「一是去除空题，二是去除重复的题目」。**判定层 `question-match.ts` 一行未动**，不 bump `OBJECT_ENGINE_VERSION` / `CACHE_VERSION`，全部通过 `link_status='rejected'` 标记完成（`validateStoredObject()` 第二条即排除，读侧零改动生效）。
+
+### 一、先诊断，不先动手
+
+| 项 | 实测（生产只读） |
+|---|---|
+| 题目相关表 | `question_objects` 615,370 / `question_inline_figures` 273,037 / `netdisk_files` 78,400 / `question_figures` 31,685 / `library_docs` 165 / `questions` 45 |
+| 整理前分布 | `qobj-2 ok 603,739` + `rejected 11,631`；20,584 份来源；`user_id` 仅 1 个 |
+| **空题：ok 中无汉字无字母** | **3,826 条**（`54．0` / `29．4 33.3` / `37．2` / `16、（1）①③④⑩…`），其中含全角句点 `．` 的 3,494 条、≤8 字 3,287 条、U+FFFD 乱码 2 条 |
+| 🔴 **空题根因** | **D-047 白名单能抓到 0 条**。`RE_ALLOWED_ONLY` 字符类收了 `。`、`、` 却**漏了 `．`(U+FF0E)**，而 `QUESTION_START` 恰恰把 `N．` 当题号标点 ⇒ `1．`/`2．` 这类纯题号空壳一律逃过第四道闸。补全 `．` 后命中 **3,316 条、其中乱码 0 条**（白名单仍挡住编码损坏题干）。 |
+| **重复（按 user+stem）** | 112,048 组 / **134,852 冗余**（占 ok 22.3%）；同来源内仅 5,073 组，跨来源 108,208 组 |
+| **重复主体不是「同一题存两遍」** | 短空壳（≤12 字）冗余仅 10,153（7.5%）；大头是 31–100 字 52,228、>100 字 58,929。重复最多的样本是「回答第Ⅰ卷时，选出每小题的答案后…」「本试卷分第Ⅰ卷…」等**答题卡/试卷模板说明**，在 18 份卷子里反复出现被切成题目。与 D-036「冗余 ≠ 重复题」结论一致。 |
+| 🔴 **去重口径必须收紧** | **51,671 组（58,434 冗余）同题干但解析不同** —— 那是同一道题的**不同解答**，删了会丢内容 ⇒ **一律保留**。只处理 `stem_text + solution_text` 都完全相同的 **61,524 组 / 79,449 冗余**。 |
+
+### 二、做法：标记排除，不物理删行
+
+`question_objects` 是**派生表**（`db-backup` 逐字跳过、可重建），且 `question_figures` / `question_inline_figures` 按 `(user_id, source_type, source_id, object_index)` 关联。物理删行会造成配图孤儿、破坏 `object_index`，且删了照样会被重建复活 ⇒ 改用 `link_status='rejected'`：可逆、指纹入参不含 `link_status`（M45 B4）不失配、读侧零改动生效。
+
+**防复活（这是"整理"能否算数的关键）**：
+- 空题：三处白名单同步补 `．`（`question-objects-build.mjs` / `question-objects-mark-meaningless.mjs` / `measure-object-meaningless.sql` 四处）⇒ 第四道闸在**构建期**就拦掉，重建不再产生。
+- 去重：`question-objects-build.mjs` 的 `--apply` 收尾新增 `dedupeAfterBuild()`，全量重建后自动跑同口径去重（限定 `APPLY && LIMIT === 0`，局部构建不碰别人的对象）。
+- **M47 新增 12 条断言**守两处判据逐字同口径、三处白名单同步、只标记不删行、护栏齐全、判定层零改动。
+
+新增 `server/scripts/question-objects-dedupe.mjs`：默认 dry-run、`--apply` 必须 `--i-have-backup`、命中超 10% 拒绝（本次 12.9% 须显式 `--force`）、分批 2000 且每批校验行数、复核归零、导出 id 清单可回滚。
+
+### 三、执行与独立复核
+
+| 步 | 实绩 |
+|---|---|
+| 空题 dry-run / APPLY | 命中 ok **3,316**、编码损坏排除 519（白名单生效）；2 批 + 复核归零。`ok 603,739 → 600,423` |
+| 去重 dry-run / APPLY | dry-run 命中 79,449；空题先标掉 502 个空壳重复 ⇒ APPLY 实际 **78,947**（40 批，清单重算覆盖）；复核归零 |
+| **最终态** | **615,370 行 = ok 521,476 + rejected 93,894**（去重 78,947 + 无实义 14,945 + 超长 2）。**总行数不变**（只标记不删行） |
+| 独立复核 6 项 | ① 空题仍 ok **0**；② 完全重复仍 ok **0**；③ **被去重组中「一条 ok 都不剩」的组数 0**（没有把整组题删光）；④ 数字闭合 `603739 − 3316 − 78947 = 521476` ✔；⑤ 配图三表精确行数 `31,685 / 273,037 / 7,286` **与整理前一致**；⑥ 抽样 8 条标记行全是真题目的重复副本 |
+| 读路径实证 | 用生产 `dist/shared/question-match.js` 实跑：`OBJECT_ENGINE_VERSION = qobj-2`；**ok 随机 300 条 → 可用 300/300**（拒绝原因分布为空）；**rejected 随机 100 条 → 读侧排除 100/100** |
+| 门禁 | M47 **12/12**、M45 9/9、M46 11/11、`verify:gate` **38/38**、`method:check` H1 26 / H2 143 / H3 2、`node --check` 三个脚本 RC=0 |
+| 回滚 | 两份 id 清单已归档 `backups/tidy-{meaningless,dedupe}-ids-20261113.json`（3,316 / 78,947 条，148K / 3.4M）；`--rollback <清单> --apply --i-have-backup` 按 `link_reason` 精确匹配恢复。⚠️ `question_objects` 派生表**不进备份**，回滚只靠清单，不靠 `.gkbk`。 |
+| 清理 | 远端 `/tmp` 15 个临时文件 + 2 个校验脚本删净；**保留** `dist.bak-20261113-234502`、11 份 `.gkbk`、两份回滚清单、`qobj2-rebuild.log`。 |
+
+### 四、不宣称与遗留
+
+- 🔴 **不宣称**命中提升 / 召回改善 / P95 改善 / 误判归零 / 所有用户可用。本条只声称：空题与完全重复对象不再占检索候选位，且读路径实证无异常。`review_events` **仍 0 行**，唯一够格的效果指标依旧无数据。
+- ⚠️ **510 条未处理**：ok 中「无汉字无字母」但不含 `．`、也不匹配白名单的 510 条（其中 U+FFFD 乱码 2 条，原文可能是真题目）。为避免误伤，本轮**不动**，登记待查。
+- ⚠️ **同题干不同解析的 51,671 组刻意保留**（不同解答有信息价值）。若思傅要求更激进的「按题干去重」，需另行拍板。
+- ⚠️ **`curriculum.service.ts` 注释过时**：仍写「不改 `CACHE_VERSION`（保持 v14）」，实际已是 v15（D-049）。**未改**——改注释会让 dist 与生产清单再次漂移，留给下次整份构建时一并带上。
+- ⚠️ **Caddy 响应头重复冲突**见 D-052，未改。
+- **D-049 的「15 份切题失效未修好」结论不变**；`strict=1`、第二层准入、T0 判定、`0032` 上生产、G1–G8 发货、面客集成**全部仍锁**。
