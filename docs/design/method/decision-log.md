@@ -1193,3 +1193,36 @@
 | **验证** | 本轮实测：`npm run method:check` **H1 26 处 / H2 140 处 / H3 2 处三条硬门全绿**；`node server/scripts/verify/modules/43-curriculum-topics.mjs` **RC=0**；`npm run verify:gate` **37/37 通过、失败 0**（16.8s）。全部文档改动带「命中 1 次」断言批量同步，追加块经逐行去重复核（无重复段）；项目记忆压缩至 **14,99x B**、8 章完整。新增唯一代码产物＝ `server/scripts/measure-t0-gate.sql`（纯 SELECT 判定探针）。 |
 | **待思傅** | ① 是否授权启动 3–5 份只读样张（S1–S9，另建 D 号）；② G8 逐科官方课标文本核对是否授权只读取证；③ 是否显式豁免 `P-028 Q5①`（否则实现继续锁）；④ `git push` 仍等明确指示（D-042 的推送授权只对那一次生效，本地另压 D-043 与本轮 commit）。 |
 | **不外推 / 不宣称** | 四算子全为**只读诊断读数**，不得作成功证据；不计算召回率/准确率，不宣称命中提升／修复有效／误判归零／图形全覆盖／所有用户可用；200 条盲测样本不外推全库、未参与调参或验收；`pg_stat` 旁证不作定论；T0 状态仍记「未过」，本判定只拆账、不放宽。 |
+
+
+
+---
+
+## D-045 · 三项授权：样张产图启动 / G8 只读取证 / 显式豁免 `P-028 Q5①`（2026-11-13 11:39，思傅「授权启动样张产图； 授权只读取证；豁免 Q5①，推进P-028；」）
+
+> 🔴 **按 `GK-OPS-22` 先建本 D 号再动工**；本条为**建档骨架 + 硬边界**，实绩在执行后以「实绩补录」追加，不涂改历史行。
+> 🔴 授权原文逐字保留；`git push` **本轮未授权**，仍不推送（沿用 D-042「授权只对那一次生效」）。
+
+| 项 | 认定 / 边界 |
+|---|---|
+| **① 授权启动样张产图** | 依据 `docs/reports/3-5份样张与图文同源复核闸-作业指导书-D044.md` 执行 **S0–S6**（本 D 号即 S0 建档）。数量取 **3 份**（SOP 允许 3–5；先验证链路、遵守 L3 资源纪律），分层 **S-a 含 OLE/VML 公式／S-c 纯文字长题／S-d 必含反例（高失配逼兜底）**，如实登记「未取 S-b/S-e 及其理由」。候选池纯 `SELECT`、确定性 `md5` 排序、`source_id` 清单＋sha256＋SQL 全文登记；产物**仅 L3 `/tmp/gk-sample-*` 与本地 `.tmp/`**；零写库（不写 `question_figures`／`question_inline_figures`／`blob_objects`／不上传 storage）、零下发、不进任何 API response 与 `figureUrl`、不带 `--apply`、不设双硬锁、不改 `netdisk-figure-crop.py`／`netdisk-figure-build.mjs`／`pdf_tool.py` 一行。🔴 **S7 逐份人工签核仍只能思傅本人做，AI 不代签**；S8 通过线「不通过 0 且存疑 ≤2」＋单独统计「题目是否可解」不变。⇒ **本授权只解锁产图与材料包，不解锁任何下发 / 写库 / 放行**。 |
+| **② 授权 G8 只读取证** | 对 `migrations/0032_curriculum_topics.sql` 的 720 行 seed 做**逐科官方课标文本可核验性核对**，重点 118 行「转载清单未列 2025 修订版，按 2022 版；待教育部官方附件核对」与 `framework_verified=false` 行。产出差异清单与分级（已具官方链接／仅地方转载／待官方附件／高中通用领域），**纯只读取证、不写库、不改 seed、不改 `framework_verified`、不面客集成**。🔴 按 **D-044** 口径：G8 **不含法务复核**（CC BY-NC 非本项目束缚），只剩「逐科官方文本核对（数据准确性）」。在线核验不到的官方附件**如实记为「未能在线核验」，不得推断为「已核对通过」**。 |
+| 🔴 **③ 显式豁免 `P-028 Q5①`（本轮最关键）** | 思傅明确「豁免 Q5①，推进 P-028」⇒ 登记为**显式豁免**，符合 `P-028 §2` Q5②「须写明豁免哪些门，另建 D 号」的形式要求。🔴 **豁免范围仅一条**：解除「T0 硬门未过前**不写实现代码**」这一工程禁令，允许按 Q1② 落地**开发态**实现（独立只读端点、前端标签层、默认关开关、事先声明）。 |
+| 🔴 **豁免不解除（逐条锁死）** | **T0 状态仍记「未过」**（D-044 实测：`review_events` 0 行、`curriculum_topics` 生产不存在、0032 未上生产），本豁免**不改写 T0 判定、不宣称通过**；`P-025 Q2①` 前后对照协议 v1.0 **仍为任一借鉴项实施的必跑前置**（实施后同轮须跑后采集与配对差分）；第二层上线准入、`strict=1`、判定层六条 P0 硬闸、`question-reference.ts`／`TOPIC_TERMS` 55 词、`CACHE_VERSION v14`、`P-025 T4` 契约 sha、M42 v3、数据门 14 项；**发货 G1–G8 一关未过** ⇒ 不 ssh 生产库写操作、不备份/迁移/换 dist/重启 `gk-api`/部署/发版；`0032` 仍只在开发库；**不面客集成**；样张 S7 人工签核；独立盲测验收。⇒ **本豁免 ≠ T0 放行、≠ 发货、≠ 面客、≠ 效果宣称**。 |
+| 🔴 **falsifier 配套修订（不是自行放宽，是实现授权的逻辑配套）** | `P-028` §⑤ **F9** 原文「未过 T0 即启动算子实施」与本豁免直接冲突 ⇒ 修订为「**未取得 D-045 显式豁免即启动算子实施**」；**F10** 按 D-044 已移除法务复核 ⇒ 修订为「未经逐科官方文本复核即面客集成」。🔴 其余 F1–F8／F11–F12 **一字不动**；F9 修订后仍由 D-045 单点约束、不可再次外推。此修订在交付回执中单列请思傅知悉，若不认可请直接更正。 |
+| 🔴 **撤销条件** | 实现过程中若出现：① 判定层／`question-reference.ts`／`v14` 任一漂移（F1/F2）；② 标签被表述为「标准答案／课标认定／已核实」或声明可关闭（F6）；③ 命中提升类宣称（F7）；④ `term` 冒充课标条文或第三方原创表达入代码（F8）；⑤ 开关持久化绕开隐私两道门（F11）；⑥ 借本豁免推进发货或面客集成 —— **任一触发即豁免自动失效、代码回退、另立 D 号**。 |
+| **Q1② 实施期工程决策（本轮定稿）** | 端点 `GET /api/curriculum/topics` **要求正常身份**（`requireUserId`，前端带 `buildHeaders()`），🔴 **不加入 `PUBLIC_ROUTES`**：字典虽为全局只读无 `user_id`，但加白名单会扩大匿名暴露面，且前端已统一带 `X-Auth-Token` ⇒ 选更小暴露面。开关状态**仅前端本地内存态、不持久化、不落服务端** ⇒ 不触发 `guardPolicy`／`guardPrivacy` 持久化链路（但两道门本身一行不动，将来若要持久化须重过）。端点 **fail-closed 降级**：生产库无 `curriculum_topics` 表或查询失败 ⇒ 返回 `available:false` + 空数组，前端不渲染标签，绝不 500。服务端只允许 `SELECT`、不暴露写端点。 |
+| **零改动红线** | `question-match.ts`（sha `84f998ff…`）／`question-reference.ts`（55 词）／`answer-search.service.ts`（`v14`）／`sharedSignals()`／`migrations/0032`／`measure-baseline.sql`／判定层六闸／`strict=1`／M42 v3 —— 全部零改动；不 bump `CACHE_VERSION`（Q1② 主 result 零改动）；不改 `PUBLIC_ROUTES`。 |
+| **不外推 / 不宣称** | 三项均为**工程授权**，不是效果证据；不计算召回率/准确率，不宣称命中提升／适配度提升／知识点标注准确／修复有效／误判归零／图形全覆盖／所有用户可用；样张材料包**不是通过判定**；G8 差异清单**不等于逐科核对通过**；`term` 不冒充课标条文；题目表无学科字段 ⇒ 不宣称按 9 科分层或覆盖。 |
+| **实绩补录** | 见下方「D-045 实绩」（2026-11-13 补录，三项分列）。 |
+
+### D-045 实绩（2026-11-13 补录）
+
+| 项 | 实绩 |
+|---|---|
+| **① 样张产图 S0–S6** | `server/scripts/measure-sample-candidates.sql` 纯 SELECT ⇒ L3 输出 15 行（S-a/S-c/S-d 各 5），sha `22eb923b…`；定 3 份候选 sha `a4ad6d97…`。S2 预检全绿（`MemAvailable` 2,837,144 KB／`fc-match Symbol`＝StandardSymbolsPS.otf／LO 24.2.7.2）；cgroup `MemoryMax=1800M CPUQuota=150%`。`SAMPLE_DONE total=3 complete=3 errors=0 fallback=0`；7 项材料×3 齐、6 张图 PIL 全可解码；`netdisk-figure-crop.py` sha `0d6305d2…` 执行前后一致（运行时包装、零改动）。报告：`docs/reports/D-045-样张产图实绩与S7人工签核表.md`。🔴 **S7 人工签核／S8 判定／S9 清理未执行**；三份同页文本均检出解析/答案关键词（机器提示非结论），S-d 反例未逼出兜底 ⇒ **不宣称通过**。 |
+| **② G8 只读取证** | 教材〔2022〕2号附件 **17 项**取实；本项目 9 科官方 PDF **HEAD 全部 200 / application/pdf / 13–40 MB**。完整下载数学（189 页）、物理（71 页）⇒ **均为逐页扫描图、pypdf 抽文本 0 字符**。教材〔2025〕1号《…日常修订版》标注「**此件依申请公开**」，`moe.gov.cn` 无逐科附件全文；检索到的正文来自第三方知识库分享页 ⇒ 按 D-038 不作取数依据。seed 720 行／9 科：`source_url` **全部地方转载** `yun.jyyzjk.cn`、**0 行官方 PDF 直链**；118 行待核（物理 56＋生物 62）、`framework_verified=false` 199 行（英语 96 行全 false）。⇒ **G8 判定未通过**、发货仍锁。报告：`docs/reports/G8-逐科官方课标文本只读取证差异清单-D045.md`。零写库、未改 seed。 |
+| **③ P-028 Q5① 豁免实现** | 后端 `server/src/curriculum/` 四文件（`GET /api/curriculum/topics` 要求身份、不进 `PUBLIC_ROUTES`、fail-closed `available:false`）＋`app.module.ts` 注册；前端 `curriculum-disclaimer.ts`／`curriculum-tags.ts`／`curriculum-tags.tsx` ＋ `api.ts`／`answer-editor.tsx` 接入（字面「可能涉及」、默认关＋本地内存态、声明常驻）；M44 静态守卫 A1–A11。F9/F10 按 D-045 配套修订，F1–F8／F11／F12 一字未动；**状态仍「已批准」**（未发货／未面客）。 |
+| **④ 门禁实绩** | `method:check` H1 26／H2 143／H3 2 全绿；M43 RC=0；M44 RC=0；`check-isolation` 153 处 0 缺口；`verify:gate` **37/37**（15.8s）；`pnpm tsc`／`lint:build`／`build:weapp`（14.07s）／`build:server` 全 RC=0。 |
+| **⑤ 首次失败与修复** | `verify:gate` 首轮 M13 报 `curriculum.service.ts:62` 查 `curriculum_topics` 缺用户隔离。核实 `0032` 明确「全局只读字典（不是用户数据，故无 `user_id`）」⇒ 属门禁文档所列的**全局表有意设计**，按规范在 `check-isolation.mjs::TABLE_ALLOWLIST` 登记并注明 0032／D-039／D-045 依据，同时补 **M44 A11** 断言防止白名单被误删；🔴 **未删检查、未加 `user_id` 假过滤**。 |
+| **⑥ 边界复核** | 判定层 `question-match.ts` sha `84f998ff…`／`question-reference.ts` 55 词／`CACHE_VERSION v14`／`strict=1`／M42 v3／`measure-baseline.sql`／`migrations/0032`／`PUBLIC_ROUTES` 全零改动；未写生产库、未产图入 storage、未下发、未换 dist、未重启、未部署、未发版、**未 push**。`.doc` 整题快照仍 **0 行**。 |
