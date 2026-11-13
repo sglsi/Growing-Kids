@@ -125,7 +125,10 @@ const STEM_MEANINGFUL_RE = /[\u4e00-\u9fa5\u3400-\u4dbfa-zA-Z]/
  * 真题目（知识／文化／信息交流…）。它们同样不含汉字与拉丁字母，只按①②判会被
  * 当成碎片拒掉，把「编码缺陷」错误地伪装成「切题缺陷」。白名单把它们排除在外。
  */
-const STEM_ALLOWED_ONLY_RE = /^[0-9\s.,;:+*/=^%()\[\]{}<>|_、。，；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$/
+// D-053：白名单必须含全角句点 `．`(U+FF0E)。QUESTION_START 把 `N．` 当题号标点，
+// 切出的对象 stem 就是 `1．`/`54．0` 这类纯题号；旧白名单只收 `。`、`、` 却漏了 `．`，
+// 导致这 3,316 条空壳以 ok 入库（D-047 判据漏洞）。仅补这一个字符，不放宽其余条件。
+const STEM_ALLOWED_ONLY_RE = /^[0-9\s.,;:+*/=^%()\[\]{}<>|_、。，．；：！？…—－×÷·~√△∵∴°℃①-⑩-]+$/
 // 刻意不 export：本脚本顶层直接执行，被 import 会连带跑一次构建。
 // 验证走 `--from-fixture` 黑盒（M45），不引入跨文件副作用。
 function isStemMeaningless(stem) {
@@ -398,10 +401,40 @@ async function runDb() {
         if (batch.length < 50) break
       }
     }
+    // D-053：全量重建收尾去重，防止派生表重建把题库整理结果复活。
+    // 只在 --apply 且全量构建时跑；局部构建（--limit）不碰别人的对象。
+    if (APPLY && LIMIT === 0) {
+      stats.deduped = await dedupeAfterBuild(client)
+      console.log(`  收尾去重：标记 ${stats.deduped} 行重复对象`)
+    }
   } finally {
     await client.end()
   }
   return stats
+}
+
+const DEDUPE_REASON = '题干与解答完全相同（保留同组首条），D-053 去重'
+
+/**
+ * D-053 重建收尾去重。与 question-objects-dedupe.mjs::DUP_RANKED_CTE 逐字同口径
+ * （M47 守漂移）：PARTITION BY user_id, stem_text, coalesce(solution_text, '')，
+ * 按 id 升序保留 rn=1。只标记不删行，判定层零改动、不 bump 版本。
+ */
+async function dedupeAfterBuild(client) {
+  const r = await client.query(`
+    WITH ranked AS (
+      SELECT id, row_number() OVER (
+        PARTITION BY user_id, stem_text, coalesce(solution_text, '')
+        ORDER BY id
+      ) AS rn
+      FROM question_objects
+      WHERE link_status = 'ok'
+    )
+    UPDATE question_objects q SET link_status = 'rejected', link_reason = $1
+      FROM ranked
+     WHERE q.id = ranked.id AND ranked.rn > 1
+  `, [DEDUPE_REASON])
+  return r.rowCount
 }
 
 // ---------- main ----------
