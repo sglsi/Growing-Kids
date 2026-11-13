@@ -36,6 +36,7 @@ const TABLE_ALLOWLIST = new Set([
   'login_tickets', // 扫码登录票据：按 token 主键寻址，user_id 只在授权成功后写入、不是隔离维度（0012 / OPS-18 R-技术-10）
   'health_check', // 运维探针
   'users', // 身份表：按 id / open_id / device_id 限定，不是按 user_id
+  'curriculum_topics', // 全局只读字典：0032 建表即无 user_id 列（非用户数据），服务端只允许 SELECT、不暴露写端点（D-039 / D-045 / P-028 Q1②）
 ])
 
 /** 有意不带 user_id 过滤的文件（cron / 监控 / GC 全表扫描、通用出口） */
