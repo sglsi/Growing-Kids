@@ -1353,3 +1353,27 @@
 | **回滚** | ① 数据：随时可重跑重建（派生表，不依赖备份）；② 代码：`dist/shared/question-match.js.bak-20261113-204119` 与 `dist/answer-search/answer-search.service.js.bak-20261113-204119` 覆盖回并重启即可（回到 qobj-1 + v14）。⚠️ 回滚代码**必须同时**把库重建回 qobj-1，否则全部对象被判版本不一致。 |
 | 🔴 **不宣称** | 不宣称命中提升／P95 改善／误判归零／15 份已修好。本条只声称：线上对象已全部按 qobj-2 规则重建，小数不再被当作题目起点，读路径实测除既有 rejected 外无一例校验失败。**D-049 登记的「15 份未修好」结论不变**（4 份纯答案文档、10 份无编号材料题、1 份标点丢失）；`review_events` 仍 0 行，无任何效果指标可用。 |
 | **未做 / 仍锁** | 前端 `build:weapp` → 上传 → 发版**未做**（本次前端只改了一行注释，无功能变化，不必发版）；`strict=1`、第二层准入、T0 判定、`0032` 上生产、curriculum 模块发货等**全部仍锁**；本地 ahead 21 commits，**未 push**。 |
+
+---
+
+## D-051 · 安全加固复核：修好「本地构建 → 生产」断链与两处致命启动/响应缺陷（2026-11-13 23:20–23:45，思傅「继续当前任务」）
+
+> 起因：22:38 提交的「代码审查安全加固 P0-P3」（7 文件 / 323 行）只有一句「pnpm build 通过」就落地提交，没跑回归、没做启动冒烟。本轮做交付前复核，结果**这批改动如果直接发生产，服务起不来**。
+
+| 项 | 认定 / 实绩 |
+|---|---|
+| 🔴 **① 构建产物根本跑不起来（@/ 别名）** | `nest build` 走 tsc，而 tsc **不会**把 `tsconfig.json` 里的 `paths: {"@/*": ["./src/*"]}` 重写成相对路径 ⇒ dist 里留 `require("@/app.service")` ⇒ `node dist/main` 直接 `MODULE_NOT_FOUND`。实测报错原文：`Error: Cannot find module '@/app.service'`（requireStack: app.controller → app.module → main）。 |
+| **为什么此前一直没人发现** | 生产 `/opt/gk/server/dist` 是**别名重构之前**构建的：`grep 'require("@/' dist` 全空、`app.controller.js` 里是 `require("./app.service")`。线上跑得好好的，于是「本地 build ≠ 生产构建」这件事被掩盖到第一次真正「本地构建 → 上传 dist」才暴露。**本轮 D-050 之所以没踩到，纯属运气**：只换了 2 个文件，`question-match.js` 是零依赖单文件、`answer-search.service.js` 本来就用相对路径（换前逐行 diff 只有 CACHE_VERSION 一行差异，正是这个原因的旁证）。 |
+| **改法** | 全仓只有 **2 个文件 / 9 处**用 `@/`（`main.ts` 5 处、`app.controller.ts` 4 处），其余 380 个文件本来就是相对路径 —— 说明相对路径才是项目约定。故改成相对路径，**不引入 `tsc-alias` 依赖**（为一个 2 文件问题加构建链依赖不划算）。 |
+| **守卫** | **M13 新增一条断言**（9/9 → **10/10**）：扫描 `server/src/**/*.ts` 禁 `from '@/`（过滤注释行，防注释里的说明造成假阳性），再扫 `server/dist/**/*.js` 禁 `require("@/`，两头都钉住。 |
+| 🔴 **② ValidationPipe 让服务启动即崩** | P1 加了 `new ValidationPipe({ transform:true, whitelist:false, transformOptions:{ enableImplicitConversion:true } })`，但项目**既没装 `class-validator` 也没装 `class-transformer`**，且 `grep -rn "class-validator" src/` 除注释外**一处都没有**（全仓无任何带装饰器的 DTO）。实测启动报：`ERROR [PackageLoader] The "class-validator" package is missing`，进程直接退出。 |
+| **而且它不是「零变更」** | `enableImplicitConversion: true` 会按 TS 声明类型强制转换参数（`?limit=abc` → NaN、"0" → false 等），**改变现有端点行为**。原提交信息「零业务行为变更」不成立。 |
+| **改法** | 移除全局 ValidationPipe，注释里写明将来要上的正确顺序：先 `pnpm add class-validator class-transformer` + 逐端点补 DTO 装饰器 + 回归通过，再开 `whitelist`。 |
+| **③ 超大 body 返回 500 而非 413** | `AllExceptionsFilter` 只认 `HttpException`，其余一律 500。body-parser 的 `PayloadTooLargeError` 自带 `status: 413` 但不是 HttpException ⇒ 被降级成 500；还踩中「5xx 落盘」分支，把纯客户端错误写进 `error-YYYY-MM-DD.log`。非法 JSON 的 `SyntaxError`（400）同样被降成 500。新增 `statusOf()`：先认 HttpException，再认普通异常的 4xx/5xx `status`/`statusCode`，都没有才 500。实测由 500 → **413**。 |
+| **启动冒烟（本地 :3999，`NODE_ENV=development`）** | `node dist/main` 正常启动、34 个模块全部 initialized、`/api/health` **200 / 8.6ms**。P3 五个安全响应头逐条确认存在（`X-Content-Type-Options/nosniff`、`X-Frame-Options/DENY`、`Referrer-Policy/no-referrer`、`X-DNS-Prefetch-Control/off`、`Content-Security-Policy/default-src 'none'…`）。 |
+| **限流实测（`THROTTLE_LIMIT=5`）** | `/api/image/capabilities`（公共路由）连打 9 次：`200×5 → 429×4` ✔；`/api/health` 连打 6 次全 200 ✔（放行规则生效）。⚠️ 中途我先在 `/api/health` 上打过 30 次全 200，一度误判「限流没生效」——其实是 health 被显式放行，**测法错，不是代码错**。 |
+| **生产侧前置核查（只读）** | ① `AUTH_TOKEN_SECRET` 已配置（`.env.secrets`，len=64）、`NODE_ENV=production` 由 systemd unit 设置，且 dotenv 在**模块顶层**加载、早于 P0 闸门 ⇒ P0 不会把生产拒之门外；② `TENCENT_PG_URL` 在生产**根本没配**（走 `DATABASE_URL`）⇒ P3 的 `rejectUnauthorized` 收紧对生产**是 no-op**，不会连不上库；③ `CORS_ORIGINS` 未配置 ⇒ 新代码下 `credentials:false`，但本项目鉴权走 `X-Auth-Token` 响应头、不用 Cookie，**H5 扫码页不依赖 CORS 凭据**，不受影响。 |
+| ⚠️ **仍存的一处待确认（未改）** | 上传魔数白名单覆盖 PNG/JPEG/GIF/BMP/TIFF/PDF/docx(zip)/webm/mp3/ogg/RIFF，但**不含老式 `.doc`（`D0 CF 11 E0`）**。库内 `.doc` 主要来自网盘（不走上传），若将来开放 `.doc` 上传会被拒。**未改**，登记待确认。 |
+| **门禁** | M13 **10/10**、`verify:gate` **37/37**（M12 13、M13 10、M16 4、M18 11）、M45/M46 RC=0、`build` RC=0。 |
+| 🔴 **仍未部署** | 本节全部为**本地**验证。生产仍跑旧 dist（别名重构前 + 无 P0–P3）。发货需把整份新 dist 上传（这是**第一次**具备可运行性），属写生产，须思傅单独拍板；且换前必须核对 `dist` 里 **`curriculum/*`、`shared/curriculum-topics.js`、`shared/anon-bootstrap-guard.js` 等仍锁功能是否要一并带上**（它们现在是本地有、生产无）。 |
+| **不宣称** | 不宣称「安全加固已上线」——**一行代码都还没进生产**。本轮只声称：这批改动原本会因两处启动缺陷导致生产不可用，现已修好并通过本地冒烟；构建链路从此可正常发货。 |
