@@ -663,7 +663,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           ) : null}
           {/* P-028 / D-045：知识点讲解标签。只在有参考例题时挂载，不扩大面客范围；
               标签按用户当前题干字面匹配，只展示不排序，事先声明常驻且默认关。
-              主检索 result 结构零改动 ⇒ CACHE_VERSION 保持 v14。 */}
+              主检索 result 结构零改动 ⇒ 本功能不 bump CACHE_VERSION（D-049 因切分口径
+              变更已把 v14 → v15，与本功能无关）。 */}
           {hasRefs ? (
             <CurriculumTags stem={item?.content?.question || item?.title || ''} />
           ) : null}
