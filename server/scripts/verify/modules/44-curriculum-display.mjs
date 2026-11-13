@@ -41,7 +41,8 @@ const REL = {
 }
 
 // M42 B1 / M43 复用的判定层真相源基线 sha
-const MATCH_BASELINE_SHA = '84f998ff9d2bb2f5e2d3cec70b7ea309deef8ee69bfb558a4b8180939258ed10'
+// 变更史：84f998ff… → 36b3cde9…（D-049 收紧题号正则，半角小数不再当题目起点）
+const MATCH_BASELINE_SHA = '36b3cde980d8d08144a738b528d230ee5a5031dad00df40d50c4beb37cb4d550'
 
 function read(key) {
   const p = path.join(ROOT, REL[key])
@@ -50,6 +51,19 @@ function read(key) {
 }
 function sha(key) {
   return crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, REL[key]))).digest('hex')
+}
+/**
+ * 剥掉 TS/TSX 注释后再做「代码里不得出现 X」的判断。
+ *
+ * 为什么需要：本模块的组件与算子文件在文件头用注释逐条写明「不写 localStorage」
+ * 「不并入 TOPIC_TERMS」「不出现『标准答案』」——这些**否定式说明**会被朴素子串断言
+ * 当成违规命中，造成守卫自身误报（2026-11-13 实测三处）。断言要查的是代码，
+ * 不是解释代码的文字。需要「注释里必须写着某口径」的断言仍走原文。
+ */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 }
 /** 取 TS 里 export const X = '...' 的单引号字符串（跨行拼接按相邻字面量处理） */
 function constString(src, name) {
@@ -102,12 +116,13 @@ m.test('A4 判定层零改动：question-match.ts sha 与 M42 B1 基线一致', 
   c.ok(sha('match') === MATCH_BASELINE_SHA, 'question-match.ts 与 M42 B1 基线 sha 不一致')
 })
 
-m.test('A5 参考例题契约零改动：55 词、无 curriculum 引用、v14 未 bump', (c) => {
+m.test('A5 参考例题契约零改动：55 词、无 curriculum 引用、CACHE_VERSION 已登记', (c) => {
   const ref = read('ref')
   c.ok(!ref.includes('curriculum'), 'question-reference.ts 不应引用 curriculum')
   c.ok(!ref.includes('topicLabels'), 'question-reference.ts 不应出现 topicLabels')
   const cache = read('cache')
-  c.ok(/CACHE_VERSION\s*=\s*'v14'/.test(cache), "CACHE_VERSION 必须保持 v14（Q1② 主 result 零改动）")
+  // Q1② 要求主 result 结构零改动；D-049 因切分口径变更已把 v14 → v15，属另一件事，须保持登记值
+  c.ok(/CACHE_VERSION\s*=\s*'v15'/.test(cache), 'CACHE_VERSION 不是 v15（D-049 已 bump，若再改须登记 D 号）')
   c.ok(!cache.includes('curriculum/topics'), 'answer-search 不应直接消费字典端点')
   c.ok(!cache.includes('topicLabels'), 'answer-search 不应把标签塞进 result')
 })
@@ -127,25 +142,32 @@ m.test('A6 事先声明：两端逐字一致，且常驻不可关闭', (c) => {
 })
 
 m.test('A7 默认关 + 本地内存态：不持久化、不触碰隐私两道门', (c) => {
-  const comp = read('feComponent')
+  const raw = read('feComponent')
+  const comp = stripComments(raw) // 只查代码：注释里正写着「不写 localStorage」这类否定说明
   c.ok(/useState\(false\)/.test(comp), '开关默认值必须是 false')
   c.ok(!/Taro\.setStorage|setStorageSync|localStorage/.test(comp), '开关不应持久化（须重过隐私两道门）')
   c.ok(!/guardPolicy|guardPrivacy/.test(comp), '本地内存态不应绕过两道门的调用链')
-  c.ok(comp.includes('知识点提示：关'), '缺少默认关的可见文案')
-  c.ok(read('feEditor').includes('{hasRefs ? (\n            <CurriculumTags'), '标签未只在 hasRefs 时挂载')
+  c.ok(raw.includes('知识点提示：关'), '缺少默认关的可见文案')
+  // 该文件是 CRLF：断言前归一化换行，否则 Windows 工作区必然误报
+  c.ok(
+    read('feEditor').replace(/\r\n/g, '\n').includes('{hasRefs ? (\n            <CurriculumTags'),
+    '标签未只在 hasRefs 时挂载',
+  )
 })
 
 m.test('A8 只展示不排序：纯字面匹配，不进判定/共现/缓存键', (c) => {
-  const lib = read('feTags')
+  const raw = read('feTags')
+  const lib = stripComments(raw)
   c.ok(lib.includes('text.indexOf(term)'), '匹配必须是字面 indexOf（Q2①）')
   c.ok(!/sharedSignals|MIN_SHARED_SIGNALS|TOPIC_TERMS/.test(lib), '标签算子不得引用判定层信号')
   c.ok(!/embedding|vector|rerank|semantic/i.test(lib), '不得引入语义/向量/Reranker')
-  c.ok(lib.includes('不是检索排序') || lib.includes('**不是检索排序**'), '缺少「排序只影响展示」的口径声明')
+  // 口径声明写在注释里，必须查原文
+  c.ok(raw.includes('不是检索排序'), '缺少「排序只影响展示」的口径声明')
   c.ok(lib.includes('MAX_CURRICULUM_TAGS = 3'), '展示上限应为 3')
 })
 
 m.test('A9 不宣称：标签措辞与不宣称纪律', (c) => {
-  const comp = read('feComponent')
+  const comp = stripComments(read('feComponent')) // 注释里正写着「不出现『标准答案』」，不剥会自伤
   c.ok(comp.includes('可能涉及：'), '标签缺少「可能涉及」前缀')
   for (const bad of ['课标认定：', '已核实知识点', '标准答案', '本题知识点']) {
     c.ok(!comp.includes(bad), `标签组件不得出现宣称词：${bad}`)

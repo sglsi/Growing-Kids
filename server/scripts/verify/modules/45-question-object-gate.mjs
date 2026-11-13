@@ -37,8 +37,17 @@ const GATE_FIXTURE = 'server/scripts/verify/fixtures/question-object-gate-cases.
 const MATCH = 'server/src/shared/question-match.ts'
 const TMP_OUT = path.join(ROOT, '.tmp', 'verify-object-gate.json')
 
-/** 判定层真相源基线 sha（与 M42 B1 / M43 / M44 同一常量口径） */
-const MATCH_BASELINE_SHA = '84f998ff9d2bb2f5e2d3cec70b7ea309deef8ee69bfb558a4b8180939258ed10'
+/**
+ * 判定层真相源基线 sha（与 M42 B1 / M43 / M44 同一常量口径）。
+ *
+ * 变更史：
+ *   · 84f998ff…  D-047 建立本模块时的原始基线（配合「零改动」守卫）
+ *   · 36b3cde9…  **D-049 主动改动**：`QUESTION_START` 收紧为半角 `.` 后不得紧跟数字，
+ *                 `SOLUTION_BOUNDARY_RE` 同口径同步，`OBJECT_ENGINE_VERSION` qobj-1 → qobj-2。
+ *                 ⇒ 语义从「零改动」改为「与已登记基线一致」：**任何**改动都必须显式更新
+ *                 本常量并在台账留 D 号，否则 A3 失败。改动本身不是禁止的，悄悄改才是。
+ */
+const MATCH_BASELINE_SHA = '36b3cde980d8d08144a738b528d230ee5a5031dad00df40d50c4beb37cb4d550'
 
 function read(rel) {
   const p = path.join(ROOT, rel)
@@ -86,9 +95,9 @@ m.test('A2 闸门位置：紧跟「题干为空」、且在「对象超长」之
   c.ok(src.includes("row.link_status = 'rejected'"), '命中的对象必须置 rejected（只拒绝、不放行）')
 })
 
-m.test('A3 判定层零改动：question-match.ts sha 仍为 baseline', (c) => {
+m.test('A3 判定层与登记基线一致：question-match.ts sha == baseline', (c) => {
   const sha = crypto.createHash('sha256').update(read(MATCH), 'utf8').digest('hex')
-  c.ok(sha === MATCH_BASELINE_SHA, `判定层被改动：${sha.slice(0, 12)}… ≠ ${MATCH_BASELINE_SHA.slice(0, 12)}…`)
+  c.ok(sha === MATCH_BASELINE_SHA, `判定层被改动：${sha.slice(0, 12)}… ≠ ${MATCH_BASELINE_SHA.slice(0, 12)}…（若为有意改动，须在台账留 D 号并更新本常量）`)
 })
 
 m.test('A4 fixture 覆盖真实生产形态（不是只造好看样本）', (c) => {

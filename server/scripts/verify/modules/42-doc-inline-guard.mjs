@@ -58,12 +58,13 @@ function codePy(src) {
     .join('\n')
 }
 
-m.test('🔴 B1 判定层真相源一行未动（与 M35–M41 同基线）', (c) => {
+m.test('🔴 B1 判定层与登记基线一致（改动须有 D 号，不许顺手改）', (c) => {
   const src = read(MATCH).replace(/\r\n/g, '\n')
   c.eq(
     crypto.createHash('sha256').update(src, 'utf8').digest('hex'),
-    '84f998ff9d2bb2f5e2d3cec70b7ea309deef8ee69bfb558a4b8180939258ed10',
-    'question-match.ts 被改动 —— 走提案单，不要顺手改判定层',
+    // 变更史：84f998ff… 为 D-042 起的基线；36b3cde9… 为 D-049 主动收紧题号正则后的基线
+    '36b3cde980d8d08144a738b528d230ee5a5031dad00df40d50c4beb37cb4d550',
+    'question-match.ts 被改动 —— 走提案单/台账 D 号，并同步更新本基线，不要悄悄改',
   )
 })
 
@@ -117,9 +118,10 @@ m.test('🔴 B5 复判报告与 D-026 / D-027 台账、不宣称', (c) => {
   }
 })
 
-m.test('🔴 B6 前后端契约未被本提案改动', (c) => {
+m.test('🔴 B6 前后端契约未被本提案改动（CACHE_VERSION 版本已登记）', (c) => {
   const as = read(SERVICE_AS)
-  c.ok(/const CACHE_VERSION = 'v14'/.test(as), 'CACHE_VERSION 被改动（本提案不改 result 结构，不该 bump）')
+  // 本提案不改 result 结构；D-049 因切分口径变更已把 v14 → v15（旧缓存会指向旧边界）
+  c.ok(/const CACHE_VERSION = 'v15'/.test(as), 'CACHE_VERSION 不是 v15（D-049 已 bump，若再改须登记 D 号）')
   const p = read(PROPOSAL)
   c.ok(/前端与共享契约/.test(p) || /前端.*一行不改/.test(p), '提案缺「前端契约零改动」约束')
 })
