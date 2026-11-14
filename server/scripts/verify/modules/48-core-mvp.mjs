@@ -9,16 +9,18 @@
 //    路线全部「只有文字」，打印出来孩子没法作答。
 // ② 智能高清：默认档是「黑白」且点开即前端整图硬二值化，彩色插图/照片
 //    灰阶全丢；结果一键覆盖原图、无对比无撤销。本轮只加护栏不动算法。
-// ③ 去手写（功能不完善）与资料库搜题（成熟度不足）入口收起，实现保留。
+// ③ 去手写（功能不完善）入口收起、实现保留。
 // ④ 学习手册页注册与入口（原拟名「功能一览」，按内容实质改名）。
+// ⑤ D-055：资料库搜题按 B 保留 + 常驻声明 + 「不判定用户自录答案」口径。
 //
 // 🔴 本模块只守静态契约，不碰判定层、不宣称任何效果。
+//    资料库搜题的三道门（T0／第二层准入／G8）仍未过，保留入口是产品裁决，不是签核。
 
 import fs from 'fs'
 import path from 'path'
 import { Module } from '../lib/harness.mjs'
 
-const m = new Module('M48', '核心功能回归守卫：导出带图 / 高清护栏 / 入口收起 / 学习手册（D-054）')
+const m = new Module('M48', '核心功能回归守卫：导出带图 / 高清护栏 / 入口收敛 / 学习手册 / 资料库口径（D-054+D-055）')
 const ROOT = path.resolve(process.cwd(), '..')
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8')
 
@@ -35,6 +37,7 @@ const RECOGNIZE = 'src/pages/recognize/index.tsx'
 const PROFILE = 'src/pages/profile/index.tsx'
 const CONFIG = 'src/app.config.ts'
 const GUIDE = 'src/pages/guide/index.tsx'
+const ANSWER_SVC = 'server/src/answer-search/answer-search.service.ts'
 
 // ---------- A 导出必须带图 ----------
 m.test('A1 汇总 Word 导出嵌入题面图（不再 100% 纯文本）', (c) => {
@@ -122,11 +125,30 @@ m.test('C1 去手写入口三处收起（实现保留）', (c) => {
   c.ok(read(IMG_CTRL).includes('erase_v2: false'), 'capabilities 不得再声明去手写可用')
 })
 
-m.test('C2 资料库搜题保留开关且当前关闭', (c) => {
+m.test('C2 资料库搜题按 B 保留：入口在 + 常驻声明', (c) => {
   const a = read(ANSWER_EDITOR)
-  c.ok(a.includes('const KB_SEARCH_ENABLED = false'), '成熟度不足 ⇒ 开关必须为 false')
-  c.ok(a.includes('{KB_SEARCH_ENABLED && ('), '按钮必须受开关包裹，实现不得删')
-  c.ok(a.includes('T0 硬门未过') && a.includes('review_events 仍 0 行'), '关闭理由须写在代码里，避免后人误开')
+  c.ok(a.includes('const KB_SEARCH_ENABLED = true'), 'D-055 思傅拍板按 B ⇒ 开关必须为 true')
+  c.ok(a.includes('{KB_SEARCH_ENABLED && ('), '按钮仍须受开关包裹，实现不得删')
+  c.ok(a.includes('const KB_SEARCH_NOTICE'), '必须定义常驻声明文案')
+  c.ok(a.includes('{KB_SEARCH_ENABLED ? ('), '声明必须独立于结果卡片常驻渲染')
+  c.ok(a.indexOf('{KB_SEARCH_ENABLED ? (') < a.indexOf('{candidate ? ('),
+    '常驻声明的渲染位置须排在任何检索结果卡片之前（先给声明、后给内容）')
+  c.ok(a.includes('不判定你录入的答案') && a.includes('不需要核对，也不用存疑'),
+    '口径须写明：不判定、不核对、不制造疑虑')
+  c.ok(a.includes('检索范围包括'), '须如实写检索范围，不得照抄「仅供本人资料检索」这句虚假陈述')
+  c.ok(a.includes('T0 硬门') && a.includes('review_events'), '三门未过的事实须留在代码里，避免后人误当签核通过')
+})
+
+m.test('C3 检索结果不再出现核对/疑虑话术，且缓存已失效', (c) => {
+  const s = read(ANSWER_SVC)
+  for (const bad of ['请核对后采纳', '核对后再采纳', '按来源核对后采纳', '自行核对']) {
+    c.ok(!s.includes(bad), `服务端 note 仍含旧话术：${bad}`)
+  }
+  c.ok(s.includes("const CACHE_VERSION = 'v16'"), 'note 文案变了必须 bump，否则老缓存吐旧话术')
+  c.ok(s.includes("${CACHE_VERSION}:${question}"), '版本须参与 qHash，bump 才有效')
+  const a = read(ANSWER_EDITOR)
+  c.ok(!a.includes('请打开文件核对原题与解析后采纳'), '前端来源卡片不得再要求核对后采纳')
+  c.ok(!a.includes('找到这道题的参考答案'), '不得把资料库内容摆成与用户自录答案对立的「参考答案」')
 })
 
 // ---------- D 学习手册 ----------

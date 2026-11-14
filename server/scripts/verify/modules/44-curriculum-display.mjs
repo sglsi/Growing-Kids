@@ -3,7 +3,7 @@
 // 为什么单独一个模块：M43 守「维度表本身有没有越界」，但**没有模块守
 // 「把字典接成端点 + 前端标签时有没有破契约」**。D-045 豁免 Q5① 后最容易出的
 // 四类事故：
-//   ① 顺手把标签塞进检索 result 或改 note ⇒ 破 P-025 T4 契约 sha / 触发 v15；
+//   ① 顺手把标签塞进检索 result 或改 note ⇒ 破 P-025 T4 契约 sha / 触发缓存 bump；
 //   ② 把端点加进 PUBLIC_ROUTES 或加写方法 ⇒ 扩大匿名暴露面 / 破坏只读字典；
 //   ③ 事先声明可被开关一起关掉、或标签被写成「课标认定 / 已核实」；
 //   ④ 生产库没有 0032 表时端点直接 500（D-044 实测 present=false）。
@@ -121,8 +121,9 @@ m.test('A5 参考例题契约零改动：55 词、无 curriculum 引用、CACHE_
   c.ok(!ref.includes('curriculum'), 'question-reference.ts 不应引用 curriculum')
   c.ok(!ref.includes('topicLabels'), 'question-reference.ts 不应出现 topicLabels')
   const cache = read('cache')
-  // Q1② 要求主 result 结构零改动；D-049 因切分口径变更已把 v14 → v15，属另一件事，须保持登记值
-  c.ok(/CACHE_VERSION\s*=\s*'v15'/.test(cache), 'CACHE_VERSION 不是 v15（D-049 已 bump，若再改须登记 D 号）')
+  // Q1② 要求主 result 结构零改动；缓存版本登记值 D-049 v15 → D-055 note 口径 v16，
+  // 属另一件事，须保持登记值一致。再 bump 须同步 M42 B6 / M46 A4 / M48 C3。
+  c.ok(/CACHE_VERSION\s*=\s*'v16'/.test(cache), 'CACHE_VERSION 不是 v16（D-055 已登记，若再改须登记 D 号）')
   c.ok(!cache.includes('curriculum/topics'), 'answer-search 不应直接消费字典端点')
   c.ok(!cache.includes('topicLabels'), 'answer-search 不应把标签塞进 result')
 })

@@ -120,8 +120,10 @@ m.test('🔴 B5 复判报告与 D-026 / D-027 台账、不宣称', (c) => {
 
 m.test('🔴 B6 前后端契约未被本提案改动（CACHE_VERSION 版本已登记）', (c) => {
   const as = read(SERVICE_AS)
-  // 本提案不改 result 结构；D-049 因切分口径变更已把 v14 → v15（旧缓存会指向旧边界）
-  c.ok(/const CACHE_VERSION = 'v15'/.test(as), 'CACHE_VERSION 不是 v15（D-049 已 bump，若再改须登记 D 号）')
+  // 本提案不改 result 结构；缓存版本登记值随变更推进：D-049 切分口径 v14→v15、
+  // D-055 改 note 口径 v15→v16（旧缓存会吐「请核对后采纳」，与「无疑虑」冲突）。
+  // 若再 bump 须登记 D 号并同步 M44 A5 / M46 A4 / M48 C3。
+  c.ok(/const CACHE_VERSION = 'v16'/.test(as), 'CACHE_VERSION 不是 v16（D-055 已登记，若再改须登记 D 号）')
   const p = read(PROPOSAL)
   c.ok(/前端与共享契约/.test(p) || /前端.*一行不改/.test(p), '提案缺「前端契约零改动」约束')
 })
