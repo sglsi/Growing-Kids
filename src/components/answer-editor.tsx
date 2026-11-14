@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { View, Text, Image as TaroImage, RichText } from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import { Plus, Trash2, Crop, Globe, FileText, Check, X, Bot, BookOpen } from 'lucide-react-taro'
+import { Plus, Trash2, Crop, FileText, Check, X, BookOpen } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
@@ -16,7 +16,6 @@ import { guardPolicy } from '@/services/policy-gate'
 import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
 import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
-import { AI_PUBLIC_ENTRY } from '@/constants/app-info'
 import type { AnswerAttachment, TimelineItem } from '@/types'
 import type { AnswerSearchResult, InlineFigure } from '@/services/api'
 // P-015 / D-018：事先声明文案的前端镜像（服务端缺字段时兜底，绝不出现「有内容、无声明」）
@@ -380,7 +379,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 知识库   = 只检索 ima 知识库（秒级），直接给命中条目+高亮内容，不喂给 AI
   // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
   const handleSearch = async (searchMode: 'search' | 'kb' | 'ai') => {
-    const searchLabel = searchMode === 'search' ? '联网搜题' : searchMode === 'kb' ? '资料库检索' : 'AI 解题'
+    const searchLabel = searchMode === 'kb' ? '资料库检索' : '检索中'
     // R-合规-02：联网搜题 / AI 解题都往外部发内容，未开启时后端会 403 AI_DISABLED，
     // 这里先拦一次是为了给出「去哪开」的提示，而不是让用户撞一个看不懂的报错。
     //
@@ -630,30 +629,18 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         </View>
         {/* 资料库搜题：先查运营者提供的公共资料库（文件名/路径 + 资料正文双通道），未命中再查 ima 知识库；
             全程只检索、不生成内容、不喂给 AI。
-            ⚠️ 不受 AI_PUBLIC_ENTRY 约束（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
-            它跟「AI 解题」不是一回事，被一起收起属于误伤。 */}
+            ⚠️ 不走联网/大模型链路（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
+            它是纯检索，与 AI 解题不是一回事，被一起收起属于误伤。 */}
         {KB_SEARCH_ENABLED && (
           <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
             <BookOpen size={12} color={INK} />
             <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '资料库搜题'}</Text>
           </View>
         )}
-        {/* 联网搜题 / AI 解题：这两条确实往外部发内容且含 AI 生成，
-            个人主体不开放（见 constants/app-info.ts），此处直接不渲染入口。 */}
-        {AI_PUBLIC_ENTRY && (
-          <>
-            {/* 联网搜题：只做真实网络检索，不喂给 AI */}
-            <View className={btn} onClick={() => { if (!searching) void handleSearch('search') }}>
-              <Globe size={12} color={INK} />
-              <Text className="block text-xs">{searching === 'search' ? '检索中…' : '联网搜题'}</Text>
-            </View>
-            {/* AI 解题：只做模型推理，不检索 */}
-            <View className={btn} onClick={() => { if (!searching) void handleSearch('ai') }}>
-              <Bot size={12} color={INK} />
-              <Text className="block text-xs">{searching === 'ai' ? '解题中…' : 'AI 解题'}</Text>
-            </View>
-          </>
-        )}
+        {/* 🔴 原「联网搜题 / AI 解题」两个入口已整块移除（思傅 2026-11-14）：
+            个人主体不开放 AI 外发，且本版 AI 助手对用户不可用。留着入口或相关描述
+            会指向一个不存在的服务，也会让审核按「提供 AI 服务」要求补类目。
+            上面的「资料库搜题」是纯检索，按 B 保留，不受影响。 */}
         {/* 保存：仅编辑态需要（预览态内容即已入库内容；附件操作都是即时保存） */}
         {mode === 'edit' ? (
           <View

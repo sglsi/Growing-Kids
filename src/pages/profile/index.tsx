@@ -2,12 +2,11 @@
 import { View, Text, Image, ScrollView, Button as NativeButton, Picker } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
-import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, Bot, MessageSquare } from 'lucide-react-taro'
+import { CircleUser, LogIn, LogOut, Pencil, Inbox, BookOpen, Plus, HardDrive, MessageSquare, Camera } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyCard } from '@/components/filter-header'
 import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
 import QrLoginModal from '@/components/qr-login-modal'
 import {
   getAuthState, isLoggedIn, promptLogin, logout, fetchMe, updateProfile,
@@ -18,9 +17,8 @@ import { fetchOverview, fetchStorageUsage, formatBytes, purgeAccount, uploadImag
 } from '@/services/api'
 import { buildHeaders } from '@/services/net'
 import { Network } from '@/network'
-import { INK, BRAND_FOREGROUND } from '@/lib/theme'
-import { ensureAiSetting, peekAiEnabled, updateAiEnabled } from '@/services/ai-settings'
-import { AI_PUBLIC_ENTRY, APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
+import { INK, BRAND, BRAND_FOREGROUND } from '@/lib/theme'
+import { APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
 import { GRADE_PICKER_LABELS, gradeLabel, toGrade, toGradeIndex } from '@/constants/grades'
 
 /**
@@ -88,14 +86,12 @@ export default function ProfilePage() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [busy, setBusy] = useState(false)
-  const [editing, setEditing] = useState(false)
+  /** 昵称输入框的值：常驻 `type="nickname"`，由微信官方填写能力一键带入，见「头像 + 身份」区 */
   const [nickname, setNickname] = useState('')
   /** 头像本机持久化副本（`chooseAvatar` 只给临时文件，冷启后必须靠它显示） */
   const [localAvatar, setLocalAvatar] = useState<LocalAvatar | null>(null)
   /** H5 扫码登录弹层（电脑浏览器无 wx.login，思傅 2026-10-20 拍板方案） */
   const [qrVisible, setQrVisible] = useState(false)
-  /** AI 外发开关（R-合规-02）：默认关 = 仅本地，任何内容不出机器 */
-  const [aiEnabled, setAiEnabledState] = useState(peekAiEnabled())
   /**
    * 年级（`P-005`）：决定新录入题目默认归到哪一年级、检索时优先找哪一年级。
    * null = 未选择 —— 此时检索**不按年级过滤**，功能照常可用（不做任何拦截）。
@@ -110,38 +106,6 @@ export default function ProfilePage() {
   const openAgreement = () => Taro.navigateTo({ url: '/pages/agreement/index' })
   /** 打开学习手册：讲清「为什么这样设计」与「每个功能怎么用」，纯静态页 */
   const openGuide = () => Taro.navigateTo({ url: '/pages/guide/index' })
-
-  /**
-   * 切换「AI 与在线检索」开关（R-合规-02）。
-   * 打开方向必须二次确认：这一步等于监护人同意把孩子的题目发往第三方。
-   * 关闭方向不确认——收紧权限不需要征求同意。
-   */
-  const handleToggleAi = async (next: boolean) => {
-    if (busy) return
-    if (next) {
-      const r = await Taro.showModal({
-        title: '开启 AI 与在线检索',
-        content:
-          '开启后，题目文字会发送给第三方服务（联网搜题、大模型解题）用于给出答案与讲解。\n\n' +
-          '不开启时：识别在本机完成，答案只在本地题库里找，任何内容都不会离开设备。\n\n' +
-          '可随时回来关闭。',
-        confirmText: '同意开启',
-        cancelText: '继续仅本地',
-      })
-      if (!r.confirm) return
-    }
-    setBusy(true)
-    try {
-      const v = await updateAiEnabled(next)
-      setAiEnabledState(v)
-      Taro.showToast({ title: v ? '已开启 AI 与在线检索' : '已切换为仅本地模式', icon: 'none' })
-    } catch (e) {
-      console.error('[profile] 保存 AI 开关失败', e)
-      Taro.showToast({ title: '保存失败，请稍后重试', icon: 'none' })
-    } finally {
-      setBusy(false)
-    }
-  }
 
   /**
    * 保存年级（`P-005` 决策 7）。
@@ -293,6 +257,7 @@ export default function ProfilePage() {
       try {
         const user = await fetchMe()
         setState({ userId: user.id, nickname: user.nickname || '', avatarUrl: user.avatar_url || '', isAnonymous: !!user.is_anonymous })
+        setNickname(user.nickname || '')
         void ensureAvatarLocal(user.avatar_url || '')
       } catch {
         /* 校验失败保留本地展示 */
@@ -304,8 +269,6 @@ export default function ProfilePage() {
     load()
     // 头像本机副本：冷启后 state.avatarUrl 只有 key，需靠本地文件显示
     setLocalAvatar(readLocalAvatar())
-    // 开关可能被别的入口改过（例如隐私页），回到本页时对齐一次
-    void ensureAiSetting().then(setAiEnabledState)
   })
 
   const handleLogin = async () => {
@@ -331,11 +294,6 @@ export default function ProfilePage() {
         load()
       },
     })
-  }
-
-  const handleEditNickname = () => {
-    setNickname(state?.nickname || '')
-    setEditing(true)
   }
 
   /**
@@ -393,19 +351,32 @@ export default function ProfilePage() {
     }
   }
 
-  const handleSaveNickname = async () => {
+  /**
+   * 昵称自动保存（失焦 / 键盘「完成」时触发）。
+   *
+   * ⚠️ 微信自 2022-10 收回 `getUserProfile` / `getUserInfo` 的真实头像昵称，
+   *    小程序**不能静默自动获取**。官方「头像昵称填写能力」的做法是：
+   *    `input type="nickname"` 聚焦后键盘上方出现「使用微信昵称」，用户点一下
+   *    即由微信填入并触发 onInput —— 这就是本页「自动展示」能做到的最接近形态。
+   *    旧版把输入框藏在「编辑」后面、还要手点「保存」，家长根本发现不了。
+   */
+  const saveNicknameIfChanged = async () => {
     const name = nickname.trim()
+    const saved = (state?.nickname || '').trim()
+    if (busy || name === saved) return
     if (!name) {
-      Taro.showToast({ title: '昵称不能为空', icon: 'none' })
+      // 清空不等于删除昵称：回填原值，避免用户以为能把自己昵称抹掉
+      setNickname(saved)
       return
     }
     setBusy(true)
     try {
       const user = await updateProfile({ nickname: name })
       setState({ userId: user.id, nickname: user.nickname || '', avatarUrl: user.avatar_url || '', isAnonymous: !!user.is_anonymous })
-      setEditing(false)
-      Taro.showToast({ title: '已保存', icon: 'success' })
+      setNickname(user.nickname || name)
+      Taro.showToast({ title: '昵称已更新', icon: 'success' })
     } catch (e) {
+      setNickname(saved)
       Taro.showToast({ title: e instanceof Error ? e.message : '保存失败', icon: 'none' })
     } finally {
       setBusy(false)
@@ -486,52 +457,46 @@ export default function ProfilePage() {
               >
                 <Text> </Text>
               </NativeButton>
+              {/* 可见角标：原来只有透明按钮，家长根本不知道头像可点 */}
+              <View
+                className="absolute bottom-0 right-0 flex items-center justify-center rounded-full"
+                style={{ width: '20px', height: '20px', backgroundColor: BRAND, border: '2px solid #fff' }}
+              >
+                <Camera size={11} color={BRAND_FOREGROUND} />
+              </View>
             </View>
             <View className="flex-1">
-              <View className="flex flex-row items-center gap-2">
-                <Text className="block text-lg font-bold text-foreground">
-                  {state?.nickname || (logged ? '微信用户' : '未登录')}
-                </Text>
-                {logged && (
-                  <View className="block text-xs text-primary rounded-lg border border-border px-2 py-1" onClick={handleEditNickname}>
-                    编辑
-                  </View>
-                )}
-              </View>
-              <Text className="block text-xs text-muted-foreground mt-1">
-                {logged ? '已登录（数据云端同步）' : '匿名使用中（本机数据保留 30 天）'}
-              </Text>
-              {logged && !state?.nickname && (
-                <Text className="block text-[11px] text-muted-foreground mt-1">
-                  点头像可选微信头像，点「编辑」填昵称
-                </Text>
-              )}
-            </View>
-          </View>
-
-          {editing && (
-            <Card className="rounded-2xl border-border p-4 mb-5">
-              <View className="flex flex-row items-center gap-2">
-                <View className="flex-1 border border-border rounded-xl px-3 py-2">
-                  {/* `type="nickname"`：微信官方替代方案——聚焦时键盘上方会出现
-                      「使用微信昵称」，用户一键填入。`getUserProfile` 已不再返回真昵称
-                      （固定「微信用户」），这是唯一合规且省事的做法。 */}
+              {logged ? (
+                <>
+                  {/* 常驻的微信官方「头像昵称填写能力」昵称侧：聚焦后键盘上方出现
+                      「使用微信昵称」，点一下即由微信填入；失焦 / 按完成自动保存。
+                      旧版藏在「编辑」后面还要手点保存，家长发现不了也懒得填。 */}
                   <Input
                     value={nickname}
                     type="nickname"
-                    placeholder="填写昵称（可点选微信昵称）"
+                    className="h-9"
+                    placeholder="点这里使用微信昵称"
                     onInput={(e) => setNickname(e.detail.value)}
+                    onBlur={() => void saveNicknameIfChanged()}
+                    onConfirm={() => void saveNicknameIfChanged()}
                   />
-                </View>
-                <Button className="h-10 rounded-xl" disabled={busy} onClick={handleSaveNickname}>
-                  <Text className="block text-sm">保存</Text>
-                </Button>
-                <Button variant="outline" className="h-10 rounded-xl" onClick={() => setEditing(false)}>
-                  <Text className="block text-sm">取消</Text>
-                </Button>
-              </View>
-            </Card>
-          )}
+                  <Text className="block text-[11px] text-muted-foreground mt-1">
+                    点头像可用微信头像，点昵称可用微信昵称（改完自动保存）
+                  </Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">
+                    已登录（数据云端同步）
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text className="block text-lg font-bold text-foreground">未登录</Text>
+                  <Text className="block text-xs text-muted-foreground mt-1">
+                    匿名使用中（本机数据保留 30 天）
+                  </Text>
+                </>
+              )}
+            </View>
+          </View>
 
           {/* 登录 / 退出（C1：换手机前登录引导，P-007 / D-010，纯文案不新增交互） */}
           <Card className="rounded-2xl border-border p-4 mb-5">
@@ -559,30 +524,6 @@ export default function ProfilePage() {
               </>
             )}
           </Card>
-
-          {/* 智能客服：走大模型 ⇒ 属 AI 外发，个人主体不开放（见 constants/app-info.ts） */}
-          {AI_PUBLIC_ENTRY && (
-            <Card
-              className="rounded-2xl border-border p-4 mb-5"
-              onClick={() => Taro.navigateTo({ url: '/pages/chat/index' })}
-            >
-              <View className="flex flex-row items-center gap-3">
-                <View
-                  className="rounded-xl flex items-center justify-center"
-                  style={{ width: '40px', height: '40px', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
-                >
-                  <Bot size={20} color={INK} />
-                </View>
-                <View className="flex-1">
-                  <Text className="block text-sm font-semibold text-foreground">智能客服</Text>
-                  <Text className="block text-xs text-muted-foreground mt-1">
-                    关于小程序的功能和使用问题都可以问我
-                  </Text>
-                </View>
-                <Text className="block text-base text-muted-foreground">›</Text>
-              </View>
-            </Card>
-          )}
 
           {/* 数据概览 */}
           <View className="flex flex-row gap-3 mb-5">
@@ -656,10 +597,10 @@ export default function ProfilePage() {
                 <View className="mt-2 flex flex-row gap-2">
                   <View
                     className="flex h-8 flex-1 items-center justify-center rounded-lg"
-                    style={{ backgroundColor: INK }}
+                    style={{ backgroundColor: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.25)' }}
                     onClick={() => handleRollover(true)}
                   >
-                    <Text className="text-xs" style={{ color: BRAND_FOREGROUND }}>
+                    <Text className="text-xs" style={{ color: INK }}>
                       {`升到${gradeLabel(rollover.suggested)}`}
                     </Text>
                   </View>
@@ -674,35 +615,19 @@ export default function ProfilePage() {
             )}
           </Card>
 
-          {/* AI 与在线检索（R-合规-02）：默认关 = 仅本地，任何内容不出机器。
-              ⚠️ 个人主体下整块收起（见 constants/app-info.ts）：留着开关等于让审核员
-              看到「用户可自行打开 AI 服务」，会被要求补「深度合成-AI问答」类目。 */}
-          {AI_PUBLIC_ENTRY ? (
-            <Card className="rounded-2xl border-border p-4 mb-5">
-              <View className="flex flex-row items-center justify-between">
-                <View className="flex flex-row items-center gap-2">
-                  <Bot size={16} color="#9A948A" />
-                  <Text className="block text-sm font-semibold text-foreground">AI 与在线检索</Text>
-                </View>
-                <Switch checked={aiEnabled} disabled={busy} onCheckedChange={handleToggleAi} />
-              </View>
-              <Text className="block mt-2 text-xs text-muted-foreground">
-                {aiEnabled
-                  ? '已开启：联网搜题、AI 解题与智能客服会调用第三方服务，题目内容会离开本机。'
-                  : '未开启（仅本地）：识别与本地题库匹配都在本机完成，题目内容不会发送给第三方。「资料库搜题」不受这个开关影响，只在你点击时检索运营者提供的公共资料库。'}
-              </Text>
-            </Card>
-          ) : (
-            <Card className="rounded-2xl border-border p-4 mb-5">
-              <View className="flex flex-row items-center gap-2">
-                <Bot size={16} color="#9A948A" />
-                <Text className="block text-sm font-semibold text-foreground">数据在哪处理</Text>
-              </View>
-              <Text className="block mt-2 text-xs text-muted-foreground">
-                识别、切题、复习排程都在本服务上完成，题目内容不发送给任何第三方。
-              </Text>
-            </Card>
-          )}
+          {/* 数据处理说明（思傅 2026-11-14「收起 AI 相关开关入口及相关描述内容」）：
+              原「AI 与在线检索」开关卡片整块移除。入口不开放时留着开关或描述，
+              既是指向一个不存在的东西，也会让审核按「提供 AI 服务」要求补类目。
+              这里只留一句不含 AI 字样的如实说明；服务端 requireAiEnabled() 仍是兜底。 */}
+          <Card className="rounded-2xl border-border p-4 mb-5">
+            <View className="flex flex-row items-center gap-2">
+              <HardDrive size={16} color="#9A948A" />
+              <Text className="block text-sm font-semibold text-foreground">数据在哪处理</Text>
+            </View>
+            <Text className="block mt-2 text-xs text-muted-foreground">
+              识别、切题、复习排程都在本服务上完成，题目内容不发送给任何第三方。
+            </Text>
+          </Card>
 
           {/* 学习手册：原拟名「功能一览」，按内容实质改名——既有方法说明也有一览 */}
           <Card className="rounded-2xl border-border p-4 mb-5" onClick={openGuide}>
@@ -785,13 +710,15 @@ export default function ProfilePage() {
                 margin: '12px 0 0',
                 padding: '11px 0',
                 width: '100%',
-                background: INK,
-                color: BRAND_FOREGROUND,
+                // 浅底深字：原 INK 深墨底 + BRAND_FOREGROUND 深墨绿字对比度极低，
+                // 字几乎看不见（BRAND_FOREGROUND 是给绿色填充面用的，不是给深底用的）
+                background: 'rgba(16, 185, 129, 0.08)',
+                color: INK,
                 borderRadius: '12px',
                 fontSize: '14px',
                 lineHeight: '1.45',
                 fontWeight: 500,
-                border: 'none',
+                border: '1px solid rgba(16, 185, 129, 0.25)',
               }}
             >
               <Text>发送意见与建议</Text>

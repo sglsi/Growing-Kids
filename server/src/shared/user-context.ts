@@ -335,7 +335,9 @@ export function requireAiEnabled(req: RequestWithUser): string {
   throw new ForbiddenException({
     code: 403,
     reason: 'AI_DISABLED',
-    message: '未开启 AI 与在线检索：当前为仅本地模式。可在「我的 · 隐私与账号」中开启。',
+    // 2026-11-14：原文案指向「我的」页里的 AI 开关，而个人主体下该开关已整块
+    // 收起，指向不存在的入口属虚假指引。reason 仍保留 AI_DISABLED（M11 判据）。
+    message: '当前版本仅在本机完成识别与整理，未提供在线解题。',
   })
 }
 
