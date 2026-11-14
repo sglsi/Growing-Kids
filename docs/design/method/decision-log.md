@@ -1978,3 +1978,52 @@ D-058 查明：删智能客服后 `ContentCheckService.checkText()` 只剩不可
 🔴 生产 `gk-api` 仍跑 **D-056 的旧 dist**：未换 `server/dist`、未重启、未上传 r11 前端包、未提审、未发版、未动数据库、未开 `urlCheck` / `__usePrivacyCheck__`。本地 dist 已含 r11 + v17 ⇒ 与生产存在 **2 处 drift**（D-059 UGC 守卫 + D-060 披露/召回源）。**后台勾 `method=1`、改选「采集用户隐私」、r11 重新同意生效的共同前提仍是先换后端 dist 并重启 + 上传 r11 前端包**，需思傅单独授权。
 
 回滚：按 commit 逐条 revert；`ima-provider.ts` 从 git 恢复即可，`CACHE_VERSION` 须退回 v16、政策退回 r10、第三方共享退回 6 条、指引退回 r10 口径，并让已重新同意用户再弹一次窗。生产未写入，无生产回滚动作。
+
+---
+
+## D-061｜D-059/D-060 后端 `dist` 换包并重启 `gk-api`（2026-11-14 22:38）
+
+**授权**：思傅 22:35 明确回「**现在换 dist**」⇒ 显式授权成立，覆盖 D-060 §七「生产仍跑旧 dist」与 §六「未授权不换包」的结论。
+**范围**：**只换后端 `server/dist` + 重启 `gk-api`**。⛔ 未上传小程序、未提审、未发版、未动数据库、未动 Caddy、未跑迁移（`0032` 仍未上）、前端产物一个字节未发。
+
+### 一、发货前判定（sha256 集合比对，不用有序 diff）
+
+本地 `server/dist`（`build:server` RC=0，HEAD `8daea39`）与生产 `/opt/gk/server/dist` 各 566 文件：
+
+| 项 | 结果 |
+|---|---|
+| 文件数 | **566 / 566** |
+| 仅本地 | **3**：`security/ugc-text-guard.service.{d.ts,js,js.map}`（D-059 新增） |
+| 仅生产 | **3**：`answer-search/ima-provider.{d.ts,js,js.map}`（D-060 已删源文件，Nest 不清 dist 孤儿） |
+| 内容不同 | **37**：D-059 五链路（`auth`/`timeline`/`questions`/`memory`/`subjects` 的 module+service）＋`security/content-check`＋`security/security.module`＋D-060（`answer-search.service`、`app.controller`、`shared/user-context`）＋2 个 `tsconfig*.tsbuildinfo` |
+| 发货包 | **40 文件 / 214,840 B** |
+
+⚠️ 本机 `sha256sum` 对二进制输出 `hash *./path`（带 `*`），生产输出 `hash  path`；比对前必须归一化（去 `*`、去 `./`），否则会把 566 条全部误判为「仅本地」。
+
+### 二、部署与验证
+
+1. **回滚点**：`sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-d059d060-20261114223806`（566 文件 / 5.2M，原 dist 保持不动，只覆盖点名文件）。
+2. **验包**：scp 到 `/tmp` → 解到 `/tmp/gk-d059d060/new` → `sha256sum -c` **40/40 OK**、解出 40 文件。
+3. **精准覆盖**：逐文件 `cp` + `chown gk:gk` + `chmod 644` ⇒ **COPIED=40**。
+4. **删孤儿**：`answer-search/ima-provider.{d.ts,js,js.map}` 三个 REMOVED，`IMA_RESIDUE=0`；`UGC_PRESENT=3`。
+5. **部署后复比**：重新取生产清单 ⇒ **566/566、onlyLocal 0 / onlyProd 0 / diff 0**，零残留差异后才重启。
+6. **重启与验证**：`systemctl restart gk-api` ⇒ `ActiveState=active / SubState=running`（22:38:29）；`http://127.0.0.1:3000/api/health` **200**（`:8080` 不作判据）、`https://deep-root.cn/api/health` **200**；`journalctl` 零 ERROR / 零 `MODULE_NOT_FOUND`，Nest 全路由挂载成功、OCR 常驻就绪。
+7. **生产特征串**：`CACHE_VERSION = 'v17'` ✓、`ima.qq.com` 命中 **0** ✓、`security/ugc-text-guard.service.js` 存在 ✓、`app.controller.js` 含「腾讯云境内自建」✓。
+8. **清理**：远端 `/tmp/gk-d059d060*` 已删；备份目录保留作回滚点。
+
+### 三、🔴 边界：后端已换包 ≠ 用户能用上
+
+- **前端一字节未发**：小程序未上传/未提审/未发版 ⇒ 隐私政策 r11、UGC 常驻声明、采纳二次确认、学习手册、智能高清护栏，用户手上都还没有。
+- **mp 后台现在可以做的**：改选「采集用户隐私」、5.1 保持「必要的最短时间」、6.2 填「弹窗」。**UGC `method=1` 仍不建议勾**——它的前提除后端外还要求 r11 前端包在线上（否则线上仍是 r8 文案，声明与包不符）。
+- 后端已 v17 ⇒ 旧开发版小程序搜题会拿到新口径（不再有外部知识库条目、note 为「不判定你录入的答案」）；`answer_cache` 里 v16 及更早记录因 `qHash` 含 `CACHE_VERSION` **自然失效，无需清库**。本轮对数据库零写入。
+- 仍锁：`strict=1`、第二层准入、T0 判定、`0032` 上生产、G8、面客集成、15 份切题失效、Caddy 重复响应头、公安联网备案、`review_events` 0 行、发布门两阻断。
+- **不宣称**：命中／召回／误判归零／P95／图形全覆盖／所有用户可用／核心功能已面客。
+
+### 四、回滚（未执行，留作应急）
+
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
+  && sudo -n mv /opt/gk/server/dist.bak-d059d060-20261114223806 /opt/gk/server/dist \
+  && sudo -n systemctl restart gk-api
+```
+回滚后打 `:3000/api/health` 并确认 `CACHE_VERSION` 回到 `v16`（含 ima 分支）。
