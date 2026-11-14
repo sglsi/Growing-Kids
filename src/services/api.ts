@@ -597,7 +597,7 @@ export function updateQuestion(
     images?: string[]
     /** 答案附件全量替换（思傅 2026-10-21：图片 / 文档 / 文本） */
     answer_attachments?: AnswerAttachment[]
-    /** 答案来源：manual 手填 / search 联网搜索（含 ima 知识库）/ ocr / mixed */
+    /** 答案来源：manual 手填 / search 联网搜索 / ocr / mixed */
     answer_source?: AnswerSource | 'mixed'
     /** 参考来源；知识库条目没有外链，url 可空 */
     answer_refs?: { title: string; url?: string }[]
@@ -1328,7 +1328,7 @@ export interface InlineFigure {
 export interface AnswerSearchResult {
   /**
    * search = 联网检索到真实来源；netdisk = 命中百度网盘里的自有资料（先于 kb）；
-   * kb = 来自 ima 知识库；llm = 无检索、纯模型推理；none = 都不可用
+   * kb = 来自资料库；llm = 无检索、纯模型推理；none = 都不可用
    */
   source: 'search' | 'netdisk' | 'kb' | 'llm' | 'none'
   /**
@@ -1378,7 +1378,7 @@ export interface AnswerSearchResult {
  *
  * mode（思傅 2026-10-23 拆分）：
  *   'search' = 联网搜题：只做真实网络检索，直接给来源摘要+链接，不喂给 AI
- *   'kb'     = 知识库：只检索 ima 知识库（秒级），不喂给 AI
+ *   'kb'     = 资料库：只检索运营者公共资料库（秒级），不喂给 AI
  *   'ai'     = AI 解题：只做模型推理，不检索，明确标注未联网核实
  */
 export function searchAnswer(
@@ -1735,106 +1735,20 @@ export async function saveQuestionAsImage(
 }
 
 // ============================================================
-// 智能客服（chat）
+// 🔴 2026-11-14（D-058）：原「智能客服 / 知识库管理」前端 API 封装整段删除。
+//
+// 个人主体下 AI 助手对用户完全不可用：
+//   ① 资质：办不了「深度合成-AI 问答」类目（需法人 + 算法备案）；
+//   ② 前端：AI_PUBLIC_ENTRY = false，D-057 已删净「我的」页与答题页入口；
+//   ③ 服务端：POST /api/chat/message、POST /api/chat 均过 requireAiEnabled()
+//      fail-closed，真实用户 ai_enabled 全为 false ⇒ 必然 403 AI_DISABLED。
+// 两个页面（pages/chat/index、pages/chat/admin）已无任何入口，属死页面；
+// 连同页面源码、路由、通用对话 service（src/services/chat.ts）一并删除，
+// 避免小程序包里残留大模型话术被审核认定为「提供 AI 服务」。
+//
+// ⚠️ 服务端 ChatModule / requireAiEnabled() 闸门**刻意保留**：删了才是真的
+//    把合规后门打开；M49 A3 专条守此。数据库 chat_* 表与 migrations 亦保留。
 // ============================================================
-export interface KnowledgeArticle {
-  id: string
-  title: string
-  content: string
-  category: string | null
-  tags: string[]
-  is_active: boolean
-  sort_order: number
-  created_at: string
-  updated_at: string
-}
-
-export interface ChatMessage {
-  id: string
-  session_id: string
-  user_id: string | null
-  role: 'user' | 'assistant'
-  content: string
-  created_at: string
-}
-
-export interface ChatSendResult {
-  session_id: string
-  reply: string
-  user_message_id: string
-  assistant_message_id: string
-}
-
-export function fetchKnowledgeList() {
-  return unwrap<KnowledgeArticle[]>(
-    Network.request({ url: '/api/chat/knowledge', method: 'GET', header: authHeaders() }),
-  )
-}
-
-export function createKnowledgeArticle(input: {
-  title: string
-  content: string
-  category?: string
-  tags?: string[]
-  is_active?: boolean
-  sort_order?: number
-}) {
-  return unwrap<KnowledgeArticle>(
-    Network.request({
-      url: '/api/chat/knowledge',
-      method: 'POST',
-      data: input,
-      header: authHeaders(),
-    }),
-  )
-}
-
-export function updateKnowledgeArticle(
-  id: string,
-  patch: Partial<
-    Pick<KnowledgeArticle, 'title' | 'content' | 'category' | 'tags' | 'is_active' | 'sort_order'>
-  >,
-) {
-  return unwrap<KnowledgeArticle>(
-    Network.request({
-      url: `/api/chat/knowledge/${id}`,
-      method: 'PATCH',
-      data: patch,
-      header: authHeaders(),
-    }),
-  )
-}
-
-export function deleteKnowledgeArticle(id: string) {
-  return unwrap<{ id: string }>(
-    Network.request({
-      url: `/api/chat/knowledge/${id}`,
-      method: 'DELETE',
-      header: authHeaders(),
-    }),
-  )
-}
-
-export function sendChatMessage(sessionId: string | null, content: string) {
-  return unwrap<ChatSendResult>(
-    Network.request({
-      url: '/api/chat/message',
-      method: 'POST',
-      data: { session_id: sessionId || '', content },
-      header: authHeaders(),
-    }),
-  )
-}
-
-export function fetchChatHistory(sessionId: string) {
-  return unwrap<ChatMessage[]>(
-    Network.request({
-      url: `/api/chat/messages?session_id=${encodeURIComponent(sessionId)}`,
-      method: 'GET',
-      header: authHeaders(),
-    }),
-  )
-}
 
 // ------------------------------------------------------------
 // 账号注销（OPS-18 R-合规-03）
@@ -1873,7 +1787,7 @@ export interface GradeRollover {
 }
 
 export interface UserSettings {
-  /** 是否允许把题目内容发往第三方 AI（ima / 联网检索 / 大模型）。false = 仅本地 */
+  /** 是否允许把题目内容发往第三方 AI（联网检索 / 大模型）。false = 仅本地 */
   ai_enabled: boolean
   /** 当前年级 1–12；null = 未选择（检索不按年级过滤） */
   grade?: number | null

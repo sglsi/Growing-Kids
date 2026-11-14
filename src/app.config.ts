@@ -51,8 +51,11 @@ export default defineAppConfig({
     'pages/privacy/index',
     // 用户协议（上线验收第 11 项：提审要求与隐私政策齐备）
     'pages/agreement/index',
-    'pages/chat/index',
-    'pages/chat/admin',
+    // 🔴 2026-11-14（D-058）：智能客服 / 知识库管理两个页面已连同源码删除。
+    //    个人主体下 AI 助手对用户完全不可用（资质 + AI_PUBLIC_ENTRY=false +
+    //    服务端 requireAiEnabled() fail-closed），这两个页面早已无任何入口，
+    //    留在包里只会让审核按「提供 AI 服务」要求补「深度合成-AI 问答」类目。
+    //    ⛔ 不要再注册回来；服务端闸门与 ChatModule 仍保留作合规兜底。
     'pages/memory/edit',
     'pages/memory/detail',
     // H5 扫码登录·手机端落地页（电脑浏览器无 wx.login；手机微信扫码后打开本页授权）
