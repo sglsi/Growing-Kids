@@ -77,7 +77,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // D-049：切分规则 qobj-1 → qobj-2（题号正则不再把半角小数当题目起点）⇒ 全库对象边界改变，
 // source_location 的 charStart/charEnd/objectIndex 与旧缓存不再对应。不 bump 会让用户
 // 一直看到指向旧边界的来源位置（点开对不上原文），必须整体失效。
-const CACHE_VERSION = 'v15'
+// D-055：note 口径改为「不判定用户自录答案、不制造疑虑」，旧缓存会原样吐旧话术，
+// 按项目惯例 bump（注释见下方 qHash 处），判据＝拿新题测。
+const CACHE_VERSION = 'v16'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -379,7 +381,7 @@ export class AnswerSearchService {
           solution: own.solution.slice(0, 500) || `来自：${own.title}`,
           refs: [{ title: own.title, url: '' }],
           confidence: 1,
-          note: '在运营者提供的公共资料库里找到了这道题的答案，请按来源核对后采纳',
+          note: '在你自己录过的题目里找到了这道题的答案',
         }
         settled = true
       }
@@ -394,7 +396,7 @@ export class AnswerSearchService {
             solution: `来自：${doc.title}`,
             refs: [{ title: doc.title, url: '' }],
             confidence: 0.9,
-            note: `在你的资料库里找到了这道题的解析，请核对后采纳${sourceNote(doc.sourceLocation)}`,
+            note: `在你的资料库里找到了这道题的解析${sourceNote(doc.sourceLocation)}`,
             ...(doc.sourceLocation ? { source_location: toSourceLocation(doc.sourceLocation) } : {}),
           }
           settled = true
@@ -425,7 +427,7 @@ export class AnswerSearchService {
             refs: [{ title: exact.name, url: '' }],
             confidence: Number((exact.score || 0).toFixed(2)),
             // 用户可见面统一叫「资料库」：资料存在哪个网盘/知识库与本项目无关
-            note: `来自资料库（已定位到这道题的解析段），请打开文件核对后再采纳${sourceNote(exact.sourceLocation)}`,
+            note: `来自资料库（已定位到这道题的解析段），可打开原文查看${sourceNote(exact.sourceLocation)}`,
             ...(exact.sourceLocation ? { source_location: toSourceLocation(exact.sourceLocation) } : {}),
           }
           settled = true
@@ -462,7 +464,7 @@ export class AnswerSearchService {
               solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
               refs: items.slice(0, 5).map((i) => ({ title: i.title, url: i.url })),
               confidence: Number(relevance(question, items).toFixed(2)),
-              note: '来自 ima 知识库（未做 AI 整理），请核对后采纳',
+              note: '来自资料库知识条目（未做 AI 整理），可作为参考资料',
             }
             settled = true
           } else if (items.length > 0) {
@@ -503,7 +505,7 @@ export class AnswerSearchService {
               ...imaItems.map((i) => ({ title: i.title, url: '' })),
             ],
             confidence: Number((hits[0]?.score || 0).toFixed(2)),
-            note: '没找到这道题的答案，以下是同主题资料，可打开文件自行核对',
+            note: '没找到这道题的答案，以下是同主题资料，可打开文件查看',
           }
         } else {
           result = {
@@ -574,7 +576,7 @@ export class AnswerSearchService {
           answer: (top.summary || top.snippet || '').slice(0, 500),
           solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
           refs, confidence: Number(conf.toFixed(2)),
-          note: '来自网络检索（未做 AI 整理），请核对后采纳',
+          note: '来自网络检索（未做 AI 整理），可作为参考资料',
         }
       } else {
         result = {

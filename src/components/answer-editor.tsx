@@ -24,16 +24,27 @@ import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
 /**
- * 资料库搜题：本版暂不保留（思傅 2026-11-14「如果不成熟，则不保留，待成熟后再上线」）。
+ * 资料库搜题：D-055 思傅拍板「确要按 B」——保留入口 + 收敛口径 + 常驻声明。
  *
- * 成熟度判定（全部为只读事实，非推测）：T0 硬门未过、第二层上线准入未过、
- * G8 合规门未过（seed 720 行全转载 / 0 官方直链）、review_events 仍 0 行（零效果证据）、
- * D-049 的 15 份切题失效未修好；且它检索的是「运营者提供的公共资料库」，
- * 与个人主体不做共享题库/UGC 的合规红线有张力。
+ * 🔴 成熟度事实没有变化，也不因保留入口而宣称通过：T0 硬门、第二层上线准入、
+ *    G8 合规门三条仍未过，`review_events` 生产仍 0 行，D-049 的 15 份切题失效未修好。
+ *    这是产品裁决，不是签核结论；不宣称命中、召回、误判、可用性任何一项。
  *
- * 实现完整保留，未删任何检索代码。待上述门通过后把这一行改回 true 即可上线。
+ * 🔴 「仅供本人资料检索」这句没有照抄：实现的 ① 自有题库 / ② library_docs 确实按
+ *    `user_id` 隔离，但 ③ 公共资料库（不传 userId，所有登录用户一致）与 ④ ima 知识库
+ *    是运营者配置的内容。照抄 B 原案那句就是虚假陈述 ⇒ 常驻声明如实写检索范围。
  */
-const KB_SEARCH_ENABLED = false
+const KB_SEARCH_ENABLED = true
+
+/**
+ * 按 B 的「常驻声明」：不挂在结果卡片上，而是只要入口存在就常驻，
+ * 保证「先给声明、后给内容」，也保证没搜到任何东西时用户仍看得到口径。
+ *
+ * 口径依据（思傅 2026-11-14）：「用户自己输入的答案是其认为的确定答案，无疑虑」。
+ * ⇒ 检索结果只是参考资料，不评判、不核对、不暗示用户怀疑自己录入的答案。
+ */
+const KB_SEARCH_NOTICE =
+  '资料库检索只提供参考资料，不判定你录入的答案。你自己录入的答案就是确定答案，不需要核对，也不用存疑。检索范围包括你自己录入的内容和本小程序资料库里的资料。'
 
 /**
  * 题目答案编辑区（思傅 2026-10-21）
@@ -626,6 +637,16 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         ) : null}
       </View>
 
+      {/* D-055 按 B：常驻声明。与结果无关，入口在就常驻；不折叠、不自动消失、
+          也不等「点了搜题」才出现 —— 否则就是先给内容、后给声明。 */}
+      {KB_SEARCH_ENABLED ? (
+        <View className="mt-2 rounded-lg p-2" style={{ backgroundColor: 'rgba(11,122,85,0.04)' }}>
+          <Text className="block text-xs" style={{ color: '#6B655C', lineHeight: '1.6' }}>
+            {KB_SEARCH_NOTICE}
+          </Text>
+        </View>
+      ) : null}
+
       {/* 搜到的候选答案：必须「采纳」才入库。
           🔴 P-016 / D-019：source='none' 也要渲染 —— 旧实现把「没找到 / 请单独录入小题」
           只塞进一个转瞬即逝的 toast，用户观感就是「点了资料库搜题什么都没有」。
@@ -645,7 +666,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                   ? hasRefs
                     ? '没找到原题答案 · 以下是解题思路相近的例题'
                     : candidate.match_level === 'exact'
-                      ? '找到这道题的参考答案'
+                      // D-055：不叫「参考答案」——那会把资料库内容摆到与用户自录答案
+                      // 对立的位置。改中性表述：只是资料库里有这道题的解析。
+                      ? '资料库里有这道题的解析'
                       : candidate.match_level === 'topic'
                         ? '没找到这道题的答案，以下是同主题资料'
                         : `资料库检索结果（${candidate.refs.length} 条）`
@@ -653,7 +676,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                     // 显式标识「AI 生成」：《人工智能生成合成内容标识办法》要求
                     // 面向公众提供的 AI 生成内容须在界面上可识别。原文案只写
                     // 「AI 推理结果」，未落到「生成内容」这一法定表述。
-                    ? 'AI 生成内容（未联网核实，请核对后再用）'
+                    ? 'AI 生成内容（未联网核实，仅供参考）'
                     : '结果'}
             </Text>
             <X size={14} color="#9A948A" onClick={() => setCandidate(null)} />
@@ -773,7 +796,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           {/* P3 / P-012 / D-015：来源卡片。只在 exact 展示 —— topic/none 一律不展示，
               否则等于给「没找到原题」的结果背书。只渲染已有的 source_location，
               不新增答案内容、不做自动跳题；「题干 A + 别人解析」的残余风险仍在，
-              家长必须能按题号回原文核对（报告 §8.4 / §8.5 第 3 条）。 */}
+              家长可按题号回原文查看（报告 §8.4 / §8.5 第 3 条）。 */}
           {candidate.match_level === 'exact' && candidate.source_location ? (
             <View className="mb-2 rounded-lg border p-2" style={{ borderColor: 'rgba(11,122,85,0.18)', backgroundColor: 'rgba(11,122,85,0.04)' }}>
               <Text className="block text-xs font-medium mb-1" style={{ color: BRAND_TEXT }} numberOfLines={2}>
@@ -788,7 +811,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                   : ''}
               </Text>
               <Text className="block text-xs text-muted-foreground mt-1">
-                请打开文件核对原题与解析后采纳
+                可打开原文查看题目与解析
               </Text>
             </View>
           ) : null}
