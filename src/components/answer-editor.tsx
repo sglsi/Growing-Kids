@@ -24,6 +24,18 @@ import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 
 /**
+ * 资料库搜题：本版暂不保留（思傅 2026-11-14「如果不成熟，则不保留，待成熟后再上线」）。
+ *
+ * 成熟度判定（全部为只读事实，非推测）：T0 硬门未过、第二层上线准入未过、
+ * G8 合规门未过（seed 720 行全转载 / 0 官方直链）、review_events 仍 0 行（零效果证据）、
+ * D-049 的 15 份切题失效未修好；且它检索的是「运营者提供的公共资料库」，
+ * 与个人主体不做共享题库/UGC 的合规红线有张力。
+ *
+ * 实现完整保留，未删任何检索代码。待上述门通过后把这一行改回 true 即可上线。
+ */
+const KB_SEARCH_ENABLED = false
+
+/**
  * 题目答案编辑区（思傅 2026-10-21）
  *
  * 设计依据见「题目答案功能-设计方案.md」：
@@ -580,10 +592,12 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             全程只检索、不生成内容、不喂给 AI。
             ⚠️ 不受 AI_PUBLIC_ENTRY 约束（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
             它跟「AI 解题」不是一回事，被一起收起属于误伤。 */}
-        <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
-          <BookOpen size={12} color={INK} />
-          <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '资料库搜题'}</Text>
-        </View>
+        {KB_SEARCH_ENABLED && (
+          <View className={btn} onClick={() => { if (!searching) void handleSearch('kb') }}>
+            <BookOpen size={12} color={INK} />
+            <Text className="block text-xs">{searching === 'kb' ? '检索中…' : '资料库搜题'}</Text>
+          </View>
+        )}
         {/* 联网搜题 / AI 解题：这两条确实往外部发内容且含 AI 生成，
             个人主体不开放（见 constants/app-info.ts），此处直接不渲染入口。 */}
         {AI_PUBLIC_ENTRY && (

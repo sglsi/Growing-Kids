@@ -3,7 +3,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
-import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Eraser, Database, Maximize2 } from 'lucide-react-taro'
+import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders } from '@/services/net'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
@@ -116,7 +116,7 @@ const CANVAS_CSS_SIDE = MAX_CANVAS_SIDE
 const AI_ACTIONS: { action: ImageAction; label: string; icon: any }[] = [
   { action: 'auto', label: '自动调正', icon: Wand },
   { action: 'enhance', label: '智能高清', icon: Sparkles },
-  { action: 'erase_v2', label: '去手写', icon: Eraser },
+  // 去手写（erase_v2）本版暂不接入：功能不完善，入口先收起，实现保留待成熟后开放
 ]
 
 // 智能高清的「倍率 / 模式」选项（方案 §3：CPU 轻量 SR，x2 默认；x3/x4 更清晰但更慢）

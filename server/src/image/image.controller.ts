@@ -32,7 +32,7 @@ export class ImageController {
         // 以下三项都是**本地自有功能**（不依赖外部 AI 服务）：
         straighten: true,   // 自动调正：本地几何纠偏（透视压平，100% 保真）
         enhance: true,      // 智能高清：本地超分/锐化（CPU 推理）
-        erase_v2: true,     // 去手写：本地手写检测 + 局部修复
+        erase_v2: false,    // 去手写本版不接入（功能不完善），入口与能力声明一并收起
         external_fallback: MODE === 'hybrid' || MODE === 'gen', // 仅兜底用（需 COZE_API_TOKEN）
       },
     }

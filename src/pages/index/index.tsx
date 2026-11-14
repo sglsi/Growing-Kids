@@ -1,7 +1,7 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow, useDidHide } from '@tarojs/taro'
 import { useState, useRef } from 'react'
-import { Trash2, BookmarkPlus, BookmarkMinus, CircleUser, Crop, Wand, Sparkles, Eraser, Tag, Camera, FileText, Images } from 'lucide-react-taro'
+import { Trash2, BookmarkPlus, BookmarkMinus, CircleUser, Crop, Wand, Sparkles, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -33,7 +33,7 @@ const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[
   { action: 'crop', label: '裁剪', icon: Crop },
   { action: 'auto', label: '自动调正', icon: Wand },
   { action: 'enhance', label: '智能高清', icon: Sparkles },
-  { action: 'erase', label: '去手写', icon: Eraser },
+  // 去手写本版暂不接入（功能不完善），入口收起，实现保留
 ]
 
 /**
