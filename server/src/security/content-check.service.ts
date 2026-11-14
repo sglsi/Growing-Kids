@@ -6,15 +6,18 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
  *
  * ## 为什么必须做
  * 小程序**凡用户可产出内容的场景**（UGC），提审时被要求接入内容安全检测，
- * 否则大概率驳回。本项目的 UGC 入口：
- *   · `chat/send` 用户提问（还会被拼进 system prompt 的上下文）
- *   · `chat/knowledge` 知识库文章（全局可见，直接决定所有用户助手的回答口径）
+ * 否则大概率驳回。本项目的 UGC 文本入口（D-059 后经 `UgcTextGuard` 统一收口）：
+ *   · 昵称（`auth/updateProfile`）、学科名称（`subjects`）
+ *   · 题干 / 答案 / 解题过程 / 题目名称（`timeline` 与旧 `questions` 表）
+ *   · 成长记忆文字（`memories`）
+ *   · `chat/send` 用户提问（`chat` 前端已删，闸门保留作合规兜底）
  *
  * ## 设计取舍
- * - **best-effort**：检测不可用时**放行**而非阻断，避免微信接口抖动把整条对话链路打死；
+ * - **best-effort**：检测不可用时**放行**而非阻断，避免微信接口抖动把整条保存链路打死；
  *   但失败必须 `console.error` 打全错（项目铁律：best-effort catch 必须打全错）。
  * - **未配置 appid/secret 直接放行**：本地开发/无凭据环境不应被拒绝服务。
- * - **同步短文本足够**：聊天单条消息量小；超长文本按 2000 字切片逐段检查。
+ * - **同步短文本足够**：超长文本按 2000 字切片逐段检查；D-059 给两次外网
+ *   fetch 加 3s 超时，防止检测接口挂住把「保存题目」拖过前端 60s 超时。
  * - **AI 回复默认不检**（`CONTENT_CHECK_AI_REPLY=true` 才开）：
  *   回复经 LLM 再走一轮检测会显著拉长响应链路；如需满足更严格的内容合规，打开开关即可。
  */
@@ -24,6 +27,8 @@ const MSG_SEC_CHECK = 'https://api.weixin.qq.com/wxa/msg_sec_check'
 
 /** 单次检测上限（微信限制 2500 字），留余量按 2000 切片 */
 const CHUNK_SIZE = 2000
+/** D-059：外网请求超时。检测不可用⇒放行，绝不能让保存链路被挂住 */
+const FETCH_TIMEOUT_MS = 3000
 
 export interface TextCheckResult {
   /** true = 通过（含「检测不可用」时的放行） */
@@ -62,6 +67,7 @@ export class ContentCheckService {
     try {
       const res = await fetch(
         `${TOKEN_URL}?grant_type=client_credential&appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}`,
+        { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
       )
       const json = (await res.json()) as { access_token?: string; expires_in?: number; errcode?: number; errmsg?: string }
       if (!json.access_token) {
@@ -140,6 +146,7 @@ export class ContentCheckService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: chunk, scene, version: 2, openid }),
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         })
         const json = (await res.json()) as {
           errcode?: number

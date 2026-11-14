@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { UsersService } from '../users/users.service'
+import { UgcTextGuard } from '../security/ugc-text-guard.service'
 import type { User } from '../users/users.types'
 import { code2Session } from './wechat-session'
 import type { LoginResult, WechatSession } from './auth.types'
@@ -11,7 +12,10 @@ const TABLES_WITH_USER = ['subjects', 'timeline_items', 'library_docs', 'documen
 export class AuthService {
   private readonly logger = new Logger(AuthService.name)
 
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly ugc: UgcTextGuard,
+  ) {}
 
   /**
    * 微信登录：code → openid → 找/建正式用户 → 迁移匿名数据 → 返回身份
@@ -145,11 +149,20 @@ export class AuthService {
     }
   }
 
-  /** 更新昵称 / 头像 */
+  /**
+   * 更新昵称 / 头像。
+   *
+   * D-059：昵称是 UGC「用户资料」场景，入库前过内容安全检测。
+   * 登录时带 profile 也走这里（`login()` 内部调用），一处收口两条入口。
+   * 头像只是 URL / storage key，不送文本检测。
+   */
   async updateProfile(
     userId: string,
     patch: { nickname?: string; avatar_url?: string },
   ): Promise<User> {
+    if (patch.nickname !== undefined) {
+      await this.ugc.assertAllowed(userId, [patch.nickname], { scene: 1, tag: 'nickname' })
+    }
     return this.usersService.updateProfile(userId, patch)
   }
 

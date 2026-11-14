@@ -7,6 +7,7 @@ import { gradeSpread, normalizeGrade } from '../shared/grade'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
 import { IngestService } from '../storage/ingest.service'
+import { UgcTextGuard, questionTexts } from '../security/ugc-text-guard.service'
 import {
   cacheGet, cacheSet, invalidateUserTimeline, stableQuery,
   TL_LIST_PREFIX, TL_ITEM_PREFIX, TL_OV_KEY, TL_REVIEW_SUM_KEY,
@@ -122,6 +123,7 @@ export class TimelineService {
     private readonly storageService: StorageService,
     private readonly blobService: BlobService,
     private readonly ingestService: IngestService,
+    private readonly ugc: UgcTextGuard,
   ) {}
 
   /**
@@ -465,6 +467,14 @@ export class TimelineService {
       throw new BadRequestException('题目条目缺少 content.question')
     }
 
+    // D-059：题干 / 答案 / 解题过程 / 题目名称 / 标签都是用户可编辑文本，
+    // 入库前过微信内容安全检测，命中违规整条拒绝（不落库、不生成图片引用）。
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.title, ...questionTexts(dto.content), ...(dto.tags ?? [])],
+      { tag: 'timeline.create' },
+    )
+
     const client = getSupabaseClient()
     // 未显式指定年级时才查用户表（省一次 RTT）
     const userGrade = dto.grade === undefined ? await this.ownerGrade(userId) : undefined
@@ -721,6 +731,12 @@ export class TimelineService {
       }
       payloads.push(await this.buildPayload(userId, dto, ownedSubjects, seqCache, userGrade))
     }
+    // D-059：整批合并成一次检测调用，避免逐题往返把保存链路拖过前端 60s 超时。
+    await this.ugc.assertAllowed(
+      userId,
+      dtos.flatMap((d) => [d.title, ...questionTexts(d.content), ...(d.tags ?? [])]),
+      { tag: 'timeline.batch' },
+    )
     const { data, error } = await client.from(TABLE).insert(payloads).select(SELECT_COLS)
     if (error) throw new Error(error.message)
     // 迁移双写：DB_PROVIDER=dual 时把这批行镜像到腾讯云 PG（best-effort，失败不影响主库）
@@ -745,6 +761,13 @@ export class TimelineService {
    * 再用带嵌入的 findOne 单独查一遍返回完整记录。两次都是最朴素、最稳的调用。
    */
   async update(userId: string, id: string, dto: UpdateTimelineDto): Promise<TimelineItem> {
+    // D-059：只送本次实际改动的用户文本，不重送已入库的旧内容
+    // （否则每次换图片 / 切学科都会把整篇题干重新发一遍）。
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.title, ...questionTexts(dto.content), ...(dto.tags ?? [])],
+      { tag: 'timeline.update' },
+    )
     const client = getSupabaseClient()
     // 内容局部更新合并（P3 链路复核发现的数据丢失）：content 为局部 patch 时
     // 先读现价再合并——详情页等调用方只传题干/答案/解答/状态，全量替换会把

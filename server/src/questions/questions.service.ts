@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { cleanStr, cleanDate } from '../shared/query-param'
+import { UgcTextGuard } from '../security/ugc-text-guard.service'
 import type {
   Question,
   QuestionWithSubject,
@@ -26,6 +27,8 @@ interface ListQuery {
  */
 @Injectable()
 export class QuestionsService {
+  constructor(private readonly ugc: UgcTextGuard) {}
+
   private applyRange(q: any, startDate?: string, endDate?: string) {
     let query = q
     // 脏参数防御：非日期字符串喂给 recognized_at 会让 Postgres 解析失败直接 500
@@ -87,6 +90,13 @@ export class QuestionsService {
     if (!dto.subject_id) throw new BadRequestException('subject_id 不能为空')
     if (!dto.question_content) throw new BadRequestException('question_content 不能为空')
 
+    // D-059：旧题目表同样是用户可达的文本写入口，不能因为主链路迁到 timeline 就漏掉
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.question_content, dto.answer_content, dto.solution, dto.wrong_answer, dto.source],
+      { tag: 'questions.create' },
+    )
+
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = {
       user_id: userId,
@@ -114,6 +124,12 @@ export class QuestionsService {
   }
 
   async update(userId: string, id: string, dto: UpdateQuestionDto): Promise<Question> {
+    // D-059：只送本次提交的文本字段（UpdateQuestionDto 全为可选）
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.question_content, dto.answer_content, dto.solution, dto.wrong_answer, dto.source],
+      { tag: 'questions.update' },
+    )
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     const fields: (keyof UpdateQuestionDto)[] = [

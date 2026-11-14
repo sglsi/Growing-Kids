@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
+import { UgcTextGuard } from '../security/ugc-text-guard.service'
 import { cleanStr, cleanDate } from '../shared/query-param'
 import type {
   Memory, MemoryMedia, MemoryListQuery,
@@ -22,7 +23,10 @@ const VALID_KINDS: ReadonlyArray<MemoryKind> = ['image', 'audio', 'video']
  */
 @Injectable()
 export class MemoryService {
-  constructor(private readonly storageService: StorageService) {}
+  constructor(
+    private readonly storageService: StorageService,
+    private readonly ugc: UgcTextGuard,
+  ) {}
 
   // ---------- 列表 ----------
   async list(
@@ -174,6 +178,12 @@ export class MemoryService {
 
   // ---------- 创建 ----------
   async create(userId: string, dto: CreateMemoryDto): Promise<Memory> {
+    // D-059：成长记忆文字（标题 / 正文 / 心情 / 标签）属 UGC 文本，先过检再入库
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.title, dto.content, dto.mood, ...(dto.tags ?? [])],
+      { scene: 4, tag: 'memory.create' },
+    )
     const client = getSupabaseClient()
     const payload: Record<string, unknown> = {
       user_id: userId,
@@ -198,6 +208,12 @@ export class MemoryService {
 
   // ---------- 修改 ----------
   async update(userId: string, id: string, dto: UpdateMemoryDto): Promise<Memory> {
+    // D-059：只送本次改动的文本，不重送旧正文
+    await this.ugc.assertAllowed(
+      userId,
+      [dto.title, dto.content, dto.mood, ...(dto.tags ?? [])],
+      { scene: 4, tag: 'memory.update' },
+    )
     const client = getSupabaseClient()
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (dto.title !== undefined) update.title = dto.title
