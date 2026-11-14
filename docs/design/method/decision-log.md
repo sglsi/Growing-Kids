@@ -1529,3 +1529,20 @@
 - **生产未动一行**：服务端 dist 未换、`gk-api` 未重启；小程序未上传、未提审、未发版。要让真实用户用上，须另行授权「换 dist + 重启」并走完 mp 后台人工项。
 - 仍锁：`strict=1`、第二层准入、T0 判定、`0032` 上生产、G1–G8 发货、面客集成、15 份切题失效、Caddy 重复响应头、公安联网备案（审核中）。
 - **回滚**：全部为本地源码改动，按 commit 逐条 revert 即可；学习手册页为新增文件，删除即可。生产态未产生任何需要回滚的写入。
+
+### 八、交付与提交后复核（2026-11-14 02:51）
+
+按功能模块拆 **6 条独立 commit**（`f42272c` 之后，未 push）：
+
+| commit | 模块 |
+|---|---|
+| `74567fc` | fix(export) 三条导出链补齐题目配图 + `dynamic-tests/run-export-figures.cjs` |
+| `faf6a24` | feat(guide) 学习手册静态页 |
+| `fd39b67` | fix(image) 智能高清护栏 + OCR 校验 fail-closed |
+| `86353d9` | fix(entry) 去手写／资料库搜题入口收敛 |
+| `ccaf441` | test(verify) M48 守卫 |
+| `fdc4c30` | docs(method) 本台账 |
+
+`src/pages/index/index.tsx`／`subject/index.tsx`／`components/image-editor.tsx` 三个文件同时含「高清护栏」与「去手写」两类 hunk，已按 hunk 拆进 `fd39b67` 与 `86353d9`，两组边界互不混改。
+
+提交后重编译 `build:weapp`（版本角标 `fdc4c30` = HEAD `fdc4c30`），并全量复核：`verify:gate` **38/38**、M45 9/9 + M46 11/11 + M47 12/12 + **M48 13/13**、`method:check` H1 26 / H2 144 / H3 2 零警告、离线实证 3/3 PASS。`release:check`（02:51）仍为**通过 10／警告 2／阻断 2**，与 02:29 一致；两项阻断是 mp 后台人工前置，未擅自打开。工作区干净。
