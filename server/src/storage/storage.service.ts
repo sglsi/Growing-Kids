@@ -181,7 +181,7 @@ export class StorageService {
    *
    * 用途（2026-10-21 真机 downloadFile 60s 超时根因修复）：文档/PDF 的
    * file_key 经 `/api/storage/files/*` 代理给手机——手机走局域网连后端，
-   * 由后端服务端取对象存储，避开手机直连 Supabase（新加坡）的跨境慢网。
+   * 由后端服务端取对象存储，避开手机直连早期境外托管库的跨境慢网（现网已迁 L3 境内）。
    * 文档都是小文件（KB~MB 级），Buffer 全量读无压力。
    */
   async readObject(key: string): Promise<Buffer | null> {

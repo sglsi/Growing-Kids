@@ -96,11 +96,11 @@ m.test('A3 切分规则版本已 bump 到 qobj-2（否则旧对象不会重建�
   c.ok(!/OBJECT_ENGINE_VERSION\s*=\s*'qobj-1'/.test(src), '仍存在 qobj-1 赋值')
 })
 
-m.test('A4 结果内容变了 ⇒ CACHE_VERSION 必须失效（当前 v16）', (c) => {
+m.test('A4 结果内容变了 ⇒ CACHE_VERSION 必须失效（当前 v17）', (c) => {
   const src = read(ANSWER_SVC)
-  // D-049 切分口径 v14→v15；D-055 note 口径 v15→v16。两处均已登记台账，
+  // D-049 切分口径 v14→v15；D-055 note 口径 v15→v16；D-060 删召回源 v16→v17。均已登记台账，
   // 断言守「当前登记值」而非某一个历史值；再 bump 须同步 M42 B6 / M44 A5 / M48 C3。
-  c.ok(/const CACHE_VERSION = 'v16'/.test(src), 'CACHE_VERSION 不是 v16（旧缓存会吐旧 note 或指向旧边界）')
+  c.ok(/const CACHE_VERSION = 'v17'/.test(src), 'CACHE_VERSION 不是 v16（旧缓存会吐旧 note 或指向旧边界）')
 })
 
 m.test('A5 本次只改切题层：input-guard 的 ITEM_START 未被波及', (c) => {

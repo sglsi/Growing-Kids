@@ -30,7 +30,7 @@ import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
  *    这是产品裁决，不是签核结论；不宣称命中、召回、误判、可用性任何一项。
  *
  * 🔴 「仅供本人资料检索」这句没有照抄：实现的 ① 自有题库 / ② library_docs 确实按
- *    `user_id` 隔离，但 ③ 公共资料库（不传 userId，所有登录用户一致）与 ④ ima 知识库
+ *    `user_id` 隔离，但 ③ 公共资料库（不传 userId，所有登录用户一致）
  *    是运营者配置的内容。照抄 B 原案那句就是虚假陈述 ⇒ 常驻声明如实写检索范围。
  *    ✅ 2026-11-14 思傅复核「两处待复核照办」⇒ 维持如实口径，本项已确认、不再待复核。
  */
@@ -376,7 +376,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
   // ---------- 联网搜题 / 知识库 / AI 解题（思傅 2026-10-23：三者彻底拆开，不再混为「联网搜答案」） ----------
   // 联网搜题 = 只做真实网络检索，直接给来源摘要+链接，不喂给 AI
-  // 知识库   = 只检索 ima 知识库（秒级），直接给命中条目+高亮内容，不喂给 AI
+  // 知识库   = 只检索运营者公共资料库（D-060 移除外部知识库），给命中条目，不喂给 AI
   // AI 解题   = 只做模型推理，不检索，结果明确标注「未联网核实」
   const handleSearch = async (searchMode: 'search' | 'kb' | 'ai') => {
     const searchLabel = searchMode === 'kb' ? '资料库检索' : '检索中'
@@ -384,8 +384,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     // 这里先拦一次是为了给出「去哪开」的提示，而不是让用户撞一个看不懂的报错。
     //
     // ⚠️ kb（资料库检索）**不受 AI 开关约束**（思傅 2026-11-03）：它只去用户自己的
-    //    ima 知识库找，不做 AI 生成，被「AI 与在线检索」连坐是误伤。但题干确实会
-    //    发到腾讯 ima ⇒ 仍需监护人已同意隐私政策（guardPolicy 兜这道）。
+    //    公共资料库里找，不做 AI 生成，被「AI 与在线检索」连坐是误伤。
+    //    题干会进入运营者公共资料库检索 ⇒ 仍需监护人已同意隐私政策（guardPolicy 兜这道）。
     if (searchMode === 'kb') {
       if (!(await guardPolicy('检索公共资料库'))) return
     } else if (!(await ensureAiSetting())) {
@@ -627,7 +627,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
         </View>
-        {/* 资料库搜题：先查运营者提供的公共资料库（文件名/路径 + 资料正文双通道），未命中再查 ima 知识库；
+        {/* 资料库搜题：只查运营者提供的公共资料库（文件名/路径 + 资料正文双通道），D-060 已移除外部知识库；
             全程只检索、不生成内容、不喂给 AI。
             ⚠️ 不走联网/大模型链路（思傅 2026-11-03 反馈「从我的资料库搜答案没了」）：
             它是纯检索，与 AI 解题不是一回事，被一起收起属于误伤。 */}
@@ -677,7 +677,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
                   ? `网络检索结果（${candidate.refs.length} 条来源）`
                   : candidate.source === 'netdisk' || candidate.source === 'kb'
                   // P-006 / D-009：按原题判定分档，netdisk 与 kb 一视同仁——
-                  // ima 语义检索命中也可能只是同专题不同题，不得无条件叫「资料库检索结果」。
+                  // 语义相近的命中也可能只是同专题不同题，不得无条件叫「资料库检索结果」。
                   // 未带 match_level 的旧契约仍走原文案，避免老结果显示成「没找到」。
                   ? hasRefs
                     ? '没找到原题答案 · 以下是解题思路相近的例题'

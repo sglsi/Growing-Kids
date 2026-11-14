@@ -234,8 +234,10 @@ m.test('🔴 P-009：两个正文数据源都走 judgeObjects 硬闸（无数据
   c.ok(nd.includes('judgeObjects(question, text,'), '网盘深挖没有改用 judgeObjects')
   c.ok(sv.includes('judgeObjects(question, text,'), 'library_docs 没有改用 judgeObjects')
   c.ok(!/const j = judge\(/.test(nd + sv), '仍有全文件级 judge() 在给 exact 供数')
-  // ima 是语义高亮片段，按 P-006 口径仍用 isSameQuestion，但不得因此绕过闸门
-  c.ok(sv.includes('isSameQuestion(question, joined)'), 'ima 分支原题判定被删了')
+  // D-060：外部知识库召回源已移除；判定层 judgeObjects 路径不变，且 service
+  // 不得再出现该 provider 的任何代码引用（防后续迭代悄悄带回来）
+  c.ok(!/ImaKnowledgeProvider|ima-provider|IMA_|imaItems/.test(sv),
+    'D-060：已移除的外部知识库 provider 被带回来了')
 })
 
 m.test('🔴 match_level 契约三处同名同值域（后端类型 / service / 前端 api）', (c) => {
@@ -251,18 +253,21 @@ m.test('🔴 match_level 契约三处同名同值域（后端类型 / service / 
   c.ok(vals.includes('exact') && vals.includes('topic') && vals.includes('none'), '三档没有全部落地')
 })
 
-m.test('🔴 ima 语义检索结果也必须过原题判定（不得「有结果就 verified:true」）', (c) => {
+m.test('🔴 D-060：外部知识库召回源已移除且不得复活（判定层硬闸原样保留）', (c) => {
   const s = read(SERVICE)
-  c.ok(s.includes('isSameQuestion(question, joined)'),
-    'ima 分支缺少原题判定闸门 —— 它查询链被降级成主题词，命中同专题不同题几乎必然')
-  c.ok(!/if \(items\.length > 0\)\s*\{[\s\S]{0,200}?verified:\s*true/.test(s),
-    '仍存在「if (items.length > 0) { … verified: true }」的旧模式')
-  const iJudge = s.indexOf('isSameQuestion(question, joined)')
-  const iAnswer = s.indexOf("answer: (top.summary || top.snippet || '')")
-  c.ok(iJudge > -1 && iAnswer > iJudge, 'ima 的答案组装跑到了原题判定之前')
-  c.ok(s.includes('imaItems = items.slice(0, 5)'), '判不出原题的 ima 条目必须留给兜底如实列出，不能丢')
+  const qm = read('server/src/shared/question-match.ts')
+  c.ok(!/ImaKnowledgeProvider|ima-provider|imaItems|imaMissNote|IMA_/.test(s),
+    'service 里仍有已移除 provider 的代码引用')
+  // ⚠️ 不能用 top.summary/top.snippet 做禁词：mode=search 的正常链路也用它组装 answer。
+  //    只查已删分支特有的 note，避免误伤联网检索。
+  c.ok(!s.includes('来自资料库知识条目（未做 AI 整理），可作为参考资料'),
+    '已移除分支的「未做 AI 整理」文案仍在，说明分支没删干净')
+  c.ok(s.includes("answer: '', // 🔴 D-009"), 'topic 兜底未显式置空 answer')
+  // 判定层零改动：真相源仍在，service 的正文判定仍走 judgeObjects
+  c.ok(/judgeObjects/.test(qm), '判定层 judgeObjects 不见了')
+  c.ok(s.includes('judgeObjects(question, text,'), 'service 的正文判定没走 judgeObjects')
+  c.ok(/const CACHE_VERSION = 'v17'/.test(s), '删源后未 bump 缓存版本，旧缓存会吐已删数据源的答案')
 })
-
 m.test('🔴 topic 结果 answer 必须为空、verified 必须为 false；answer 不再来自 top.snippet', (c) => {
   const s = read(SERVICE)
   c.ok(!s.includes('answer: (top.snippet'), '仍在把网盘正文片段塞进 answer')
@@ -298,11 +303,12 @@ m.test('🔴 采纳闸门双保险：前端条件渲染 + handleAdopt 保存前�
 m.test('🔴 分档呈现：topic 明说「没找到这道题的答案」，且不把文件名清单当解题过程渲染', (c) => {
   const s = read(EDITOR)
   c.ok(s.includes('没找到这道题的答案，以下是同主题资料'), '缺少诚实化文案')
-  c.ok(s.includes('找到这道题的参考答案'), 'exact 分档标题缺失')
+  // D-055：不叫「参考答案」（会把资料库内容摆到与用户自录答案对立的位置）
+  c.ok(s.includes('资料库里有这道题的解析'), 'exact 分档标题缺失（D-055 中性口径）')
   c.ok(/candidate\.solution && candidate\.match_level !== 'topic'/.test(s),
     'topic 的 solution（文件名清单）仍被 MathText 当解题过程渲染')
   c.ok(s.includes("candidate.source === 'netdisk' || candidate.source === 'kb'"),
-    'kb 来源未纳入分档 —— ima 同专题条目会继续冒充「资料库检索结果」')
+    'kb 来源未纳入分档 —— 同专题条目会继续冒充「资料库检索结果」')
 })
 
 m.test('🔴 H2 口径：搜题结果文案不含宣称词与门槛话术', (c) => {

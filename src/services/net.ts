@@ -99,7 +99,7 @@ export function isPdfFile(mimeOrUrl: string): boolean {
  * 打开对象存储文件（文档/PDF），失败则复制链接。
  *
  * @param fileKey 有则走后端代理 `/api/storage/files/{key}`（手机→局域网后端→对象存储），
- *   避开手机直连 Supabase（新加坡）的跨境慢网——2026-10-21 真机实测直连
+ *   避开手机直连早期境外托管库的跨境慢网（现网已迁 L3 境内）——2026-10-21 真机实测直连
  *   downloadFile 60s 超时（reportTask costTime too long: 60022ms）。
  *   无 key 才直连原 URL。复制兜底始终用原公网 URL（浏览器可开）。
  */

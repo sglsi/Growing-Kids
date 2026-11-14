@@ -35,7 +35,7 @@ const HEADER_TOKEN = 'x-auth-token'
 /**
  * 用户对象内存缓存 TTL（思傅 2026-10-21 性能优化）。
  *
- * 根因：本中间件对**每个请求**都做一次 users 表查询（Supabase 新加坡 RTT ~1.5s），
+ * 根因：本中间件对**每个请求**都做一次 users 表查询（早期境外库 RTT ~1.5s），
  * 这是「每次点开题目都要等」的后端侧主因。下游只消费 id / is_anonymous /
  * expire_at / role，一分钟内稳定，缓存无一致性风险。
  * 代价：改 role 后最多 60s 生效（提权脚本会提示）。
@@ -322,7 +322,7 @@ export async function requireAdmin(req: RequestWithUser): Promise<string> {
  *
  * 规则（用户级、默认关）：
  *   未开启 `users.ai_enabled` ⇒ **只走本地**（本机 OCR 侧车 + 本地题库），
- *   任何题目文本/图片都不得发往 ima、联网检索或大模型；开启后才放行。
+ *   任何题目文本/图片都不得发往联网检索或大模型；开启后才放行。
  *
  * ⚠️ 为什么在**后端**拦而不是只在前端藏按钮：
  *   前端藏按钮只是体验，拿到接口就能绕。控制点必须在服务端。

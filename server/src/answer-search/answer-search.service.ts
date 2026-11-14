@@ -6,7 +6,6 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { TimelineService } from '../timeline/timeline.service'
 import { OcrService } from '../ocr/ocr.service'
 import { resolveSearchProvider } from './search-provider'
-import { ImaKnowledgeProvider } from './ima-provider'
 import { NetdiskSearchService } from '../netdisk/netdisk-search.service'
 import { judgeObjects, isSameQuestion, extractDistinctive } from '../shared/question-match'
 import type { SourceLocation } from '../shared/question-match'
@@ -25,9 +24,9 @@ import type { AnswerSearchResult, WebItem } from './answer-search.types'
  *     直接返回最相关来源的摘要 + 参考链接，让用户自己看原文。
  *     检索不到就如实说检索不到，**绝不拿 AI 答案冒充搜索结果**。      source=search / verified=true
  *
- *   mode=kb（知识库）：**只检索 ima 知识库**，不喂给 AI。
- *     思傅自建知识库内容权威、检索秒级（联网搜题实测 83s，知识库 <2s），
- *     作为第三种解题来源；未配凭据时给出明确配置指引，绝不静默降级。    source=kb / verified=true
+ *   mode=kb（资料库检索）：**只查自有题库 / 自有资料库 / 运营者公共资料库**，不喂给 AI。
+ *     🔴 D-060：外部知识库因访问限制已整体移除，不再作为召回源。
+ *     未命中时如实返回 source=none 或 topic，绝不静默降级或伪造。        source=netdisk / kb / none
  *
  *   mode=ai（AI 解题）：**只做模型推理**，不检索。
  *     模型基于学科知识推导，明确标注「未联网核实」。                  source=llm / verified=false
@@ -79,7 +78,9 @@ const CACHE_PREFIX = 'ans:srch:'
 // 一直看到指向旧边界的来源位置（点开对不上原文），必须整体失效。
 // D-055：note 口径改为「不判定用户自录答案、不制造疑虑」，旧缓存会原样吐旧话术，
 // 按项目惯例 bump（注释见下方 qHash 处），判据＝拿新题测。
-const CACHE_VERSION = 'v16'
+// D-060：移除外部知识库召回源 ⇒ 同一道题可能从 source=kb 变为 netdisk/topic/none。
+// 不 bump 的话 answer_cache 会把已删除数据源产出的旧答案原样吐给用户，必须整体失效。
+const CACHE_VERSION = 'v17'
 const QUOTA_PREFIX = 'ans:q:'
 
 /** 把判定层的来源位置收敛成对外契约（只暴露必要字段，不泄漏内部字符区间细节之外的内容） */
@@ -107,7 +108,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DAILY_LIMIT = 20
 
 /**
- * 持久化答案缓存（思傅 2026-10-24 定，为省 ima 日配额）：
+ * 持久化答案缓存（思傅 2026-10-24 定，为省外部检索配额）：
  *   - 成功结果默认**永久**（ANSWER_CACHE_TTL_DAYS=0 表示不过期；设正数=保留 N 天）；
  *   - 失败/零命中结果按 ANSWER_CACHE_NEG_TTL_HOURS（默认 12h）短期记忆——
  *     防同一道搜不到的题反复白扣配额，同时不把「配额耗尽」状态永久固化。
@@ -172,7 +173,7 @@ export class AnswerSearchService {
   /**
    * 持久化缓存读取（answer_cache 表）。
    *
-   * 命中即省下一次外部调用（ima 日配额 / 联网检索 83s / LLM token），
+   * 命中即省下一次外部调用（联网检索 83s / LLM token），
    * 这是「同一道题永不重复消耗配额」的唯一保障——内存缓存重启即丢，撑不住日配额。
    *
    * ⚠️ RLS 全注释 + service_role ⇒ 必须显式 .eq('user_id')，否则会读到别人的缓存。
@@ -314,7 +315,7 @@ export class AnswerSearchService {
       if (persisted) {
         await cacheSet(cacheKey, persisted, CACHE_TTL_MS)
         this.logger.log(
-          `[answer-search] 持久化缓存命中（mode=${mode}）→ 省 1 次外部调用（ima 日配额很紧，命中即赚）`,
+          `[answer-search] 持久化缓存命中（mode=${mode}）→ 省 1 次外部调用（命中即赚）`,
         )
         return { ...persisted, cached: true }
       }
@@ -356,8 +357,9 @@ export class AnswerSearchService {
       //   ① 同用户题库里做过、有答案的同一道题（最快、最可靠）
       //   ② 自有资料库 library_docs 正文里定位到的【答案】/【解析】段
       //   ③ 网盘资料正文里定位到的解析段（原有链路，现在带原题判定）
-      //   ④ ima 知识库（原有能力，语义检索；沿用既有口径）
-      //   ⑤ 都没给答案 ⇒ 只列同主题资料，明说「没找到这道题的答案」，绝不冒充
+      //   ④ 都没给答案 ⇒ 只列同主题资料，明说「没找到这道题的答案」，绝不冒充
+      // 🔴 D-060：原第 ④ 顺位「外部知识库」因访问限制已整体移除；
+      //    召回源只剩 ①②③，六条 P0 硬闸与判定层一行未动。
       // 🔴 旧实现 `disk.hits.length > 0` 就直接 verified:true 并把 top.snippet 塞进 answer，
       //    实测（2026-11-04 生产 answer_cache）返回的是**另一道题**的【分析】片段——
       //    同专题教辅 + 一堆文件名。D-009 硬性约束：answer 只能来自 exact 判定。
@@ -368,10 +370,6 @@ export class AnswerSearchService {
       const inputGuard = guardQuestionInput(question)
       let disk: Awaited<ReturnType<NetdiskSearchService['search']>> | null = null
       let settled = false
-      let imaMissNote = ''
-      /** ④ 里判不出原题的 ima 条目：不抢占 result，交给 ⑤ 与网盘命中一起如实列出 */
-      let imaItems: WebItem[] = []
-
       // ① 自己的题库：以前做过这道题 / 录入过答案
       const own = await this.searchOwnAnswers(userId, itemId, question)
       if (own) {
@@ -403,7 +401,7 @@ export class AnswerSearchService {
         }
       }
 
-      // ③ 公共资料库（只有 exact 才在这里返回；topic 不抢占后面的 ima 与兜底）
+      // ③ 公共资料库（只有 exact 才在这里返回；topic 不抢占后面的兜底）
       //    P-011：不传 userId —— 运营者提供的公共题库对所有登录用户一致。
       // P-016 / D-019：闸门的作用域只到「判定层」。合格输入照常检索 + 判定；
       // 不合格输入改走「仅参考例题」只读模式（不送判定、hits 恒空），仍能把
@@ -434,76 +432,20 @@ export class AnswerSearchService {
         }
       }
 
-      // ④ ima 知识库（P-006 硬闸：语义检索结果也必须过原题判定，不得无条件标 exact）
-      //    ⚠️ 旧实现 `items.length > 0` 就直接 `verified:true / answer: top.summary`，
-      //       而 ima 的查询链本身被降级成「主题词」（buildQueryFallbacks），命中同专题
-      //       不同题几乎必然 ⇒ 与网盘那条「把资料片段当答案」是同一个病，只是来源不同。
-      //    判据用 isSameQuestion（多锚点共现），不要求【答案】标记——ima 条目是高亮片段，
-      //    没有教辅那种段落标记；判不出就降级 topic，由 ⑤ 如实列出，绝不冒充。
-      if (!settled) {
-        const ima = new ImaKnowledgeProvider()
-        if (!ima.available()) {
-          imaMissNote = `知识库未配置（缺 ${ima.missingKeys().join(' / ')}）：请在服务器 .env.secrets 填入 IMA_CLIENT_ID / IMA_API_KEY / IMA_KB_ID（ima.qq.com/agent-interface 获取）后重跑 encrypt-env 并重启后端`
-        } else {
-          let items: WebItem[] = []
-          let kbErr = ''
-          try {
-            items = await ima.search(question, 8)
-          } catch (e) {
-            kbErr = e instanceof Error ? e.message : String(e)
-            this.logger.warn(`[answer-search] ima 知识库检索失败: ${kbErr}`)
-          }
-          const joined = items.slice(0, 3)
-            .map((i) => `${i.title}\n${i.summary || i.snippet || ''}`)
-            .join('\n')
-          if (items.length > 0 && isSameQuestion(question, joined)) {
-            const top = items[0]
-            result = {
-              source: 'kb', verified: true, match_level: 'exact',
-              answer: (top.summary || top.snippet || '').slice(0, 500),
-              solution: items.slice(0, 3).map((i) => `${i.title}：${(i.summary || i.snippet || '').slice(0, 200)}`).join('\n\n'),
-              refs: items.slice(0, 5).map((i) => ({ title: i.title, url: i.url })),
-              confidence: Number(relevance(question, items).toFixed(2)),
-              note: '来自资料库知识条目（未做 AI 整理），可作为参考资料',
-            }
-            settled = true
-          } else if (items.length > 0) {
-            // 只找到同主题条目 ⇒ 不抢占 result，交给 ⑤ 与网盘命中一起如实列出
-            imaItems = items.slice(0, 5)
-          } else {
-            // 220021 = ima 日配额耗尽（按调用计数，零命中也扣）——专属文案，别混在泛化失败里
-            const quotaHit = /220021|已达上限/.test(kbErr)
-            // ⚠️ 不要把「改试联网搜题 / AI 解题」写进提示：个人主体下那两个入口
-            //    根本不渲染（AI_PUBLIC_ENTRY=false），指着不存在的按钮让人去点＝坏体验。
-            imaMissNote = quotaHit
-              ? '资料库今日检索次数已达上限，请明天再试'
-              : kbErr
-                ? `资料库检索失败（${kbErr.slice(0, 80)}），请稍后重试`
-                : '资料库里没有找到与这道题相关的内容，可以先手动填写答案'
-          }
-        }
-      }
-
-      // ⑤ 兜底：有同主题资料（网盘命中 + ima 条目）就如实列出来（answer 必须为空）
+      // ④ 兜底：有同主题资料（网盘命中）就如实列出来（answer 必须为空）
       if (!settled) {
         const hits = disk?.hits ?? []
         const fileLines = hits.slice(0, 5).map((h, i) =>
           `${i + 1}. ${h.name}（${h.hit === 'content' ? '正文命中' : '文件名命中'} ${Math.round(h.score * 100)}%）\n   路径：${h.path}`,
         )
-        const kbLines = imaItems.map((i, idx) =>
-          `${fileLines.length + idx + 1}. ${i.title}（知识库同主题条目）`,
-        )
-        if (fileLines.length > 0 || kbLines.length > 0) {
+        if (fileLines.length > 0) {
           result = {
             source: hits.length > 0 ? 'netdisk' : 'kb',
             verified: false,
             match_level: 'topic',
             answer: '', // 🔴 D-009：同主题资料片段绝不进答案字段
-            solution: [...fileLines, ...kbLines].join('\n'),
-            refs: [
-              ...hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
-              ...imaItems.map((i) => ({ title: i.title, url: '' })),
-            ],
+            solution: fileLines.join('\n'),
+            refs: hits.slice(0, 5).map((h) => ({ title: h.name, url: '' })),
             confidence: Number((hits[0]?.score || 0).toFixed(2)),
             note: '没找到这道题的答案，以下是同主题资料，可打开文件查看',
           }
@@ -511,7 +453,7 @@ export class AnswerSearchService {
           result = {
             source: 'none', verified: false, match_level: 'none',
             answer: '', solution: '', refs: [], confidence: 0,
-            note: imaMissNote || '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
+            note: '资料库里没有找到与这道题相关的内容，可以先手动填写答案',
           }
         }
       }
@@ -588,7 +530,7 @@ export class AnswerSearchService {
       }
     }
 
-    // 结果入两级缓存（含 source=none：短期记忆，避免同一道搜不到的题反复白扣 ima 配额）
+    // 结果入两级缓存（含 source=none：短期记忆，避免同一道搜不到的题反复查库）
     await cacheSet(cacheKey, result, CACHE_TTL_MS)
     await this.cacheWrite(userId, qHash, mode, result)
     return result

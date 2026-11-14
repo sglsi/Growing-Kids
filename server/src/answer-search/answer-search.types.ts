@@ -20,7 +20,7 @@ export interface WebItem {
  */
 export interface AnswerSearchResult {
   /**
-   * search = 有真实网络来源；kb = 来自 ima 知识库；netdisk = 来自百度网盘资料；
+   * search = 有真实网络来源；kb = 来自资料库；netdisk = 来自百度网盘资料；
    * llm = 无检索、纯模型推理；none = 都不可用
    */
   source: 'search' | 'kb' | 'netdisk' | 'llm' | 'none'

@@ -144,7 +144,7 @@ m.test('C3 检索结果不再出现核对/疑虑话术，且缓存已失效', (c
   for (const bad of ['请核对后采纳', '核对后再采纳', '按来源核对后采纳', '自行核对']) {
     c.ok(!s.includes(bad), `服务端 note 仍含旧话术：${bad}`)
   }
-  c.ok(s.includes("const CACHE_VERSION = 'v16'"), 'note 文案变了必须 bump，否则老缓存吐旧话术')
+  c.ok(s.includes("const CACHE_VERSION = 'v17'"), 'note 文案变了必须 bump，否则老缓存吐旧话术')
   c.ok(s.includes("${CACHE_VERSION}:${question}"), '版本须参与 qHash，bump 才有效')
   const a = read(ANSWER_EDITOR)
   c.ok(!a.includes('请打开文件核对原题与解析后采纳'), '前端来源卡片不得再要求核对后采纳')

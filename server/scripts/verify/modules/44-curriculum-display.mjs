@@ -121,9 +121,9 @@ m.test('A5 参考例题契约零改动：55 词、无 curriculum 引用、CACHE_
   c.ok(!ref.includes('curriculum'), 'question-reference.ts 不应引用 curriculum')
   c.ok(!ref.includes('topicLabels'), 'question-reference.ts 不应出现 topicLabels')
   const cache = read('cache')
-  // Q1② 要求主 result 结构零改动；缓存版本登记值 D-049 v15 → D-055 note 口径 v16，
+  // Q1② 要求主 result 结构零改动；缓存版本登记值 D-049 v15 → D-055 v16 → D-060 删源 v17，
   // 属另一件事，须保持登记值一致。再 bump 须同步 M42 B6 / M46 A4 / M48 C3。
-  c.ok(/CACHE_VERSION\s*=\s*'v16'/.test(cache), 'CACHE_VERSION 不是 v16（D-055 已登记，若再改须登记 D 号）')
+  c.ok(/CACHE_VERSION\s*=\s*'v17'/.test(cache), 'CACHE_VERSION 不是 v17（D-060 已登记，若再改须登记 D 号）')
   c.ok(!cache.includes('curriculum/topics'), 'answer-search 不应直接消费字典端点')
   c.ok(!cache.includes('topicLabels'), 'answer-search 不应把标签塞进 result')
 })

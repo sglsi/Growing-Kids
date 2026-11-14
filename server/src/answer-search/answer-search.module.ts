@@ -6,7 +6,7 @@ import { OcrModule } from '../ocr/ocr.module'
 import { NetdiskModule } from '../netdisk/netdisk.module'
 
 @Module({
-  // NetdiskModule：mode=kb 时先查百度网盘资料，未命中再查 ima（思傅 2026-11-03 定）
+  // NetdiskModule：mode=kb 时查运营者公共资料库（D-060 移除外部知识库）
   imports: [TimelineModule, OcrModule, NetdiskModule],
   controllers: [AnswerSearchController],
   providers: [AnswerSearchService],

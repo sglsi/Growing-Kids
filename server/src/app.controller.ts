@@ -24,7 +24,7 @@ export class AppController {
           library: '/api/library/docs',
           auth: '/api/auth/login',
         },
-        note: '这是 API 服务，没有网页首页；以上路径返回 JSON。数据库：Supabase（新加坡区）。AI 识图/搜题与对象存储暂不可用（开发中）。',
+        note: '这是 API 服务，没有网页首页；以上路径返回 JSON。数据库：腾讯云境内自建 PostgreSQL（L3）。本服务仅提供 API，无网页首页。',
       },
     };
   }
