@@ -33,6 +33,7 @@ import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
  * 🔴 「仅供本人资料检索」这句没有照抄：实现的 ① 自有题库 / ② library_docs 确实按
  *    `user_id` 隔离，但 ③ 公共资料库（不传 userId，所有登录用户一致）与 ④ ima 知识库
  *    是运营者配置的内容。照抄 B 原案那句就是虚假陈述 ⇒ 常驻声明如实写检索范围。
+ *    ✅ 2026-11-14 思傅复核「两处待复核照办」⇒ 维持如实口径，本项已确认、不再待复核。
  */
 const KB_SEARCH_ENABLED = true
 
@@ -438,34 +439,62 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 🔴 P-015：即使结构将来变化，只要带 references 就一律不给「采纳」。
   const canAdopt = !!candidate && candidate.match_level !== 'topic' && candidate.match_level !== 'none' && !hasRefs
 
-  const handleAdopt = async () => {
+  /**
+   * D-055「两处待复核照办」②：用户自录的答案是其认为的确定答案 ⇒
+   * 检索结果要写回答案字段时，绝不静默覆盖，必须先由用户显式确认。
+   *
+   * 判据取「当前编辑态文本 + 附件 + 已存 answer」任一非空：只看 item.content.answer
+   * 会漏掉「刚录入、还没点保存」这一常见情形，那恰恰最容易被无声替换。
+   */
+  const hasOwnAnswer = !!(text.trim() || atts.length || item?.content?.answer?.trim())
+
+  const handleAdopt = () => {
     if (!candidate) return
     if (!canAdopt) {
       Taro.showToast({ title: '非本题答案，不能采纳', icon: 'none' })
       return
     }
+    // 没有自录答案时保持原来一步到位，不给新用户增加无谓点击
+    if (!hasOwnAnswer) {
+      void doAdopt()
+      return
+    }
+    Taro.showModal({
+      title: '这道题已有你录入的答案',
+      content: '继续会把资料库里的解析写入，并替换你已录入的内容。仍要继续吗？',
+      confirmText: '继续写入',
+      cancelText: '先不替换',
+      success: (r) => { if (r.confirm) void doAdopt() },
+    })
+  }
+
+  const doAdopt = async () => {
+    // 取局部快照：二次确认弹窗期间 candidate 可能已被「放弃」清空；
+    // 同时让 TS 的 null narrowing 留在函数内，不依赖外层判断。
+    const picked = candidate
+    if (!picked) return
     setSaving(true)
     try {
       const updated = await saveAnswer(item.id, {
-        answer: candidate.answer,
-        solution: candidate.solution,
+        answer: picked.answer,
+        solution: picked.solution,
         attachments: atts,
-        refs: candidate.refs,
+        refs: picked.refs,
         // netdisk 命中运营者提供的公共资料库 ⇒ 记 library（与「从资料库插入」同源），
         // 不要落到 mixed：mixed 是「检索+手工混合」的意思，会造成来源统计失真
         source:
-          candidate.source === 'netdisk'
+          picked.source === 'netdisk'
             ? 'library'
-            : candidate.source === 'search' || candidate.source === 'kb'
+            : picked.source === 'search' || picked.source === 'kb'
               ? 'search'
               : 'mixed',
       })
-      setText(candidate.answer)
+      setText(picked.answer)
       setCandidate(null)
       // 采纳后回到预览态：立刻看到渲染后的数学式
       setMode('view')
       // 通知调用方刷新自己的编辑框（详情页把答案与解题过程合并成一个框了）
-      onAdopt?.(candidate.answer, candidate.solution || '')
+      onAdopt?.(picked.answer, picked.solution || '')
       onSaved?.(updated)
       Taro.showToast({ title: '已采纳', icon: 'success' })
     } catch (e) {
