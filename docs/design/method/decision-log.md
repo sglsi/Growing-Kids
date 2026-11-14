@@ -2027,3 +2027,60 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
   && sudo -n systemctl restart gk-api
 ```
 回滚后打 `:3000/api/health` 并确认 `CACHE_VERSION` 回到 `v16`（含 ima 分支）。
+
+---
+
+## D-062：前端上传开发版 2026.11.14.1 + 仓库推送（D-060/D-061 面客第一步）
+
+> 日期：2026-11-14 ｜ 授权：思傅「进行前端上传更新；进行推送」 ｜ 性质：**发布动作**（上传开发版 + git push），**未提审、未发正式版**
+
+### 一、授权与边界
+
+思傅明确授权两件事：① 前端上传更新；② 推送仓库。执行范围严格限定为「上传开发版」与「push 到 origin/main」，**未做**：提审、发布正式版、开 `urlCheck` / `__usePrivacyCheck__`、mp 后台勾 `method=1`、改数据库。
+
+### 二、前端上传
+
+- 构建：`pnpm build:weapp` RC=0，`✓ built in 12.21s`；`src/build-meta.ts` 角标 `11-14 22:57 · 880ac98`（与 HEAD 一致）。
+- 发布前包校验（`dist/`）：
+  - `2026-11-14-r11` **存在**；`2026-11-14-r10` 命中 **0**；
+  - 「智能客服 / 知识库管理」命中文件 **0**；
+  - 「Supabase（新加坡）」/「腾讯 ima」命中文件 **0**。
+- 上传命令结果：`√ Using AppID: wx48bf5ba9bae0bf39` → `TOTAL 860.0 KB (880,683 Byte)` → `√ upload`。
+- 版本号 `2026.11.14.1`；描述六条：资料库检索范围收敛、隐私政策 r11（第三方 5 项 / 数据境内）、内容安全检测、智能高清保留原画质另存、导出 Word/PDF 支持配图、复习本学习手册页。
+
+### 三、CLI `code 10` 根因（本轮新结论，写入铁律）
+
+现象：`islogin` 返回 `{"login":true}`，但 `upload` 报 `code 10 需要重新登录`，且每次调用都打印 `IDE server started successfully, listening on http://127.0.0.1:<新端口>`。
+
+根因：**CLI 没连上 GUI IDE，而是每次自己拉起一个无 AppID 权限的 headless server**；该 server 能读本地登录缓存（故 `islogin` 为真），但取不到 AppID 权限 ⇒ `Fetching AppID permissions` 阶段 `code 10`。
+
+正解：**用 `--port <GUI IDE 端口>` 直连 GUI IDE**。GUI IDE 端口从
+`%LOCALAPPDATA%\微信开发者工具\User Data\<hash>\Default\.ide` 读取（本轮为 `28668`），该文件只在 IDE 真正起服务端口后才存在。
+
+排障轨迹（供下次照做）：
+1. `taskkill /F /IM wechatdevtools.exe` 全清；
+2. 纯 Node 写 UTF-8 `.cmd`（`chcp 65001`）交桌面 `explorer.exe` 冷启动（`start`/`Start-Process` 均被拦）；
+3. 冷启动后 `islogin` 为真，但 `upload` 仍 `code 10`；
+4. 查到 `.ide` 出现 `28668` → `cli islogin --port 28668` 返回 `{"login":true}`；
+5. `cli upload --port 28668 ...` → `√ upload`。
+
+⚠️ 结论修正：旧铁律「`code 10` ⇒ taskkill→冷启动→upload 为首个动作」**不充分**；真正的判据是**有没有连上 GUI IDE 的服务端口**。后续一律显式带 `--port`，端口从 `.ide` 读，不写死。
+
+### 四、仓库推送
+
+- `GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null" git push origin main`
+- 结果：`d180c2c..880ac98  main -> main`，一次推送 **52 个本地提交**（含 D-057~D-061 全部代码、守卫、文档、台账与项目记忆）。
+- 推送前：本地领先 52 / 远端领先 0；推送后工作区干净。
+
+### 五、生效边界（不得误传）
+
+- 上传的是**开发版**：需在 mp 后台提交审核 → 审核通过 → 发布，才对用户生效。**当前线上仍是旧版本**。
+- 因而 r11 隐私政策、提审页「采集用户隐私」、6.2「弹窗」、UGC `method=1`，**均尚未面客**。
+- 两个发布阻断开关（`urlCheck` / `__usePrivacyCheck__`）**仍关**；开启前提是 mp 后台域名白名单（含 `downloadFile`）与隐私保护指引先办完。
+- 后端 D-061 已上线（`v17`），前端此包与之配套。
+
+### 六、回滚
+
+前端：mp 后台「版本管理」选上一个开发版重新提交，或重新上传旧 commit 构建的包。
+仓库：`git revert` 或 `git reset --hard d180c2c`（远端 `origin/main` 需 `push --force`，属破坏性操作，需单独授权）。
+后端不变，无需回滚。
