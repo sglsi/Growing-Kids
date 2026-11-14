@@ -1665,3 +1665,50 @@ node scripts/release-check.mjs             # 发布态校验，须零阻断
 ### 十、🔴 授权边界（本轮零生产写入）
 
 「单独授权换 dist＋重启」置于「先办 mp 两项、暂不发货」语境下，理解为**办完 mp 两项后会再给一次明确授权**，本轮不执行：生产 dist 未换、`gk-api` 未重启、小程序未上传/未提审/未发版。若思傅本意是「现在就换 dist＋重启」，须明确回一句「现在执行换 dist」，再按 D-052 流程（备份 → 集合比对 → 旧 dist 留 `.bak` → 重启 → 打 `:3000` 验真健康）执行；当前 mp 两项未生效时执行会造成线上故障，故不自行推断为已授权。
+
+---
+
+## D-056｜服务端 `dist` 换包并重启 `gk-api`（2026-11-14 16:50）
+
+**授权**：思傅 16:45 明确回「**现在执行换 dist**」⇒ 显式授权成立，覆盖 D-055 §十的「待另行授权」结论。
+**范围**：**只换后端 `server/dist` + 重启 `gk-api`**。⛔ 未上传小程序、未提审、未发版、未动数据库、未动 Caddy、未跑迁移（`0032` 仍未上）、未改任何前端产物。
+
+### 一、发货前判定（集合比对，不用有序 diff）
+
+本地 `npm run build`（`nest build`）RC=0 保证产物与 HEAD `3c25722` 一致；本地/生产各取 `find dist -type f -exec sha256sum` 清单：
+
+| 项 | 结果 |
+|---|---|
+| 本地 / 生产文件数 | **566 / 566** |
+| 仅本地 / 仅生产 | **0 / 0** ⇒ 零未发货漂移，无需 D-050 的排除项 |
+| 内容不同 | **15**，全部可归属 D-054/D-055 |
+
+15 个文件＝`answer-search.service.js/.map`（D-055 note＋v16）、`document.service.js/.map/.d.ts`、`pdf.service.js/.map`、`ocr.service.js/.map`、`image.service.js/.map`、`image.controller.js/.map`（D-054 六处）＋ 2 个 `tsconfig*.tsbuildinfo`（编译元数据）。`ocr.types.ts` 只改注释 ⇒ 产物无差异，符合预期。生产当时仍是 D-052 旧包（`CACHE_VERSION='v15'` / `erase_v2: true` / 无 `imageParagraphs` / 无 `t-stem`）。
+
+**启动前额外查一个高风险点**：`document.service.ts` 新增 `StorageService` 构造注入，`DocumentModule` 必须已 import `StorageModule`（源码与编译产物均已核），否则 Nest 启动即崩。本地 `PORT=3999 node dist/main` 冒烟 ⇒ `DocumentModule` / `AnswerSearchModule` 等全部 `dependencies initialized`，DI 图无缺口。
+
+### 二、部署与验证
+
+1. **回滚点**：`sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-d055-20261114165028`（566 文件，用 `cp -a` 保留原 dist 不动，只覆盖点名文件）。
+2. **验包**：打包 245,507 B / 15 文件 → scp → 解到 `/tmp/gk-d055/new` → `sha256sum -c` **15/15 OK**；再 grep 六项特征串（v16 / `imageParagraphs` / `erase_v2: false` / 「一致性校验失败，回退原图」/ `readObject(u)` / `t-stem`）全部命中才放行。
+3. **精准覆盖**：逐文件 `cp` + `chown gk:gk` + `chmod 644`，**COPIED=15**。
+4. **部署后复比**：重新取生产清单 ⇒ **566/566 全同、仅本地 0、仅生产 0、内容不同 0**，零残留差异后才重启。
+5. **重启与验证**：`systemctl restart gk-api` ⇒ `ActiveState=active / SubState=running`（16:50:59）；`http://127.0.0.1:3000/api/health` **200**（`:8080` 是 Caddy 空 200 假探针，不作判据）、`https://deep-root.cn/api/health` **200**；`journalctl -u gk-api --since 3min` 无 ERROR / DI 报错 / `MODULE_NOT_FOUND`；生产 dist 六项特征串全部到位、`请核对后采纳` 残留 **0**。
+6. **清理**：远端 `/tmp/gk-d055` 已删；`/opt/gk/server/dist.bak-d055-20261114165028` 作为回滚点保留（566 文件已复核）。
+
+### 三、🔴 边界：这只是一次「后端换包」，不等于用户能用上
+
+- **前端产物一个字节都没发**：小程序未上传/未提审/未发版 ⇒ 按 B 保留的入口与常驻声明、**采纳二次确认（D-055 照办②）**、学习手册、智能高清护栏、去手写收起，都**仍只在本地**，用户手上没有。
+- **mp 后台两项人工前置仍未办**（D-055 §九）：三类域名白名单、隐私指引 7 项生效、托管状态待核、UGC 声明未填 ⇒ `release:check` 的 2 个阻断（`urlCheck` / `__usePrivacyCheck__`）**保持关闭，未擅自打开**。
+- 服务端已 v16 ⇒ 旧开发版小程序调资料库搜题会拿到新 `note`（不再要求核对），这是预期口径，不是故障。生产 `answer_cache` 里 v15 的老记录因 `qHash` 含 `CACHE_VERSION` **自然失效，无需清库**；本轮对数据库零写入。
+- 仍锁：`strict=1`、第二层准入、T0 判定、`0032` 上生产、G8、面客集成、15 份切题失效、Caddy 重复响应头、公安联网备案、`review_events` 0 行。
+- **不宣称**：命中／召回／误判归零／P95／图形全覆盖／所有用户可用／核心功能已面客。判定层 `question-match.ts` 一行未动，`OBJECT_ENGINE_VERSION` 仍 `qobj-2`，不重建题库。
+
+### 四、回滚（未执行，留作应急）
+
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
+  && sudo -n mv /opt/gk/server/dist.bak-d055-20261114165028 /opt/gk/server/dist \
+  && sudo -n systemctl restart gk-api
+```
+回滚后须重打 `:3000/api/health` 并确认 `CACHE_VERSION` 回到 `v15`。
