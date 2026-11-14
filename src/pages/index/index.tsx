@@ -14,7 +14,7 @@ import SelectionBar from '@/components/selection-bar'
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchOverview, fetchTimeline, batchDeleteTimeline, addToReviewBook, removeFromReviewBook,
-  fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion, getSettings,
+  fetchSubjects, updateTimeline, replaceTimelineImage, uploadImage, updateQuestion, getSettings, saveQuestionAsImage,
   type Overview, type TimelineItem, type Subject, type ImageAction, type Paged, type GradeScope,
 } from '@/services/api'
 import { gradeLabel } from '@/constants/grades'
@@ -503,6 +503,14 @@ export default function IndexPage() {
         await updateQuestion(item.id, { question_images: nextKeys })
         Taro.hideLoading()
         Taro.showToast({ title: '图片已更新', icon: 'success' })
+      } else if (editorAction === 'enhance' || editorAction === 'auto') {
+        // 智能高清 / 自动调正的结果另存为新图片，原图不覆盖。
+        // 设计红线「始终保留原图可回退」（自动调正与智能高清重构方案 §3.4）：
+        // 处理可能把图改得不适合阅读，覆盖后用户就再也回不到原图。
+        const up = await uploadImage(tempFilePath, { purpose: 'save' })
+        await saveQuestionAsImage(item.subject_id || '', up.key, up.url, up.timeline_id)
+        Taro.hideLoading()
+        Taro.showToast({ title: '已另存新图片，原图保留', icon: 'success' })
       } else {
         await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
         Taro.hideLoading()
@@ -1043,7 +1051,7 @@ export default function IndexPage() {
         src={editorSrc}
         autoAction={editorAction}
         enableSaveToInbox={false}
-        confirmText="保存并替换原图"
+        confirmText="另存为新图片"
         onCancel={() => { setEditorItem(null); setEditorAction(null); setEditorSrc('') }}
         onConfirm={handleEditorConfirm}
       />

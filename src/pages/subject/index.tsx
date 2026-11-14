@@ -18,7 +18,7 @@ import RangePicker, { getSinceFromRange, type RangeValue } from '@/components/ra
 import { confirmDelete, useSelection } from '@/lib/use-selection'
 import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
-  updateTimeline, updateQuestion, uploadImage, replaceTimelineImage, fetchReviewSummary,
+  updateTimeline, updateQuestion, uploadImage, replaceTimelineImage, fetchReviewSummary, saveQuestionAsImage,
   fetchDocuments, batchDeleteDocuments, deleteDocument, renameDocument,
   type Subject, type TimelineItem, type Paged, type ImageAction, type ReviewSummary, type DocItem,
 } from '@/services/api'
@@ -444,6 +444,12 @@ export default function SubjectPage() {
         await updateQuestion(item.id, { question_images: nextKeys })
         Taro.hideLoading()
         Taro.showToast({ title: '图片已更新', icon: 'success' })
+      } else if (editorAction === 'enhance' || editorAction === 'auto') {
+        // 智能高清 / 自动调正：结果另存为新图片，原图保留（见首页同款说明）
+        const up = await uploadImage(tempFilePath, { purpose: 'save' })
+        await saveQuestionAsImage(item.subject_id || '', up.key, up.url, up.timeline_id)
+        Taro.hideLoading()
+        Taro.showToast({ title: '已另存新图片，原图保留', icon: 'success' })
       } else {
         // replaceTimelineImage 内部会同步换 thumb_key（否则列表仍显示旧缩略图）
         await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
@@ -911,7 +917,7 @@ export default function SubjectPage() {
         src={editorSrc}
         autoAction={editorAction}
         enableSaveToInbox={false}
-        confirmText="保存并替换原图"
+        confirmText="另存为新图片"
         onCancel={() => { setEditorItem(null); setEditorSrc('') }}
         onConfirm={(p) => void handleEditorConfirm(p)}
       />

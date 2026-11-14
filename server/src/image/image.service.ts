@@ -306,9 +306,11 @@ export class ImageService {
         reason: consistency.similar ? undefined : `识别一致性偏低(${consistency.score.toFixed(2)} < ${threshold})`,
       }
     } catch (e) {
-      // OCR 失败/超时 → 默认接受处理图，不阻塞（方案 §4 硬约束）
-      console.warn('[image] OCR 一致性校验失败，默认接受处理图：', (e as Error).message)
-      return { accept: true, verified: false, reason: (e as Error).message }
+      // 校验本身失败时回退原图，而不是把「未经验证的处理图」直接交给用户。
+      // 全项目红线「宁可不处理，不能处理坏」（智能高清方法论 §4）：
+      // 旧实现 catch 默认 accept:true，等于校验挂了就放行，正好会把处理坏的图发出去。
+      console.warn('[image] OCR 一致性校验失败，回退原图：', (e as Error).message)
+      return { accept: false, verified: false, reason: `一致性校验未完成：${(e as Error).message}` }
     } finally {
       if (timer) clearTimeout(timer)
     }

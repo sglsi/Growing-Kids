@@ -202,7 +202,9 @@ export default function ImageEditor({
   //    服务，保持初始启用，行为无回归。
   const [framing, setFraming] = useState(!cropOnly)
   const [previewError, setPreviewError] = useState(false)
-  // 智能高清：点开即出「黑白」预览（默认），面板内可切换其他模式实时预览；
+  // 智能高清：默认「原图（不处理）」，用户显式选模式才出预览。
+  // 原默认档是「黑白」且点开即整图硬二值化，彩色插图/照片/几何图灰阶全丢，
+  // 是「处理得不适合正常阅读」的头号来源（方法论 §10.7 已登记）。
   // 倍率/处理模式仅「高清扩展」分组下使用。
   const [srScale, setSrScale] = useState<SRScale>(2)
   const [srMode, setSrMode] = useState<SRMode>('classical')
@@ -220,10 +222,10 @@ export default function ImageEditor({
   const [srPanelOpen, setSrPanelOpen] = useState(false)
   /**
    * 智能高清面板中选中的模式：基础画面模式（'original'|'enhance'|'brighten'|'gray'|'bw'）
-   * 或「高清扩展」('hd')。默认 'bw'（黑白）——点开即给出黑白预览；点「确定」时
-   * 据此决定走 enhance_preset 还是 sr_scale 路径。
+   * 或「高清扩展」('hd')。默认 'original'——点开不做任何处理，
+   * 由用户显式选模式；点「确定」时据此决定走 enhance_preset 还是 sr_scale 路径。
    */
-  const [activeMode, setActiveMode] = useState<'original' | 'enhance' | 'brighten' | 'gray' | 'bw' | 'hd'>('bw')
+  const [activeMode, setActiveMode] = useState<'original' | 'enhance' | 'brighten' | 'gray' | 'bw' | 'hd'>('original')
 
   // ── 去手写：框选补擦 + 对比 + 撤销（方案 §5.10 R1/R2）────────────────────
   // eraseMode=true：用户在 result 图上划框，圈出「自动漏擦的手写」
@@ -1321,16 +1323,15 @@ export default function ImageEditor({
       // 避免基于不同底稿的缓存错配（也避免拿过滤镜的图二次叠加增强）。
       setEnhanceBase(currentSrc)
       setModeThumbs({})
-      setActiveMode('bw') // 默认选中「黑白」，点开即给出黑白预览
-      setActivePreset('bw')
+      setActiveMode('original') // 默认不处理，保持原图
+      setActivePreset('original')
       setSrPanelOpen(true)
       // ⭐ 隐藏裁剪框/遮罩：模式预览需要一张干净的图（思傅 2026-10-19 反馈：
       //    裁剪框的四块遮罩盖在预览图上，效果同样看不清）。取消/确定后面板关闭，
       //    用户点底部「裁剪」按钮可随时重新进入裁剪。
       setFraming(false)
-      // ⭐ 前端实时预览：基础模式（含默认黑白）本地即时出图，点击即显，
-      //    不再走后端（对标扫描王/夸克的即时滤镜，规避秒级网络往返）。
-      void pickEnhanceModeLocal('bw')
+      // ⭐ 不再自动出预览：默认「原图」时若仍调 renderLocalPreset，会把原图
+      //    缩到 1365px 并导出 JPEG（越「高清」越糊）。用户点任一模式才本地即时出图。
       return
     }
     if (action === 'auto') {
@@ -1432,7 +1433,8 @@ export default function ImageEditor({
         canvas: node,
         x: 0, y: 0, width: w, height: h,
         destWidth: w, destHeight: h,
-        fileType: 'jpg', quality: 0.95,
+        // PNG 无损：二值图/细笔画经 JPEG 会产生振铃，是「处理后发糊」的成因之一
+        fileType: 'png',
         success: (res: any) => resolve(res.tempFilePath),
         fail: (err: any) => reject(err),
       } as any)
@@ -1509,6 +1511,18 @@ export default function ImageEditor({
   const onConfirmEnhance = () => {
     if (activeMode === 'hd') {
       void runEnhance(true)
+      return
+    }
+    if (activeMode === 'bw') {
+      // 硬二值化丢掉全部灰阶与颜色，对几何图/图表/彩色插图是破坏性的。
+      // 即使显式选了也要先说清代价，避免「一键把卷子处理成看不懂」。
+      Taro.showModal({
+        title: '黑白模式会丢失颜色',
+        content: '整张图会压成纯黑白，插图、图表和照片可能不适合阅读。处理结果会另存为新图片，原图保留。',
+        confirmText: '仍要使用',
+        cancelText: '换一种',
+        success: (r) => { if (r.confirm) setSrPanelOpen(false) },
+      })
       return
     }
     // 基础画面模式：主图已是本地处理结果，直接确认。
@@ -1964,7 +1978,7 @@ export default function ImageEditor({
         style={{ bottom: 0, backgroundColor: '#000', paddingBottom: 12 }}
       >
         <Button className="w-full h-11 rounded-xl" disabled={busy || aiBusy} onClick={handleConfirm}>
-          <Text className="block text-sm text-brand-foreground">{busy ? '处理中…' : (confirmText || '保存并替换原图')}</Text>
+          <Text className="block text-sm text-brand-foreground">{busy ? '处理中…' : (confirmText || '保存图片')}</Text>
         </Button>
       </View>
 
@@ -2468,7 +2482,7 @@ function normalizeIllumination(d: Uint8ClampedArray, w: number, h: number, stren
   boxBlur(dil, gw, gh, kBlur, t1, bg)
 
   // ③ 双线性插回全图，逐像素乘增益（三通道同一标量 ⇒ 不偏色）
-  const GAIN_MAX = 3.5
+  const GAIN_MAX = 2.0 // 原 3.5：暗背景/大面积中间调被整体洗白、层次压平
   const GAIN_MIN = 0.5
   for (let y = 0; y < h; y++) {
     const sy = (y + 0.5) / DS - 0.5
@@ -2577,7 +2591,7 @@ function applyPresetPixels(
 
   // ── 共用前置：光照归一化（去阴影/光照不均）──────────────────────────────
   // 固定较强力度 0.9：Retinex 分解的纯增益步，不做反而把手影留给后续处理。
-  normalizeIllumination(d, w, h, 0.9)
+  normalizeIllumination(d, w, h, 0.5) // 原固定 0.9：光照归一化过强会洗掉浅色笔迹
 
   if (preset === 'gray') {
     // 灰度 + 文档曲线（背景白化 + 中间调对比扩展），滑杆再叠一层用户对比
@@ -2616,12 +2630,12 @@ function applyPresetPixels(
   if (preset === 'enhance') {
     // 对比拉伸 + 非锐化；保色（不动色度），只拉亮度与边缘
     const g = readGray(d, n)
-    stretchPercentileGray(g, n, 0.01, 0.995)
+    stretchPercentileGray(g, n, 0.02, 0.98) // 原 0.01/0.995 极值分位把淡色内容一起拉向 0/255
     const a = 1.0 + slider * 0.6 + (strength === 'strong' ? 0.2 : strength === 'weak' ? -0.15 : 0)
     const b = slider * 20
     for (let i = 0; i < n; i++) g[i] = (g[i] - 128) * a + 128 + b
     writeGrayToRgba(d, g, n)
-    sharpen3x3(d, w, h, 0.15 + slider * 1.5)
+    sharpen3x3(d, w, h, Math.min(0.6, 0.15 + slider * 0.45)) // 原上限 1.65 且无 halo 限幅，产生白边/笔画粘连
     return
   }
 
