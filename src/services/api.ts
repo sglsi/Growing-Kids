@@ -1157,7 +1157,10 @@ export async function recognizeDocumentByUrl(
  * 把「识别结果」直接导出为一个 Word 文档。
  * 后端生成 docx → 上传存储 → 写入 documents 记录（「文档」页可见），返回可直接打开的地址。
  */
-export async function exportRecognizedDocx(items: RecognizeResult[], title?: string) {
+export async function exportRecognizedDocx(
+  items: Array<RecognizeResult & { images?: string[] }>,
+  title?: string,
+) {
   const data = await unwrapResponse<{ url: string; file_key: string; title: string }>(
     Network.request({
       url: '/api/ocr/export-docx',

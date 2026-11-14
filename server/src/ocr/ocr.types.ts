@@ -81,12 +81,13 @@ export interface RecognizedItem {
  * 前端把「粘贴栏」每条题目回传——文本 + 手动裁剪的图片 URL 列表。
  *
  * 与 RecognizedItem 的关系：后者是自动识别链路的结构化产物（字段多、落库用）；
- * 本类型只取导出所需字段，images 为公网可访问 URL，服务端下载后嵌入 docx。
+ * 本类型只取导出所需字段，images 可为公网可访问 URL 或 storage key（识别页草稿
+ * 传的是 question_image_keys / answer_image_keys），服务端读取后嵌入 docx。
  * 既有的「识别结果导出」调用方传的 items 结构上兼容本类型（多余字段被忽略）。
  */
 export interface ExportDocxItem {
   question_content: string
-  /** 手动裁剪的错题图片 URL（公网可访问）；导出时按序嵌入题干之后 */
+  /** 题面/答案图片：公网 URL 或 storage key；导出时按序嵌入题干之后 */
   images?: string[]
   wrong_answer?: string
   answer_content?: string

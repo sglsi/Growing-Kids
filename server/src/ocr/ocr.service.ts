@@ -905,13 +905,20 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
    * 统一转 PNG 再嵌。
    */
   private async fetchDocxImage(
-    url: string,
+    urlOrKey: string,
   ): Promise<{ data: Buffer; width: number; height: number; type: 'jpg' | 'png' | 'gif' | 'bmp' } | null> {
-    const u = (url || '').trim()
-    if (!/^https?:\/\//i.test(u)) return null
+    const u = (urlOrKey || '').trim()
+    if (!u) return null
     try {
-      let buf = await this.downloadBinary(u, 10_000, 8 * 1024 * 1024)
-      if (!buf.length) return null
+      // 两种入参：① 公网 URL（#150 手动裁剪图）；② storage key（识别页草稿的
+      // question_image_keys / answer_image_keys）。后者必须走 readObject 直读，
+      // 因为 local 驱动下 getPublicUrl() 给的是 127.0.0.1 回环地址，容器里下载常 404。
+      // 旧实现只认 http(s) ⇒ 识别结果「另存 Word」永远不带图，打印出来只有文字。
+      const isUrl = /^https?:\/\//i.test(u)
+      if (!isUrl && !/^[A-Za-z0-9._\-/]+$/.test(u)) return null
+      const raw = isUrl ? await this.downloadBinary(u, 10_000, 8 * 1024 * 1024) : await this.storageService.readObject(u)
+      let buf = raw
+      if (!buf || !buf.length || buf.length > 8 * 1024 * 1024) return null
       let meta = await sharp(buf).metadata()
       const width = meta.width ?? 0
       const height = meta.height ?? 0

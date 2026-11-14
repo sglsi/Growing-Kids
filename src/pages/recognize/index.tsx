@@ -1421,7 +1421,14 @@ export default function RecognizePage() {
     if (!drafts.length) return
     setExporting(true)
     try {
-      const res = await exportRecognizedDocx(drafts, `识别结果 · ${new Date().toLocaleDateString('zh-CN')}`)
+      // 识别结果里题干中的几何图/图表留在题块照片（question_image_keys）里。
+      // 旧实现把 drafts 原样传给后端，而后端只认 items[].images ⇒ Word 里只有文字，
+      // 孩子打印出来看不到图就没法作答。这里把两类图片 key 按序填进 images。
+      const withImages = drafts.map((d) => ({
+        ...d,
+        images: [...(d.question_image_keys || []), ...(d.answer_image_keys || [])],
+      }))
+      const res = await exportRecognizedDocx(withImages, `识别结果 · ${new Date().toLocaleDateString('zh-CN')}`)
       Taro.showToast({ title: 'Word 已生成', icon: 'success' })
       if (res?.url) openStorageFile(res.url, false, res.file_key)
     } catch (e) {

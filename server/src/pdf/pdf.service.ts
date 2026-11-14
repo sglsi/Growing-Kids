@@ -145,11 +145,22 @@ export class PdfService {
       if (it.kind === 'image' && it.url) {
         units.push({ id: it.id, url: it.url })
       } else if (it.kind === 'question') {
-        (it.question_image_urls || []).forEach((u, i) => {
-          if (u) units.push({ id: `${it.id}#q${i}`, url: u })
-        })
+        const qImages = (it.question_image_urls || []).filter(Boolean)
+        if (qImages.length) {
+          // 题面图里含题干中的几何图/图表/示意图，是「孩子能作答」的关键素材
+          qImages.forEach((u, i) => units.push({ id: `${it.id}#q${i}`, url: u }))
+        } else {
+          // 纯 OCR 文字题（用户只存了识别文字、没有题块照片）：
+          // 旧逻辑会一路走到「所选素材中没有可合成的图片」直接 400，练习卷出不来。
+          // 改为把题干渲染成文本块，至少保证题目可打印、可作答。
+          const stem = ((it.content as { question?: string } | null)?.question || '').trim()
+          if (stem) units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') } })
+        }
         if (includeAnswers) {
           const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }
+          // 答案图同样只在「答疑解惑」卷出现，练习卷不带
+          const aImages = (it.answer_image_urls || []).filter(Boolean)
+          aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u }))
           if ((c.wrong_answer || '').trim()) {
             units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') } })
           }

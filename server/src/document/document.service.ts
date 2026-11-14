@@ -1,10 +1,21 @@
 import { Injectable } from '@nestjs/common'
 import {
   Document, Packer, Paragraph, TextRun, HeadingLevel,
-  AlignmentType, Footer, PageNumber, BorderStyle,
+  AlignmentType, Footer, PageNumber, BorderStyle, ImageRun,
 } from 'docx'
+import sharp from 'sharp'
 import { getSupabaseClient } from '../storage/database/supabase-client'
+import { StorageService } from '../storage/storage.service'
 import { cleanStr, cleanDate } from '../shared/query-param'
+
+/** 单题最多嵌入的图片数：防止一份汇总卷被几十张原图撑到打不开 */
+const MAX_IMAGES_PER_QUESTION = 6
+/** 单图字节上限（与 OcrService.fetchDocxImage 对齐） */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+/** docx 正文可用宽度（px @96dpi，A4 扣边距后约 600） */
+const DOCX_IMAGE_MAX_W = 600
+
+type DocxImage = { data: Buffer; width: number; height: number; type: 'jpg' | 'png' | 'gif' | 'bmp' }
 
 interface ExportParams {
   subject_id?: string
@@ -40,6 +51,15 @@ interface RawRow {
     answer?: string
     solution?: string
     wrong_answer?: string
+    /**
+     * 题面图 / 题目附图的 storage key。识别页 OCR 后题块照片就存在这里，
+     * 题干里的几何图、图表、示意图都在这张图里 —— 导出时若不嵌入，
+     * 打印出来只剩文字，孩子根本没法作答（本次修复的直接对象）。
+     */
+    question_images?: string[]
+    images?: string[]
+    /** 答案图只在 include_answers=true 时导出，避免练习卷泄答案 */
+    answer_images?: string[]
     error_analysis?: { type?: string; label?: string; reason?: string; suggestion?: string } | null
     review_count?: number
   }
@@ -56,6 +76,78 @@ interface RawRow {
 
 @Injectable()
 export class DocumentService {
+  constructor(private readonly storageService: StorageService) {}
+
+  /**
+   * storage key → docx 可嵌入的图片。
+   *
+   * 走 StorageService.readObject() 直读（local 读盘 / supabase download），
+   * 不走 HTTP 回自己的公开读端点：getPublicUrl() 在 local 驱动下给的是
+   * 127.0.0.1 回环地址，容器里下载常 404（storage.service.ts:163 已记录同一坑）。
+   *
+   * docx 的 ImageRun 必须显式给 type，否则媒体扩展名是 .undefined、Word 里图裂。
+   * 非 PNG/JPEG/GIF/BMP 的格式统一用 sharp 转 PNG。
+   */
+  private async loadImage(key: string): Promise<DocxImage | null> {
+    if (!key || typeof key !== 'string') return null
+    try {
+      let buf = await this.storageService.readObject(key)
+      if (!buf || !buf.length) return null
+      if (buf.length > MAX_IMAGE_BYTES) {
+        console.warn('[document/export] 图片超过 8MB，跳过', key)
+        return null
+      }
+      let meta = await sharp(buf).metadata()
+      const width = meta.width ?? 0
+      const height = meta.height ?? 0
+      if (!width || !height) return null
+      let type: DocxImage['type'] = 'png'
+      if (meta.format === 'jpeg') type = 'jpg'
+      else if (meta.format === 'gif') type = 'gif'
+      else if (meta.format !== 'png') {
+        buf = await sharp(buf).png().toBuffer()
+        meta = await sharp(buf).metadata()
+      }
+      return { data: buf, width: meta.width ?? width, height: meta.height ?? height, type }
+    } catch (e) {
+      console.warn('[document/export] 图片读取/解析失败，跳过', key, (e as Error)?.message ?? e)
+      return null
+    }
+  }
+
+  /** 把一组 storage key 转成居中的图片段落；单图失败写一行诚实提示，不阻断整份导出 */
+  private async imageParagraphs(keys: string[]): Promise<Paragraph[]> {
+    const out: Paragraph[] = []
+    const seen = new Set<string>()
+    let embedded = 0
+    for (const key of keys) {
+      if (embedded >= MAX_IMAGES_PER_QUESTION) break
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      const img = await this.loadImage(key)
+      if (!img) {
+        out.push(
+          new Paragraph({
+            spacing: { after: 60 },
+            children: [new TextRun({ text: '（本题图片未能嵌入，请回原流程查看）', size: 18, color: '9A948A', italics: true })],
+          }),
+        )
+        continue
+      }
+      const w = Math.min(DOCX_IMAGE_MAX_W, img.width)
+      const h = Math.max(1, Math.round((img.height * w) / img.width))
+      out.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 80, after: 160 },
+          children: [new ImageRun({ data: img.data, type: img.type, transformation: { width: w, height: h } })],
+        }),
+      )
+      embedded += 1
+    }
+    return out
+  }
+
   /** 数据源：timeline_items 中 kind=question 的条目（content jsonb） */
   private async queryRows(userId: string, params: ExportParams): Promise<RawRow[]> {
     const client = getSupabaseClient()
@@ -152,7 +244,7 @@ export class DocumentService {
         }),
       )
 
-      group.rows.forEach((row) => {
+      for (const row of group.rows) {
         questionNo += 1
         const c = row.content || {}
         children.push(
@@ -162,6 +254,16 @@ export class DocumentService {
           }),
         )
         children.push(...this.textParagraphs(c.question || '', { size: 22 }))
+
+        // 题面配图：OCR 只把题干转成了文字，几何图/图表/示意图留在题块照片里。
+        // 旧实现 100% 纯文本，打印出来孩子看不到图、题目没法作答。
+        // 这里把已落库的题面图按序嵌回题干之后（同一 storage key 去重）。
+        // 兼收 content.images（历史条目把附图放在这个字段）。
+        const questionImageKeys = [
+          ...(Array.isArray(c.question_images) ? c.question_images : []),
+          ...(Array.isArray(c.images) ? c.images : []),
+        ]
+        children.push(...(await this.imageParagraphs(questionImageKeys)))
 
         // 答案区块（2026-10-28 语义统一）：只有显式 include_answers === true 才输出，
         // 不传 = 打印练习卷。与 pdf/combine 保持一致，避免同一产品两种默认。
@@ -185,6 +287,10 @@ export class DocumentService {
             )
             children.push(...this.textParagraphs(c.solution, { size: 22 }))
           }
+
+          // 答案图只在「答疑解惑」卷里出现：练习卷带答案图等于提前给答案。
+          const answerImageKeys = Array.isArray(c.answer_images) ? c.answer_images : []
+          children.push(...(await this.imageParagraphs(answerImageKeys)))
         }
 
         // P2-16 错因分析（本地规则引擎结论；无则跳过；纯题目卷不输出）
@@ -223,7 +329,7 @@ export class DocumentService {
             }),
           )
         }
-      })
+      }
     }
 
     if (!rows.length) {
