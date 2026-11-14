@@ -108,6 +108,8 @@ export default function ProfilePage() {
   const openPolicy = () => Taro.navigateTo({ url: '/pages/privacy/index' })
   /** 打开用户协议（提审要求与隐私政策齐备） */
   const openAgreement = () => Taro.navigateTo({ url: '/pages/agreement/index' })
+  /** 打开学习手册：讲清「为什么这样设计」与「每个功能怎么用」，纯静态页 */
+  const openGuide = () => Taro.navigateTo({ url: '/pages/guide/index' })
 
   /**
    * 切换「AI 与在线检索」开关（R-合规-02）。
@@ -701,6 +703,23 @@ export default function ProfilePage() {
               </Text>
             </Card>
           )}
+
+          {/* 学习手册：原拟名「功能一览」，按内容实质改名——既有方法说明也有一览 */}
+          <Card className="rounded-2xl border-border p-4 mb-5" onClick={openGuide}>
+            <View className="flex flex-row items-center gap-3">
+              <View
+                className="rounded-xl flex items-center justify-center"
+                style={{ width: '40px', height: '40px', backgroundColor: 'rgba(16, 185, 129, 0.08)' }}
+              >
+                <BookOpen size={20} color={INK} />
+              </View>
+              <View className="flex-1">
+                <Text className="block text-sm font-semibold text-foreground">学习手册</Text>
+                <Text className="block text-xs text-muted-foreground">为什么这样设计 · 每个功能怎么用</Text>
+              </View>
+              <Text className="text-sm text-muted-foreground">›</Text>
+            </View>
+          </Card>
 
           {/* 隐私与账号（R-合规-03）：政策可查、数据可删、账号可注销 */}
           <Card className="rounded-2xl border-border p-4 mb-5">

@@ -46,6 +46,8 @@ export default defineAppConfig({
     'pages/detail/index',
     'pages/library/index',
     'pages/profile/index',
+    // 学习手册：为什么这样设计 + 每个功能怎么用（纯静态说明页，无网络/无写操作）
+    'pages/guide/index',
     'pages/privacy/index',
     // 用户协议（上线验收第 11 项：提审要求与隐私政策齐备）
     'pages/agreement/index',
