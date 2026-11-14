@@ -151,6 +151,22 @@ m.test('C3 检索结果不再出现核对/疑虑话术，且缓存已失效', (c
   c.ok(!a.includes('找到这道题的参考答案'), '不得把资料库内容摆成与用户自录答案对立的「参考答案」')
 })
 
+m.test('C4 覆盖自录答案前须显式确认（D-055 照办②）', (c) => {
+  const a = read(ANSWER_EDITOR)
+  c.ok(a.includes('hasOwnAnswer'), '须显式判定是否已有自录答案')
+  c.ok(a.includes('text.trim() || atts.length || item?.content?.answer?.trim()'),
+    '判定须覆盖编辑态文本/附件/已存答案，漏一种就会静默覆盖刚录入未保存的内容')
+  c.ok(a.includes("title: '这道题已有你录入的答案'") && a.includes('替换你已录入的内容'),
+    '二次确认须如实说明会替换，不得含糊或暗示用户答案有误')
+  c.ok((a.match(/void doAdopt\(\)/g) || []).length === 2,
+    '写入只能发生在「无自录答案」与「用户已确认」两条路径')
+  // 只切 handleAdopt 的函数体：文件里另有两处手动保存也调 saveAnswer，
+  // 用全文 indexOf 比对会误报，必须确认「确认门之前」这一段里没有写入。
+  const gate = a.slice(a.indexOf('const handleAdopt'), a.indexOf('const doAdopt'))
+  c.ok(gate.length > 0 && gate.includes('Taro.showModal({') && !gate.includes('saveAnswer('),
+    '二次确认之前不得发生任何写入')
+})
+
 // ---------- D 学习手册 ----------
 m.test('D1 学习手册页已注册且有入口', (c) => {
   c.ok(read(CONFIG).includes("'pages/guide/index'"), 'app.config.ts 须注册路由')
