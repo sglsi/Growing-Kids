@@ -192,22 +192,69 @@ m.test('🔴 A7 CACHE_VERSION = v14 且参与 qHash（P-017：result 增 figureU
   c.ok(/双通道检索/.test(nd), '双通道没有体现在 note 里（改了文案就必须 bump）')
 })
 
-m.test('🔴 A8 隐私政策 r8、两处口径一致、面客不再说「你自己的网盘」', (c) => {
+m.test('🔴 A8 隐私政策 r11、两处口径一致、面客不再说「你自己的网盘」', (c) => {
   const pp = read(PP)
   const doc = read(PPDOC)
-  c.ok(/PRIVACY_POLICY_VERSION = '2026-11-07-r8'/.test(pp), '应用内政策没升 r8')
-  c.ok(doc.includes('2026-11-07-r8'), 'docs/legal 镜像没升 r8')
+  c.ok(/PRIVACY_POLICY_VERSION = '2026-11-14-r11'/.test(pp), '应用内政策没升 r11')
+  c.ok(doc.includes('2026-11-14-r11'), 'docs/legal 镜像没升 r11')
   c.ok(/运营者提供的公共资料库/.test(pp) && /运营者提供的公共资料库/.test(doc), '两处都没写公共资料库')
   c.ok(/不含任何用户的个人信息/.test(pp) && /不带用户属性|不含任何用户的个人信息/.test(doc),
     '没写「公共题库不带用户信息」')
   c.ok(!/你自己百度网盘里的资料/.test(pp) && !/你自己百度网盘里的资料/.test(doc),
     '还在说「你自己百度网盘里的资料」')
-  c.ok(/腾讯 ima 知识库/.test(doc), '法定第三方清单 ima 条目被删了')
+  const docBodyA8 = doc.slice(doc.indexOf('## 一、'), doc.indexOf('## 附：'))
+  c.ok(!/Supabase|腾讯 ima|境外区域|（新加坡）/.test(docBodyA8),
+    'D-060：法定第三方清单仍有已删除条目（变更记录属历史，只扫正文）')
   c.ok(/百度网盘（公共资料索引）|百度网盘（资料归档）/.test(doc), '法定第三方清单网盘条目被删/没改口径')
   const editor = read('src/components/answer-editor.tsx')
   c.ok(/guardPolicy\('检索公共资料库'\)/.test(editor), '前端 guardPolicy action 还是「我的资料库」')
   const profile = read('src/pages/profile/index.tsx')
   c.ok(/检索运营者提供的公共资料库/.test(profile), 'profile 面客文案没改')
+})
+
+// D-058：r9 把 AI 开关 / 智能客服 / 大模型服务商从法律文本里删净。
+// D-059：r10 又把「内容安全检测」这一真实存在的数据处理活动补回披露。
+// 单独立一条用例，避免与 A8 里 P-011 时期的既有失败（profile 面客文案）混在一起，
+// 让「本轮改动是否达标」有独立绿灯。
+m.test('🔴 A9 隐私政策正文不含已删 AI 开关，且如实披露内容安全检测（D-058 / D-059）', (c) => {
+  const pp = read(PP)
+  const doc = read(PPDOC)
+  // ⚠️ 只扫「用户实际看到的正文」：源码头注释与 docs 变更记录里如实记了
+  //    「删掉大模型服务商」，那是历史说明，整文件扫会假阳性。
+  const ppBody = pp.slice(pp.indexOf('export const PRIVACY_POLICY_SECTIONS'), pp.indexOf('export const POLICY_CONSENT_TEXT'))
+  const docBody = doc.slice(doc.indexOf('## 一、'), doc.indexOf('## 附：'))
+  // ⚠️ 不能把「智能问答」列为禁词：正文里有「不提供智能问答」这层如实否定，
+  //    宽匹配会把正确的否定表述判成残留。
+  c.ok(!/AI 与在线检索|大模型服务商|默认关闭|受该开关控制/.test(ppBody)
+    && !/AI 与在线检索|大模型服务商|默认关闭|受该开关控制/.test(docBody),
+  '隐私政策正文仍残留已删除的 AI 开关 / 大模型服务商描述')
+  c.ok(/当前版本不提供在线解题/.test(ppBody) && /当前版本不提供在线解题/.test(docBody),
+    '两处都要如实写明本版不提供在线解题')
+  // D-059 反转：r9 因「用户可达链路无检测」而收窄，r10 已按方案 A 真正接入，
+  // 两处正文必须重新如实披露该处理活动（否则又变成与实际行为不符）。
+  c.ok(/msgSecCheck/.test(ppBody) && /msgSecCheck/.test(docBody),
+    '政策正文必须披露 msgSecCheck')
+  c.ok(/内容安全检测/.test(ppBody) && /内容安全检测/.test(docBody),
+    '第三方清单须写明内容安全检测用途')
+  c.ok(/openid/.test(ppBody) && /openid/.test(docBody),
+    '须如实写明该接口强制携带 openid（身份信息例外）')
+})
+
+// D-060：生产早已迁至腾讯云境内自建库（L3）；外部知识库因访问限制整体移除。
+// 单独立一条，避免与 A8 的 P-011 时期既有失败（profile 面客文案）混在一起。
+m.test('🔴 A10 r11 正文无已删第三方，且后端不再引用该 provider（D-060）', (c) => {
+  const pp = read(PP)
+  const doc = read(PPDOC)
+  const ppBody = pp.slice(pp.indexOf('export const PRIVACY_POLICY_SECTIONS'), pp.indexOf('export const POLICY_CONSENT_TEXT'))
+  const docBody = doc.slice(doc.indexOf('## 一、'), doc.indexOf('## 附：'))
+  // ⚠️ 「不涉及数据出境」是正确表述，不能列为禁词；只禁已删除的实体名与旧失实表述。
+  const banned = /Supabase|腾讯 ima|境外区域|（新加坡）|可能涉及数据出境/
+  c.ok(!banned.test(ppBody) && !banned.test(docBody), 'r11 正文仍残留已删除的第三方 / 数据出境表述')
+  c.ok(/中国大陆境内/.test(ppBody) && /中国大陆境内/.test(docBody), '两处未写明数据存放于境内')
+  c.ok(/PRIVACY_POLICY_VERSION = '2026-11-14-r11'/.test(pp), '应用内政策没升 r11')
+  const svc = read('server/src/answer-search/answer-search.service.ts')
+  c.ok(!/ImaKnowledgeProvider|ima-provider|IMA_/.test(svc), '后端仍引用已移除的外部知识库 provider')
+  c.ok(/const CACHE_VERSION = 'v17'/.test(svc), '删源后未 bump CACHE_VERSION，旧缓存会吐已删数据源的答案')
 })
 
 // ============================================================

@@ -207,8 +207,8 @@ m.test('🔴 隐私清单全篇 7 项、第 7 项用途短句逐字一致', (c) 
   c.ok(accept.includes(SAVE_PHRASE), '验收记录缺第 7 项用途短句')
   // L3 方案里写作「隐私指引 **7 项**」（带加粗），用正则兼容 Markdown 强调
   c.ok(/隐私指引\s*\*{0,2}\s*7 项/.test(read(L3)), 'L3 方案没同步 7 项')
-  c.ok(read(PP).includes("PRIVACY_POLICY_VERSION = '2026-11-07-r8'"), '应用内隐私政策没升 r8（P-011 公共资料库口径订正）')
-  c.ok(read(PPDOC).includes('2026-11-07-r8'), 'docs/legal 镜像没升 r8')
+  c.ok(read(PP).includes("PRIVACY_POLICY_VERSION = '2026-11-14-r11'"), '应用内隐私政策没升 r11（D-060 第三方清单订正）')
+  c.ok(read(PPDOC).includes('2026-11-14-r11'), 'docs/legal 镜像没升 r11')
   // 用途短句逐字一致：4.5.4.2 拍板段 / 4.5.5 用途表第 7 行 / 验收记录第 7 行
   // ⚠️ 不能用「!includes('保存所有图片')」这种宽检查——GK-QA-16 4.5.5 末尾
   //    有「不要临场改写成…或『保存所有图片』」的**否定示例**，那是合规说明不是改写。

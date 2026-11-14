@@ -1,4 +1,4 @@
-// 模块 49：AI 入口收口 / 头像昵称填写能力 / 反馈按钮对比度（D-057）
+// 模块 49：AI 入口收口 / 头像昵称填写能力 / 反馈按钮对比度（D-057 / D-058）
 //
 // 守 2026-11-14 思傅四项指令的落地，都是「改完容易被后续迭代悄悄带回来」的点：
 //
@@ -83,6 +83,18 @@ m.test('A4 不再有指向「已收起开关」的虚假指引', (c) => {
   c.ok(!hint.includes('可在「我的 · 隐私与账号」中开启'), '前端提示语不得指向不存在的开关')
   c.ok(!ctx.includes('可在「我的 · 隐私与账号」中开启'), '服务端 403 文案不得指向不存在的开关')
   c.ok(hint.includes('未提供在线解题'), '提示语须如实说明本版未提供')
+})
+
+m.test('A5 智能客服死页面已删除，路由 / 页面 / 前端封装不得回归（D-058）', (c) => {
+  const cfg = read('src/app.config.ts')
+  c.ok(!cfg.includes("'pages/chat/index'") && !cfg.includes("'pages/chat/admin'"),
+    'app.config.ts 仍注册智能客服 / 知识库管理路由')
+  c.ok(!fs.existsSync(path.join(ROOT, 'src/pages/chat')), 'src/pages/chat 死页面目录仍在')
+  c.ok(!fs.existsSync(path.join(ROOT, 'src/services/chat.ts')), '通用对话 service 仍在')
+  const api = read('src/services/api.ts')
+  c.ok(!api.includes('sendChatMessage') && !api.includes('export interface KnowledgeArticle'),
+    'api.ts 仍导出智能客服封装')
+  c.ok(api.includes('前端 API 封装整段删除'), '删除原因须留注释，避免后人当漏删补回')
 })
 
 // ---------- B 微信官方头像昵称填写能力 ----------

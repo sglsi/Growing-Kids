@@ -1786,3 +1786,195 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 - **生产零写入**：未换 `server/dist`、未重启 `gk-api`、未上传小程序、未提审、未发版、未动数据库、未开 `urlCheck` / `__usePrivacyCheck__`。🔴 本地 `build:server` 后的 dist 会含新的 403 文案，**与生产 drift 一处**，下次换包时按 D-052 集合比对带上。
 - **不宣称**：AI 助手可用／命中提升／召回／误判归零／图形全覆盖／所有用户可用／核心功能已面客。判定层一行未动，`OBJECT_ENGINE_VERSION` 仍 `qobj-2`，`CACHE_VERSION` 仍 `v16`，`0032` 未上、G8 未过、`review_events` 仍 0 行。
 - **回滚**：按 commit 逐条 revert 即可；M49 为新增文件，删除即可。生产无写入需回滚。
+
+---
+
+## D-058 · 2026-11-14 智能客服死页面删除 / 隐私政策 r9 / mp 后台两项人工前置详细步骤
+
+> 思傅三项指令：①「请确定智能客服在个人里也不能用吗，如果不能用则删除」；②「修改隐私政策中与 AI 相关内容」；③「给出隐私指引 7 项与 UGC 声明的详细步骤」。
+> 本条覆盖 D-057 §六 两处「待拍板」：智能客服死页面 ⇒ **删**；隐私政策 AI 描述 ⇒ **改**。范围 L0/L1，**零提案、零学习行为改动、生产零写入**。
+
+### 一、🔴 明确回答：智能客服在个人主体下**完全不可用**
+
+| 层 | 事实 | 判据 |
+|---|---|---|
+| 资质 | 个人主体办不了「深度合成-AI 问答」类目（需法人 + 算法备案） | `src/constants/app-info.ts` `OPERATOR_TYPE='personal'` |
+| 前端入口 | `AI_PUBLIC_ENTRY=false`；D-057 已删「我的」页智能客服卡片、答题页「联网搜题 / AI 解题」按钮 | M49 A1/A2 全绿 |
+| 服务端 | `POST /api/chat/message`、`POST /api/chat` 均过 `requireAiEnabled()` fail-closed；生产真实用户 `ai_enabled` 全 false ⇒ 必然 403 `AI_DISABLED` | `chat.controller.ts:91/117`、D-057 §二 |
+| 可达路径 | 页面虽仍注册在 `app.config.ts`，但**无任何入口**（死页面），用户到不了 | D-057 §六 |
+
+⇒ **「我的」页里没有、也不可能有智能客服**。既然不能用，本轮按指令把残留删净。
+
+### 二、删除清单（只删前端，服务端闸门刻意保留）
+
+| 文件 | 动作 |
+|---|---|
+| `src/pages/chat/index.tsx`、`index.config.ts`、`admin.tsx`、`admin.config.ts` | 整目录删除（4 文件，均已在 git 跟踪，可 `git checkout` 回滚） |
+| `src/app.config.ts` | 删 `pages/chat/index`、`pages/chat/admin` 两条路由，留注释写明不可注册回来 |
+| `src/services/chat.ts` | 删（通用对话 `/api/chat`，全仓零引用） |
+| `src/services/api.ts` | 删「智能客服（chat）」整段：`KnowledgeArticle` / `ChatMessage` / `ChatSendResult` 类型与 6 个 API 封装，留删因注释 |
+| `server/scripts/verify/modules/49-ai-entry-and-profile.mjs` | 新增 **A5**：路由 / 目录 / service / api 封装不得回归（M49 13/13 → **14/14**） |
+
+**刻意保留**：`server/src/chat/*`（`ChatModule`、`requireAiEnabled()` 闸门、知识库管理端点）、`chat_*` 表与 `migrations/`、`AI_PUBLIC_ENTRY` 常量、`ai_enabled` 字段。D-057 已定「闸门与代码保留＝合规兜底」；且 M11 断言依赖 `/api/chat*` 返回 403 而非 404，删服务端会破坏该判据。**删前端是收紧，不是放开**。
+**实证**：`pnpm build:weapp` 成功，`dist/**/*.js|json|wxml` 里「智能客服 / 知识库管理」**0 命中**；`dist/common.js` 已含 `2026-11-14-r9`。
+
+### 三、隐私政策 r8 → r9：清掉 5 处虚假指引
+
+`PRIVACY_POLICY_VERSION = '2026-11-14-r9'`，`src/constants/privacy-policy.ts`（唯一事实源）与 `docs/legal/隐私政策.md`（可发布副本）逐字同步：
+
+| 处 | r8 | r9 |
+|---|---|---|
+| 三、2 | 「检索与讲解…或在没有现成答案时由大模型生成讲解」 | 「资料检索…本版本不提供由大模型生成讲解的在线服务」 |
+| 三、长段 | 二分法 +「开启与关闭都在『我的 → 隐私与账号 → AI 与在线检索』中」 | 只写「资料库搜题」纯检索；**如实写明当前版本不提供在线解题 / 智能问答、不向大模型发送题干** |
+| 四、清单 | 「大模型服务商（扣子 / DeepSeek / 腾讯混元）」 | **整条删除**（法定第三方清单 7 → 6 条，对外无此外发） |
+| 四、微信开放接口 | 「用于登录、内容安全检测」 | 收窄为「用于登录（code 换 openid）」；末句「内容安全检测除外」例外说明一并删（当前用户可达链路 0 调用，留着即失实） |
+| 四、特别说明 | 「不受『AI 与在线检索』开关约束」 | 「只检索公共资料库与你自己名下的 ima 资料，不生成内容」 |
+
+- 变更记录追加 r9 行；**M28 / M33 版本断言同步 r9**；M33 新增 **A9** 独立守「正文不得残留 AI 开关 / 大模型服务商 / 默认关闭 / 受该开关控制」，并判「当前版本不提供在线解题」两处齐备（只扫正文，避开头注释与变更记录里的历史说明）。
+- 🔴 **全部已同意用户需重新弹同意**，且必须随**小程序前端包**生效（`build:weapp` → 开发者工具重编译 → 上传 → 发版）；只换后端 dist 不生效。
+- 顺带修 M28 既有格式失败：验收报告七行表第 7 行尾部 padding 导致逐字断言不命中，删去多余空格后 M28 该用例转绿。
+
+### 四、mp 后台两项人工前置：详细步骤已交付
+
+新增 `docs/reports/mp后台-隐私指引7项与UGC声明-操作指引.md`（**当前状态版**，基于托管 11-05 已解除）：入口1/入口2 判断（本项目未发线上版 ⇒ 走入口2）、10 步逐屏操作、7 项逐行短句与漏勾后果、保存期限粘贴文本（30 天 / 7 天 / 14 份 / 14 天）、**r9 后第三方信息共享 6 条**、真机验证 7 步、UGC 声明官方字段（`scene` 1–5 五类全勾 / `method` / `has_audit_team=0` / `audit_desc` ≤256 字）、两版可粘贴文案、常见驳回语、8 步最终顺序清单。
+
+同步订正旧状态，避免照着托管期路径白跑：`GK-QA-16` 4.5.2（政策版本 r3→r9、托管分支作废）、4.5.3 第 7 步（5 条→6 条）、4.5.6（保存期限指向新 §2.4）、4.5.7（整表重写为 r9 的 6 条、删「受 AI 开关控制」列）；验收报告 §3.2 UGC 文本行与订正块、§3.3-③ 新指引指针与 r9 订正块。M49 D1/D2 所依赖的「托管 11-05 已解除」「不要再按那些路径操作」等字面均保留。
+
+### 五、🔴 本轮新发现的发布阻断（待思傅拍板，未擅自实施）
+
+全仓 `server/src` 中 `ContentCheckService.checkText()` / `msgSecCheck` **只被 `chat.service.ts:67`（智能客服）调用**。删掉智能客服页后，**用户可达链路上内容安全检测调用数为 0**；而微信官方《关于微信小程序内容安全要求规范》明确 UGC 小程序须接入官方内容安全 API，代码审核会做敏感词能力检测。⇒ UGC 声明勾 `method=1`「使用平台建议的内容安全 API」属声明失实，勾 `method=4` 又大概率被拦。
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| **A（推荐）** | 把现成 `ContentCheckService.checkText()` 复用到用户可达文本链路（昵称 / 题目名称 / 答案文本 / 成长记忆文字），命中违规拒绝入库 | 独立后端改动约半天 + 隐私政策补披露「内容安全检测」并升 **r10** + 换 `server/dist` 并重启 `gk-api`（需单独授权发货） |
+| **B（不推荐）** | 用指引 §3.3 的 B 版文案如实申报 `method=4` | 零改动，但平台敏感词检测大概率驳回 |
+
+建议：先按 B 版把声明如实填上走通流程，同时另建 D 号实施 A，实施完更新声明为 `method=1` + A 版文案并同步 r10。**本轮未实施 A**（属新增数据外发与后端发版，超出「给步骤」范围）。
+
+### 六、验证（全本地，生产零写入）
+
+- `verify:gate` **38/38**；`method:check` H1/H2/H3 三条硬门全绿；前端 `tsc` / `lint:build` RC=0，后端 `tsc --noEmit` RC=0。
+- **M49 14/14**（新增 A5 通过）、**M33 A9 PASS**（本轮 r9 守卫）、**M28 七行表用例转绿**。
+- `M28/M33/M49` 合并跑 41 用例 / 38 通过 / 3 失败，**3 条均为既有失败，未冒称全绿**：① M28 接口用例 `建立测试身份失败：缺少 X-Device-Id`（环境性，本轮未动任何后端/身份代码）；② M33 A7 `CACHE_VERSION = v14` 断言（当前 v16，D-055 前既有矛盾）；③ M33 A8 `profile 面客文案没改`（P-011 时期断言，本轮未动 profile 页）。
+- `build:weapp` 成功；产物「智能客服 / 知识库管理」0 命中，r9 已进包。
+
+### 七、边界 / 不宣称 / 回滚
+
+- **生产零写入**：未换 `server/dist`、未重启 `gk-api`、未上传小程序、未提审、未发版、未动数据库、未开 `urlCheck` / `__usePrivacyCheck__`。本地 `dist` 为开发包，与生产仍有 D-057 的 403 文案 drift。
+- **不宣称**：隐私指引已生效 / UGC 声明已通过 / AI 助手可用 / 核心功能已面客 / 门禁全绿。`release:check` 两阻断仍关；`0032` 未上生产、G8 未过、`review_events` 仍 0 行；15 份切题失效未修。
+- **回滚**：删除的前端文件均在 git 跟踪内，`git checkout -- src/pages/chat src/services/chat.ts` 可恢复；其余按 commit 逐条 revert。隐私政策 r9 回滚会让已重新同意的用户再次弹窗，属可接受的「烦恼」级。
+
+---
+
+## D-059 · 按方案 A 接入 UGC 内容安全检测（2026-11-14）
+
+> 指令：思傅「按A实施」（承接 D-058 §五的 A/B 待拍板）。**追加式改判**：D-058 §五 的「待拍板 / 未实施 A」是当时事实，原样留档；本条记录拍板结果与实施，不涂改历史。
+> 范围：**仅本地代码 + 文档 + 编译产物**；生产 `server/dist` 未换、`gk-api` 未重启、小程序未上传发版。换 dist 需单独授权（同 D-056 规矩）。
+
+### 一、拍板与判断
+
+D-058 查明：删智能客服后 `ContentCheckService.checkText()` 只剩不可达的 chat 调用，UGC 声明勾 `method=1` 属失实。思傅选 **A**：复用现成 service 铺到用户可达文本链路，命中违规拒绝入库；代价是新增数据外发 ⇒ 隐私政策必须升 **r10** 补披露，且后端要换包重启。
+
+### 二、实施（统一收口，不散落）
+
+新增 `server/src/security/ugc-text-guard.service.ts`：`UgcTextGuard.assertAllowed(userId, parts, opts)` 汇总本次实际写入的用户文本 → 去重 → 调 `checkText()` → `allowed=false` 抛 `BadRequestException('内容包含不适宜的文字，请修改后再保存')`；`questionTexts()` 白名单只收 6 个可编辑字段，**不收** `images` / `answer_refs` / file key / URL。`SecurityModule` 增 provider+export。
+
+五条用户可达写入口（五个 module 同步 `imports: [SecurityModule]`）：
+
+| # | 落点 | 送检字段 | scene |
+|---|---|---|---|
+| 1 | `auth/auth.service.ts::updateProfile`（覆盖 PATCH 与登录带 profile） | 昵称 | 1 |
+| 2 | `timeline/timeline.service.ts::create / createBatch / update` | 题目名称、题干、答案、解题过程、错答、父题干、题号标签、标签 | 2 |
+| 3 | `questions/questions.service.ts::create / update`（旧表） | 题干、答案、解题过程、错答、来源 | 2 |
+| 4 | `memory/memory.service.ts::create / update` | 成长记忆标题、正文、心情、标签 | 4 |
+| 5 | `subjects/subjects.service.ts::create / update`（仅改名时） | 学科名称 | 1 |
+
+关键取舍：① `update` 只送本次改动字段，不重送旧全文；② `createBatch` 整批 `flatMap` 合并成**一次**检测，不逐题往返；③ 只改图片 / 只切学科时 parts 为空 ⇒ 0 次外网调用；④ `content-check.service.ts` 两次微信 fetch 加 `AbortSignal.timeout(3000)`，防检测接口挂住把保存链路拖过前端 60s 超时；⑤ 原有 chat 调用与 fail-closed 闸门**一行未删**。
+
+### 三、隐私政策 r8→r9→**r10**
+
+`src/constants/privacy-policy.ts` 与 `docs/legal/隐私政策.md` 逐字同步：三节新增用途第 6 条（内容安全检测，写明只送用户主动编辑文本、命中拒绝保存、不在我方库留存、检测不可用时跳过照常保存）；四节「微信开放接口」由 r9 的「仅登录」扩为「登录 + msgSecCheck v2，文本连同 openid」；末句补「除内容安全检测必须携带 openid 外」订正 r9 的身份信息例外。**法定第三方接收方仍 6 条**（微信两类用途合一条）。变更记录追加 r10 行。M28 / M33 A8 版本断言同步 r10；M33 A9 反转 r9 那条「不得声称有内容安全检测」为「必须披露 msgSecCheck / openid」。
+
+⚠️ **全部已同意用户需重新弹同意**，且必须随**小程序前端包**生效（重编译 → 上传 → 发版），只换后端 dist 不生效。
+
+### 四、UGC 声明与文档订正
+
+`docs/reports/mp后台-隐私指引7项与UGC声明-操作指引.md`：§3.1 `method` 改为**勾 1**（前提后端已发货）；§3.3 正式版 `audit_desc` 实测 **238 字 ≤256**（与验收报告 §3.2 文案逐字一致）（B 版降级为历史留档、注明已作废）；§3.4 整节由「待拍板 A/B」改写为「方案 A 已实施」，列五条落点、实证命令与四条诚实边界；§4 增加**第 0 步「后端先发货」**，并明确「没换 dist 就勾 method=1 比填 4 更糟」。§2.5 第 6 条微信共享内容补用户文本与 openid、版本口径 r9→r10。同步订正 `GK-QA-16` 4.5.2/4.5.3/4.5.6/4.5.7 与验收报告 §3.2 UGC 文案及订正块、§3.3-③。
+
+新增 `server/scripts/verify/modules/50-ugc-content-check.mjs`（M50，8 用例）与 `dynamic-tests/run-ugc-guard-d059.cjs`（离线实证 26 用例）。
+
+### 五、验证（全本地，生产零写入）
+
+- `verify:gate` **38/38**；`method:check` H1/H2/H3 三条硬门全绿；前端 `tsc` / `lint:build` RC=0，后端 `tsc --noEmit` RC=0；`build:server` / `build:weapp` RC=0。
+- **M50 8/8**、**M33 A9 PASS**、`run-ugc-guard-d059.cjs` **26/26**（拒绝 / 放行 / 去重 / 白名单 / scene / skipped / 五链路接入 / 超时）。
+- **Nest 运行时 DI 冒烟**：`NestFactory.create(AppModule).init()` 打印 `NEST_DI_OK: 所有 provider 均可解析` ⇒ 五个 module 的 `SecurityModule` 注入闭合（该一次性命令因 sidecar 常驻需 timeout 收尾，OCR 恢复脚本在本机 `spawn powershell ENOENT` 与本次改动无关）。
+- `dist/common.js` 含 `2026-11-14-r10`、旧 r9 **0 命中**、「智能客服 / 知识库管理」**0 命中**。
+- `M28/M33/M49/M50` 合并 49 用例 / 46 通过 / **3 失败，全部为 D-058 时已存在的既有失败**，未冒称全绿：① M28 接口用例「建立测试身份失败：缺少 X-Device-Id」（环境性）；② M33 A7 `CACHE_VERSION=v14` 断言（当前 v16）；③ M33 A8 `profile 面客文案没改`（P-011 时期断言）。本轮新增的 M33 A9 与 M50 全绿。
+
+### 六、诚实边界 / 不宣称
+
+- **best-effort 未改**：凭据缺失 / 微信接口异常 / 匿名账号无 openid ⇒ 底层放行。生产 `users` 匿名账号占多数，这部分实际不送检；「接入」≠「全覆盖」，指引 §3.4 与政策三节均已如实写明。
+- **图片 / 视频 / 音频未接** `imgSecCheck` / `mediaCheckAsync`；OCR 全文、资料库正文、机器生成文本不送检；**历史数据不回溯**。若审核追问，优先补图片检测与匿名态 openid（另开 D 号）。
+- **不宣称**：UGC 声明已提交 / 已通过、`method=1` 现在就能填、隐私指引已生效、门禁全绿、AI 助手可用。`release:check` 两阻断仍关；`0032` 未上生产、G8 未过、`review_events` 仍 0 行、15 份切题失效未修。
+- 🔴 **后台勾 `method=1` 与 r10 披露生效的共同前提＝先把 D-059 后端 dist 换上生产并重启**，目前**未做**（需思傅单独授权）。本地 `server/dist` 已含新守卫，与生产存在 drift。
+
+### 七、回滚
+
+按 commit 逐条 revert 即可；`ugc-text-guard.service.ts` / M50 / 实证脚本为新增文件，删除即可。回滚后须把隐私政策退回 r9、指引退回 B 版 `method=4` 口径，并让已重新同意的用户再次弹窗（「烦恼」级，无数据丢失）。生产未写入，无生产回滚动作。
+
+---
+
+## D-060 · 提审页/存储页截图裁定 + 现行披露订正 + 移除外部知识库（2026-11-14）
+
+> 触发：思傅给出两张 mp 后台截图，问「点击提交审核后是这个界面」「开发者对信息的存储页面显示如上，请确定是否这样选择就可以」「信息使用规则 6.2 如何填写」；并指出「Supabase（新加坡）早都已经全部转到腾讯云上了……请检索并删除与之相关联的全部内容」「腾讯 ima 知识库有访问限制，也一并删除与之相关联的内容」。**本轮全本地，生产零写入**。
+
+### 一、两张截图的裁定（人工填表口径，逐项写进指引 §2.4.1）
+
+| 位置 | 截图当前 | 裁定 |
+| --- | --- | --- |
+| 提审信息页「用户隐私保护指引设置」 | 未采集用户隐私 | 🔴 **选错，必须改「采集用户隐私」**：项目实有 `chooseAvatar` / `Input type="nickname"` / `chooseMedia` / 麦克风 / 文件 / 剪贴板 / 相册写入等隐私接口，后台已按 7 项申报，勾「未采集」与代码、指引、政策三处矛盾 |
+| 5.1「固定存储期限 0 天」 | 备选未选 | ⛔ 不要选：等于承诺不留存，与账号／题目／图片／文档实际留存相矛盾 |
+| 5.1「开发者承诺……实现处理目的所必要的最短时间」 | 已选中 | ✅ **正确，保持选中** |
+| 6.2「再次以 ___ 方式告知并征得你的明示同意」 | 空白 | 填「**弹窗**」两字；与官方模板句式、政策 r11 第九节、指引 §2.2 第 7 步「采集变动通知方式＝弹窗」三处一致 |
+
+### 二、Supabase（新加坡）：订正「现行披露」，不是改写技术史
+
+生产早已整体迁到腾讯云境内自建库（L3：同机 PostgreSQL `gk` + 本地 PostgREST 反代 + `STORAGE_DRIVER=local`）。现行法定文本仍写「Supabase（新加坡）／数据存放在境外／可能涉及数据出境」，属**失实披露**，必须删。本轮清理范围：
+
+- `src/constants/privacy-policy.ts` 与 `docs/legal/隐私政策.md`：第四节改为「腾讯云（境内云服务器，数据库与文件存储）……**数据全部存放在中国大陆境内，不涉及数据出境**」；删除特别说明中的境外存储口径。
+- `docs/reports/mp后台-隐私指引7项与UGC声明-操作指引.md`：`§2.5` 第三方共享第 1 条改写为腾讯云境内；删除「数据出境已告知」旧句。
+- `docs/design/GK-QA-16-运维、发布与故障处置手册.md` 4.5.2/4.5.3/4.5.6/4.5.7 及状态行（v1.45）；`docs/reports/小程序上线验收-差距评估与整改记录.md` r11 订正块。
+- `server/src/app.controller.ts` 根路由 note 改为「腾讯云境内自建 PostgreSQL（L3）」；`src/services/net.ts`、`server/src/storage/storage.service.ts`、`server/src/maintenance/maintenance.service.ts`、`server/src/shared/user-context.ts` 中把「手机直连 Supabase（新加坡）的跨境慢网／RTT」等**现行误导注释**改为「早期境外托管库……（现网已迁 L3 境内）」。
+
+🔴 **清理边界（必须如实说明）**：`supabase-js` 仍是本地 PostgREST 兼容客户端 SDK，`server/src/**/supabase*.provider.ts` 等文件名、L3 迁移历史文档与归档报告仍含该字面。**这与「现行隐私披露中的境外服务方」不是同一概念**；物理删掉会破坏 L3 兼容层并抹掉迁移史。若思傅要的是「字面全仓零 Supabase」，需另开 D 号评估改造，不能在合规订正里顺手删。
+
+### 三、腾讯 ima 知识库：整体移除（有访问限制）
+
+- 删 `server/src/answer-search/ima-provider.ts`（`ImaKnowledgeProvider` / `buildQueryFallbacks()` / `IMA_SEARCH_ENDPOINT`）。
+- `answer-search.service.ts`：删 import、第 ④ 顺位外部知识库召回分支、`imaItems` / `imaMissNote` / ima 配额 note；兜底只列网盘与公共资料库命中，`answer:''` + `verified:false` 不变。**六条 P0 硬闸与判定层 `judgeObjects` 一行未动**（真值源在 `shared/question-match.ts`，不依赖 provider）。
+- 删 `.env.example` 四个 `IMA_*` 键并注明 `.env.secrets` 里的旧键可安全忽略；`answer-search.module.ts` / `.controller.ts` / `.types.ts`、`src/services/api.ts`、`src/services/ai-settings.ts`、`src/components/answer-editor.tsx` 中「只检索 ima 知识库／来自 ima」等现行注释改为「运营者公共资料库／资料库」。
+- 现行文档（政策两副本、mp 指引、GK-QA-16、验收报告）删净「腾讯 ima 知识库」条目；法定第三方接收方 **6 → 5 条**。
+- 🔴 删掉召回来路会改变 `result`/`note`，故 `CACHE_VERSION` **v16 → v17**，防止 `answer_cache` 继续吐旧数据源产出的答案。M42/M44/M46/M48 与 `dynamic-tests/run-kb-note-d055.cjs` 同步。
+
+### 四、隐私政策 r10 → `2026-11-14-r11`
+
+两处副本逐字同步：删境外存储／数据出境失实表述、删 ima 第三方条目、资料检索只写「运营者提供的公共资料库」、第九节写实为「小程序内以弹窗提示、重新征求你的明示同意」（对齐 6.2）、法定第三方接收方 6 → 5 条，变更记录追加 r11 行。⚠️ **全部已同意用户需重新弹同意，且必须随小程序前端包生效**（重编译 → 上传 → 发版），只换后端 dist 不生效。
+
+### 五、守卫与验证（全本地，生产零写入）
+
+- M28 / M33 / M50 版本断言 r10 → r11；M33 删除「腾讯 ima 知识库必须存在」旧断言，A8 改为扫正文不得残留 `Supabase|腾讯 ima|境外区域|（新加坡）`，新增 **A10**（r11 正文无已删第三方 / 两处写明中国大陆境内 / service 不再引用 `ImaKnowledgeProvider|ima-provider|IMA_` / `CACHE_VERSION='v17'`）；M27 由「ima 分支必须过原题判定」改为「外部知识库召回源已移除且不得复活」，并顺手把 D-055 后过时的 exact 标题断言改为「资料库里有这道题的解析」；M42/M44/M46/M48 与离线实证脚本同步 v17。
+- `verify:gate` **38/38**、`method:check` H1/H2/H3 全绿、前后端 `tsc` / `lint:build` RC=0、`build:server` / `build:weapp` RC=0；`run-kb-note-d055.cjs` **8/8**、`run-ugc-guard-d059.cjs` **26/26**。
+- `dist/common.js` 含 `2026-11-14-r11`、旧 r10 **0 命中**，「智能客服／知识库管理」0 命中，「Supabase（新加坡）／腾讯 ima 知识库」现行披露 0 命中。🔴 `build:server` 不会清理已删源文件留下的 dist 孤儿 ⇒ 手工删 `server/dist/answer-search/ima-provider.{js,js.map,d.ts}`，复扫 0 命中（下次换 dist 按 D-052 集合比对自然带走）。
+- **M27/M28/M33/M42/M44/M46/M48/M50 合并 104 用例 / 97 通过 / 7 失败**；修正 M27/M33 后复跑 M27+M33 为 35 用例 / 31 通过 / **4 失败，全部为既有或环境性**：M27 与 M33 A7 仍断言 `CACHE_VERSION=v14`（当前 v17）、M27 接口用例缺 `X-Device-Id`、M33 A8 `profile 面客文案没改`。M42/M44/M46/M48/M50 与 M33 A10、M27 新增防复活用例全绿，**未冒称全绿**。
+
+### 六、诚实边界 / 不宣称
+
+- 本轮只做**代码与文档的本地订正**；「删除」指现行对外披露与现行运行链路中的引用被移除，**不等于全仓字面清零**（见第二节边界）。
+- 不宣称：mp 后台已改选／已提交／审核已通过、r11 已生效、`method=1` 现在就能勾、门禁全绿、AI 助手可用。D-059 的 UGC best-effort 边界（无 openid／凭据／接口异常放行，图片音视频未检，历史不回溯）本轮未改也未改善。
+- `0032` 未上生产、G8 未过、`review_events` 0 行、15 份切题失效未修、T0／第二层准入仍未过。
+
+### 七、生产状态与回滚
+
+🔴 生产 `gk-api` 仍跑 **D-056 的旧 dist**：未换 `server/dist`、未重启、未上传 r11 前端包、未提审、未发版、未动数据库、未开 `urlCheck` / `__usePrivacyCheck__`。本地 dist 已含 r11 + v17 ⇒ 与生产存在 **2 处 drift**（D-059 UGC 守卫 + D-060 披露/召回源）。**后台勾 `method=1`、改选「采集用户隐私」、r11 重新同意生效的共同前提仍是先换后端 dist 并重启 + 上传 r11 前端包**，需思傅单独授权。
+
+回滚：按 commit 逐条 revert；`ima-provider.ts` 从 git 恢复即可，`CACHE_VERSION` 须退回 v16、政策退回 r10、第三方共享退回 6 条、指引退回 r10 口径，并让已重新同意用户再弹一次窗。生产未写入，无生产回滚动作。
