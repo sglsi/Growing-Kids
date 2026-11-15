@@ -2084,3 +2084,43 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 前端：mp 后台「版本管理」选上一个开发版重新提交，或重新上传旧 commit 构建的包。
 仓库：`git revert` 或 `git reset --hard d180c2c`（远端 `origin/main` 需 `push --force`，属破坏性操作，需单独授权）。
 后端不变，无需回滚。
+
+---
+
+## D-063：资料库多图导入（自动排序 + 手动调序 + 合成一图一页 PDF）（2026-11-15）
+
+### 一、触发与拍板
+
+思傅 11-14 要求「资料导入页从只能导文件，扩到多份图片导入 → 自动排序 → 手动改序 → 合成一份文件存储」。按 GK-OPS-22 先查台账：无既有决策，新建 `P-029` + 本 D 号；不碰判定层/排程/激励，按 D-015 走工程类降维。四问逐题确认：Q1 原答「PDF 智能拼页」，11-15 思傅改判「**按一图一页，开始我的理解有误**」⇒ **最终 Q1 = PDF 一图一页**；Q2 选择顺序＋数字序兜底；Q3 缩略图＋上移/下移＋序号；Q4 只存合成文件到资料库。
+
+### 二、实现
+
+**后端**：新增 `POST /api/library/combine-images`（`LibraryImageCombineService`，`LibraryModule` 内注册，不引 PDF 模块以免循环依赖）。收 `keys` 数组 → 按下标顺序逐张 `readObject` → 共用 `normalizeImageSource()` → `buildOneImagePerPagePdf()`（每图一页 A4、等比居中）→ `uploadBuffer` → **只 `LibraryService.create()` 一条**成品（封面缩略图 best-effort）。上限 20 张；key 白名单 `tmp|blobs|raw` 且拒 `..`。
+**共用抽取**：把 `PdfService.fetchImages()` 内联的格式归一/尺寸解析抽成 `server/src/pdf/image-normalize.ts`，A4 常量提到 `one-image-per-page.ts`；复习本智能拼页改用同一份归一，行为不变（M48 15/15）。**一图一页是独立版式，不复用 BSSF 装箱**。
+**前端**：`src/pages/library/index.tsx` 导入菜单加第三项；`chooseMedia` 多选 → `autoSortPicked()`（选择顺序为主，仅全部有可区分文件名时按 `naturalCompare()` 自然数字序）→ 全屏排序页（缩略图/序号「第 N 页」/上移/下移/删除/继续添加）→ 串行 `uploadFile(purpose:'temp')` 带逐张进度 → `combineLibraryImages(keys,name)`（成功后失效 `lib` 缓存域）→ `load({silent:true})`。原图 `ref_count=0`，由既有孤儿 GC 回收，**资料库只多 1 条**。
+
+### 三、诚实边界（不得外推）
+
+- 微信 `chooseMedia` 多数机型不给原始文件名、EXIF 常被剥离 ⇒ 自动排序实际**以选择顺序为主**；不宣称「等同真实页序」，所以必须给用户手动改序。
+- `purpose=temp` 沿用既有上传压缩链路（`compressForUpload` 长边 1600 / q80 + 服务端 WebP），**不是无损原图归档**。
+- `blob_objects` 无 `user_id`/owner 列、key 是内容寻址 ⇒ 服务端**无法逐 key 证明归属**；本端点要求登录态 + key 格式白名单（64 位 hash 不可枚举），与既有 `/api/storage/files/*` 直读模型一致。逐对象强隔离需独立提案改存储模型。
+- 同步合成（非 jobs）：20 张封顶，未做真机大样本压测；若将来放量到更大张数，须先转 `POST /api/jobs` 202+轮询（微信 60s 硬顶）。
+- 单图解码失败会**跳过并留痕**，成品页数可能少于选择张数；返回体给出 `images/pages` 实际值，不谎报。
+- 未做真机回归；本轮**零生产写入**：未换 dist、未重启、未上传、未提审、未发版、未写库、未开两个发布阻断开关。
+
+### 四、验证
+
+`dynamic-tests/run-library-combine-d063.cjs` **14/14**（页数==图片数、A4、页序==入参序、倒序反证、WebP 归一嵌入、空输入 fail-closed，另以 mock 注入验证服务层只建 1 条/保序/上限与 key 白名单拒绝且不入库）；M51 **8/8**、M48 15/15、M49 14/14、M50 8/8；`verify:gate` **38/38**、`method:check` H1/H2/H3 全绿；前后端 tsc、`lint:build`、`build:server`、`build:weapp` 全 RC=0；编译产物含 `combine-images` 与新入口文案。
+🔴 全量 `pnpm verify` 510 用例 / 318 通过 / **192 失败**，全为**既有**：本地未起服务导致 M01–M17 等接口模块 `fetch failed`，以及 M27–M43 的 `v14` / `qobj-1` / 判定层旧 sha 基线断言。本轮相关模块零新增失败，**不宣称全绿**。
+
+### 五、生产与下一步
+
+本地 `dist` 与 `server/dist` 已含新代码，生产 `gk-api` 仍跑 D-061 的 dist、线上小程序仍是 `2026.11.14.1` 开发版未提审 ⇒ 本功能**尚未面客**。要生效需思傅单独授权：精准换后端 dist + 重启 + 上传新前端包 + 提审发布。真机回归项见 `P-029` §⑥。
+
+### 六、回滚
+
+按功能逐文件 revert：删 `library-image-combine.service.ts` / `image-normalize.ts` / `one-image-per-page.ts` / M51 / 实证脚本，回退 `pdf.service.ts`（恢复内联归一与本地 A4 常量）、`library.controller.ts` / `library.module.ts` / `api.ts` / `library/index.tsx`；无数据库迁移、无表结构变更。生产未写入，无生产回滚动作。
+
+### 七、登记
+
+提案 `P-029`（已批准，未实施）；守卫 `M51`；实证 `run-library-combine-d063.cjs`；项目记忆升 r65；今日日志 `2026-11-15.md`。
