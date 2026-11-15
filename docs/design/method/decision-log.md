@@ -2293,3 +2293,56 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 ### 六、回滚与登记
 
 前端：mp 后台「版本管理」选 `2026.11.15.1` 重新设为开发版／提交，或重新上传 D-066 之前 commit 构建的包；后端与仓库不变、无需回滚。登记：台账 **D-067**、今日日志 `2026-11-15.md`、项目记忆升 **r69**；临时脚本 `.tmp/upload-d067.mjs`、`.tmp/ide-errors-d067.mjs`、`.tmp/ide-badge-d067.mjs` 未纳入提交。
+
+---
+
+## D-068：资料库直接拖动 / 预览放大·旋转·裁剪 / 无限层级文件夹（2026-11-15 21:40）
+
+> 触发：思傅 11-15「将多张图片进行合成时，支持将选中的图片直接进行拖动，点击图片进行预览时，支持对图片进行放大、旋转、裁剪等操作；同时图片的旋转当前只有右转90度，增加一个左转90度功能；支持对资料库中的内容建立不同层级的文件夹，从而能够让用户对文件进行分类存储；」 ｜ 性质：**本地功能实现 + 记账**（L1 工程类，提案 `P-030`）。四问答复：①长按激活但拖不动 ⇒ **缺陷修复不是改判**；②放大仅查看不写回、旋转裁剪参与合成；③通用编辑器与合成页预览**两处都加**左转 90°；④**无限层级树**。
+> 🔴 **本轮没有任何发货授权**：未执行 `0033` migration（含开发库与生产库）、未换生产 `server/dist`、未重启 `gk-api`、未重新上传小程序、未提审、未发版、未 push、零生产写入。
+
+### 一、根因（拖动缺陷，非交互改判）
+
+D-064 把 `touchmove` 只挂在 `ScrollView` 上，格子矩形又只在 `onLongPress` 回调里异步量一次；手势起点在格子子节点，`scrollY={!dragging}` 翻转打断手势序列、矩形未回来手指已移动 ⇒ 选中条出现但落点永远算不出。修复四点：① `touchstart` 提前 `measureCells()`；② 事件同时收在**稳定的根 `View`**、`ScrollView`、网格 `View`；③ `dragActiveRef` 给 `endDrag` 去重复（多祖先 `touchend` 会移两次）；④ `hitCellIndex()` 纯函数做「矩形命中 → 最近格子兜底 → 太远返回 -1」，并加跟手浮层。另修 `handleCellClick` 用 `longPressAtRef` 时间窗（400ms）吞 tap，避免「长按未拖动后点目标格」要连点两次。
+
+### 二、落地清单（本地代码）
+
+- **数据**：新建 `migrations/0033_library_folders.sql` —— `library_folders(parent_id` 自引用、`deleted_at` 软删列)，`library_docs` 加 `folder_id` + 索引。**仅文件，未在任何库执行**。
+- **后端**：新建 `library-folder.service.ts`（list/create/rename/move/remove/assertFolder，逐链 `.eq('user_id')`、`UgcTextGuard.assertAllowed`、沿 parent 链查环 `MAX_DEPTH=32`、软删把资料与子文件夹提升到父级）与 `library-folder.controller.ts`（独立挂 `/api/library/folders`，4 端点全 `requireUserId()`，不进 `PUBLIC_ROUTES`）；`library.service.ts` / `library.controller.ts` / `library.module.ts` / `library.types.ts` 支持 `folder_id` **显式传入才碰新列**（老库 fail-safe）；`upload.controller.ts` 双读 query+formData；`library-image-combine.service.ts` 第 4 参透传文件夹，页序逻辑零改。
+- **前端 API / 类型**：`src/services/api.ts` 增 `LibraryFolder`、`folderId` 查询/上传/合成参数与 6 个文件夹接口；`src/types/index.ts` 增 `LibraryDoc.folder_id`。
+- **前端页面 `src/pages/library/index.tsx`**：拖动修复（上）；预览层加「放大／左转90°／右转90°／裁剪」工具条 + 离屏 Canvas；放大走 `Taro.previewImage` 不写回，旋转用 `rotateImageFile()` 烘焙、裁剪复用 `ImageEditor(cropOnly)`，两者都 `setComposeImage(idx,path)` 写回并参与合成，复核态编辑会退回调整态重新「确定」；无限层级目录面包屑／子目录／新建·改名·移动·软删／资料「⋯」移动；`useDidShow` 先探测 `/api/library/folders`，失败则 `folderSupportedRef=false` 并**完全不传 `folder_id`**（新前端打旧后端不会打挂）；缓存 key 带 `folderId`；上传与合成透传当前目录。
+- **旋转左转**：`src/components/image-editor.tsx` 加 `RotateCcw` + `handleRotate(-1)`（`dir: 1 | -1`，`(rotation + dir*90 + 360)%360`）；新建 `src/lib/rotate-image.ts`（离屏 Canvas 2d，CSS/缓冲 1:1 轮询实测 + 全区域导出 + 显式 destWidth/destHeight，`dir=-1 ⇒ 270°` 复用通用编辑器同角度体系）。
+- **守卫 / 实证**：新建 `server/scripts/verify/modules/52-library-folders-and-preview.mjs`（A1–A10）与 `dynamic-tests/run-library-d068.cjs`。
+
+### 三、验证结果（本轮实跑，全部本地）
+
+| 项目 | 结果 |
+|---|---|
+| `pnpm tsc` / `pnpm lint:build` | RC=0 / RC=0 |
+| `pnpm --filter server exec tsc --noEmit` / `pnpm build:server` | RC=0 / RC=0 |
+| `pnpm build:weapp` | RC=0（`✓ built in 8.15s`），`dist/pages/library/index.js` 36.73 kB |
+| `cd server && node scripts/check-isolation.mjs` | 扫描 **164 处** `.from()`，通过 |
+| `pnpm verify:gate` | **38/38**（M12 13 / M13 10 / M16 4 / M18 11） |
+| `pnpm method:check` | H1（27 处）/ H2（140 处）/ H3 三条硬门全绿 |
+| `M51 + M52` | **19/19**（M51 9/9 未回退，M52 10/10 新增） |
+| `run-library-compose-d064.cjs` / `run-library-combine-d063.cjs` | **27/27** / **14/14** 未回退 |
+| `run-library-d068.cjs` | **37/37**（三级面包屑、成环收敛、`subtreeIds`、树深度与排除自身子树、落点命中/间隙兜底/远处 -1、左转角度等价、写回口径、产物 13 条特征串） |
+| 产物特征串 | `左转90°`／`右转90°`／`放大仅查看`／`新建文件夹`／`全部资料`／`管理当前目录`／`compose-rotate-canvas` 均在 `dist`；D-064 的 `确定（`／`开始合成（`／`Swiper`／`已移除` 未丢 |
+
+`CACHE_VERSION` 仍 **v17**（未动召回源／`note` 结构／政策 r11）；判定层 `shared/question-match.ts` **一行未动**。
+
+### 四、生效边界（不得误传）
+
+- 🔴 **`0033` 一次都没执行**：生产 `library_docs` 没有 `folder_id` 列、没有 `library_folders` 表 ⇒ **文件夹功能在生产完全不可用**；前端靠能力探测自动隐藏文件夹 UI 并退回全量列表，这是「不打挂」，不是「功能已上线」。
+- 🔴 后端新端点 `POST/GET/PATCH/DELETE /api/library/folders` **未上生产 dist**（D-066 换的是 `combine-images` 那一版）；`gk-api` 未重启。前端未重新 `build:weapp` 上传 ⇒ 线上开发版仍是 `2026.11.15.2`（D-067），**本轮四项功能一个都没面客**。
+- 🔴 真机**未回归**：长按后真拖动、双指放大、Canvas 旋转/裁剪出图、三级目录、删除文件夹后资料提升，全部只有纯函数／编译产物级证据。⛔ 不宣称手势已可用／图片编辑已生效／文件夹可面客／所有用户可用／全绿即发货。
+- 仍锁：提审／发正式版、`urlCheck`／`__usePrivacyCheck__` 两门、mp 后台 `method=1`、r11 面客、`0032` 上生产、`review_events` 0 行、`strict=1`、第二层准入、T0 判定。
+- 未 push（本地领先 9，本轮记账后再 +1）、未提审、未发版、数据库零写入、未动 Caddy。
+
+### 五、回滚（未执行）
+
+纯本地：`git revert` 本轮 commit 即可（`0033` 只是文件、未入库，不需要反向 migration）。若将来上生产后要回滚：① 前端重新上传 `2026.11.15.2` 包；② 后端按 D-066 的 `dist.bak-*` 回滚并重启；③ **不要删 `library_folders` 表**（软删数据仍在，先保留再评估）。
+
+### 六、登记
+
+提案 **P-030**、台账 **D-068**、今日日志 `.workbuddy/memory/2026-11-15.md`、项目记忆升 **r70**（同时把超限的 `MEMORY.md` 压缩到软限内，细节仍以 `MEMORY-full-archive.md` 与本报告为准）。

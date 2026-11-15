@@ -228,6 +228,8 @@ export interface LibraryDoc {
   tags: string[]
   /** 年级快照（`P-005`）：1–12，null / undefined = 未标注（存量资料） */
   grade?: number | null
+  /** D-068：所属文件夹；null / undefined = 未归类（根目录） */
+  folder_id?: string | null
   created_at: string
   url?: string
   thumb_url?: string

@@ -162,6 +162,12 @@ export class UploadController {
     const archiveTo = String(Array.isArray(archiveToRaw) ? archiveToRaw[0] : archiveToRaw).trim()
     const imageToLibrary = archiveTo === 'library'
 
+    // D-068：资料库文件夹归属。与 purpose 同样双读（query + formData），
+    // 只影响 purpose=save 且归档到 library 的分支；不传 = 根目录（旧行为）。
+    // 归属校验不在这里做，统一由 LibraryService.create → LibraryFolderService.assertFolder 收口。
+    const folderRaw = b.folder_id ?? q.folder_id ?? ''
+    const folderId = String(Array.isArray(folderRaw) ? folderRaw[0] : folderRaw).trim() || null
+
     // 展示名（思傅 2026-10-23）：优先 formData.original_name（前端显式传的用户选中文件的
     // 真实名字，UTF-8 安全），回落 multipart filename 头（微信 uploadFile 默认给的是
     // 临时路径名 tmp_xxx.pdf，且中文会被按 latin1 读成乱码，故必须过 decodeUploadFileName）。
@@ -308,6 +314,7 @@ export class UploadController {
           size_bytes: ing.sizeBytes,
           file_hash: fileHash,
           source: 'upload',
+          folder_id: folderId,
         })
         libraryId = doc.id
       } else if (isImage) {
@@ -340,6 +347,7 @@ export class UploadController {
           size_bytes: ing.sizeBytes,
           file_hash: fileHash,
           source: 'upload',
+          folder_id: folderId,
         })
         libraryId = doc.id
       }

@@ -157,6 +157,8 @@ export interface UploadOpts {
    * 后端优先读它来命名 library 条目 / timeline 标题。
    */
   fileName?: string
+  /** D-068：归档到指定资料库文件夹（仅 purpose='save' 时有效）；不传 = 根目录 */
+  folderId?: string
 }
 
 // ============================================================
@@ -216,10 +218,13 @@ export async function uploadFile(
   const qs: string[] = []
   if (opts.purpose) qs.push(`purpose=${opts.purpose}`)
   if (opts.archiveTo) qs.push(`archive_to=${opts.archiveTo}`)
+  if (opts.folderId) qs.push(`folder_id=${encodeURIComponent(opts.folderId)}`)
   const url = `/api/upload${qs.length ? `?${qs.join('&')}` : ''}`
   const formData: Record<string, string> = {}
   if (opts.purpose) formData.purpose = opts.purpose
   if (opts.archiveTo) formData.archive_to = opts.archiveTo
+  // D-068：与 purpose 同样双写 query + formData，防中间层丢参数
+  if (opts.folderId) formData.folder_id = opts.folderId
   // 原始文件名随表单上传（UTF-8 安全；见 UploadOpts.fileName 注释）
   if (opts.fileName) formData.original_name = encodeURIComponent(opts.fileName)
   const res = await Network.uploadFile({
@@ -798,11 +803,25 @@ export function markReviewed(id: string, result: 'correct' | 'wrong' = 'correct'
 // ============================================================
 // 资料库 library（外部文档）
 // ============================================================
+/** D-068：资料库文件夹（无限层级，parent_id 自引用） */
+export interface LibraryFolder {
+  id: string
+  user_id: string
+  parent_id: string | null
+  name: string
+  created_at: string
+}
+
 export interface LibraryQuery {
   subjectId?: string
   keyword?: string
   /** 按年级检索（`P-005`）：与题目同口径，不传 = 不按年级过滤 */
   grade?: number
+  /**
+   * D-068：按文件夹过滤。不传 = 全量（旧口径）；'root' = 未归类；具体 id = 该文件夹直属资料。
+   * ⚠️ 缓存 key 必须带它，否则切换文件夹会命中上一个目录的缓存（与 grade 同坑）。
+   */
+  folderId?: string
   page?: number
   pageSize?: number
 }
@@ -812,6 +831,7 @@ export function fetchLibrary(q: LibraryQuery = {}) {
   if (q.subjectId) data.subject_id = q.subjectId
   if (q.keyword) data.keyword = q.keyword
   if (q.grade) data.grade = q.grade
+  if (q.folderId) data.folder_id = q.folderId
   data.page = q.page ?? 1
   data.page_size = q.pageSize ?? 20
   return unwrap<Paged<LibraryDoc>>(
@@ -850,14 +870,72 @@ export function createLibraryDoc(payload: {
  * 原图走 `purpose=temp` 上传（不建条目、由孤儿 GC 回收），故这里只需提交 key 列表。
  * 成功后失效 `lib` 缓存域，页面 `load({silent:true})` 才能拉到新条目。
  */
-export function combineLibraryImages(keys: string[], name: string) {
+export function combineLibraryImages(keys: string[], name: string, folderId?: string) {
   return invalidateAfter(
     unwrap<LibraryDoc & { pages: number; images: number }>(
       Network.request({
         url: '/api/library/combine-images',
         method: 'POST',
-        data: { keys, name },
+        data: { keys, name, ...(folderId ? { folder_id: folderId } : {}) },
         header: authHeaders(),
+      }),
+    ),
+    'lib',
+  )
+}
+
+// ============================================================
+// D-068 资料库文件夹（无限层级）
+// ============================================================
+export function fetchLibraryFolders() {
+  return unwrap<LibraryFolder[]>(
+    Network.request({ url: '/api/library/folders', method: 'GET', header: authHeaders() }),
+  )
+}
+
+export function createLibraryFolder(name: string, parentId?: string | null) {
+  return unwrap<LibraryFolder>(
+    Network.request({
+      url: '/api/library/folders', method: 'POST',
+      data: { name, parent_id: parentId ?? null }, header: authHeaders(),
+    }),
+  )
+}
+
+export function renameLibraryFolder(id: string, name: string) {
+  return unwrap<LibraryFolder>(
+    Network.request({
+      url: `/api/library/folders/${id}`, method: 'PATCH',
+      data: { name }, header: authHeaders(),
+    }),
+  )
+}
+
+export function moveLibraryFolder(id: string, parentId: string | null) {
+  return unwrap<LibraryFolder>(
+    Network.request({
+      url: `/api/library/folders/${id}`, method: 'PATCH',
+      data: { parent_id: parentId }, header: authHeaders(),
+    }),
+  )
+}
+
+export function deleteLibraryFolder(id: string) {
+  return invalidateAfter(
+    unwrap<{ id: string; promoted_docs: number; promoted_folders: number }>(
+      Network.request({ url: `/api/library/folders/${id}`, method: 'DELETE', header: authHeaders() }),
+    ),
+    'lib',
+  )
+}
+
+/** 把资料移入文件夹；null / 'root' = 移回根目录（未归类） */
+export function moveLibraryDocToFolder(id: string, folderId: string | null) {
+  return invalidateAfter(
+    unwrap<{ id: string; folder_id: string | null }>(
+      Network.request({
+        url: `/api/library/${id}`, method: 'PATCH',
+        data: { folder_id: folderId }, header: authHeaders(),
       }),
     ),
     'lib',

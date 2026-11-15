@@ -25,11 +25,14 @@ export class LibraryController {
     @Query('grade') grade?: string,
     @Query('page') page?: string,
     @Query('page_size') pageSize?: string,
+    /** D-068：不传 = 全量（旧口径）；'root' = 未归类；具体 id = 该文件夹直属资料 */
+    @Query('folder_id') folderId?: string,
   ) {
     const userId = requireUserId(req)
     const data = await this.libraryService.list(userId, {
       subject_id: subjectId, keyword,
       grade: grade ? Number(grade) : undefined,
+      folder_id: folderId,
       page: page ? Number(page) : 1,
       page_size: pageSize ? Number(pageSize) : 20,
     })
@@ -56,11 +59,11 @@ export class LibraryController {
   @HttpCode(200)
   async combineImages(
     @Req() req: RequestWithUser,
-    @Body() body: { keys?: string[]; name?: string },
+    @Body() body: { keys?: string[]; name?: string; folder_id?: string | null },
   ) {
     const userId = requireUserId(req)
     if (!body || !Array.isArray(body.keys)) throw new BadRequestException('keys 必须是数组')
-    const data = await this.imageCombineService.combine(userId, body.keys, body.name)
+    const data = await this.imageCombineService.combine(userId, body.keys, body.name, body.folder_id)
     return { code: 200, msg: 'success', data }
   }
 
@@ -83,13 +86,14 @@ export class LibraryController {
   async update(
     @Req() req: RequestWithUser,
     @Param('id') id: string,
-    @Body() body: { name?: string; subject_id?: string | null; grade?: number | null },
+    @Body() body: { name?: string; subject_id?: string | null; grade?: number | null; folder_id?: string | null },
   ) {
     const userId = requireUserId(req)
     const data = await this.libraryService.update(userId, id, {
       name: body?.name,
       subject_id: body?.subject_id,
       grade: body?.grade,
+      folder_id: body?.folder_id,
     })
     return { code: 200, msg: 'success', data }
   }

@@ -51,7 +51,7 @@ export class LibraryImageCombineService {
     private readonly library: LibraryService,
   ) {}
 
-  async combine(userId: string, keys: string[], name?: string): Promise<{
+  async combine(userId: string, keys: string[], name?: string, folderId?: string | null): Promise<{
     id: string
     name: string
     url: string
@@ -121,6 +121,8 @@ export class LibraryImageCombineService {
       size_bytes: pdfBytes.length,
       source: 'image-combine',
       tags: ['图片合成'],
+      // D-068：成品归档到合成时所在文件夹（归属由 LibraryService.create 统一校验）
+      ...(folderId ? { folder_id: folderId } : {}),
     })
     const [withUrl] = await this.library.withUrls([doc])
     this.logger.log(`[combine-images] ${images.length} 张图 → ${images.length} 页 PDF，归档 ${doc.id}`)

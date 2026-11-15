@@ -5,6 +5,7 @@ import { BlobService } from '../storage/blob.service'
 import { BaiduNetdiskService } from '../storage/baidu-netdisk.service'
 import { extractDocContent } from '../ocr/pdf-tool'
 import { gradeSpread, normalizeGrade } from '../shared/grade'
+import { LibraryFolderService } from './library-folder.service'
 import type { LibraryDoc, CreateLibraryDocDto, LibraryQuery } from './library.types'
 
 const TABLE = 'library_docs'
@@ -31,6 +32,7 @@ export class LibraryService {
     private readonly storageService: StorageService,
     private readonly blobService: BlobService,
     private readonly netdisk: BaiduNetdiskService,
+    private readonly folders: LibraryFolderService,
   ) {}
 
   /**
@@ -54,9 +56,21 @@ export class LibraryService {
     const from = (page - 1) * pageSize
     const to = from + pageSize - 1
 
+    // D-068：按文件夹过滤。
+    // 🔴 0033 未执行时 library_docs 还没有 folder_id 列 ⇒ **只有显式传了才加条件**，
+    //    不传时保持与旧客户端/检索链路完全一致的「全量」口径，绝不静默改默认行为。
+    //    'root' / 'null' = 未归类（folder_id is null）；具体 id = 该文件夹直属资料。
+    const folderFilter = (() => {
+      const raw = (query.folder_id ?? '').trim()
+      if (!raw) return undefined
+      return raw === 'root' || raw === 'null' ? '__root__' : raw
+    })()
+
     // 与年级无关的公共条件（取数据与数命中共用同一份，避免两处漂移）
     const applyCommon = (q: any): any => {
       let out = q.eq('user_id', userId).is('deleted_at', null)
+      if (folderFilter === '__root__') out = out.is('folder_id', null)
+      else if (folderFilter) out = out.eq('folder_id', folderFilter)
       if (query.subject_id) out = out.eq('subject_id', query.subject_id)
       // 关键词同时搜文件名与正文（思傅 2026-11-03：资料库也要能搜内容）。
       // 正文是入库时抽好的 text_content，命中后前端照常打开原文件。
@@ -179,10 +193,15 @@ export class LibraryService {
     }
     const grade = dto.grade !== undefined ? normalizeGrade(dto.grade) : await this.ownerGrade(userId)
     const client = getSupabaseClient()
+    // D-068：只在显式给了 folder_id 时才写该列 —— 0033 未执行的库不能因为新代码而入库失败。
+    // 传 null 表示「根目录」，此时也不写（列默认 NULL），保持旧行为。
+    // 归属必须校验：无 RLS，不能让任何人往别人的文件夹里塞资料。
+    const folderId = await this.folders.assertFolder(userId, dto.folder_id)
     const { data, error } = await client
       .from(TABLE)
       .insert({
         user_id: userId,
+        ...(folderId ? { folder_id: folderId } : {}),
         name: dto.name || '未命名文档',
         file_key: dto.file_key,
         thumb_key: dto.thumb_key ?? null,
@@ -403,8 +422,8 @@ export class LibraryService {
   async update(
     userId: string,
     id: string,
-    patch: { name?: string; subject_id?: string | null; grade?: number | null },
-  ): Promise<{ id: string; name: string; subject_id: string | null; grade: number | null }> {
+    patch: { name?: string; subject_id?: string | null; grade?: number | null; folder_id?: string | null },
+  ): Promise<{ id: string; name: string; subject_id: string | null; grade: number | null; folder_id?: string | null }> {
     const client = getSupabaseClient()
     const upd: Record<string, unknown> = {}
     if (patch.name !== undefined) {
@@ -433,6 +452,11 @@ export class LibraryService {
         throw new BadRequestException('grade 必须是 1-12 的整数或 null')
       }
       upd.grade = normalizeGrade(patch.grade)
+    }
+    // D-068：移动资料到文件夹。null / 'root' = 移回根目录（未归类）。
+    // 只在显式传了才写该列（0033 未执行的库保持旧行为）；目标文件夹必须属于本人。
+    if (patch.folder_id !== undefined) {
+      upd.folder_id = await this.folders.assertFolder(userId, patch.folder_id)
     }
     if (Object.keys(upd).length === 0) throw new BadRequestException('没有需要更新的字段')
 

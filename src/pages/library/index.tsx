@@ -1,7 +1,8 @@
-import { View, Text, ScrollView, Image, Swiper, SwiperItem } from '@tarojs/components'
+import { View, Text, ScrollView, Image, Swiper, SwiperItem, Canvas } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useRef, useState } from 'react'
-import { FileText, Trash2, Upload, Ellipsis } from 'lucide-react-taro'
+import { useRef, useState, type ReactNode } from 'react'
+import { FileText, Trash2, Upload, Ellipsis, RotateCcw, RotateCw, Crop, Maximize2 } from 'lucide-react-taro'
+import ImageEditor from '@/components/image-editor'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyCard, BottomActionBar, ActionBtn } from '@/components/filter-header'
@@ -14,8 +15,11 @@ import { openStorageFile, isPdfFile } from '@/services/net'
 import {
   fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc, updateLibraryDoc,
   combineLibraryImages, getSettings,
-  type LibraryDoc, type Subject, type Paged, type GradeScope,
+  fetchLibraryFolders, createLibraryFolder, renameLibraryFolder, moveLibraryFolder,
+  deleteLibraryFolder, moveLibraryDocToFolder,
+  type LibraryDoc, type Subject, type Paged, type GradeScope, type LibraryFolder,
 } from '@/services/api'
+import { rotateImageFile } from '@/lib/rotate-image'
 import { gradeLabel } from '@/constants/grades'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { getSubjectColor, formatTime } from '@/types'
@@ -48,6 +52,12 @@ function genImageName(): string {
 /** D-063：一次最多合成多少张，与后端 MAX_COMBINE_IMAGES 保持一致 */
 const MAX_COMBINE_IMAGES = 20
 
+/** D-068：预览页旋转烘焙用的离屏 Canvas（CSS 尺寸必须与缓冲 1:1，见 rotate-image.ts） */
+const ROTATE_CANVAS_ID = 'compose-rotate-canvas'
+
+/** D-068：新前端打旧后端（0033 未执行）时文件夹接口不可用，降级为「不显示文件夹、按全量列表」 */
+const ROOT_FOLDER = 'root'
+
 interface PickedImage {
   id: number
   path: string
@@ -61,6 +71,14 @@ interface RemovedImage extends PickedImage {
 }
 
 interface CellRect { left: number; top: number; right: number; bottom: number }
+
+/** D-068：Taro 触摸事件在不同基础库里可能只给 client 或只给 page 坐标，两者都收 */
+interface TouchLike {
+  clientX?: number
+  clientY?: number
+  pageX?: number
+  pageY?: number
+}
 
 /** 预览层 Swiper 在小程序里必须有确定高度；取一次视口高度即可（数字值 = 真实 px） */
 const SCREEN_H = (() => {
@@ -117,6 +135,101 @@ function autoSortPicked(items: PickedImage[]): PickedImage[] {
 }
 
 /**
+ * D-068 无限层级目录：面包屑（根 → 当前）。
+ * 纯函数，MAX_DEPTH 防脏数据环把 UI 卡死；遇到环就停，不递归、不抛错。
+ */
+function folderPathOf(folders: LibraryFolder[], currentId: string | null): LibraryFolder[] {
+  if (!currentId) return []
+  const byId = new Map(folders.map((f) => [f.id, f]))
+  const out: LibraryFolder[] = []
+  const seen = new Set<string>()
+  let cursor: string | null = currentId
+  for (let depth = 0; cursor && depth < 32; depth++) {
+    if (seen.has(cursor)) break
+    seen.add(cursor)
+    const f: LibraryFolder | undefined = byId.get(cursor)
+    if (!f) break
+    out.unshift(f)
+    cursor = f.parent_id ?? null
+  }
+  return out
+}
+
+/** D-068：某文件夹的全部后代 id（含自己），用于「移动到」时排除自身子树防成环 */
+function subtreeIds(folders: LibraryFolder[], id: string): Set<string> {
+  const out = new Set<string>([id])
+  for (let round = 0; round < 32; round++) {
+    let grew = false
+    for (const f of folders) {
+      if (f.parent_id && out.has(f.parent_id) && !out.has(f.id)) { out.add(f.id); grew = true }
+    }
+    if (!grew) break
+  }
+  return out
+}
+
+/** D-068：把扁平文件夹列表按树展开成带缩进深度的行（移动选择器用），排除指定子树 */
+function folderTreeRows(
+  folders: LibraryFolder[],
+  excludeId: string | null = null,
+): Array<{ folder: LibraryFolder; depth: number }> {
+  const skip = excludeId ? subtreeIds(folders, excludeId) : new Set<string>()
+  const childrenOf = (parent: string | null) => folders
+    .filter((f) => (f.parent_id ?? null) === parent && !skip.has(f.id))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+  const rows: Array<{ folder: LibraryFolder; depth: number }> = []
+  const walk = (parent: string | null, depth: number) => {
+    if (depth > 32) return
+    for (const f of childrenOf(parent)) {
+      rows.push({ folder: f, depth })
+      walk(f.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return rows
+}
+
+/**
+ * D-068：把手指坐标映射到落点格子下标。命中矩形优先；落在格子间隙时按最近中心兜底；
+ * 离所有格子太远（> 1.6 格宽）返回 -1，避免拖到页面空白处乱落位。
+ * 纯函数，供离线实证直接执行（真机手势仍必须实机回归，静态证据不等于手势可用）。
+ */
+function hitCellIndex(rects: CellRect[], x: number, y: number): number {
+  if (!rects.length) return -1
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i]
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i
+  }
+  let best = Number.POSITIVE_INFINITY
+  let hit = -1
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i]
+    const dx = x - (r.left + r.right) / 2
+    const dy = y - (r.top + r.bottom) / 2
+    const d = dx * dx + dy * dy
+    if (d < best) { best = d; hit = i }
+  }
+  const r0 = rects[0]
+  const span = Math.max(r0.right - r0.left, r0.bottom - r0.top, 1)
+  return best <= (span * 1.6) ** 2 ? hit : -1
+}
+
+/** D-068 预览工具条按钮：黑底白字，禁用时只降透明度不吞点击反馈 */
+function PreviewTool({ icon, label, disabled, onClick }: {
+  icon: ReactNode
+  label: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <View className="flex flex-col items-center" style={{ opacity: disabled ? 0.4 : 1 }} onClick={onClick}>
+      {icon}
+      <Text style={{ color: '#fff', fontSize: 11, marginTop: 4 }}>{label}</Text>
+    </View>
+  )
+}
+
+/**
  * 资料库：外部 PDF / Word / TXT / 图片
  * v4 新增页面，对应后端 GET /api/library
  */
@@ -165,6 +278,36 @@ export default function LibraryPage() {
   const [dragging, setDragging] = useState(false)
   const cellRects = useRef<CellRect[]>([])
   const longPressedRef = useRef(false)
+  /**
+   * D-068 拖拽修复：真机上「长按已激活但拖不动」。根因是旧实现只在 ScrollView 上
+   * 收 touchmove，且矩形只在长按回调里异步量一次 —— 手势起点在格子（子节点）上，
+   * scrollY 一翻转发手势序列就断了；矩形还没回来手指已经移动，落点永远算不出。
+   * 现在：① touchstart 就提前量矩形；② 事件收到稳定的根 View／网格 View 上；
+   * ③ 用 ref 记活跃态，避免多个祖先重复 onTouchEnd 造成重复落位；④ 拖动时跟手显示浮层。
+   */
+  const dragActiveRef = useRef(false)
+  const longPressAtRef = useRef(0)
+  const [dragPoint, setDragPoint] = useState<{ x: number; y: number } | null>(null)
+
+  /** D-068：预览页放大 / 左右转 90° / 裁剪（旋转与裁剪写回合成，放大仅查看不写回） */
+  const [canvasSize, setCanvasSize] = useState({ w: 1, h: 1 })
+  const [editorIndex, setEditorIndex] = useState<number | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+
+  /** D-068 无限层级文件夹：currentFolderId=null 表示根目录（未归类） */
+  const [folders, setFolders] = useState<LibraryFolder[]>([])
+  const [folderSupported, setFolderSupported] = useState(true)
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null)
+  const [folderBusy, setFolderBusy] = useState(false)
+  /** 新建 / 重命名共用的输入弹层 */
+  const [folderDialog, setFolderDialog] = useState<{ mode: 'create' | 'rename'; id?: string; initial?: string } | null>(null)
+  /** 移动选择器：资料或文件夹的目标目录 */
+  const [folderPicker, setFolderPicker] = useState<{ kind: 'doc' | 'folder'; id: string; name: string } | null>(null)
+  /** ref 与 state 同步：useDidShow / 异步回调里拿到的闭包不能是旧的文件夹口径 */
+  const folderSupportedRef = useRef(true)
+  const currentFolderRef = useRef<string | null>(null)
+  const folderQuery = (): string | undefined =>
+    folderSupportedRef.current ? (currentFolderRef.current ?? ROOT_FOLDER) : undefined
 
   /** 每页条数：滚到底追加，避免一次拉太多在慢网上白等 */
   const PAGE_SIZE = 30
@@ -184,9 +327,13 @@ export default function LibraryPage() {
     const grade = opts.grade === undefined ? gradeFilter : opts.grade
     const append = opts.append === true
     const nextPage = append ? page + 1 : 1
+    // D-068：当前文件夹也要进缓存 key，否则切目录会命中上一个目录的缓存（与 grade 同坑）
+    const fid = folderQuery()
     // 追加页不进缓存（key 会膨胀，且意义小），只缓存第一页
     // ⚠️ 缓存 key 必须带 grade：否则切年级会命中上一个年级的缓存，看着像"筛了没用"
-    const listKey = append ? '' : cacheListKey('lib', { keyword: kw || '', subjectId: sid || '', grade: grade ?? '', pageSize: PAGE_SIZE })
+    const listKey = append ? '' : cacheListKey('lib', {
+      keyword: kw || '', subjectId: sid || '', grade: grade ?? '', pageSize: PAGE_SIZE, folderId: fid || '',
+    })
     if (!append) {
       const cached = listKey ? cacheGet<Paged<LibraryDoc>>(listKey) : null
       if (cached) {
@@ -208,6 +355,7 @@ export default function LibraryPage() {
         grade: grade ?? undefined,
         page: nextPage,
         pageSize: PAGE_SIZE,
+        folderId: fid,
       })
       setDocs((prev) => (append ? [...prev, ...res.list] : res.list))
       setTotal(res.total)
@@ -246,25 +394,46 @@ export default function LibraryPage() {
       // 空 catch 会把「服务不可用」伪装成「资料未分类」，排查时无从下手。
       .catch((e) => console.error('[library] 学科列表加载失败', e))
     /**
+     * D-068 文件夹能力探测必须先于列表：新前端打旧后端（`0033` 未执行）时
+     * `/api/library/folders` 会 404，此时 folderSupportedRef=false ⇒ 不传 folder_id，
+     * 列表退回「全量」旧口径，绝不让资料库打不开。探测失败不能吞（工程规范第 7 章第 2 条）。
+     */
+    const probe = fetchLibraryFolders()
+      .then((list) => {
+        setFolders(list || [])
+        setFolderSupported(true)
+        folderSupportedRef.current = true
+      })
+      .catch((e) => {
+        console.warn('[library] 文件夹接口不可用，按全量列表展示（0033 可能未执行）', e)
+        setFolders([])
+        setFolderSupported(false)
+        folderSupportedRef.current = false
+        setCurrentFolderId(null)
+        currentFolderRef.current = null
+      })
+    /**
      * 年级对齐后再拉列表。
      * ⚠️ 多这一次请求是为了首屏就是"筛过的"——若先 load() 再改 grade，
      * 用户会看到全量列表闪一下再被筛掉，像数据错乱。设置接口挂在 /api/settings，
      * 与列表并行发出、体积很小，代价可接受。
      */
-    getSettings()
-      .then((s) => {
-        const g = s.grade ?? null
-        setUserGrade(g)
-        setGradeFilter(g)
-        void load({ grade: g })
-      })
-      .catch((e) => {
-        // 取不到年级不能让资料库打不开：退回"不加年级条件"的全量列表
-        console.error('[library] 年级设置加载失败，按全部年级展示', e)
-        setUserGrade(null)
-        setGradeFilter(null)
-        void load({ grade: null })
-      })
+    void probe.then(() => {
+      getSettings()
+        .then((s) => {
+          const g = s.grade ?? null
+          setUserGrade(g)
+          setGradeFilter(g)
+          void load({ grade: g })
+        })
+        .catch((e) => {
+          // 取不到年级不能让资料库打不开：退回"不加年级条件"的全量列表
+          console.error('[library] 年级设置加载失败，按全部年级展示', e)
+          setUserGrade(null)
+          setGradeFilter(null)
+          void load({ grade: null })
+        })
+    })
   })
 
   const handleOpen = (d: LibraryDoc) => {
@@ -317,7 +486,11 @@ export default function LibraryPage() {
       // #121：后端若发现同指纹内容已在本用户资料库里，会复用旧条目而非新建
       // （物理层早已去重，这里是业务条目层）⇒ 提示文案必须区分「新增」与「已存在」，
       // 否则用户会以为没存进去、反复上传。
-      const up = await uploadFile(filePath, { purpose: 'save', archiveTo: 'library', fileName })
+      // D-068：导入即归入当前文件夹；旧后端（能力探测失败）时 folderQuery() 为 undefined，
+      // 完全退回旧调用，不因为新字段把上传打挂。
+      const up = await uploadFile(filePath, {
+        purpose: 'save', archiveTo: 'library', fileName, folderId: folderQuery(),
+      })
       Taro.hideLoading()
       if (up?.duplicated) {
         Taro.showToast({ title: up.restored ? '已存过，已为你恢复' : '这份已存过，无需重复归档', icon: 'none' })
@@ -406,7 +579,23 @@ export default function LibraryPage() {
   /** 顺序调整：拖到哪个格子就占哪个格子；nudgeCompose 是精确 ±1 的兜底 */
   const moveCompose = (from: number, to: number) => setComposeItems((prev) => moveItem(prev, from, to))
   const nudgeCompose = (index: number, delta: number) => moveCompose(index, index + delta)
-  const clearDrag = () => { setDragFrom(null); setDragTo(null); setDragging(false) }
+  /** 量一次所有格子的视口矩形；touchstart 提前量、长按再量、首帧补量，三层兜底 */
+  const measureCells = () => {
+    const q = Taro.createSelectorQuery()
+    q.selectAll('.compose-cell').boundingClientRect()
+    q.exec((res: unknown) => {
+      const first = Array.isArray(res) ? res[0] : null
+      cellRects.current = Array.isArray(first) ? (first as CellRect[]) : []
+    })
+  }
+  const clearDrag = () => {
+    dragActiveRef.current = false
+    setDragFrom(null)
+    setDragTo(null)
+    setDragging(false)
+    setDragPoint(null)
+    longPressedRef.current = false
+  }
 
   /**
    * D-064：删除 = 移入页面下部临时框（不真删），记下原位，点 ＋ 就能加回。
@@ -438,41 +627,52 @@ export default function LibraryPage() {
     })
   }
 
-  /** 长按拖拽：激活时抓一次各格子视口矩形，touchmove 用坐标命中落点 */
+  /** 长按激活拖拽；矩形早已在 touchstart 量过，这里再量一次防滚动导致位置变化 */
   const beginDrag = (index: number) => {
     longPressedRef.current = true
+    longPressAtRef.current = Date.now()
     // 触觉反馈不可用时不影响排序本身
     void Taro.vibrateShort().catch((e) => console.warn('[compose] 震动不可用', e))
     // 状态必须同步生效：查询矩形是异步的，若等回调再设，用户在回调前松手就会漏掉整次拖拽
+    dragActiveRef.current = true
     setDragFrom(index)
     setDragTo(index)
     setDragging(true)
-    const q = Taro.createSelectorQuery()
-    q.selectAll('.compose-cell').boundingClientRect()
-    q.exec((res: unknown) => {
-      const first = Array.isArray(res) ? res[0] : null
-      cellRects.current = Array.isArray(first) ? (first as CellRect[]) : []
-    })
+    measureCells()
   }
 
-  /** Taro 的 ScrollView.onTouchMove 事件类型是 BaseEventOrig，touches 需自行窄化 */
+  /**
+   * D-068 拖拽修复：落点命中。
+   *  ① 兼容 clientX/clientY 与 pageX/pageY 两种字段口径（不同基础库不一致）；
+   *  ② rects 缺失或数量不符就现场补量，不让首次拖动因异步查询没回来而空转；
+   *  ③ 落在格子间隙时按「最近格子」兜底，拖到边缘也有反馈，不再像拖不动。
+   * 事件类型在 Taro 里是 BaseEventOrig，touches 需自行窄化。
+   */
   const updateDragTarget = (e: unknown) => {
-    if (dragFrom === null) return
-    const t = (e as { touches?: Array<{ clientX: number; clientY: number }> }).touches?.[0]
-    if (!t) return
-    const rects = cellRects.current
-    for (let i = 0; i < rects.length; i++) {
-      const r = rects[i]
-      if (t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom) {
-        if (i !== dragTo) setDragTo(i)
-        return
-      }
+    if (dragFrom === null || !dragActiveRef.current) return
+    const ev = e as {
+      touches?: Array<TouchLike>
+      changedTouches?: Array<TouchLike>
     }
+    const t = ev.touches?.[0] || ev.changedTouches?.[0]
+    if (!t) return
+    const x = typeof t.clientX === 'number' ? t.clientX : t.pageX
+    const y = typeof t.clientY === 'number' ? t.clientY : t.pageY
+    if (typeof x !== 'number' || typeof y !== 'number') return
+    setDragPoint({ x, y })
+    const rects = cellRects.current
+    if (!rects.length || rects.length !== composeItems.length) { measureCells(); return }
+    const hit = hitCellIndex(rects, x, y)
+    if (hit >= 0 && hit !== dragTo) setDragTo(hit)
   }
 
   const endDrag = () => {
     // 无条件解锁滚动：即使闭包里 dragFrom 还是旧值（快按快放），也不能把页面卡在不可滚动态
     setDragging(false)
+    if (!dragActiveRef.current) return
+    // ref 先落闸：根 View 与 ScrollView 都会收到 touchend，防止重复落位把顺序移两次
+    dragActiveRef.current = false
+    setDragPoint(null)
     if (dragFrom === null) return
     // 手指真的拖到别的格子 → 松手即落位；只是长按没动 → 保持「待落点」，点目标格子也能完成
     if (dragTo !== null && dragTo !== dragFrom) {
@@ -482,8 +682,13 @@ export default function LibraryPage() {
   }
 
   const handleCellClick = (index: number) => {
-    // 长按那一次触摸框架一般不派发 tap；万一派发了，这里吞掉，避免误开预览
-    if (longPressedRef.current) { longPressedRef.current = false; return }
+    // 只吞掉「长按同一次手势」紧跟着派发的 tap；超过 400ms 的另一次点击必须正常响应，
+    // 否则「长按没拖动 → 点目标格子完成调序」的兜底要连点两次才生效。
+    if (longPressedRef.current && Date.now() - longPressAtRef.current < 400) {
+      longPressedRef.current = false
+      return
+    }
+    longPressedRef.current = false
     if (dragFrom !== null) {
       if (index !== dragFrom) moveCompose(dragFrom, index)
       clearDrag()
@@ -538,7 +743,8 @@ export default function LibraryPage() {
         keys.push(up.key)
       }
       Taro.showLoading({ title: '正在合成…', mask: true })
-      const doc = await combineLibraryImages(keys, composeName.trim() || genCombineName())
+      // D-068：合成成品归入当前文件夹（keys 顺序仍严格等于 PDF 页序，不因目录改动而重排）
+      const doc = await combineLibraryImages(keys, composeName.trim() || genCombineName(), folderQuery())
       Taro.hideLoading()
       setComposeVisible(false)
       setComposeItems([])
@@ -571,11 +777,15 @@ export default function LibraryPage() {
   /** 卡片「⋯」→ 重命名 / 归属学科 / 删除 */
   const handleMore = (d: LibraryDoc) => {
     if (sel.selecting) return
-    Taro.showActionSheet({ itemList: ['重命名', '归属学科', '删除'] })
+    // D-068：旧后端没有文件夹能力时不显示这一项（能力探测见 useDidShow）
+    const items = ['重命名', '归属学科', ...(folderSupported ? ['移动到文件夹…'] : []), '删除']
+    Taro.showActionSheet({ itemList: items })
       .then((res) => {
         if (res.tapIndex === 0) setRenameTarget(d)
         else if (res.tapIndex === 1) setAssignTarget(d)
-        else if (res.tapIndex === 2) handleSingleDelete(d)
+        else if (folderSupported && res.tapIndex === 2) {
+          setFolderPicker({ kind: 'doc', id: d.id, name: d.name })
+        } else if (res.tapIndex === items.length - 1) handleSingleDelete(d)
       })
       .catch(() => { /* 取消 */ })
   }
@@ -615,6 +825,159 @@ export default function LibraryPage() {
     } catch (e) {
       console.error('[library] 重命名失败', e)
       Taro.showToast({ title: `重命名失败：${e instanceof Error ? e.message.slice(0, 30) : '请重试'}`, icon: 'none' })
+    }
+  }
+
+  // ============================================================
+  // D-068：预览页放大 / 左右转 90° / 裁剪
+  // ============================================================
+  /**
+   * 把编辑结果写回当前项。合成时上传的就是 `composeItems[i].path`，
+   * 所以旋转/裁剪必须写回才真正进入成品 PDF；放大不需要写回（用户拍板口径）。
+   */
+  const setComposeImage = (index: number, path: string) => {
+    setComposeItems((prev) => prev.map((it, i) => (i === index ? { ...it, path } : it)))
+    if (confirmed) {
+      // 复核态里改了图 ⇒ 退回调整态重新确定，避免「看完就直接合成旧图」
+      setConfirmed(false)
+      Taro.showToast({ title: '图片已修改，请重新确定页序', icon: 'none' })
+    }
+  }
+
+  /** 放大：系统原生预览（双指缩放），只看不写回 */
+  const handlePreviewZoom = () => {
+    if (previewIndex === null) return
+    const urls = composeItems.map((it) => it.path)
+    void Taro.previewImage({ urls, current: urls[previewIndex] })
+      .catch((e) => console.warn('[compose] 放大预览不可用', e))
+  }
+
+  /** 左右转 90°：把方向烘焙进图片本身（CSS rotate 不会进成品） */
+  const handlePreviewRotate = async (dir: 1 | -1) => {
+    const idx = previewIndex
+    if (idx === null || previewBusy || composeBusy) return
+    const src = composeItems[idx]?.path
+    if (!src) return
+    setPreviewBusy(true)
+    Taro.showLoading({ title: dir === 1 ? '右转中…' : '左转中…', mask: true })
+    try {
+      const out = await rotateImageFile(src, dir, ROTATE_CANVAS_ID, async (w, h) => {
+        setCanvasSize({ w, h })
+      })
+      setComposeImage(idx, out)
+    } catch (e) {
+      console.error('[compose] 旋转失败', e)
+      Taro.showToast({ title: '旋转失败，请重试', icon: 'none' })
+    } finally {
+      Taro.hideLoading()
+      setPreviewBusy(false)
+    }
+  }
+
+  /** 裁剪复用已验证的 ImageEditor（cropOnly）；先收起预览，避免两个 z-[200] 抢层 */
+  const openCropEditor = () => {
+    if (previewIndex === null || composeBusy) return
+    setEditorIndex(previewIndex)
+    setPreviewIndex(null)
+  }
+
+  const handleCropConfirm = (path: string) => {
+    const idx = editorIndex
+    setEditorIndex(null)
+    if (idx === null || !path) return
+    setComposeImage(idx, path)
+    setPreviewIndex(idx)
+  }
+
+  // ============================================================
+  // D-068：无限层级文件夹
+  // ============================================================
+  const refreshFolders = async () => {
+    try {
+      const list = await fetchLibraryFolders()
+      setFolders(list || [])
+    } catch (e) {
+      console.error('[library] 文件夹列表刷新失败', e)
+    }
+  }
+
+  const enterFolder = (id: string | null) => {
+    setCurrentFolderId(id)
+    currentFolderRef.current = id
+    setKeyword('')
+    void load({ keyword: '' })
+  }
+
+  const handleFolderDialogConfirm = async (value: string) => {
+    const d = folderDialog
+    setFolderDialog(null)
+    if (!d || folderBusy) return
+    const name = value.trim()
+    if (!name) {
+      Taro.showToast({ title: '名称不能为空', icon: 'none' })
+      return
+    }
+    setFolderBusy(true)
+    try {
+      if (d.mode === 'create') await createLibraryFolder(name, currentFolderId)
+      else if (d.id) await renameLibraryFolder(d.id, name)
+      await refreshFolders()
+      Taro.showToast({ title: d.mode === 'create' ? '已新建文件夹' : '已重命名', icon: 'success' })
+    } catch (e) {
+      console.error('[library] 文件夹操作失败', e)
+      Taro.showToast({ title: `操作失败：${e instanceof Error ? e.message.slice(0, 20) : '请重试'}`, icon: 'none' })
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  const handleFolderActions = (f: LibraryFolder) => {
+    void Taro.showActionSheet({ itemList: ['重命名', '移动到…', '删除文件夹'] })
+      .then(async (res) => {
+        if (res.tapIndex === 0) {
+          setFolderDialog({ mode: 'rename', id: f.id, initial: f.name })
+        } else if (res.tapIndex === 1) {
+          setFolderPicker({ kind: 'folder', id: f.id, name: f.name })
+        } else if (res.tapIndex === 2) {
+          const ok = await Taro.showModal({
+            title: '删除文件夹',
+            content: `「${f.name}」里的资料和子文件夹会移到上一级，不会删除文件。`,
+          }).then((r) => r.confirm).catch(() => false)
+          if (!ok) return
+          setFolderBusy(true)
+          try {
+            await deleteLibraryFolder(f.id)
+            await refreshFolders()
+            if (currentFolderId === f.id) enterFolder(f.parent_id ?? null)
+            Taro.showToast({ title: '已删除文件夹', icon: 'success' })
+            load({ silent: true })
+          } catch (e) {
+            console.error('[library] 删除文件夹失败', e)
+            Taro.showToast({ title: '删除失败，请重试', icon: 'none' })
+          } finally {
+            setFolderBusy(false)
+          }
+        }
+      })
+      .catch(() => { /* 取消 */ })
+  }
+
+  const handleFolderPickerPick = async (target: string | null) => {
+    const p = folderPicker
+    setFolderPicker(null)
+    if (!p || folderBusy) return
+    setFolderBusy(true)
+    try {
+      if (p.kind === 'doc') await moveLibraryDocToFolder(p.id, target)
+      else await moveLibraryFolder(p.id, target)
+      await refreshFolders()
+      Taro.showToast({ title: '已移动', icon: 'success' })
+      load({ silent: true })
+    } catch (e) {
+      console.error('[library] 移动失败', e)
+      Taro.showToast({ title: `移动失败：${e instanceof Error ? e.message.slice(0, 20) : '请重试'}`, icon: 'none' })
+    } finally {
+      setFolderBusy(false)
     }
   }
 
@@ -663,6 +1026,67 @@ export default function LibraryPage() {
 
       <ScrollView scrollY style={{ height: '100vh', paddingTop: 92 }} onScrollToLower={loadMore} lowerThreshold={120}>
         <View className="px-4 pb-28 pt-3">
+          {/* D-068 无限层级文件夹：面包屑 + 新建 + 当前层子文件夹。能力探测失败时整块隐藏 */}
+          {folderSupported && (
+            <View style={{ marginBottom: 12 }}>
+              <ScrollView scrollX style={{ whiteSpace: 'nowrap' }}>
+                <View style={{ display: 'inline-flex', flexDirection: 'row', alignItems: 'center' }}>
+                  <View
+                    onClick={() => enterFolder(null)}
+                    style={{ padding: '6px 10px', borderRadius: 8, backgroundColor: !currentFolderId ? '#e8efe0' : '#f3f4f0' }}
+                  >
+                    <Text className="block text-xs text-foreground">全部资料</Text>
+                  </View>
+                  {folderPathOf(folders, currentFolderId).map((f) => (
+                    <View key={f.id} style={{ display: 'inline-flex', flexDirection: 'row', alignItems: 'center' }}>
+                      <Text className="block text-xs text-muted-foreground" style={{ padding: '0 4px' }}>›</Text>
+                      <View
+                        onClick={() => enterFolder(f.id)}
+                        style={{ padding: '6px 10px', borderRadius: 8, backgroundColor: f.id === currentFolderId ? '#e8efe0' : '#f3f4f0' }}
+                      >
+                        <Text className="block text-xs text-foreground">{f.name}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
+              <View className="flex flex-row items-center gap-2 mt-2">
+                <View className="px-3 py-2 rounded-xl bg-brand-soft" onClick={() => setFolderDialog({ mode: 'create' })}>
+                  <Text className="block text-xs text-brand-text">＋ 新建文件夹</Text>
+                </View>
+                {currentFolderId && (
+                  <View
+                    className="px-3 py-2 rounded-xl bg-muted"
+                    onClick={() => {
+                      const f = folders.find((x) => x.id === currentFolderId)
+                      if (f) handleFolderActions(f)
+                    }}
+                  >
+                    <Text className="block text-xs text-foreground">管理当前目录</Text>
+                  </View>
+                )}
+              </View>
+              {folders.filter((f) => (f.parent_id ?? null) === currentFolderId).length > 0 && (
+                <View className="mt-2 space-y-1">
+                  {folders
+                    .filter((f) => (f.parent_id ?? null) === currentFolderId)
+                    .map((f) => (
+                      <View
+                        key={f.id}
+                        className="flex flex-row items-center gap-2 rounded-xl border border-border px-3 py-2"
+                        onClick={() => enterFolder(f.id)}
+                      >
+                        <Text style={{ fontSize: 16 }}>📁</Text>
+                        <Text className="flex-1 block text-sm text-foreground truncate">{f.name}</Text>
+                        <View className="p-1" onClick={(e) => { e.stopPropagation?.(); handleFolderActions(f) }}>
+                          <Ellipsis size={14} color="#bbb" />
+                        </View>
+                      </View>
+                    ))}
+                </View>
+              )}
+            </View>
+          )}
           {/* 年级口径说明 + 一键回到全量：筛掉的资料必须有一条随时能走回来的路 */}
           <View className="flex flex-row items-center justify-between mb-3">
             <Text className="block text-xs text-muted-foreground">
@@ -795,13 +1219,19 @@ export default function LibraryPage() {
         onSelect={handleSubjectPicked}
       />
 
-      {/* D-063/D-064 多图合成：全屏排序页。序号就是 PDF 页序，一图一页。 */}
+      {/* D-063/D-064 多图合成：全屏排序页。序号就是 PDF 页序，一图一页。
+          D-068：手势收在稳定的根 View 上（不再只依赖 ScrollView），touchstart 提前量矩形，
+          拖拽才有落点；endDrag 由 dragActiveRef 去重复。 */}
       {composeVisible && (
         <View
           style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100,
             backgroundColor: '#fff', display: 'flex', flexDirection: 'column',
           }}
+          onTouchStart={() => { measureCells() }}
+          onTouchMove={updateDragTarget}
+          onTouchEnd={endDrag}
+          onTouchCancel={endDrag}
         >
           <View style={{ padding: '16px 16px 12px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
@@ -816,8 +1246,8 @@ export default function LibraryPage() {
               {confirmed
                 ? '点图片可左右滑动预览；需要改动请点「返回调整」'
                 : dragFrom !== null
-                  ? '已选中：拖到目标位置松手，或直接点目标图片'
-                  : '长按调整顺序 · 点图预览 · 右上角 ✕ 移入下方待恢复区'}
+                  ? '已选中：直接拖到目标位置松手，或点目标图片'
+                  : '长按后直接拖动调整顺序 · 点图预览 · ✕ 移入下方待恢复区'}
             </Text>
           </View>
 
@@ -857,7 +1287,12 @@ export default function LibraryPage() {
             onTouchEnd={endDrag}
             onTouchCancel={endDrag}
           >
-            <View style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap' }}>
+            <View
+              style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap' }}
+              onTouchMove={updateDragTarget}
+              onTouchEnd={endDrag}
+              onTouchCancel={endDrag}
+            >
               {composeItems.map((it, idx) => {
                 const isFrom = dragFrom === idx
                 const isTarget = dragFrom !== null && dragTo === idx && dragTo !== dragFrom
@@ -976,10 +1411,27 @@ export default function LibraryPage() {
               </Text>
             </View>
           </View>
+
+          {/* D-068：拖拽跟手浮层——「能拖动」必须有可见反馈，否则用户仍以为没反应。
+              落点同时由目标格子的绿色边框指示（见 isTarget）。pointerEvents:none 不挡手势。 */}
+          {dragging && dragPoint && dragFrom !== null && (
+            <View
+              style={{
+                position: 'fixed', zIndex: 150,
+                left: Math.max(0, dragPoint.x - 34), top: Math.max(0, dragPoint.y - 34),
+                width: 68, height: 68, borderRadius: 10, overflow: 'hidden',
+                border: '2px solid #7ba05b', opacity: 0.9, pointerEvents: 'none',
+              }}
+            >
+              <Image src={composeItems[dragFrom]?.path || ''} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+            </View>
+          )}
         </View>
       )}
 
-      {/* D-064：全屏预览，Swiper 左右滑动查看不同图片；自写以便显示 -N- 页码 */}
+      {/* D-064 全屏预览（Swiper 左右滑动）；D-068 追加放大 / 左转 / 右转 / 裁剪工具条。
+          🔴 口径（思傅拍板）：放大只查看不写回；旋转与裁剪写回 composeItems[i].path，
+             因此会真正进入最终合成的一图一页 PDF。 */}
       {composeVisible && previewIndex !== null && (
         <View
           style={{
@@ -999,7 +1451,7 @@ export default function LibraryPage() {
             indicatorDots={false}
             duration={200}
             onChange={(e) => setPreviewIndex(e.detail.current)}
-            style={{ width: '100%', height: SCREEN_H - 60 }}
+            style={{ width: '100%', height: SCREEN_H - 165 }}
           >
             {composeItems.map((it) => (
               <SwiperItem key={it.id}>
@@ -1007,6 +1459,105 @@ export default function LibraryPage() {
               </SwiperItem>
             ))}
           </Swiper>
+          <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, textAlign: 'center', padding: '6px 0 2px' }}>
+            放大仅查看；旋转 / 裁剪会写入合成结果
+          </Text>
+          <View
+            style={{
+              flexShrink: 0, padding: '10px 12px 18px', backgroundColor: '#111',
+              display: 'flex', flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
+            }}
+          >
+            <PreviewTool
+              icon={<Maximize2 size={22} color="#ffffff" />}
+              label="放大"
+              onClick={handlePreviewZoom}
+            />
+            <PreviewTool
+              icon={<RotateCcw size={22} color="#ffffff" />}
+              label="左转90°"
+              disabled={previewBusy}
+              onClick={() => void handlePreviewRotate(-1)}
+            />
+            <PreviewTool
+              icon={<RotateCw size={22} color="#ffffff" />}
+              label="右转90°"
+              disabled={previewBusy}
+              onClick={() => void handlePreviewRotate(1)}
+            />
+            <PreviewTool
+              icon={<Crop size={22} color="#ffffff" />}
+              label="裁剪"
+              onClick={openCropEditor}
+            />
+          </View>
+          {/* 离屏 Canvas：旋转烘焙用，CSS 尺寸与缓冲严格 1:1（同 image-editor 已验证口径） */}
+          <Canvas
+            type="2d"
+            id={ROTATE_CANVAS_ID}
+            style={{ position: 'absolute', left: '-9999px', top: 0, width: canvasSize.w, height: canvasSize.h }}
+          />
+        </View>
+      )}
+
+      {/* D-068 裁剪：复用通用图片编辑器（cropOnly）。收起预览后再开，避免两个 z-200 抢层 */}
+      <ImageEditor
+        visible={editorIndex !== null}
+        src={editorIndex !== null ? (composeItems[editorIndex]?.path || '') : ''}
+        cropOnly
+        enableSaveToInbox={false}
+        confirmText="用这张图"
+        onCancel={() => setEditorIndex(null)}
+        onConfirm={handleCropConfirm}
+      />
+
+      {/* D-068 新建 / 重命名文件夹 */}
+      {folderDialog && (
+        <RenameDialog
+          title={folderDialog.mode === 'create' ? '新建文件夹' : '重命名文件夹'}
+          initialValue={folderDialog.initial || ''}
+          maxLength={60}
+          onCancel={() => setFolderDialog(null)}
+          onConfirm={handleFolderDialogConfirm}
+        />
+      )}
+
+      {/* D-068 移动选择器：无限层级树按深度缩进；移动文件夹时排除自身子树防成环 */}
+      {folderPicker && (
+        <View
+          style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 300, backgroundColor: 'rgba(0,0,0,0.45)' }}
+          onClick={() => setFolderPicker(null)}
+        >
+          <View
+            style={{
+              position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: '#fff',
+              borderRadius: '16px 16px 0 0', padding: 16,
+            }}
+            onClick={(e) => e.stopPropagation?.()}
+          >
+            <Text className="block text-base font-medium text-foreground">把「{folderPicker.name}」移动到</Text>
+            <ScrollView scrollY style={{ maxHeight: 340, marginTop: 12 }}>
+              <View
+                className="rounded-xl bg-muted px-3 py-3 mb-1"
+                onClick={() => void handleFolderPickerPick(null)}
+              >
+                <Text className="block text-sm text-foreground">📁 根目录（未归类）</Text>
+              </View>
+              {folderTreeRows(folders, folderPicker.kind === 'folder' ? folderPicker.id : null).map(({ folder, depth }) => (
+                <View
+                  key={folder.id}
+                  className="rounded-xl bg-muted px-3 py-3 mb-1"
+                  style={{ marginLeft: depth * 16 }}
+                  onClick={() => void handleFolderPickerPick(folder.id)}
+                >
+                  <Text className="block text-sm text-foreground">📁 {folder.name}</Text>
+                </View>
+              ))}
+            </ScrollView>
+            <View className="mt-2 py-3 flex items-center justify-center" onClick={() => setFolderPicker(null)}>
+              <Text className="block text-sm text-muted-foreground">取消</Text>
+            </View>
+          </View>
         </View>
       )}
     </View>

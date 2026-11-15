@@ -3,7 +3,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Network } from '@/network'
-import { RotateCw, Crop, Undo2, X, Wand, Sparkles, Database, Maximize2 } from 'lucide-react-taro'
+import { RotateCw, RotateCcw, Crop, Undo2, X, Wand, Sparkles, Database, Maximize2 } from 'lucide-react-taro'
 import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders } from '@/services/net'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
@@ -641,13 +641,18 @@ export default function ImageEditor({
     setCompareMode((v) => !v)
   }
 
-  const handleRotate = async () => {
+  /**
+   * D-068：旋转支持方向。dir=1 顺时针 90°（历史「旋转90°」），dir=-1 逆时针 90°。
+   * 两者都走同一套「烘焙进图片本身」的导出链路，不新增第二份坐标系换算。
+   */
+  const handleRotate = async (dir: 1 | -1 = 1) => {
     if (busy || aiBusy) return
     setBusy(true)
     try {
       // 把旋转「烘焙」进图片本身（导出整张旋转后的新图，fullFrame=true 不裁边），
       // 而不是仅做 CSS 旋转，这样预览/裁剪框/导出始终在同一坐标系，彻底消除旋转导致的错位。
-      const out = await exportEdited((rotation + 90) % 360, true)
+      // -1 顺时针等价于 +270°，归一化后正好落进 drawAndExport 已支持的 270 分支。
+      const out = await exportEdited((rotation + dir * 90 + 360) % 360, true)
       const info = await Taro.getImageInfo({ src: out })
       setCurrentSrc(out)
       setRotation(0)
@@ -785,7 +790,7 @@ export default function ImageEditor({
     if (!fullFrame && norm !== 0) {
       // 运行时裁剪恒 rot=0（旋转按钮会先把旋转烘焙进图片再归零 rotation）。
       // 此分支是安全网：避免「旋转+裁剪」复合坐标系换算出错（宁可明确报错也不输出错图）。
-      throw new Error('请先点「旋转90°」完成旋转，再进行裁剪')
+      throw new Error('请先点「左转90°」或「右转90°」完成旋转，再进行裁剪')
     }
     const swap = norm === 90 || norm === 270
 
@@ -1753,9 +1758,14 @@ export default function ImageEditor({
         )}
 
         <View className="flex flex-row items-center justify-center gap-8 mb-5">
-          <View className="flex flex-col items-center" onClick={handleRotate}>
+          {/* D-068：新增「左转90°」。两个方向共用同一套烘焙导出，不产生第二份坐标系换算。 */}
+          <View className="flex flex-col items-center" onClick={() => void handleRotate(-1)}>
+            <RotateCcw size={24} color="#ffffff" />
+            <Text className="block text-white text-opacity-80 text-xs mt-1">左转90°</Text>
+          </View>
+          <View className="flex flex-col items-center" onClick={() => void handleRotate(1)}>
             <RotateCw size={24} color="#ffffff" />
-            <Text className="block text-white text-opacity-80 text-xs mt-1">旋转90°</Text>
+            <Text className="block text-white text-opacity-80 text-xs mt-1">右转90°</Text>
           </View>
           {/* 矩形裁剪：仅矩形模式出现（四角模式专做透视压平，隐藏矩形裁剪）。
               未启用时显示「裁剪」（点击进入裁剪框），启用后变为「确定裁剪」（点击应用）。 */}
