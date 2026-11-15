@@ -2167,3 +2167,41 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 ### 六、登记
 
 `P-029` 已同步 Q3 修订；守卫 `M51` A5/A9；实证 `run-library-compose-d064.cjs`；项目记忆升 r66；今日日志 `2026-11-15.md`。
+
+---
+
+## D-065：前端上传开发版 `2026.11.15.1`（D-063/D-064 前端包）（2026-11-15）
+
+> 授权：思傅 11-15 11:31「上传前端包」、18:24「继续当前任务」 ｜ 性质：**发布动作（仅上传开发版）**，未提审、未发正式版、未 push、未换 `server/dist`、未重启、零生产写入
+
+### 一、范围与边界
+
+严格限定为「构建小程序前端包并上传为开发版」。**未做**：git push（按红线等思傅指示）、换生产 `server/dist`／重启 `gk-api`、mp 后台设为体验版／提审／发布、开 `urlCheck` / `__usePrivacyCheck__`、改数据库。上传前工作区干净，HEAD `4c225e2`，本地领先 5／远端领先 0。
+
+### 二、构建与出包校验
+
+- `pnpm build:weapp` RC=0（26.56s，`✓ built in 26.56s`）；`src/build-meta.ts` 角标 `11-15 11:37 · 4c225e2`，与 HEAD 一致；`dist` 1008K。
+- 发布前包校验（`dist/`）：`2026-11-14-r11` 命中 1 个文件、`r10` 命中 0、「智能客服／知识库管理」0、「Supabase（新加坡）／腾讯 ima」0。
+- D-063/064 本轮特征串全部命中：`combine-images`、`多张图片合成`、`开始合成`、`确定（`、`.compose-cell`、`SwiperItem`、`暂存`。18:24 上传前二次复核角标与三条断言全过，确认不是旧包。
+
+### 三、上传结果
+
+- `√ Using AppID: wx48bf5ba9bae0bf39` → **TOTAL 878.7 KB / 899827 Byte** → `√ upload`。
+- 版本号 **`2026.11.15.1`**；描述：资料库多张图片导入合成一图一页 PDF；排序页缩略图预览、删除暂存恢复、左右滑动、长按调序、两段确认。
+- 命令形态：清代理＋`NO_PROXY=127.0.0.1,localhost`，`node.exe cli.js upload --project "D:/AI/Growing-Kids" --port 46737 -v … -d …`（端口从 `.ide` 读，不写死）。
+
+### 四、排障结论（两条新铁律）
+
+1. 🔴 **`.ide` 有端口 ≠ GUI IDE 服务在跑**。判据＝`Get-NetTCPConnection -LocalPort <port> -State Listen` 有 LISTEN 且 owning process 是 wechatdevtools。CLI 打印 `IDE server started successfully, listening on <每次都不同的新端口>` ⇒ CLI 自起 headless server；此时 `islogin:true` 只是读本地缓存的假象，upload 必 `code 10`。本轮旧 `.ide` 值 28668／46648 均为残留。D-062 的「显式 `--port` 连 GUI IDE」仍是正解，但要先验端口归属。
+2. 🔴 **`code 10` 有第二种根因**：冷启动（taskkill 全清 → 纯 Node 写 UTF-8 `.cmd` 交 `explorer.exe`，带 `--project` + `--remote-debugging-port=9222`）后 `.ide=46737` 且 GUI IDE 真监听，但 `islogin --port 46737` 返回 **`{"login":false}`**，界面显示「未登录／游客模式」⇒ **冷启动会掉登录态**，upload 卡在 `Fetching AppID permissions`。分流方法：先跑 `islogin --port` 看 true/false，别盲目重试 upload。处置＝`cli login --port` 出二维码交思傅扫码，登录后 `islogin:true` 再 upload。二维码约 2 分钟超时（`code 25`），`miniprogram-ci` 通道因 `key/private.appid.key` 为 **0 字节**不可用。
+3. 为免反复重发过期码，临时守护 `.tmp/auto-login-upload.mjs` 续期二维码并计划扫码后自动上传；该守护 10 分钟内未被扫码而超时（日志 `.tmp/auto-upload.log`），**未执行上传**。18:24 复核时登录态已恢复为 `true`，改由本轮显式命令完成上传。
+
+### 五、生效边界（不得误传）
+
+- 上传的是**开发版**：须 mp 后台提交审核 → 审核通过 → 发布，才对用户生效；**线上仍是旧版本**。r11 隐私政策、提审页「采集用户隐私」、6.2「弹窗」、UGC `method=1` 均**尚未面客**，两个发布阻断开关仍关。
+- 🔴 **本前端包与后端不配套**：包内「多张图片合成一份 PDF」会调 `POST /api/library/combine-images`，而该端点**未上生产 dist**（D-063 零生产写入）⇒ 体验版点合成会失败。要完整可用，须思傅**另行授权**换 `server/dist` + 重启 `gk-api`（D-061 的 dist 不含此端点）。
+- D-063/064 的诚实边界不变：真机未回归、长按非自由拖拽、自动排序以选择顺序为主、非无损、`blob_objects` 无逐 key 归属。
+
+### 六、回滚与登记
+
+前端：mp 后台「版本管理」选上一个开发版重新提交，或重新上传 `4c225e2` 之前的 commit 构建的包；仓库与后端不变、无需回滚。登记：台账 **D-065**、今日日志 `2026-11-15.md`、项目记忆升 **r67**。
