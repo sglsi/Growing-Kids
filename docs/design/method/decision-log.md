@@ -2346,3 +2346,11 @@ D-064 把 `touchmove` 只挂在 `ScrollView` 上，格子矩形又只在 `onLong
 ### 六、登记
 
 提案 **P-030**、台账 **D-068**、今日日志 `.workbuddy/memory/2026-11-15.md`、项目记忆升 **r70**（同时把超限的 `MEMORY.md` 压缩到软限内，细节仍以 `MEMORY-full-archive.md` 与本报告为准）。
+
+### 补记 r1 · 文件夹入口可发现性（L0 微改，思傅反馈「界面中未找到相关按钮」）
+
+- 根因：D-068 的 `folderSupported` 探测失败时，整块目录树被 `{folderSupported && (...)}` **静默隐藏**（`index.tsx` 1030 行），用户看不到任何入口。前三项是纯前端能力，编译进本地 `dist/` 即可用 ⇒ 正好解释「前三个已解决、第四个找不到」。探测失败的前提成立：生产 `0033` 未执行、文件夹端点未上 `server/dist` ⇒ `/api/library/folders` 404；`unwrap` 非 2xx 直接抛错 ⇒ reject ⇒ `folderSupported=false`。
+- 只读实证：`https://deep-root.cn/api/library/folders` 与 `/api/library/__no_such_route_xyz__` 均 **401**（全局鉴权无差别返回，**不能**据此判定路由存在），`/api/health` 200；结合 D-066 换的 dist 不含新 controller，端点确未挂载。
+- 修复：探测失败时改为**可见的禁用态入口**（`📁 文件夹分类` ＋ `＋ 新建文件夹` ＋「需升级服务端后可用，当前按全部资料展示」），点击 toast 说明原因；不伪造本地假目录、不放宽 fail-safe、不传 `folder_id`；探测成功仍走完整无限层级目录树。判定层 `question-match.ts`／`CACHE_VERSION v17`／r11 均未动。
+- 验证：`pnpm tsc`／`lint:build`／`build:weapp` 全 RC=0；`M51+M52` **19/19**、D-068 实证 **37/37**、D-064 **27/27**、`method:check` H1/H2/H3 全绿；编译产物 `dist/pages/library/index.js` 含新文案。
+- 🔴 边界**不变**：这只是让「未就绪」状态可见，**不是让功能可用**。要真正可用仍需三步单独授权（生产库执行 `0033` → 换 `server/dist` + 重启 `gk-api` → 重新 `build:weapp` 上传）。零生产写入、未上传、未 push、真机未回归。

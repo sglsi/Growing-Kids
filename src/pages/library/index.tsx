@@ -1026,7 +1026,21 @@ export default function LibraryPage() {
 
       <ScrollView scrollY style={{ height: '100vh', paddingTop: 92 }} onScrollToLower={loadMore} lowerThreshold={120}>
         <View className="px-4 pb-28 pt-3">
-          {/* D-068 无限层级文件夹：面包屑 + 新建 + 当前层子文件夹。能力探测失败时整块隐藏 */}
+          {/* D-068：探测成功 ⇒ 完整目录树；失败 ⇒ 下方降级块给可见入口，不静默隐藏入口 */}
+          {!folderSupported && (
+            <View style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 12, backgroundColor: '#f6f7f4', display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
+              <View style={{ flex: 1, paddingRight: 8 }}>
+                <Text className="block text-xs text-foreground">📁 文件夹分类</Text>
+                <Text className="block text-xs text-muted-foreground" style={{ marginTop: 3 }}>需升级服务端后可用，当前按全部资料展示</Text>
+              </View>
+              <View
+                className="px-3 py-2 rounded-xl bg-muted"
+                onClick={() => { void Taro.showToast({ title: '文件夹分类需服务端升级后可用', icon: 'none' }) }}
+              >
+                <Text className="block text-xs text-muted-foreground">＋ 新建文件夹</Text>
+              </View>
+            </View>
+          )}
           {folderSupported && (
             <View style={{ marginBottom: 12 }}>
               <ScrollView scrollX style={{ whiteSpace: 'nowrap' }}>
