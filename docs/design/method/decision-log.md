@@ -2251,3 +2251,45 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 ### 五、登记
 
 台账 **D-066**、今日日志 `2026-11-15.md`、项目记忆升 **r68**（本轮同时把超限的 `MEMORY.md` 由 16,916 B 压到 16,360 B，细节归档指针不变）；临时脚本留在 `.tmp/`，未纳入提交。
+
+---
+
+## D-067：重新 `build:weapp` 并上传开发版 `2026.11.15.2`（2026-11-15 20:12）
+
+> 授权：思傅 11-15 20:09「**重新 build:weapp + 上传新开发版；**」 ｜ 性质：**发布动作（仅构建＋上传开发版）**。补平 D-066 留下的「后端端点已上生产、前端仍是旧包」错位。未提审、未发正式版、未设体验版、**未 push**、未再换 `server/dist`／未重启、零生产写入。
+
+### 一、范围
+
+严格限定为「重新构建小程序前端包并上传为开发版」。**未做**：`git push`（按红线等思傅指示）、换生产 dist、mp 后台设体验版／提审／发布、开 `urlCheck`／`__usePrivacyCheck__`、改数据库、动判定层。上传前工作区干净，HEAD `6df4fe9`，本地领先 8／远端领先 0。
+
+### 二、构建与出包校验
+
+- `pnpm build:weapp` RC=0（`✓ built in 27.54s`）；`src/build-meta.ts` 角标刷新为 `11-15 20:09 · 6df4fe9`，与 HEAD 一致；`dist` 1008K / 64 文件。
+- 产物逐项校验：
+  - **D-066 头像修复**：`dist/pages/index/index.js` 命中 `gk_avatar_local` 1 次 ⇒ `homeAvatarSrc()` 兜底已进包。
+  - **D-063/064 多图合成与排序页**：`combine-images`／`combineLibraryImages` 命中 `dist/common.js`、`dist/pages/library/index.js`；`SwiperItem`／`开始合成`／`暂存` 均在 `dist/pages/library/index.js`。
+  - `dist/app.json` = `{"lazyCodeLoading":"requiredComponents","__usePrivacyCheck__":false}` ⇒ **发布阻断开关仍关、字段未删**（旧 IDE 1.06.2303220 的「无效」提示属误报，D-066 结论不变）。
+- `CACHE_VERSION` 仍 `v17`、政策 `r11` 未变 ⇒ 本次只重传前端包，无召回源／结构／政策改动，**不 bump**。
+
+### 三、上传结果
+
+- 前置 fail-closed：从 `%LOCALAPPDATA%\微信开发者工具\User Data\860e…\Default\.ide` 读到 `46737`，`Get-NetTCPConnection` 确认 `127.0.0.1:46737` LISTEN 且属 `wechatdevtools`（PID 11460）、CDP `9222` 在监听 ⇒ **GUI IDE 真通道**，非 CLI 自起 headless server；`islogin --port 46737` 返回 `{"login":true}` ⇒ 不触发 D-065 第二种 `code 10`。
+- 命令形态（`.tmp/upload-d067.mjs`）：清代理＋`NO_PROXY=127.0.0.1,localhost`，`node.exe cli.js upload --project "D:/AI/Growing-Kids" --port 46737 -v 2026.11.15.2 -d …`；端口从 `.ide` 读，不写死；脚本在 `islogin` 非 true 时直接 `exit 2` 不上传。
+- 输出：`√ Using AppID: wx48bf5ba9bae0bf39` → **TOTAL 879.0 KB / 900062 Byte** → `√ upload`，`exitCode=0`。日志 `.tmp/upload-d067.log`。
+- 版本号 **`2026.11.15.2`**（承接 D-065 的 `.1`）；描述：资料库多张图片合成一图一页 PDF（后端已上线）；首页头像显示修复；排序页缩略图预览、删除暂存恢复、左右滑动、长按调序、两段确认。
+
+### 四、IDE 侧复核（不冒称）
+
+- CDP 目标列表含本项目 `appid=wx48bf5ba9bae0bf39`、`pages/index/index` 页面帧；主页面 UI 文本 **已无** `display.webp` / `500 (HTTP…)` / `Failed to load local image`（`AVATAR_500: NO_500_IN_UI`）。
+- ⚠️ 本次 DevTools 前端未抓到 `Errors:N` 徽章数字（`BADGE=(none)`，面板未展开），**因此不宣称「本轮 IDE 重编译 Errors: 0」**；D-066 已用清 Console＋重编译验证过修复后为 `Errors: 0`，且本轮源码除角标外与 D-066 相同、产物含修复串。剩余 6 条提示性 warnings 结论不变，**未删 `__usePrivacyCheck__` 字段**。
+
+### 五、生效边界（不得误传）
+
+- ✅ **前后端已对齐**：`POST /api/library/combine-images` 已上生产（D-066）＋新前端包含 D-063/064 排序页与合成调用 ⇒ 开发版里多图合成链路可走通；D-066 首页头像 500 修复已随包上传。
+- 🔴 上传的是**开发版**：须 mp 后台设为体验版／提交审核 → 审核通过 → 发布，才对用户生效；**线上正式版仍是旧版本**。r11 隐私政策、提审页「采集用户隐私」、6.2「弹窗」、UGC `method=1` 均**尚未面客**，两道发布阻断开关仍关。
+- 🔴 诚实边界不变：**真机未回归**（多图排序页长按/touchmove 落点、`Swiper` 左右滑、✕ 命中区）、长按非自由拖拽、自动排序以选择顺序为主、非无损、`blob_objects` 无逐 key 归属。⛔ **不宣称**多图合成已面客／头像错误已在正式版消失／真机已验证／所有用户可用。
+- 未 push（本地 8＋本次记账 commit），未提审、未发版、未跑迁移、数据库零写入、未动 Caddy。
+
+### 六、回滚与登记
+
+前端：mp 后台「版本管理」选 `2026.11.15.1` 重新设为开发版／提交，或重新上传 D-066 之前 commit 构建的包；后端与仓库不变、无需回滚。登记：台账 **D-067**、今日日志 `2026-11-15.md`、项目记忆升 **r69**；临时脚本 `.tmp/upload-d067.mjs`、`.tmp/ide-errors-d067.mjs`、`.tmp/ide-badge-d067.mjs` 未纳入提交。
