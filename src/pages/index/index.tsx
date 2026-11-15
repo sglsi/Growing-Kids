@@ -28,6 +28,28 @@ import { BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
 /** 未选年级提示的关闭状态（本机记住，关掉后不再出现；P-005 决策 8） */
 const GRADE_NOTICE_KEY = 'gk_grade_notice_off_v1'
 
+/**
+ * 首页头像 src（与「我的」页 `toImageSrc()` / `ensureAvatarLocal()` 同一套规则）。
+ *
+ * 🔴 `gk_auth_state.avatarUrl` 存的是**对象 key**（`blobs/xx/<hash>/display.webp`），
+ *    不是可直接渲染的 URL：`<Image>` 不带身份令牌 ⇒ `/api/storage/files/*` 会 401，
+ *    而旧版首页直接把 key 塞进 src ⇒ 微信按「本地资源」解析成
+ *    `/pages/index/blobs/...` 并回 500（Console 里唯一的红色错误）。
+ *    因此：① 历史数据里的 http(s) 地址可直接用；② 裸 key 优先用
+ *    `gk_avatar_local` 里 downloadFile 落地的本机副本；③ 都没有就返回 ''，
+ *    回退到 CircleUser 图标，绝不把 key 当 src 渲染。
+ */
+const AVATAR_LOCAL_KEY = 'gk_avatar_local'
+function homeAvatarSrc(avatarUrl?: string): string {
+  const raw = (avatarUrl || '').trim()
+  if (/^https?:\/\//i.test(raw)) return raw
+  try {
+    const local = Taro.getStorageSync(AVATAR_LOCAL_KEY) as { key?: string; path?: string } | null
+    if (local?.path && (!local.key || local.key === raw)) return local.path
+  } catch { /* 读缓存失败按无副本处理 */ }
+  return ''
+}
+
 /** 「更多操作」里可对图片执行的 AI 动作 */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
   { action: 'crop', label: '裁剪', icon: Crop },
@@ -719,8 +741,8 @@ export default function IndexPage() {
               className="flex flex-row items-center gap-2 rounded-full border border-border px-3 py-2 ml-3"
               onClick={handleAuthTap}
             >
-              {isLoggedIn() && auth?.avatarUrl ? (
-                <Image src={auth.avatarUrl} className="rounded-full" style={{ width: '24px', height: '24px' }} mode="aspectFill" />
+              {isLoggedIn() && homeAvatarSrc(auth?.avatarUrl) ? (
+                <Image src={homeAvatarSrc(auth?.avatarUrl)} className="rounded-full" style={{ width: '24px', height: '24px' }} mode="aspectFill" />
               ) : (
                 <CircleUser size={20} color={isLoggedIn() ? BRAND_TEXT : '#9A948A'} />
               )}
