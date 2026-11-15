@@ -11,11 +11,11 @@ import { StorageService } from '../storage/storage.service'
 import { TimelineService } from '../timeline/timeline.service'
 import { DocumentsService } from '../documents/documents.service'
 import { packPages, type PackInput } from './pdf-layout'
+// D-063：A4 / 页边距提到共用模块（一图一页与智能拼页同一套版面常量）
+import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
+import { normalizeImageSource } from './image-normalize'
 
-const A4_PT = { width: 595.28, height: 841.89 }
-// 版面留白（用户选择「宽松易读」）：页边距加大到 34pt(≈12mm)，
-// 图与图之间保留 12pt 空隙，便于剪裁/批注，观感更舒展。
-const PAGE_MARGIN = 34
+// 图与图之间保留 12pt 空隙，便于剪裁/批注（智能拼页专用）。
 const IMAGE_GAP = 12
 
 // Word 版面：docx 的 page.size / margin 单位是 twips（1pt = 20twips），
@@ -62,32 +62,6 @@ export interface CombineResult {
   fillRatio: number
   /** 参与合成的图片张数 */
   images: number
-}
-
-/**
- * 从 PNG/JPEG 二进制头部解析像素尺寸。
- * 仅作 sharp 不可用时的兜底（readImageSize 零依赖，永远不抛错）。
- */
-function readImageSize(buffer: Buffer): { width: number; height: number } {
-  // PNG：0~7 签名，16~23 为 IHDR 的 width/height（大端 uint32）
-  if (buffer.length > 24 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
-    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
-  }
-  // JPEG：从 SOI(FFD8) 起遍历标记段，找 SOF0~SOF15（C4/D8/D9/DA 除外）
-  if (buffer.length > 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
-    let i = 2
-    while (i + 9 < buffer.length) {
-      if (buffer[i] !== 0xff) { i += 1; continue }
-      const marker = buffer[i + 1]
-      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue }
-      const segLen = buffer.readUInt16BE(i + 2)
-      const isSOF = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
-      if (isSOF) return { width: buffer.readUInt16BE(i + 7), height: buffer.readUInt16BE(i + 5) }
-      if (segLen <= 0) break
-      i += 2 + segLen
-    }
-  }
-  return { width: 0, height: 0 }
 }
 
 @Injectable()
@@ -193,38 +167,16 @@ export class PdfService {
       }
 
       // 格式归一：pdf-lib 与 docx 都只吃 PNG/JPEG，而素材里存在 WebP/HEIC 等格式
-      // （微信侧产出、以及图片管线中间产物）。不归一的话会出现「PDF 报没有可合成的
+      // （微信侧产出、以及图片管线中间产物）。不归一会出现「PDF 报没有可合成的
       // 图片」「Word 里图片损坏打不开」——两处症状不同，根因同一个。
-      let isPng = buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
-      let width = 0
-      let height = 0
-      try {
-        const meta = await sharp(buffer).metadata()
-        width = meta.width || 0
-        height = meta.height || 0
-        const supported = meta.format === 'png' || meta.format === 'jpeg'
-        if (!supported) {
-          // 有透明通道 → 转 PNG 保住透明度；否则转 JPEG，避免 PNG 体积暴涨
-          buffer = meta.hasAlpha
-            ? await sharp(buffer).png({ compressionLevel: 6 }).toBuffer()
-            : await sharp(buffer).jpeg({ quality: 92, mozjpeg: true }).toBuffer()
-          isPng = !!meta.hasAlpha
-          console.log(`[combine] 素材 ${u.id} 原格式 ${meta.format} 不支持，已转为 ${isPng ? 'png' : 'jpeg'}`)
-        }
-      } catch (e) {
-        // sharp 不可用/解码失败 → 回退头部解析，行为与改造前一致
-        console.warn('[combine] sharp 解析失败，回退头部解析', u.id, (e as Error)?.message)
-      }
-      if (!width || !height) {
-        const size = readImageSize(buffer)
-        width = size.width || 0
-        height = size.height || 0
-      }
-      if (!width || !height) {
-        console.error('[combine] 无法解析图片尺寸，跳过', u.id)
+      // D-063：逻辑抽到共用单元 image-normalize.ts（复习本合成与资料库多图合成
+      // 共用一份），此处不再复制第二份，避免两处格式兼容行为漂移。
+      const norm = await normalizeImageSource(buffer, u.id)
+      if (!norm) {
+        console.error('[combine] 无法解析图片，跳过', u.id)
         continue
       }
-      out.push({ id: u.id, buffer, isPng, width, height })
+      out.push({ id: u.id, ...norm })
     }
     return out
   }

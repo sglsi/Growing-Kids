@@ -2,6 +2,7 @@ import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, HttpCode, BadRequestException,
 } from '@nestjs/common'
 import { LibraryService } from './library.service'
+import { LibraryImageCombineService } from './library-image-combine.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
 import type { CreateLibraryDocDto } from './library.types'
 
@@ -9,7 +10,10 @@ interface IdsBody { ids?: string[] }
 
 @Controller('library')
 export class LibraryController {
-  constructor(private readonly libraryService: LibraryService) {}
+  constructor(
+    private readonly libraryService: LibraryService,
+    private readonly imageCombineService: LibraryImageCombineService,
+  ) {}
 
   @Get()
   @HttpCode(200)
@@ -40,6 +44,24 @@ export class LibraryController {
     const doc = await this.libraryService.create(userId, dto)
     const [withUrl] = await this.libraryService.withUrls([doc])
     return { code: 200, msg: 'success', data: withUrl }
+  }
+
+  /**
+   * D-063：多张图片按给定顺序合成**一份一图一页的 PDF**，只归档成品到资料库。
+   *
+   * `keys` 必须是本链路 `purpose=temp` 上传返回的对象 key，**数组顺序就是 PDF 页序**；
+   * 临时图不建条目、由孤儿 GC 回收，不会在资料库/收件箱多出 N 条原图。
+   */
+  @Post('combine-images')
+  @HttpCode(200)
+  async combineImages(
+    @Req() req: RequestWithUser,
+    @Body() body: { keys?: string[]; name?: string },
+  ) {
+    const userId = requireUserId(req)
+    if (!body || !Array.isArray(body.keys)) throw new BadRequestException('keys 必须是数组')
+    const data = await this.imageCombineService.combine(userId, body.keys, body.name)
+    return { code: 200, msg: 'success', data }
   }
 
   @Post('index-text')
