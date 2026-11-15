@@ -845,6 +845,25 @@ export function createLibraryDoc(payload: {
   )
 }
 
+/**
+ * D-063：多张图片按 `keys` 数组顺序合成**一份一图一页 PDF**，只归档成品到资料库。
+ * 原图走 `purpose=temp` 上传（不建条目、由孤儿 GC 回收），故这里只需提交 key 列表。
+ * 成功后失效 `lib` 缓存域，页面 `load({silent:true})` 才能拉到新条目。
+ */
+export function combineLibraryImages(keys: string[], name: string) {
+  return invalidateAfter(
+    unwrap<LibraryDoc & { pages: number; images: number }>(
+      Network.request({
+        url: '/api/library/combine-images',
+        method: 'POST',
+        data: { keys, name },
+        header: authHeaders(),
+      }),
+    ),
+    'lib',
+  )
+}
+
 export function deleteLibraryDoc(id: string) {
   return invalidateAfter(
     unwrap<{ id: string }>(

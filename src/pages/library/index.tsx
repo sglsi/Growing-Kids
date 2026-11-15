@@ -1,6 +1,6 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { FileText, Trash2, Upload, Ellipsis } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -13,7 +13,7 @@ import SubjectPickerSheet from '@/components/subject-picker-sheet'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import {
   fetchLibrary, deleteLibraryDoc, batchDeleteLibrary, fetchSubjects, uploadFile, renameLibraryDoc, updateLibraryDoc,
-  getSettings,
+  combineLibraryImages, getSettings,
   type LibraryDoc, type Subject, type Paged, type GradeScope,
 } from '@/services/api'
 import { gradeLabel } from '@/constants/grades'
@@ -43,6 +43,56 @@ function genImageName(): string {
   const d = new Date()
   const p = (n: number) => String(n).padStart(2, '0')
   return `图片_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/** D-063：一次最多合成多少张，与后端 MAX_COMBINE_IMAGES 保持一致 */
+const MAX_COMBINE_IMAGES = 20
+
+interface PickedImage {
+  id: number
+  path: string
+  /** 微信 chooseMedia 通常不返回原始文件名；只有拿到才用于自然数字序兜底 */
+  name: string
+}
+
+function genCombineName(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `图片合成_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.pdf`
+}
+
+/** 自然数字序：1、2、10 而不是 1、10、2 */
+function naturalCompare(a: string, b: string): number {
+  const ax = a.split(/(\d+)/)
+  const bx = b.split(/(\d+)/)
+  for (let i = 0; i < Math.max(ax.length, bx.length); i++) {
+    const an = ax[i] || ''
+    const bn = bx[i] || ''
+    if (/^\d+$/.test(an) && /^\d+$/.test(bn)) {
+      const d = Number(an) - Number(bn)
+      if (d) return d
+    } else {
+      const c = an.localeCompare(bn, 'zh-CN', { numeric: true })
+      if (c) return c
+    }
+  }
+  return 0
+}
+
+/**
+ * 自动排序（Q2「选择顺序＋数字序兜底」）：
+ * 以用户勾选/拍摄的先后为主；只有**每张图都带可区分的真实文件名**时，
+ * 才按自然数字序兜底（微信 chooseMedia 不给文件名、EXIF 常被剥离，
+ * 所以多数机型走选择顺序——结果可预测、不会把顺序排乱）。
+ */
+function autoSortPicked(items: PickedImage[]): PickedImage[] {
+  const names = items.map((x) => x.name.trim())
+  const usable = names.every(Boolean) && new Set(names).size === names.length
+  if (!usable) return items
+  return items
+    .map((it, idx) => ({ it, idx }))
+    .sort((a, b) => naturalCompare(names[a.idx], names[b.idx]) || a.idx - b.idx)
+    .map((x) => x.it)
 }
 
 /**
@@ -76,6 +126,13 @@ export default function LibraryPage() {
   const [gradeFilter, setGradeFilter] = useState<number | null>(null)
   const [gradeScope, setGradeScope] = useState<GradeScope | null>(null)
   const sel = useSelection()
+
+  /** D-063 多图合成：待排序的图片、成品名、进行中与序号发号器 */
+  const [composeVisible, setComposeVisible] = useState(false)
+  const [composeItems, setComposeItems] = useState<PickedImage[]>([])
+  const [composeName, setComposeName] = useState('')
+  const [composeBusy, setComposeBusy] = useState(false)
+  const composeSeq = useRef(0)
 
   /** 每页条数：滚到底追加，避免一次拉太多在慢网上白等 */
   const PAGE_SIZE = 30
@@ -274,13 +331,106 @@ export default function LibraryPage() {
     }
   }
 
+  /**
+   * D-063：多选图片 → 自动排序 → 手动调序 → 合成一份一图一页 PDF。
+   * `append=true` 时把新拍的照片接在已调好的顺序之后，不重排用户已确认的部分。
+   */
+  const handleChooseImages = async (append = false) => {
+    if (composeBusy) return
+    // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
+    if (!(await guardPolicy('选择图片'))) return
+    if (!(await guardPrivacy('选择图片'))) return
+    const room = MAX_COMBINE_IMAGES - (append ? composeItems.length : 0)
+    if (room <= 0) {
+      Taro.showToast({ title: `最多 ${MAX_COMBINE_IMAGES} 张`, icon: 'none' })
+      return
+    }
+    try {
+      const res = await Taro.chooseMedia({ count: room, mediaType: ['image'], sourceType: ['album', 'camera'] })
+      const files = res.tempFiles || []
+      if (!files.length) return
+      const picked: PickedImage[] = files.map((f) => ({
+        id: ++composeSeq.current,
+        path: f.tempFilePath,
+        // chooseMedia 标准返回里没有文件名；个别机型/基础库会带，用于数字序兜底
+        name: String((f as unknown as Record<string, unknown>).name || '').trim(),
+      }))
+      if (append) {
+        setComposeItems((prev) => [...prev, ...autoSortPicked(picked)])
+      } else {
+        setComposeItems(autoSortPicked(picked))
+        setComposeName(genCombineName())
+        setComposeVisible(true)
+      }
+    } catch (e) {
+      reportChooseFail(e, '选择图片', '选择图片失败')
+    }
+  }
+
+  /** 上移/下移：交换相邻项，序号即 PDF 页序 */
+  const moveCompose = (index: number, delta: number) => {
+    setComposeItems((prev) => {
+      const j = index + delta
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      const tmp = next[index]
+      next[index] = next[j]
+      next[j] = tmp
+      return next
+    })
+  }
+
+  const removeCompose = (id: number) => setComposeItems((prev) => prev.filter((x) => x.id !== id))
+
+  const closeCompose = () => {
+    if (composeBusy) return
+    setComposeVisible(false)
+    setComposeItems([])
+  }
+
+  /**
+   * 串行上传 + 合成。
+   * ⚠️ 微信 uploadFile 单次超时硬顶 60s，多图并行只会一起撞限流；每张上传都更新
+   * showLoading 标题，避免「点了没反应」（#150 同款教训）。
+   * 原图用 purpose=temp：不建条目、ref_count=0，24h 后由既有孤儿 GC 回收，
+   * 资料库里最终只会出现**一份**成品（Q4）。
+   */
+  const doCombine = async () => {
+    if (composeBusy || !composeItems.length) return
+    setComposeBusy(true)
+    const keys: string[] = []
+    try {
+      for (let i = 0; i < composeItems.length; i++) {
+        Taro.showLoading({ title: `上传 ${i + 1}/${composeItems.length}`, mask: true })
+        const up = await uploadFile(composeItems[i].path, { purpose: 'temp' })
+        if (!up?.key) throw new Error('上传返回缺少 key')
+        // 严格按当前列表顺序 push：后端把这个数组顺序当作 PDF 页序
+        keys.push(up.key)
+      }
+      Taro.showLoading({ title: '正在合成…', mask: true })
+      const doc = await combineLibraryImages(keys, composeName.trim() || genCombineName())
+      Taro.hideLoading()
+      setComposeVisible(false)
+      setComposeItems([])
+      Taro.showToast({ title: `已合成 ${doc.images} 张图片`, icon: 'success' })
+      load({ silent: true })
+    } catch (e) {
+      Taro.hideLoading()
+      console.error('[library] 多图合成失败', e)
+      Taro.showToast({ title: `合成失败：${e instanceof Error ? e.message.slice(0, 20) : '请重试'}`, icon: 'none' })
+    } finally {
+      setComposeBusy(false)
+    }
+  }
+
   const handleUpload = () => {
     Taro.showActionSheet({
-      itemList: ['选择文档（PDF / Word / TXT）', '选择图片'],
+      itemList: ['选择文档（PDF / Word / TXT）', '选择图片', '多张图片合成一份 PDF'],
     })
       .then((res) => {
         if (res.tapIndex === 0) handleChooseDoc()
         else if (res.tapIndex === 1) handleChooseImage()
+        else if (res.tapIndex === 2) void handleChooseImages()
       })
       .catch(() => { /* 取消 */ })
   }
@@ -511,6 +661,86 @@ export default function LibraryPage() {
         onCancel={() => setAssignTarget(null)}
         onSelect={handleSubjectPicked}
       />
+
+      {/* D-063 多图合成：全屏排序页。序号就是 PDF 页序，一图一页。 */}
+      {composeVisible && (
+        <View
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100,
+            backgroundColor: '#fff', display: 'flex', flexDirection: 'column',
+          }}
+        >
+          <View style={{ padding: '16px 16px 12px', borderBottom: '1px solid #ecefe3' }}>
+            <View className="flex flex-row items-center justify-between">
+              <Text className="block text-base font-medium text-foreground">多张图片合成一份 PDF</Text>
+              <View className="px-2 py-1" onClick={closeCompose}>
+                <Text className="block text-base text-muted-foreground">✕</Text>
+              </View>
+            </View>
+            <Text className="block text-xs text-muted-foreground mt-1">
+              按当前顺序一图一页；用 ↑ ↓ 调整顺序，序号就是 PDF 页序
+            </Text>
+          </View>
+
+          <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9 mx-4 mt-3 flex-shrink-0">
+            <Text className="block text-xs text-muted-foreground">名称</Text>
+            <Input
+              className="flex-1 text-sm bg-transparent"
+              value={composeName}
+              placeholder="合成后的文件名"
+              placeholderClass="text-muted-foreground"
+              onInput={(e) => setComposeName(e.detail.value)}
+            />
+          </View>
+
+          <ScrollView scrollY style={{ flex: 1, padding: '12px 16px' }}>
+            {composeItems.map((it, idx) => (
+              <View key={it.id} className="flex flex-row items-center gap-2 rounded-xl border border-border p-2 mb-2">
+                <View className="w-7 h-7 flex-shrink-0 rounded-full bg-brand-soft flex items-center justify-center">
+                  <Text className="block text-xs text-brand-text">{idx + 1}</Text>
+                </View>
+                <Image src={it.path} mode="aspectFill" className="w-14 h-14 flex-shrink-0 rounded-lg" style={{ backgroundColor: '#f3f4f0' }} />
+                <View className="flex-1 min-w-0">
+                  <Text className="block text-xs text-foreground">第 {idx + 1} 页</Text>
+                  <Text className="block text-xs text-muted-foreground truncate">{it.name || '按选择顺序'}</Text>
+                </View>
+                <View className="flex flex-col gap-1 flex-shrink-0">
+                  <View className="w-7 h-6 rounded-md bg-muted flex items-center justify-center" onClick={() => moveCompose(idx, -1)}>
+                    <Text className="block text-xs text-foreground">↑</Text>
+                  </View>
+                  <View className="w-7 h-6 rounded-md bg-muted flex items-center justify-center" onClick={() => moveCompose(idx, 1)}>
+                    <Text className="block text-xs text-foreground">↓</Text>
+                  </View>
+                </View>
+                <View className="w-7 h-7 flex-shrink-0 flex items-center justify-center" onClick={() => removeCompose(it.id)}>
+                  <Trash2 size={15} color="#c65f5f" />
+                </View>
+              </View>
+            ))}
+            {composeItems.length < MAX_COMBINE_IMAGES ? (
+              <View
+                className="w-full h-12 border-2 border-dashed border-border rounded-xl flex items-center justify-center"
+                onClick={() => void handleChooseImages(true)}
+              >
+                <Text className="block text-xs text-muted-foreground">＋ 继续添加（还可加 {MAX_COMBINE_IMAGES - composeItems.length} 张）</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+
+          <View className="flex flex-row gap-3 px-4 py-3 flex-shrink-0" style={{ borderTop: '1px solid #ecefe3' }}>
+            <View className="px-5 h-11 rounded-xl bg-muted flex items-center justify-center" onClick={closeCompose}>
+              <Text className="block text-sm text-foreground">取消</Text>
+            </View>
+            <View
+              className="flex-1 h-11 rounded-xl bg-brand flex items-center justify-center"
+              style={{ opacity: composeBusy ? 0.6 : 1 }}
+              onClick={() => void doCombine()}
+            >
+              <Text className="block text-sm text-brand-foreground">合成并导入（{composeItems.length} 张）</Text>
+            </View>
+          </View>
+        </View>
+      )}
     </View>
   )
 }
