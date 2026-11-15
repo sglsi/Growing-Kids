@@ -1,4 +1,4 @@
-import { View, Text, ScrollView, Image } from '@tarojs/components'
+import { View, Text, ScrollView, Image, Swiper, SwiperItem } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useRef, useState } from 'react'
 import { FileText, Trash2, Upload, Ellipsis } from 'lucide-react-taro'
@@ -53,6 +53,27 @@ interface PickedImage {
   path: string
   /** 微信 chooseMedia 通常不返回原始文件名；只有拿到才用于自然数字序兜底 */
   name: string
+}
+
+/** D-064：删除不真删，记下原位放进页面下部临时框，随时可加回（防误删） */
+interface RemovedImage extends PickedImage {
+  fromIndex: number
+}
+
+interface CellRect { left: number; top: number; right: number; bottom: number }
+
+/** 预览层 Swiper 在小程序里必须有确定高度；取一次视口高度即可（数字值 = 真实 px） */
+const SCREEN_H = (() => {
+  try { return Taro.getSystemInfoSync().windowHeight } catch { return 667 }
+})()
+
+/** 拖到哪个格子就占哪个格子；纯函数，便于守卫与实证断言 */
+function moveItem<T>(list: T[], from: number, to: number): T[] {
+  if (from < 0 || to < 0 || from >= list.length || to >= list.length || from === to) return list
+  const next = [...list]
+  const [it] = next.splice(from, 1)
+  next.splice(to, 0, it)
+  return next
 }
 
 function genCombineName(): string {
@@ -127,12 +148,23 @@ export default function LibraryPage() {
   const [gradeScope, setGradeScope] = useState<GradeScope | null>(null)
   const sel = useSelection()
 
-  /** D-063 多图合成：待排序的图片、成品名、进行中与序号发号器 */
+  /** D-063/D-064 多图合成：待排序图片、成品名、进行中与序号发号器 */
   const [composeVisible, setComposeVisible] = useState(false)
   const [composeItems, setComposeItems] = useState<PickedImage[]>([])
   const [composeName, setComposeName] = useState('')
   const [composeBusy, setComposeBusy] = useState(false)
   const composeSeq = useRef(0)
+  /** D-064：删除暂存区、预览游标、两段确认（确定 → 复核 → 开始合成） */
+  const [removedItems, setRemovedItems] = useState<RemovedImage[]>([])
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  /** 长按拖拽：dragFrom 为起点（也表示「待落点」态），dragTo 为当前命中格子 */
+  const [dragFrom, setDragFrom] = useState<number | null>(null)
+  const [dragTo, setDragTo] = useState<number | null>(null)
+  /** 手指按住期间锁住 ScrollView 滚动，避免拖拽与页面滚动打架 */
+  const [dragging, setDragging] = useState(false)
+  const cellRects = useRef<CellRect[]>([])
+  const longPressedRef = useRef(false)
 
   /** 每页条数：滚到底追加，避免一次拉太多在慢网上白等 */
   const PAGE_SIZE = 30
@@ -336,7 +368,7 @@ export default function LibraryPage() {
    * `append=true` 时把新拍的照片接在已调好的顺序之后，不重排用户已确认的部分。
    */
   const handleChooseImages = async (append = false) => {
-    if (composeBusy) return
+    if (composeBusy || (append && confirmed)) return
     // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
     if (!(await guardPolicy('选择图片'))) return
     if (!(await guardPrivacy('选择图片'))) return
@@ -360,6 +392,10 @@ export default function LibraryPage() {
       } else {
         setComposeItems(autoSortPicked(picked))
         setComposeName(genCombineName())
+        setRemovedItems([])
+        setConfirmed(false)
+        setPreviewIndex(null)
+        clearDrag()
         setComposeVisible(true)
       }
     } catch (e) {
@@ -367,25 +403,118 @@ export default function LibraryPage() {
     }
   }
 
-  /** 上移/下移：交换相邻项，序号即 PDF 页序 */
-  const moveCompose = (index: number, delta: number) => {
+  /** 顺序调整：拖到哪个格子就占哪个格子；nudgeCompose 是精确 ±1 的兜底 */
+  const moveCompose = (from: number, to: number) => setComposeItems((prev) => moveItem(prev, from, to))
+  const nudgeCompose = (index: number, delta: number) => moveCompose(index, index + delta)
+  const clearDrag = () => { setDragFrom(null); setDragTo(null); setDragging(false) }
+
+  /**
+   * D-064：删除 = 移入页面下部临时框（不真删），记下原位，点 ＋ 就能加回。
+   * ⚠️ 不在 setComposeItems 的 updater 里改另一个 state：updater 必须保持纯函数，
+   *    否则 React 严格模式下重复执行会把同一张图塞进暂存区两次。
+   */
+  const removeCompose = (id: number) => {
+    if (confirmed || composeBusy) return
+    const idx = composeItems.findIndex((x) => x.id === id)
+    if (idx < 0) return
+    setRemovedItems((prev) => [...prev, { ...composeItems[idx], fromIndex: idx }])
+    setComposeItems((prev) => prev.filter((x) => x.id !== id))
+    clearDrag()
+  }
+
+  const restoreCompose = (id: number) => {
+    if (confirmed || composeBusy) return
+    const it = removedItems.find((x) => x.id === id)
+    if (!it) return
+    if (composeItems.length >= MAX_COMBINE_IMAGES) {
+      Taro.showToast({ title: `最多 ${MAX_COMBINE_IMAGES} 张`, icon: 'none' })
+      return
+    }
+    setRemovedItems((prev) => prev.filter((x) => x.id !== id))
     setComposeItems((prev) => {
-      const j = index + delta
-      if (j < 0 || j >= prev.length) return prev
       const next = [...prev]
-      const tmp = next[index]
-      next[index] = next[j]
-      next[j] = tmp
+      next.splice(Math.min(it.fromIndex, next.length), 0, { id: it.id, path: it.path, name: it.name })
       return next
     })
   }
 
-  const removeCompose = (id: number) => setComposeItems((prev) => prev.filter((x) => x.id !== id))
+  /** 长按拖拽：激活时抓一次各格子视口矩形，touchmove 用坐标命中落点 */
+  const beginDrag = (index: number) => {
+    longPressedRef.current = true
+    // 触觉反馈不可用时不影响排序本身
+    void Taro.vibrateShort().catch((e) => console.warn('[compose] 震动不可用', e))
+    // 状态必须同步生效：查询矩形是异步的，若等回调再设，用户在回调前松手就会漏掉整次拖拽
+    setDragFrom(index)
+    setDragTo(index)
+    setDragging(true)
+    const q = Taro.createSelectorQuery()
+    q.selectAll('.compose-cell').boundingClientRect()
+    q.exec((res: unknown) => {
+      const first = Array.isArray(res) ? res[0] : null
+      cellRects.current = Array.isArray(first) ? (first as CellRect[]) : []
+    })
+  }
+
+  /** Taro 的 ScrollView.onTouchMove 事件类型是 BaseEventOrig，touches 需自行窄化 */
+  const updateDragTarget = (e: unknown) => {
+    if (dragFrom === null) return
+    const t = (e as { touches?: Array<{ clientX: number; clientY: number }> }).touches?.[0]
+    if (!t) return
+    const rects = cellRects.current
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i]
+      if (t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom) {
+        if (i !== dragTo) setDragTo(i)
+        return
+      }
+    }
+  }
+
+  const endDrag = () => {
+    // 无条件解锁滚动：即使闭包里 dragFrom 还是旧值（快按快放），也不能把页面卡在不可滚动态
+    setDragging(false)
+    if (dragFrom === null) return
+    // 手指真的拖到别的格子 → 松手即落位；只是长按没动 → 保持「待落点」，点目标格子也能完成
+    if (dragTo !== null && dragTo !== dragFrom) {
+      moveCompose(dragFrom, dragTo)
+      clearDrag()
+    }
+  }
+
+  const handleCellClick = (index: number) => {
+    // 长按那一次触摸框架一般不派发 tap；万一派发了，这里吞掉，避免误开预览
+    if (longPressedRef.current) { longPressedRef.current = false; return }
+    if (dragFrom !== null) {
+      if (index !== dragFrom) moveCompose(dragFrom, index)
+      clearDrag()
+      return
+    }
+    setPreviewIndex(index)
+  }
+
+  /** D-064：确定 = 锁住当前页序进入复核态；再点「开始合成」才真正上传 */
+  const confirmCompose = () => {
+    if (!composeItems.length) {
+      Taro.showToast({ title: '请先添加至少 1 张图片', icon: 'none' })
+      return
+    }
+    clearDrag()
+    setPreviewIndex(null)
+    setConfirmed(true)
+    if (removedItems.length) {
+      Taro.showToast({ title: `${removedItems.length} 张在待恢复区，不会合成`, icon: 'none' })
+    }
+  }
 
   const closeCompose = () => {
     if (composeBusy) return
     setComposeVisible(false)
     setComposeItems([])
+    setRemovedItems([])
+    setComposeName('')
+    setConfirmed(false)
+    setPreviewIndex(null)
+    clearDrag()
   }
 
   /**
@@ -394,9 +523,10 @@ export default function LibraryPage() {
    * showLoading 标题，避免「点了没反应」（#150 同款教训）。
    * 原图用 purpose=temp：不建条目、ref_count=0，24h 后由既有孤儿 GC 回收，
    * 资料库里最终只会出现**一份**成品（Q4）。
+   * D-064：只有 confirmed 复核态才允许触发（防止调序途中误点合成）。
    */
   const doCombine = async () => {
-    if (composeBusy || !composeItems.length) return
+    if (composeBusy || !confirmed || !composeItems.length) return
     setComposeBusy(true)
     const keys: string[] = []
     try {
@@ -412,6 +542,9 @@ export default function LibraryPage() {
       Taro.hideLoading()
       setComposeVisible(false)
       setComposeItems([])
+      setRemovedItems([])
+      setConfirmed(false)
+      setPreviewIndex(null)
       Taro.showToast({ title: `已合成 ${doc.images} 张图片`, icon: 'success' })
       load({ silent: true })
     } catch (e) {
@@ -662,7 +795,7 @@ export default function LibraryPage() {
         onSelect={handleSubjectPicked}
       />
 
-      {/* D-063 多图合成：全屏排序页。序号就是 PDF 页序，一图一页。 */}
+      {/* D-063/D-064 多图合成：全屏排序页。序号就是 PDF 页序，一图一页。 */}
       {composeVisible && (
         <View
           style={{
@@ -672,73 +805,208 @@ export default function LibraryPage() {
         >
           <View style={{ padding: '16px 16px 12px', borderBottom: '1px solid #ecefe3' }}>
             <View className="flex flex-row items-center justify-between">
-              <Text className="block text-base font-medium text-foreground">多张图片合成一份 PDF</Text>
+              <Text className="block text-base font-medium text-foreground">
+                {confirmed ? '确认页序' : '多张图片合成一份 PDF'}
+              </Text>
               <View className="px-2 py-1" onClick={closeCompose}>
                 <Text className="block text-base text-muted-foreground">✕</Text>
               </View>
             </View>
             <Text className="block text-xs text-muted-foreground mt-1">
-              按当前顺序一图一页；用 ↑ ↓ 调整顺序，序号就是 PDF 页序
+              {confirmed
+                ? '点图片可左右滑动预览；需要改动请点「返回调整」'
+                : dragFrom !== null
+                  ? '已选中：拖到目标位置松手，或直接点目标图片'
+                  : '长按调整顺序 · 点图预览 · 右上角 ✕ 移入下方待恢复区'}
             </Text>
           </View>
 
-          <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9 mx-4 mt-3 flex-shrink-0">
-            <Text className="block text-xs text-muted-foreground">名称</Text>
-            <Input
-              className="flex-1 text-sm bg-transparent"
-              value={composeName}
-              placeholder="合成后的文件名"
-              placeholderClass="text-muted-foreground"
-              onInput={(e) => setComposeName(e.detail.value)}
-            />
-          </View>
+          {!confirmed && (
+            <View className="flex flex-row items-center gap-2 rounded-xl bg-muted px-3 h-9 mx-4 mt-3 flex-shrink-0">
+              <Text className="block text-xs text-muted-foreground">名称</Text>
+              <Input
+                className="flex-1 text-sm bg-transparent"
+                value={composeName}
+                placeholder="合成后的文件名"
+                placeholderClass="text-muted-foreground"
+                onInput={(e) => setComposeName(e.detail.value)}
+              />
+            </View>
+          )}
 
-          <ScrollView scrollY style={{ flex: 1, padding: '12px 16px' }}>
-            {composeItems.map((it, idx) => (
-              <View key={it.id} className="flex flex-row items-center gap-2 rounded-xl border border-border p-2 mb-2">
-                <View className="w-7 h-7 flex-shrink-0 rounded-full bg-brand-soft flex items-center justify-center">
-                  <Text className="block text-xs text-brand-text">{idx + 1}</Text>
-                </View>
-                <Image src={it.path} mode="aspectFill" className="w-14 h-14 flex-shrink-0 rounded-lg" style={{ backgroundColor: '#f3f4f0' }} />
-                <View className="flex-1 min-w-0">
-                  <Text className="block text-xs text-foreground">第 {idx + 1} 页</Text>
-                  <Text className="block text-xs text-muted-foreground truncate">{it.name || '按选择顺序'}</Text>
-                </View>
-                <View className="flex flex-col gap-1 flex-shrink-0">
-                  <View className="w-7 h-6 rounded-md bg-muted flex items-center justify-center" onClick={() => moveCompose(idx, -1)}>
-                    <Text className="block text-xs text-foreground">↑</Text>
-                  </View>
-                  <View className="w-7 h-6 rounded-md bg-muted flex items-center justify-center" onClick={() => moveCompose(idx, 1)}>
-                    <Text className="block text-xs text-foreground">↓</Text>
-                  </View>
-                </View>
-                <View className="w-7 h-7 flex-shrink-0 flex items-center justify-center" onClick={() => removeCompose(it.id)}>
-                  <Trash2 size={15} color="#c65f5f" />
-                </View>
+          {dragFrom !== null && !confirmed && (
+            <View className="flex flex-row items-center gap-3 mx-4 mt-2 px-3 py-2 rounded-xl bg-brand-soft flex-shrink-0">
+              <Text className="block text-xs text-brand-text">已选第 {dragFrom + 1} 张</Text>
+              <View className="px-2 py-1 rounded-md bg-muted" onClick={() => { nudgeCompose(dragFrom, -1); clearDrag() }}>
+                <Text className="block text-xs text-foreground">↑ 上移</Text>
               </View>
-            ))}
-            {composeItems.length < MAX_COMBINE_IMAGES ? (
-              <View
-                className="w-full h-12 border-2 border-dashed border-border rounded-xl flex items-center justify-center"
-                onClick={() => void handleChooseImages(true)}
-              >
-                <Text className="block text-xs text-muted-foreground">＋ 继续添加（还可加 {MAX_COMBINE_IMAGES - composeItems.length} 张）</Text>
+              <View className="px-2 py-1 rounded-md bg-muted" onClick={() => { nudgeCompose(dragFrom, 1); clearDrag() }}>
+                <Text className="block text-xs text-foreground">↓ 下移</Text>
               </View>
-            ) : null}
+              <View className="px-2 py-1" onClick={clearDrag}>
+                <Text className="block text-xs text-muted-foreground">取消</Text>
+              </View>
+            </View>
+          )}
+
+          {/* 拖拽期间锁滚动，落点用视口矩形命中，不赌 Taro 的 movable-view 手势 */}
+          <ScrollView
+            scrollY={!dragging}
+            style={{ flex: 1, padding: '12px 16px' }}
+            onTouchMove={updateDragTarget}
+            onTouchEnd={endDrag}
+            onTouchCancel={endDrag}
+          >
+            <View style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap' }}>
+              {composeItems.map((it, idx) => {
+                const isFrom = dragFrom === idx
+                const isTarget = dragFrom !== null && dragTo === idx && dragTo !== dragFrom
+                return (
+                  <View
+                    key={it.id}
+                    className="compose-cell"
+                    style={{
+                      width: '30.66%', marginRight: idx % 3 === 2 ? 0 : '4%', marginBottom: 12,
+                      opacity: isFrom ? 0.45 : 1,
+                    }}
+                    onTouchStart={() => { longPressedRef.current = false }}
+                    onLongPress={() => { if (!confirmed) beginDrag(idx) }}
+                    onClick={() => handleCellClick(idx)}
+                  >
+                    <View
+                      style={{
+                        position: 'relative', width: '100%', paddingBottom: '100%',
+                        borderRadius: 10, overflow: 'hidden', backgroundColor: '#f3f4f0',
+                        border: isTarget ? '2px solid #7ba05b' : '2px solid transparent',
+                      }}
+                    >
+                      <Image
+                        src={it.path}
+                        mode="aspectFill"
+                        style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%' }}
+                      />
+                      {!confirmed && (
+                        <View
+                          style={{
+                            position: 'absolute', right: 0, top: 0, width: 24, height: 24,
+                            borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.55)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          }}
+                          onClick={(e) => { e.stopPropagation?.(); removeCompose(it.id) }}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 14, lineHeight: '14px' }}>✕</Text>
+                        </View>
+                      )}
+                    </View>
+                    {/* D-064：页码用「-数字序号-」形式展示在缩略图下部 */}
+                    <View style={{ marginTop: 4, alignItems: 'center' }}>
+                      <Text className="block text-xs text-muted-foreground">-{idx + 1}-</Text>
+                    </View>
+                  </View>
+                )
+              })}
+              {!confirmed && composeItems.length < MAX_COMBINE_IMAGES && (
+                <View
+                  style={{ width: '30.66%', marginRight: composeItems.length % 3 === 2 ? 0 : '4%', marginBottom: 12 }}
+                  onClick={() => void handleChooseImages(true)}
+                >
+                  <View
+                    style={{
+                      width: '100%', paddingBottom: '100%', position: 'relative',
+                      border: '2px dashed #d8ddd0', borderRadius: 10,
+                    }}
+                  >
+                    <View style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Text className="block text-xs text-muted-foreground">＋ 添加</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+            {!composeItems.length && (
+              <View className="py-10 flex items-center justify-center">
+                <Text className="block text-xs text-muted-foreground">还没有图片，点「＋ 添加」开始</Text>
+              </View>
+            )}
           </ScrollView>
 
+          {/* D-064：页面下部临时框——删除只是暂存，点 ＋ 加回原位，防误删 */}
+          <View style={{ margin: '0 16px 8px', padding: '8px 10px', border: '1px dashed #d8ddd0', borderRadius: 12, flexShrink: 0 }}>
+            <Text className="block text-xs text-muted-foreground">
+              已移除 {removedItems.length} 张{removedItems.length ? ' · 点 ＋ 加回原位' : ' · 删除的图片暂存这里，可随时加回'}
+            </Text>
+            {removedItems.length > 0 && (
+              <ScrollView scrollX style={{ marginTop: 8, whiteSpace: 'nowrap' }}>
+                <View style={{ display: 'inline-flex', flexDirection: 'row' }}>
+                  {removedItems.map((it) => (
+                    <View key={it.id} style={{ position: 'relative', width: 44, height: 44, borderRadius: 8, overflow: 'hidden', marginRight: 8, flexShrink: 0 }}>
+                      <Image src={it.path} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                      <View
+                        style={{
+                          position: 'absolute', right: 0, bottom: 0, width: 18, height: 18,
+                          borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.6)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                        onClick={() => restoreCompose(it.id)}
+                      >
+                        <Text style={{ color: '#fff', fontSize: 12, lineHeight: '12px' }}>＋</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
+            )}
+          </View>
+
+          {/* D-064：两段式——「确定」只锁顺序，复核后「开始合成」才上传 */}
           <View className="flex flex-row gap-3 px-4 py-3 flex-shrink-0" style={{ borderTop: '1px solid #ecefe3' }}>
-            <View className="px-5 h-11 rounded-xl bg-muted flex items-center justify-center" onClick={closeCompose}>
-              <Text className="block text-sm text-foreground">取消</Text>
+            <View
+              className="px-5 h-11 rounded-xl bg-muted flex items-center justify-center"
+              onClick={confirmed ? () => setConfirmed(false) : closeCompose}
+            >
+              <Text className="block text-sm text-foreground">{confirmed ? '返回调整' : '取消'}</Text>
             </View>
             <View
               className="flex-1 h-11 rounded-xl bg-brand flex items-center justify-center"
               style={{ opacity: composeBusy ? 0.6 : 1 }}
-              onClick={() => void doCombine()}
+              onClick={confirmed ? () => void doCombine() : confirmCompose}
             >
-              <Text className="block text-sm text-brand-foreground">合成并导入（{composeItems.length} 张）</Text>
+              <Text className="block text-sm text-brand-foreground">
+                {confirmed ? `开始合成（${composeItems.length} 张）` : `确定（${composeItems.length} 张）`}
+              </Text>
             </View>
           </View>
+        </View>
+      )}
+
+      {/* D-064：全屏预览，Swiper 左右滑动查看不同图片；自写以便显示 -N- 页码 */}
+      {composeVisible && previewIndex !== null && (
+        <View
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 200,
+            backgroundColor: '#000', display: 'flex', flexDirection: 'column',
+          }}
+        >
+          <View style={{ padding: '14px 16px', display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={{ color: '#fff', fontSize: 14 }}>- {previewIndex + 1} / {composeItems.length} -</Text>
+            <View className="px-2 py-1" onClick={() => setPreviewIndex(null)}>
+              <Text style={{ color: '#fff', fontSize: 16 }}>✕</Text>
+            </View>
+          </View>
+          <Swiper
+            current={previewIndex}
+            circular={false}
+            indicatorDots={false}
+            duration={200}
+            onChange={(e) => setPreviewIndex(e.detail.current)}
+            style={{ width: '100%', height: SCREEN_H - 60 }}
+          >
+            {composeItems.map((it) => (
+              <SwiperItem key={it.id}>
+                <Image src={it.path} mode="aspectFit" style={{ width: '100%', height: '100%' }} />
+              </SwiperItem>
+            ))}
+          </Swiper>
         </View>
       )}
     </View>

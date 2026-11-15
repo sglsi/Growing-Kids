@@ -77,8 +77,8 @@ m.test('A5 自动排序 + 手动调序 + 序号可见', (c) => {
   c.ok(s.includes('naturalCompare'), '须有自然数字序（1、2、10）')
   c.ok(s.includes('autoSortPicked'), '须有自动排序入口')
   c.ok(s.includes('选择顺序'), '须写明「以选择顺序为主」的口径')
-  c.ok(s.includes('moveCompose') && s.includes('removeCompose'), '须有上移/下移/删除')
-  c.ok(s.includes('第 {idx + 1} 页'), '列表必须显示页序，用户能核对排序结果')
+  c.ok(s.includes('moveCompose') && s.includes('removeCompose'), '须有顺序调整与删除')
+  c.ok(s.includes('-{idx + 1}-'), '缩略图下部须以「-数字序号-」显示页序（D-064）')
   c.ok(s.includes('多张图片合成一份 PDF'), '导入菜单必须保留新入口')
   c.ok(s.includes('handleChooseImages(true)'), '须支持分批追加照片')
 })
@@ -109,6 +109,23 @@ m.test('A8 离线实证脚本存在且覆盖页序与格式归一', (c) => {
   for (const kw of ['页序', '一图一页', 'WebP', 'reverse', 'fail-closed', '服务层', 'library_docs']) {
     c.ok(s.includes(kw), `实证脚本缺少 ${kw} 用例`)
   }
+})
+
+// D-064：排序页由纵向列表改为「缩略图网格 + 暂存框 + 长按拖拽 + 预览 + 两段确认」。
+// 这几条最容易被后续「简化」掉：X 变成真删、暂存框消失、确定按钮被并回合成。
+m.test('A9 排序页交互：网格 / 暂存框 / 预览 / 长按 / 两段确认（D-064）', (c) => {
+  const s = read(FE)
+  c.ok(s.includes('compose-cell'), '缩略图网格须有格子 class（长按落点依赖 selectAll）')
+  c.ok(s.includes('idx % 3 === 2'), '须为三列缩略图网格')
+  c.ok(s.includes('removeCompose(it.id)') && s.includes('✕'), '缩略图右上角须有 X 删除')
+  c.ok(s.includes('已移除') && s.includes('restoreCompose'), '下部临时框须可加回，删除不是真删')
+  c.ok(s.includes('fromIndex'), '恢复须加回被删时的原位')
+  c.ok(s.includes('Swiper') && s.includes('previewIndex'), '须有可左右滑动的全屏预览')
+  c.ok(s.includes('onLongPress') && s.includes('beginDrag'), '须支持长按调整顺序')
+  c.ok(s.includes('scrollY={!dragging}'), '拖拽期间须锁住页面滚动')
+  c.ok(s.includes('confirmCompose') && s.includes('确定（'), '须有确定按钮')
+  c.ok(s.includes('confirmed ? () => void doCombine() : confirmCompose'), '确定与合成须分两步')
+  c.ok(s.includes('if (confirmed || composeBusy) return') && s.includes('!confirmed'), '复核态须禁用删除 / 恢复 / 添加')
 })
 
 export default m
