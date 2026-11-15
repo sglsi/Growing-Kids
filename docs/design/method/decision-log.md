@@ -2205,3 +2205,49 @@ sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
 ### 六、回滚与登记
 
 前端：mp 后台「版本管理」选上一个开发版重新提交，或重新上传 `4c225e2` 之前的 commit 构建的包；仓库与后端不变、无需回滚。登记：台账 **D-065**、今日日志 `2026-11-15.md`、项目记忆升 **r67**。
+
+---
+
+## D-066：换生产 `server/dist` + 重启 `gk-api` + 修复 IDE 头像 500（2026-11-15 19:14）
+
+> 授权：思傅 18:47「**授权换 dist + 重启 gk-api；微信开发者工具里提示有一个错误，请检查并修复**」 ｜ 性质：**生产发货动作 + 前端缺陷修复**。未提审、未发正式版、未 push、**未重新上传前端包**、数据库零写入。
+
+### 一、IDE 报错定位与修复（1 error / 6~7 warnings）
+
+- 现象：调试器徽章 `Errors: 1, Warnings: 7`（重编译后 6）；Console 唯一 error 原文：
+  `[渲染层网络层错误] Failed to load local image resource /pages/index/blobs/6c/6c1a5249…/display.webp → 500 (HTTP/1.1 500 Internal Server Error)`。
+- 排障：先怀疑历史残留（会话戳 `1794714264001` = 11:44 冷启动），**清空 Console + 重新编译后错误复现** ⇒ 真 bug。逐层排查：生产 `STORAGE_PUBLIC_BASE_URL=https://deep-root.cn` 配置正确、`timeline.withUrls()` 一律返回绝对 URL、产物无该 hash 硬编码；最终用 CDP 读 appservice 本地缓存，命中
+  `gk_auth_state.avatarUrl = "blobs/6c/…/display.webp"`（**对象 key，不是 URL**）与 `gk_avatar_local = {key, path}`。
+- 🔴 **根因**：`src/pages/index/index.tsx:723` 把 `auth.avatarUrl` 直接塞进 `<Image src>`；而 `pages/profile/index.tsx` 早有 `toImageSrc()` + `ensureAvatarLocal()` 规则（注释写明「`/api/storage/files/*` 要身份令牌，`<Image>` 不带请求头，实测 401 ⇒ key 一律先 `downloadFile` 落本机再显示」）。**首页漏了这道兜底**，微信遂把相对 key 当本地资源解析成 `/pages/index/blobs/…` 并回 500。
+- 修复：首页新增 `AVATAR_LOCAL_KEY` + `homeAvatarSrc()`——① http(s) 历史地址直接可用；② 裸 key 优先取 `gk_avatar_local.path` 且校验 key 一致；③ 都没有返回 `''`，回退 `CircleUser` 图标，**绝不把 key 当 src 渲染**。渲染条件同步改用该函数。只改 1 个前端文件，后端／判定层／协议零改动。
+- 验证：`pnpm build:weapp` RC=0 → IDE 重新编译 ⇒ **徽章 `Errors: 0`**，500 消失；`pnpm tsc` / `lint:build` RC=0、`verify:gate` **38/38**、`method:check` H1/H2/H3 全绿。
+- ⚠️ 剩余 6 条 warnings 是提示性、非错误：`无效的 app.json ["__usePrivacyCheck__"]`（IDE **1.06.2303220 / 2023-03** 不识别官方后加字段，属旧版误报，**不删该字段**，删了会破坏发布门禁）、`scroll-view padding 不支持 webview`、`wx.getSystemInfoSync deprecated`、HarmonyOS 提示、preload 提示等。
+- 🔴 **边界**：修复只在本地 `dist/`。**已上传的 `2026.11.15.1` 仍是旧包**，体验版里该错误仍在；要消除须思傅**另行授权重新上传前端包**。
+
+### 二、生产换 dist 与重启（D-063 新端点上线）
+
+- `pnpm build:server` RC=0，本地 `server/dist` **575 文件**；与生产 566 文件做 sha256 **集合比对**（归一化 `hash *./path`）：`ONLY_LOCAL=9`（`library-image-combine.service.*`、`image-normalize.*`、`one-image-per-page.*`）、`ONLY_PROD=0`、`CONTENT_DIFF=9`（`library.controller.*`、`library.module.js(.map)`、`pdf.service.js(.map)`、2 个 tsbuildinfo）⇒ **TO_SHIP=18**。
+- 打包 `gk-d066-dist.tgz` 186,573 B → scp 到 `/tmp` → `sha256sum -c` **18/18 OK**。
+- **回滚点**：`sudo -n cp -a /opt/gk/server/dist /opt/gk/server/dist.bak-d066-20261115191326`。精准覆盖 18 文件（逐文件 `cp` + `chown gk:gk` + `chmod 644`），`COPIED=18`；特征串 `combine-images` 存在、新 service 与 `one-image-per-page.js` 均在。
+- **部署后复比**：生产重新取清单 ⇒ **575/575，onlyLocal 0 / onlyProd 0 / diff 0 / TO_SHIP 0**，零差异后才重启。
+- 重启验证：`systemctl restart gk-api` ⇒ `ActiveState=active / SubState=running`；**`:3000/api/health` 200**（`:8080` 不作判据）、`https://deep-root.cn/api/health` 200；启动日志 `Mapped {/api/library/combine-images, POST} route`；无 token 合法 JSON 探测 **401**（非 404，路由已挂载且鉴权生效，未写库）；`CACHE_VERSION = 'v17'` ✓、`ima.qq.com` 残留 0 ✓、`MODULE_NOT_FOUND` 0、`[persistent-ocr] 常驻进程就绪` ✓。OCR 脚本实际在 `/opt/gk/ocr-engine/pdf_tool.py`，**不在 dist 内**，本次未触碰、无降级。
+- 唯一 ERROR 日志是我第一次探测用了带反斜杠的非法 JSON 导致的 `[POST /api/library/combine-images] 400`，**非服务故障**；改用合法 JSON 后为 401。远端 `/tmp/gk-d066*` 与清单已清理。
+
+### 三、生效边界（不得误传）
+
+- 后端 `POST /api/library/combine-images` **已上生产**；但 **D-065 上传的开发版前端包未变**，且 D-066 的头像修复**未重传** ⇒ 用户手上：多图合成可调用了（后端有了），但排序页交互仍是旧包、首页头像 500 仍在。要完整可用与消除报错，需**重新 `build:weapp` 上传新开发版**（须另行授权）。
+- 仍锁：提审／发正式版、`urlCheck`／`__usePrivacyCheck__` 两门、mp 后台 `method=1`、r11 面客、`0032` 上生产、真机回归、`review_events` 0 行。数据库零写入，未跑迁移，未动 Caddy。
+- **不宣称**：多图合成已面客／头像错误已在体验版消失／真机已验证／所有用户可用。
+
+### 四、回滚（未执行）
+
+```
+sudo -n mv /opt/gk/server/dist /opt/gk/server/dist.bad \
+  && sudo -n mv /opt/gk/server/dist.bak-d066-20261115191326 /opt/gk/server/dist \
+  && sudo -n systemctl restart gk-api
+```
+回滚后 `POST /api/library/combine-images` 应回 404；前端：重新上传修复前 commit 构建的包，或 `git revert` 首页改动后重建。
+
+### 五、登记
+
+台账 **D-066**、今日日志 `2026-11-15.md`、项目记忆升 **r68**（本轮同时把超限的 `MEMORY.md` 由 16,916 B 压到 16,360 B，细节归档指针不变）；临时脚本留在 `.tmp/`，未纳入提交。
