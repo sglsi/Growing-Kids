@@ -123,4 +123,25 @@ m.test('A11 判定层不得被牵连', (c) => {
   c.ok(!fe.includes('question-match'), '前端不得直接引用判定层文件')
 })
 
+m.test('A12 按题号定位自动 OCR，不得把识别变成用户前置步骤', (c) => {
+  const fe = read(FE)
+  // 思傅 11-16 反馈：输入题号后不该让用户自己去点 OCR
+  c.ok(!fe.includes('请先对本页做一次识别'), '不得再要求用户先去点识别')
+  c.ok(!fe.includes('先在上方来源页做一次识别'), '提示文案不得把 OCR 写进用户流程')
+  c.ok(fe.includes('const handleLocateBySeq = async'), '定位须为异步：内部先补齐段落再定位')
+  c.ok(fe.includes('正在识别页面文字'), '自动识别须有等待反馈')
+  // runPageOcr 必须把结果回给调用方：setState 异步，定位不能读上一帧 boardPages
+  c.ok(/Promise<\{\s*segments: PageTextSegment\[\]/.test(fe), 'runPageOcr 须返回刚识别出的段落')
+  c.ok(/const r = await runPageOcr\(page, 'fast'\)/.test(fe), '定位缺段落时须自动跑快速识别')
+  c.ok(fe.includes('segments: r.page_text'), 'runPageOcr 须把段落一并返回')
+})
+
+m.test('A13 题号输入框须显式约束宽度（否则文字压到按钮上）', (c) => {
+  const fe = read(FE)
+  c.ok(!fe.includes('className="flex-1 text-sm"'), '原生 input 不得只靠 flex-1（默认宽度按整行解析）')
+  c.ok(fe.includes("width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px'"), '输入框须显式宽高与行高')
+  c.ok(/minWidth: 0/.test(fe), '外层容器须 minWidth: 0 才能被 flex 收窄')
+  c.ok(fe.includes('overflow: \'hidden\'') || fe.includes("overflow: 'hidden'"), '容器须裁剪溢出')
+})
+
 export default m

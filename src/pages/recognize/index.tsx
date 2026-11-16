@@ -830,8 +830,14 @@ export default function RecognizePage() {
     }
   }
 
-  /** 单页全页 OCR（用户手动触发：快速/精准）；失败置 error 态并记录原因，不抛 */
-  const runPageOcr = async (p: BoardPage, ocrMode: 'fast' | 'precise') => {
+  /**
+   * 单页全页 OCR（用户点「整页识别」，或按题号定位时自动触发）；失败置 error 态并记录原因，不抛。
+   * 返回值给调用方直接用：setState 是异步的，定位需要"刚识别出的段落"而不是上一帧的 boardPages。
+   */
+  const runPageOcr = async (
+    p: BoardPage,
+    ocrMode: 'fast' | 'precise',
+  ): Promise<{ segments: PageTextSegment[]; w: number; h: number } | null> => {
     setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
     // ⚠️ 精准模式实测 ~67s（R-上线-01），必须给等待反馈：
     //    页面上的转圈太小，用户不知道是「在跑」还是「卡死了」，只会反复点。
@@ -873,12 +879,14 @@ export default function RecognizePage() {
       } else {
         Taro.showToast({ title: `识别到 ${r.page_text.length} 段文字`, icon: 'success' })
       }
+      return { segments: r.page_text, w: r.page.w, h: r.page.h }
     } catch (e) {
       // 用户已离开本页：不是失败，别把它写成 error 态（也没人看得见）
-      if (isJobAborted(e) || unmountedRef.current) return
+      if (isJobAborted(e) || unmountedRef.current) return null
       const msg = e instanceof Error ? e.message : '识别失败，请重试'
       console.error('全页 OCR 失败', e)
       setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const, err: msg, lastMode: ocrMode } : x)))
+      return null
     } finally {
       if (precise) Taro.hideLoading()
     }
@@ -1542,10 +1550,12 @@ export default function RecognizePage() {
 
   // ── P-031 按题号提取：定位 → 逐题确认裁图 → 加入题目清单 ──
   /**
-   * 只在「错题提取」模式使用。依赖当前页已有的 OCR 段落（每段带像素框）：
-   * 没有段落就没有位置信息，只能提示先识别 —— 绝不猜坐标、绝不拿相邻题区间顶替（D-020）。
+   * 只在「错题提取」模式使用。
+   * 用户只输题号、点定位：**识别是系统内部步骤，不要求用户先点 OCR**（D-069 r1）。
+   * 本页还没有文字段落时自动跑一次快速识别，再拿刚返回的段落定位；
+   * 识别本身失败/无文字则明确告知，仍可手工「裁题目图」——绝不猜坐标、绝不拿相邻题区间顶替（D-020）。
    */
-  const handleLocateBySeq = () => {
+  const handleLocateBySeq = async () => {
     const seqs = parseSeqSpec(seqInput)
     if (!seqs) {
       Taro.showToast({ title: '题号格式如 3,5,8-12', icon: 'none' })
@@ -1553,14 +1563,31 @@ export default function RecognizePage() {
     }
     const page = boardPages[activePage]
     if (!page) {
-      Taro.showToast({ title: '请先选择来源图片', icon: 'none' })
+      Taro.showToast({ title: '请先添加来源页图片', icon: 'none' })
       return
     }
-    if (!page.segments.length) {
-      Taro.showToast({ title: '请先对本页做一次识别', icon: 'none' })
-      return
+    if (seqBusy) return
+    let segs = page.segments
+    let pw = page.w
+    let ph = page.h
+    if (!segs.length) {
+      setSeqBusy(true)
+      Taro.showLoading({ title: '正在识别页面文字…', mask: true })
+      try {
+        const r = await runPageOcr(page, 'fast')
+        segs = r?.segments ?? []
+        pw = r?.w || pw
+        ph = r?.h || ph
+      } finally {
+        Taro.hideLoading()
+        setSeqBusy(false)
+      }
+      if (!segs.length) {
+        Taro.showToast({ title: '本页没识别到文字，可直接「裁题目图」手工框', icon: 'none', duration: 2500 })
+        return
+      }
     }
-    const got = locateQuestions(page.segments, page.w, page.h, seqs)
+    const got = locateQuestions(segs, pw, ph, seqs)
     setSeqRows(
       got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
     )
@@ -1803,7 +1830,7 @@ export default function RecognizePage() {
                 <Text className="block text-xs text-muted-foreground">只存图片，不写题干文字</Text>
               </View>
               <Text className="block text-xs text-muted-foreground mb-2">
-                先在上方来源页做一次识别，系统才能按题号找到位置；定位不到的题会给整页框，由你手工圈定
+                输入题号后点「定位」，系统会自动识别本页文字并算出每题候选框；定位不到的题会给整页框，由你手工圈定
               </Text>
               <View className="flex flex-row items-center gap-2 mb-3">
                 <View className="px-3 py-1 rounded-lg border border-border" onClick={() => void addBoardPagesFromPdf()}>
@@ -1811,19 +1838,28 @@ export default function RecognizePage() {
                 </View>
                 <Text className="block text-xs text-muted-foreground">Word/TXT 没有页图，请另存为 PDF</Text>
               </View>
-              <View className="flex flex-row items-center gap-2 mb-3">
-                <View className="flex-1 h-9 rounded-xl border border-border bg-white flex flex-row items-center px-3">
+              <View className="flex flex-row items-center gap-2 mb-3" style={{ flexWrap: 'wrap' }}>
+                {/* 输入框：微信原生 input 的默认宽度按整行解析，会横向压到「定位」按钮上（文字与界面交错）。
+                    这里用显式 flex + minWidth:0 + 内层 100% 宽度把它约束在自身容器内。 */}
+                <View
+                  style={{
+                    flex: '1 1 0', minWidth: 0, height: 36, borderRadius: 12,
+                    border: '1px solid #ece8e0', backgroundColor: '#fff',
+                    display: 'flex', flexDirection: 'row', alignItems: 'center',
+                    paddingLeft: 12, paddingRight: 12, overflow: 'hidden',
+                  }}
+                >
                   <Input
-                    className="flex-1 text-sm"
+                    style={{ width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
                     value={seqInput}
                     placeholder="如 3,5,8-12"
                     placeholderClass="text-muted-foreground"
                     onInput={(e) => setSeqInput(e.detail.value)}
-                    onConfirm={handleLocateBySeq}
+                    onConfirm={() => void handleLocateBySeq()}
                   />
                 </View>
-                <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={handleLocateBySeq}>
-                  <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>定位</Text>
+                <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={() => void handleLocateBySeq()}>
+                  <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>{seqBusy ? '识别中…' : '定位'}</Text>
                 </View>
                 {seqRows.length > 0 ? (
                   <View
@@ -2206,10 +2242,18 @@ export default function RecognizePage() {
             </Text>
 
             {/* #109 序号快选：题号 = 列表显示顺序「第 N 题」，支持 3,5,8-12 */}
-            <View className="flex flex-row items-center gap-2 mb-3">
-              <View className="flex-1 h-9 rounded-xl border border-border bg-white flex flex-row items-center px-3">
+            <View className="flex flex-row items-center gap-2 mb-3" style={{ flexWrap: 'wrap' }}>
+              {/* 同「按题号提取」：原生 input 默认宽度按整行解析，必须显式约束，否则文字压到右侧按钮上 */}
+              <View
+                style={{
+                  flex: '1 1 120px', minWidth: 0, height: 36, borderRadius: 12,
+                  border: '1px solid #ece8e0', backgroundColor: '#fff',
+                  display: 'flex', flexDirection: 'row', alignItems: 'center',
+                  paddingLeft: 12, paddingRight: 12, overflow: 'hidden',
+                }}
+              >
                 <Input
-                  className="flex-1 text-sm"
+                  style={{ width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
                   value={seqInput}
                   placeholder="如 3,5,8-12"
                   placeholderClass="text-muted-foreground"
