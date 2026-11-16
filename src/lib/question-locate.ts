@@ -43,10 +43,19 @@ export interface LocatedQuestion {
   /** 是否按题号在文本里真正定位到 */
   located: boolean
   /**
-   * 归入本题的图形块（像素外接框；null = 本题没有可识别的图）。
+   * 归入本题的图形块**并集**外接框（像素；null = 本题没有可识别的图）。
    * 仅供调试与断言使用，前端不必消费——图已经并进 `stemRect`。
    */
   figureBox: SegBox | null
+  /**
+   * 归入本题的**每一张**图的框（⚠️ 一题多图是常态：一道大题下的 (1)(2)(3) 小题
+   * 各有图，或题干配图 + 结论配图）。
+   *
+   * 为什么必须逐块留：`figureBox` 是并集，只要有一张图把并集撑大，另一张即使
+   * **没被并进去**也会「落在并集里」——用并集做覆盖断言等于自己骗自己。断言必须
+   * 逐块校验 `figureBoxes[i] ⊆ stemRect`。
+   */
+  figureBoxes: SegBox[]
 }
 
 /**
@@ -139,8 +148,12 @@ function explodeLines(list: Seg[]): Seg[] {
 
 /** 选项行（`A.平行四边形` / `Ｂ．菱形`）—— 短但属于题目，不能被当手写截掉 */
 const RE_选项行 = /^\s*[A-DＡ-Ｄ]\s*[.．、,，)）]/
-/** 图注行（`第7题图` / `图3`）—— 图形是题目的一部分，必须留在题目区 */
-const RE_图注行 = /第\s*\d{1,3}\s*题\s*图|^\s*图\s*\d{1,3}\s*$/
+/** 小题标记：`(1)` / `（1）` / `①`（一题多小题时图注写成「第7题(1)图」） */
+const RE_小题标记 = '(?:[（(]\\s*\\d{1,2}\\s*[)）]|[①②③④⑤⑥⑦⑧⑨⑩])'
+/** 图注行（`第7题图` / `第7题(1)图` / `图3`）—— 图形是题目的一部分，必须留在题目区 */
+const RE_图注行 = new RegExp(
+  `第\\s*\\d{1,3}\\s*(?:${RE_小题标记}\\s*)?题\\s*(?:${RE_小题标记}\\s*)?图|^\\s*图\\s*\\d{1,3}\\s*$`,
+)
 
 /**
  * 图注里的题号（`第14题图` → 14）；不是图注返回 null。
@@ -150,7 +163,9 @@ const RE_图注行 = /第\s*\d{1,3}\s*题\s*图|^\s*图\s*\d{1,3}\s*$/
  * 会把它判给 14 —— 这正是「14 的框把 16 的图一起圈走」的成因。
  */
 function figureTitleLabel(text: string): number | null {
-  const m = /第\s*(\d{1,3})\s*题\s*图/.exec(String(text ?? ''))
+  const m = new RegExp(
+    `第\\s*(\\d{1,3})\\s*(?:${RE_小题标记}\\s*)?题\\s*(?:${RE_小题标记}\\s*)?图`,
+  ).exec(String(text ?? ''))
   return m ? Number(m[1]) : null
 }
 
@@ -284,6 +299,10 @@ export function locateQuestions(
   // 归属优先级：① 图注声明的题号（强信号，能纠正「16 的图排在 14 正文区间里」）
   //             ② 与该题 y 区间重叠高度最大（20 题这种无图注的图只能靠这条）
   // 两条都不成立 ⇒ 不归任何题：宁可漏图也不乱塞（与 D-020「错框比没框更糟」同口径）
+  //
+  // ⚠️ 图块互斥、题可多图：一个图块不得同时归两道题，但**一道题可以有多张图，
+  //    必须全部并入同一题的框**。一道大题下 (1)(2)(3) 各有图、或题干配图 +
+  //    结论配图都很常见，若按「一题一图」处理必然丢图。
   const anchorRange = (a: Anchor): [number, number] => {
     const next = anchors
       .filter((x) => x.col === a.col && x.y0 > a.y0)
@@ -327,6 +346,7 @@ export function locateQuestions(
         answerRect: null,
         located: !!hit,
         figureBox: null,
+        figureBoxes: [],
       }
     }
     const arr = byCol.get(hit.col)!
@@ -383,6 +403,8 @@ export function locateQuestions(
     // 为什么要单独并：图形块**没有文字**，纯文本链路里它不存在（20 题平行四边形
     // 下半截被切掉就是这个原因）。图可以排在题干上方（16 题），因此 y0 也要能上探；
     // 但不得侵入上一题题号行 —— 那是别人题目的起点。
+    // ⚠️ figs 是**数组**：(1)(2)(3) 各有图时会有多块，全部参与并集；`figureBoxes`
+    //    原样留下每一块，供断言逐块验证「没有哪张图被并集掩盖而漏进框外」。
     const figs = figuresByLabel.get(label) || []
     let figBox: SegBox | null = null
     if (figs.length) {
@@ -412,6 +434,7 @@ export function locateQuestions(
       answerRect: solPx === null ? null : rect(x0, solPx, x1, botOut, pageW, pageH),
       located: true,
       figureBox: figBox,
+      figureBoxes: figs.slice(),
     }
   })
 }

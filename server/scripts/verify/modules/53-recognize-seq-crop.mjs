@@ -201,6 +201,7 @@ m.test('A16 图形块参与定位（P-031 r4 / D-069 r4）', (c) => {
   // 根因：图上没有文字 ⇒ 只吃文字行的定位必然把图切在外面（真机第 20 题平行四边形下半截）
   c.ok(/export function extractFigures/.test(seg), '后端须从版面块提取图形块 extractFigures')
   c.ok(/RE_图注题号/.test(seg), '图注（第N题图）须用于图形归属：真实卷面 16 的图排在 14 正文区间内，只按 y 会归错')
+  c.ok(/RE_小题标记/.test(seg), '图注须认小题标记（第7题(1)图 / 第7(1)题图）：一题多小题时每小问各配一图')
   c.ok(/c\.ok|isFigureTitleLabel/.test(seg) || /isFigureTitleLabel/.test(seg), '须识别 figure_title 版面标签')
   // 图形块不得混进文字分段（会污染段落文本、影响既有消费方）
   c.ok(/isSkippableLabel\(b\.label\)/.test(seg), '图形块不得并入 page_text（文本链路保持原样）')
@@ -215,6 +216,10 @@ m.test('A16 图形块参与定位（P-031 r4 / D-069 r4）', (c) => {
   c.ok(/figureTitleLabel/.test(s), '前端须能解析图注题号（纠正「邻题图排在本区间」的误归）')
   c.ok(/figuresByLabel/.test(s), '须按题号归并图形块')
   c.ok(/bestOv/.test(s), '无图注的图须按 y 重叠最大归题，且重叠为 0 时不归（宁漏不误）')
+  // 一题多图：一道大题下 (1)(2)(3) 各有图是常态，归属的「唯一」只能约束图块，不能约束题
+  c.ok(/figureBoxes: SegBox\[\]/.test(s), '须逐块保留 figureBoxes（并集 figureBox 会掩盖「某张图没并进去」）')
+  c.ok(/figureBoxes: figs\.slice\(\)/.test(s), '归入的每一张图都要原样留在结果里')
+  c.ok(/题可多图/.test(s), '须明确「图块互斥、题可多图」——写成「归属唯一」会被读成一题只能一图')
   c.ok(/topOut = Math\.max\(floorY/.test(s), '图排在题干上方时 y0 须能上探，但不得侵入上一题题号行')
 
   // 前端：两段式（先文字框、再按需补图），补图必须用同一份段落重算
@@ -229,6 +234,10 @@ m.test('A16 图形块参与定位（P-031 r4 / D-069 r4）', (c) => {
   // 样本固化
   c.ok(exists('dynamic-tests/fixtures/page-text-exam-real.json'), '真机样本须固化')
   c.ok(exists('dynamic-tests/run-figure-join-p031r4.cjs'), '图形并框须有可复跑的实证脚本')
+  const dyn = read('dynamic-tests/run-figure-join-p031r4.cjs')
+  c.ok(/一题多小题/.test(dyn) || /多小题：第 5 题 3 张图全部归入/.test(dyn),
+    '须有「一题多小题各一图」用例：只按一题一图实现会丢图')
+  c.ok(/figureBoxes\.every/.test(dyn), '覆盖判据须按 figureBoxes 逐块校验（不能靠并集反查）')
 })
 
 export default m

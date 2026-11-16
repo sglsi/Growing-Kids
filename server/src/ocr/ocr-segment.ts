@@ -216,7 +216,11 @@ export interface SegmentFigure {
 }
 
 /** 图注里的题号：`第14题图` → 14（只认图注，不认「第14题」正文） */
-const RE_图注题号 = /第\s*(\d{1,3})\s*题\s*图/
+/** 小题标记：`(1)` / `（1）` / `①` —— 一题多小题时图注常写成「第7题(1)图」「第7(1)题图」 */
+const RE_小题标记 = '(?:[（(]\\s*\\d{1,2}\\s*[)）]|[①②③④⑤⑥⑦⑧⑨⑩])'
+const RE_图注题号 = new RegExp(
+  `第\\s*(\\d{1,3})\\s*(?:${RE_小题标记}\\s*)?题\\s*(?:${RE_小题标记}\\s*)?图`,
+)
 
 function isFigureLabel(label: string | null): boolean {
   const l = (label || '').toLowerCase()
