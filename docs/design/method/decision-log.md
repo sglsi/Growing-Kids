@@ -2873,3 +2873,37 @@ question_inline_figures?: Array<{ slot: number; file_key: string; width?: number
 - **未发货**：后端 dist 未换、未重启 `gk-api`；前端包未上传（线上开发版仍 `2026.11.16.1`）；`0033` 仍未执行。要看到效果需另行授权换 dist + 重启 + 重传开发版。
 - 图片 `width/height` 目前只在上传时可选传入，展示统一 `max-width:100%` 自适应，**未做按比例精确控制**；未做拖拽调整插入顺序（靠删了重插）。
 - 图文混排只在**详情页**展示态生效；首页/复习列表/导出 Word 仍按纯文本题干渲染（`[图N]` 会作为文字出现）——这是范围外，未宣称全端一致。
+
+## D-075：题干内嵌图扩展到「列表 + 导出」（P-034 扩展，2026-11-16 晚，L1 工程类）
+
+**触发**：思傅在 D-074 体检拍板「列表 + 导出都补」。D-074 台账第 2875 行把「首页/复习列表/导出 Word 仍纯文本」明确列为范围外，本决策把这块纳入，扩 P-034 范围。
+
+### 一、分档与边界
+L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 `question-match.ts`），不过 20a §5.1 三问。**不触发 CACHE_VERSION bump**（v17 不变）：切段 helper 不进 answer_cache 的 result、不改 note 结构。
+
+范围三链：
+| 链 | 处理 | 依据 |
+|---|---|---|
+| A 汇总/详情「导出打印」（`document.service.ts`） | ✅ 题干按 `[图N]` 原位切段插图 | 已存题目，有 content 内嵌图 |
+| B 复习本合成（纯文字题分支，`pdf.service.ts`） | ✅ 题干按 `[图N]` 原位切段插图 | 同上；有题面图的分支保持原行为（图本就在整张照片里） |
+| C 识别页即时导出（`ocr.service.ts`） | ⛔ 不接入 | 未入库内容，天然无详情页编辑产生的内嵌图 |
+| 列表卡片（`review-item-card.tsx`） | ✅ 按 slot 带图，无 URL 降级为文字 | 首页/复习本共用同一卡片，改一处两处生效 |
+
+### 二、实现
+- 服务端零依赖共用切段 `server/src/shared/inline-figure-runs.ts`：`splitQuestionRuns(text, resolve)` → `{kind:'text'|'figure'}[]`，缺引用原样输出 `[图N]` 文字（fail-closed，绝不拿邻图顶替，D-020 口径）。A 链 resolve 返回 storage key 走 `readObject` 直读；B 链返回签名 URL 走既有 download。
+- A 链：`questionParagraphs()` 切段 + `inlineFigureParagraph()` 单图段落，复用 `loadImage()` 与 6 张/8MB/600px 护栏；超上限降级为文字。
+- B 链：纯文字题 branch 把 stem 切成 text 块 + `#inline-<slot>` 图单元交错入列，保序。
+- 列表：`questionRichHtml()` 按 slot 组装 URL → `<RichText>` 限高 160px；无内嵌图走原 `<Text>` 摘要，零回归。
+
+### 三、实证
+| 项 | 结果 |
+|---|---|
+| `dynamic-tests/run-inline-figure-runs-d075.cjs`（真实转译执行切段 helper） | **17/17** |
+| M56（新模块：切段零依赖/fail-closed、A/B 链接入、C 链边界、列表带图） | **5/5** |
+| `verify:gate`（M12/M13/M16/M18）/ `tsc` | 38/38 / RC=0 |
+
+### 四、不宣称 / 未发货
+- **未真机回归**：列表 RichText 是否真换图、docx/PDF 里图是否真原位渲染、签名 URL 真机能否匿名 GET——均未验证。
+- **未发货**：后端 dist 未换、未重启 `gk-api`；前端包未上传；`0033` 未执行。D-074 本就未发货，本决策叠加其上。
+- 列表图片统一限高 160px 摘要展示，不按原题宽高比精排（与详情页 D-074 同口径）。
+- **push 未执行**：本地 commit 按约定做，push 等思傅指示。
