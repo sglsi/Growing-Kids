@@ -39,6 +39,21 @@ export interface AnswerAttachment {
   created_at: string
 }
 
+/**
+ * P-034（图文混排）题干内嵌图形。
+ * 与题干文本里的可见占位符 `[图N]` 一一对应：slot=N 的图渲染时替换 `[图N]`。
+ * file_key 存对象 key（与题面图同一存储），展示前由 withUrls 派生签名 URL。
+ */
+export interface QuestionInlineFigure {
+  /** 对应题干 [图N] 的 N，从 1 起；同一题内唯一 */
+  slot: number
+  /** 对象存储 key（attach 上传，不建独立 timeline 条目） */
+  file_key: string
+  /** 原始像素，展示时按比例缩放（宽满父容器） */
+  width?: number
+  height?: number
+}
+
 /** 题目的结构化内容（存于 timeline_items.content） */
 export interface QuestionContent {
   question?: string
@@ -51,6 +66,15 @@ export interface QuestionContent {
   question_images?: string[]
   /** 答题卡 / 答案图 file_key */
   answer_images?: string[]
+  /**
+   * P-034（图文混排）：题干内嵌图形。文字里用 `[图N]` 作可见占位锚点，
+   * 这里按 slot=N 存对应的图片 file_key 与原始尺寸；展示时把占位符换成图。
+   *
+   * 为什么不放进 question_images：那是「整张题面照片」，混排图是从中裁出的
+   * 局部几何图，语义与生命周期都不同（删题面图不应连带删内嵌图）。
+   * content 是 jsonb 浅合并 ⇒ 新字段免迁移；老数据没有此字段 = 纯文本渲染。
+   */
+  question_inline_figures?: QuestionInlineFigure[]
   /** 层级：1=大题/父题，2=小题/子题 */
   level?: number
   /** 所属父题在识别结果数组中的下标；顶层题为 null */
@@ -134,6 +158,11 @@ export interface TimelineItemWithUrl extends TimelineItem {
   image_urls?: string[]
   /** 题面图签名 URL（来自 content.question_images） */
   question_image_urls?: string[]
+  /**
+   * P-034：题干内嵌图签名 URL，与 content.question_inline_figures **同序**。
+   * 前端按 slot 取对应项渲染；拿不到签名的槽位为 undefined ⇒ 该占位符退化成文字。
+   */
+  question_inline_figure_urls?: (string | undefined)[]
   /** 答题卡/答案图签名 URL（来自 content.answer_images） */
   answer_image_urls?: string[]
   /** 答案附件（已补签名 URL / 缩略图 URL） */

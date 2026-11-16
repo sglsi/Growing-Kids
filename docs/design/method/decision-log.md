@@ -2815,3 +2815,61 @@ gk ALL=(root) NOPASSWD: /usr/bin/systemctl start gk-ppsv3, /usr/bin/systemctl st
 - **未真机回归**（7/14/20 定位效果、补图后框是否肉眼贴合、侧车唤醒 17s 的等待体验）；**未提审、未发正式版**。
 - 图形覆盖率未测（1 张真机 + 合成样本，只能作方向性证据）。
 - 矩形表达的固有限制不变：并排夹在别题正文带里的图，一个矩形无法既含本题文字又剔除邻题图。
+
+---
+
+## D-074：题干图文混排——图随文字一起存（P-034，2026-11-16 16:xx，L1 工程类）
+
+**触发**：思傅提出「题目详情页里文字识别后文字/符号能存，但题目里的图形没随文字一起存；需支持在文字内容外加入题目图形，并与文字一并存储」。经两轮确认定方向：**图文混排**（图插在题干文字的指定位置）+ **两种来源都要**（相册/拍照 + 题面图裁块）+ **可见占位符 [图N]** + **先本地做全套自测**（发货另行授权）。
+
+### 一、分档与边界
+
+L1 工程级（新字段 + 新交互），**不触碰学习行为**（不动题型判定、反馈、排程、掌握口径、导出口径），故不过 20a §5.1 三问；按 OPS-22 走台账 D 号 + 断言 + 明确不宣称。
+
+**硬约束（决定了实现形态）**：微信 `<textarea>` 是原生组件，**框内塞不了 `<img>`**。所以混排不能靠改输入框实现——那样会踩坏 qCaret 一整套已修好的光标补丁（第 1~11 轮）。定案：**编辑态保留可见 `[图N]` 文本，展示态用 `<RichText>` 按槽位插图**（复用参考例题 P-018 的 `stemHtml` 同款范式）。
+
+### 二、数据结构（jsonb 免迁移）
+
+`timeline_items.content` 新增：
+```ts
+question_inline_figures?: Array<{ slot: number; file_key: string; width?: number; height?: number }>
+```
+- `slot` = 题干 `[图N]` 的 N，一一对应；删除留空洞不复用（防旧标记指向新图）。
+- 走 jsonb 浅合并（后端 `update()` 的 `{...curContent, ...dto.content}`），**不加迁移**；老数据无此字段 = 纯文本渲染。
+- 与 `question_images`（整张题面照片）语义独立：删题面图不连带删内嵌图；生命周期随本题 content，删题走孤儿 GC。
+
+后端 `withUrls()` 新增派生字段 `question_inline_figure_urls`（与 figures 同序），逐张 `getPublicUrl()`；**单张签名失败返回 undefined，不让整条题目挂掉**；前端按 slot 取 URL，拿不到就把 `[图N]` 原样显示成文字。
+
+### 三、前端交互
+
+| 环节 | 实现 |
+|---|---|
+| 零依赖 helper | `src/lib/question-inline-figure.ts`：`questionRichHtml()` / `removeFigureMarker()` / `hasFigureMarker()` / `escapeRichHtml()`，零 import 可动态实跑 |
+| 展示态 | 详情页两个分支（图片条目/题目条目）共用 `figureSection`：有图时显示 RichText 预览，`[图N]` → `<img>` |
+| 来源① | 「＋ 从相册/拍照加图」→ `guardPolicy` + `guardPrivacy` 双闸门 → `chooseMedia(['camera','album'])` |
+| 来源② | 「＋ 从题面图裁图」→ 多张时 `showActionSheet` 点选 → 同一 ImageEditor(`cropOnly`) |
+| 上传 | 两条来源统一 `uploadImage(purpose='attach')`（只持久化文件、不建条目）→ 在题干光标处插 `[图N]`（走 qCaret 程序化写入，不逐字干预原生光标） |
+| 删除 | 「移除图N」→ 同时删 state 与题干里的 `[图N]`（不留孤儿标记） |
+| 保存 | `handleSave` 把题干文本（含标记）与 `question_inline_figures` **一次提交**；落库前剥掉临时 `_url` |
+
+**fail-closed**：`[图N]` 无对应 slot / 无 URL ⇒ 原样显示 `[图N]` 文字，**绝不猜图、不拿邻图顶替**（与 D-020 同口径）；题干 `< & "` 全转义、URL 剥引号空白防属性注入。
+
+### 四、实证
+
+| 项 | 结果 |
+|---|---|
+| `dynamic-tests/run-inline-figure-p034.cjs`（真实转译执行零依赖 helper + 编译产物特征） | **34/34** |
+| M55（新模块：零依赖/fail-closed、前后端契约、详情页交互、双闸门、两分支） | **4/4** |
+| `verify:gate`（M12/M13/M16/M18） | **38/38** |
+| `check:isolation` / `method:check`（H1/H2/H3）/ lint | 164 / 三硬门全绿 / 干净 |
+| P-031 回归 / 图形并框回归（D-073） | 71/71 / 17/17 |
+| `tsc`（前/后）/ `build:server` / `build:weapp` | RC=0 / RC=0 / detail **37.40 kB** |
+
+踩坑：① M18 硬门抓到详情页新调 `chooseMedia` 却没引 `guardPrivacy` ⇒ 补 recognize 同款双闸门（`guardPolicy`→`guardPrivacy` 串行）；② 视图态 `_url`（临时签名）必须落库前剥掉，否则签名会写进 content 且过期后裂图。
+
+### 五、仍不宣称 / 未发货
+
+- **未真机回归**：rich-text 是否真把 `[图N]` 换成图、家长裁剪插入是否顺手、签名 URL 真机能否匿名 GET——均未经真机验证。
+- **未发货**：后端 dist 未换、未重启 `gk-api`；前端包未上传（线上开发版仍 `2026.11.16.1`）；`0033` 仍未执行。要看到效果需另行授权换 dist + 重启 + 重传开发版。
+- 图片 `width/height` 目前只在上传时可选传入，展示统一 `max-width:100%` 自适应，**未做按比例精确控制**；未做拖拽调整插入顺序（靠删了重插）。
+- 图文混排只在**详情页**展示态生效；首页/复习列表/导出 Word 仍按纯文本题干渲染（`[图N]` 会作为文字出现）——这是范围外，未宣称全端一致。

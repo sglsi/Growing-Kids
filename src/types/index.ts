@@ -44,6 +44,14 @@ export interface AnswerAttachment {
   created_at: string
 }
 
+/** P-034（图文混排）题干内嵌图：slot 与题干 `[图N]` 一一对应 */
+export interface QuestionInlineFigure {
+  slot: number
+  file_key: string
+  width?: number
+  height?: number
+}
+
 // 题目结构化内容（存于 timeline_items.content）
 export interface QuestionContent {
   question?: string
@@ -56,6 +64,12 @@ export interface QuestionContent {
   /** 以下字段与后端 timeline 存储对齐，消除前后端类型漂移（错题提取切块流程写入） */
   question_images?: string[]
   answer_images?: string[]
+  /**
+   * P-034（图文混排）：题干内嵌图。题干文本里的 `[图N]` 是可见占位锚点，
+   * 这里按 slot=N 存图片对象 key 与尺寸；展示时把 `[图N]` 换成真图。
+   * 与 question_images（整张题面照片）语义独立，删题面图不影响内嵌图。
+   */
+  question_inline_figures?: QuestionInlineFigure[]
   /** 层级：1=大题/父题，2=小题/子题 */
   level?: number
   /** 所属父题下标；顶层为 null */
@@ -206,6 +220,8 @@ export interface TimelineItem {
   image_urls?: string[]
   /** 题面图签名 URL（来自 content.question_images） */
   question_image_urls?: string[]
+  /** P-034：题干内嵌图签名 URL，与 content.question_inline_figures 同序 */
+  question_inline_figure_urls?: (string | undefined)[]
   /** 答题卡/答案图签名 URL（来自 content.answer_images） */
   answer_image_urls?: string[]
   /** 答案附件（后端已补签名 URL / 缩略图 URL） */

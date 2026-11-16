@@ -1,4 +1,4 @@
-import { View, Text, ScrollView, Picker, Image } from '@tarojs/components'
+import { View, Text, ScrollView, Picker, Image, RichText } from '@tarojs/components'
 import Taro, { useRouter } from '@tarojs/taro'
 import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
@@ -19,10 +19,12 @@ import MathSymbolBar from '@/components/math-symbol-bar'
 import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { splitAnswerSolution, joinAnswerSolution } from '@/utils/answer-merge'
 import { useCaret } from '@/utils/use-caret'
+import { questionRichHtml, removeFigureMarker } from '@/lib/question-inline-figure'
 import { useKeyboardAvoid } from '@/lib/use-keyboard-avoid'
-import { getSubjectColor, formatTime, truncate, type SimilarItem, type ReviewPlan } from '@/types'
+import { getSubjectColor, formatTime, truncate, type SimilarItem, type ReviewPlan, type QuestionInlineFigure } from '@/types'
 import { openStorageFile } from '@/services/net'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
+import { guardPrivacy } from '@/utils/privacy'
 
 /**
  * 复习排程计划**由后端现算**（GET /api/timeline/:id 返回 review_plan）。
@@ -47,6 +49,9 @@ function planTextOf(plan: ReviewPlan | null): string {
   if (days <= 0) return `今天该复习（${d.getMonth() + 1}/${d.getDate()}）`
   return `${days} 天后（${d.getMonth() + 1}/${d.getDate()}）`
 }
+
+/** P-034：题干内嵌图视图态，_url 是刚上传还没落库的临时签名 URL（落库前剥掉） */
+type InlineFigView = QuestionInlineFigure & { _url?: string }
 
 export default function DetailPage() {
   const router = useRouter()
@@ -107,6 +112,12 @@ export default function DetailPage() {
   const [editorBusy, setEditorBusy] = useState(false)      // 编辑结果上传/替换中
   const [ocrBusy, setOcrBusy] = useState(false)            // 图片文字识别中
   const [ocrResult, setOcrResult] = useState('')           // 识别出的文字（非空=展示结果面板）
+  // P-034（图文混排）：题干内嵌图。题干里 `[图N]` 是可见占位锚点，这里按 slot 存图片。
+  //  展示态把 `[图N]` 换成真图（RichText），编辑态保留标记原文可见——微信 textarea 是原生
+  //  组件，框内插不了真图，这是唯一不动光标补丁又能图文穿插的做法。
+  const [inlineFigures, setInlineFigures] = useState<InlineFigView[]>([])
+  const [figEditorSrc, setFigEditorSrc] = useState('')     // 「从题面图裁图」正在编辑的源图 URL
+  const [figAdding, setFigAdding] = useState(false)        // 加图上传中
 
   // 输入框光标庇护所（思傅 2026-10-26 修「光标跳到末尾」）：位置记在 ref 里，
   // 只有程序化插入符号时才一次性定位，绝不逐字干预原生光标（详见 utils/use-caret.ts）
@@ -128,6 +139,11 @@ export default function DetailPage() {
     aDraftRef.current = a
     setQContent(q)
     setAnswerDraft(a)
+    // P-034：载入题干内嵌图（老数据无此字段 ⇒ 空数组 ⇒ 纯文本渲染）。
+    // 后端补的签名 URL 与 figures 同序，合并进视图态的 _url 供展示态插图。
+    const figs = Array.isArray(it.content?.question_inline_figures) ? it.content!.question_inline_figures! : []
+    const urls = it.question_inline_figure_urls || []
+    setInlineFigures(figs.map((f, i) => ({ ...f, _url: urls[i] })))
     setMastered(it.mastered)
     setPlan(it.review_plan || null)
   }
@@ -202,6 +218,11 @@ export default function DetailPage() {
          */
         subject_id: subjectId || null,
         question_content: qDraftRef.current,
+        // P-034：图文一次事务提交——题干文本（含 [图N] 标记）与内嵌图字段同时写。
+        // 剥掉视图态的 _url（临时签名，不入 content；重新加载时后端按 file_key 补）。
+        question_inline_figures: inlineFigures.map(({ slot, file_key, width, height }) => ({
+          slot, file_key, width, height,
+        })),
         answer_content: answerLatex,
         solution: solutionLatex,
         status: answerLatex || solutionLatex ? 'answered' : 'pending',
@@ -376,6 +397,94 @@ export default function DetailPage() {
     Taro.showToast({ title: mode === 'replace' ? '已替换题干' : '已追加到题干', icon: 'success' })
   }
 
+  // ---------- P-034：题干内嵌图（图文混排） ----------
+
+  /** 下一个可用 slot：取现有最大 +1；删除后留空洞不复用，避免旧 [图N] 指向新图 */
+  const nextFigSlot = () => inlineFigures.reduce((mx, f) => Math.max(mx, f.slot), 0) + 1
+
+  /**
+   * 把一个已上传的图片登记为题干内嵌图，并在题干当前光标处插入 `[图N]` 占位符。
+   * - 用 qCaret（与插符号同款）：程序化写入、一次性定位、不逐字干预原生光标（红线）。
+   * - 只登记 state，不落库：由底部「保存修改」统一提交，图文一次事务，不会存了文丢了图。
+   */
+  const attachInlineFigure = (key: string, url: string, width?: number, height?: number) => {
+    const slot = nextFigSlot()
+    const marker = `[图${slot}]`
+    setTimeout(() => {
+      const pos = qCaret.position(qDraftRef.current.length)
+      const next = qDraftRef.current.slice(0, pos) + marker + qDraftRef.current.slice(pos)
+      qDraftRef.current = next
+      setQContent(next)
+      setInlineFigures((prev) => [...prev, { slot, file_key: key, width, height, _url: url }])
+      dirtyRef.current = true
+      qCaret.request(pos + marker.length, next)
+      qCaret.refocus()
+      Taro.showToast({ title: `已插入 [图${slot}]，记得点保存`, icon: 'none' })
+    }, 60)
+  }
+
+  /**
+   * 来源①：从相册 / 拍照选一张图 → ImageEditor 裁剪 → attach 上传 → 插入占位符。
+   * 选图先过隐私闸门（与识别页 chooseImage 同口径）。
+   */
+  const handleAddFigureFromCamera = async () => {
+    const { guardPolicy } = await import('@/services/policy-gate')
+    // 两道闸门串行（recognize 同款）：监护人同意（业务）→ 平台授权（基础库）。
+    // 未授权时 chooseMedia 会被基础库挂起，表现为「点了没反应」⇒ 必须前置。
+    if (!(await guardPolicy('选择图片'))) return
+    if (!(await guardPrivacy('选择图片'))) return
+    try {
+      const res = await Taro.chooseMedia({ count: 1, mediaType: ['image'], sourceType: ['camera', 'album'] })
+      const path = res.tempFiles?.[0]?.tempFilePath
+      if (path) setFigEditorSrc(path)
+    } catch (e) {
+      console.error('选图失败', e)
+    }
+  }
+
+  /** 来源②：从本题已有的题面图里选一张作为裁图源。多张时让用户点选。 */
+  const handleAddFigureFromQuestionImage = () => {
+    const urls = item?.question_image_urls || []
+    if (!urls.length) {
+      Taro.showToast({ title: '本题没有题面图，请用相册/拍照加图', icon: 'none', duration: 2500 })
+      return
+    }
+    if (urls.length === 1) { setFigEditorSrc(urls[0]); return }
+    Taro.showActionSheet({
+      itemList: urls.map((_, i) => `题面图 ${i + 1}`),
+      success: (r) => { const u = urls[r.tapIndex]; if (u) setFigEditorSrc(u) },
+      fail: () => {},
+    })
+  }
+
+  /**
+   * ImageEditor 确认：无论来源是相册还是题面图，结果统一 attach 上传并登记。
+   * attach = 只持久化文件、不建条目；内嵌图生命周期随本题 content，删题走孤儿 GC。
+   */
+  const handleFigureCropConfirm = async (tempPath: string) => {
+    setFigEditorSrc('')
+    setFigAdding(true)
+    try {
+      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      attachInlineFigure(up.key, up.url)
+    } catch (e) {
+      console.error('内嵌图上传失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '加图失败，请重试', icon: 'none', duration: 2500 })
+    } finally {
+      setFigAdding(false)
+    }
+  }
+
+  /** 删除一个内嵌图槽位：从 state 移除 + 从题干文本移除对应 `[图N]` 标记（图文一起删，不留孤儿标记） */
+  const handleRemoveInlineFigure = (slot: number) => {
+    const next = removeFigureMarker(qDraftRef.current, slot)
+    qDraftRef.current = next
+    setQContent(next)
+    setInlineFigures((prev) => prev.filter((f) => f.slot !== slot))
+    dirtyRef.current = true
+    Taro.showToast({ title: `已移除 [图${slot}]，记得点保存`, icon: 'none' })
+  }
+
   /**
    * 删除详情页里的某张图（思傅 2026-10-23）：
    * 题面图 / 答题卡图 / 旧版 images 兜底图均可删。
@@ -513,6 +622,58 @@ export default function DetailPage() {
   const curSubject = subjects.find((s) => s.id === subjectId) || item?.subjects || null
   const color = getSubjectColor(curSubject?.color)
 
+  // P-034（图文混排）：题干内嵌图区——展示态（RichText 把 [图N] 换成真图）+ 加图/删图入口。
+  // 两个分支（图片条目 / 题目条目）共用同一段 JSX，避免图文能力只在一处生效。
+  const figureSection = (
+    <View className="mb-4">
+      {inlineFigures.length > 0 ? (
+        <View className="rounded-2xl border border-border p-3 mb-3" style={{ backgroundColor: '#FCFBF8' }}>
+          <Text className="block text-xs text-muted-foreground mb-2">题干预览（图形已嵌入文字对应位置）</Text>
+          <RichText nodes={questionRichHtml(qContent, inlineFigures.map((f) => ({ slot: f.slot, url: f._url })))} />
+        </View>
+      ) : null}
+      <View className="flex flex-row items-center justify-between mb-2">
+        <Text className="block text-xs text-muted-foreground">
+          题里有图形？加进来后正文会出现 [图N]，预览里显示真图
+        </Text>
+      </View>
+      <View className="flex flex-row flex-wrap gap-2">
+        <View
+          className="px-3 rounded-lg"
+          style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', opacity: figAdding ? 0.6 : 1 }}
+          onClick={() => { if (!figAdding) void handleAddFigureFromCamera() }}
+        >
+          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>{figAdding ? '上传中…' : '＋ 从相册/拍照加图'}</Text>
+        </View>
+        <View
+          className="px-3 rounded-lg"
+          style={{ backgroundColor: 'rgba(16, 185, 129,0.08)', opacity: figAdding ? 0.6 : 1 }}
+          onClick={() => { if (!figAdding) handleAddFigureFromQuestionImage() }}
+        >
+          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>＋ 从题面图裁图</Text>
+        </View>
+      </View>
+      {inlineFigures.length > 0 ? (
+        <View className="flex flex-row flex-wrap gap-3 mt-3">
+          {inlineFigures.map((f) => (
+            <View key={f.slot} className="flex flex-col items-center" style={{ width: 96 }}>
+              {f._url ? (
+                <Image src={f._url} mode="aspectFit" style={{ width: 72, height: 72 }} onClick={() => Taro.previewImage({ current: f._url!, urls: inlineFigures.map((x) => x._url).filter(Boolean) as string[] })} />
+              ) : (
+                <View className="w-[72px] h-[72px] rounded-lg border border-border flex items-center justify-center">
+                  <Text className="block text-xs text-muted-foreground">[图{f.slot}]</Text>
+                </View>
+              )}
+              <View className="mt-1" onClick={() => handleRemoveInlineFigure(f.slot)}>
+                <Text className="block text-xs" style={{ color: DANGER }}>移除图{f.slot}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  )
+
   // 图片资料（kind=image）：只展示图片 + 归属学科，不做题目编辑
   if (item && item.kind === 'image') {
     return (
@@ -599,6 +760,8 @@ export default function DetailPage() {
             />
           </Card>
 
+          {figureSection}
+
           <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
             <View className="flex-1">
               <Text className="block text-sm font-medium text-foreground">归属学科</Text>
@@ -684,6 +847,17 @@ export default function DetailPage() {
           confirmText="保存并替换原图"
           onCancel={() => setEditorImg('')}
           onConfirm={(p) => void handleEditorConfirm(p)}
+        />
+
+        {/* P-034：题干内嵌图裁剪（相册/题面图来源共用），确认后 attach 上传并插入 [图N] */}
+        <ImageEditor
+          visible={!!figEditorSrc}
+          src={figEditorSrc}
+          cropOnly
+          enableSaveToInbox={false}
+          confirmText="插入题干"
+          onCancel={() => setFigEditorSrc('')}
+          onConfirm={(p) => void handleFigureCropConfirm(p)}
         />
 
         {/* 识别结果面板（思傅 2026-10-23：图片条目分支补挂——
@@ -787,6 +961,8 @@ export default function DetailPage() {
             onFocus={(e) => { qCaret.track((e.detail as { cursor?: number } | undefined)?.cursor); kb.reveal('#question-box') }}
           />
         </Card>
+
+        {figureSection}
 
         {item?.question_image_urls?.length ? (
           <View className="mb-4">
@@ -1093,6 +1269,16 @@ export default function DetailPage() {
         confirmText="保存并替换原图"
         onCancel={() => setEditorImg('')}
         onConfirm={(p) => void handleEditorConfirm(p)}
+      />
+      {/* P-034：题干内嵌图裁剪（相册/题面图来源共用） */}
+      <ImageEditor
+        visible={!!figEditorSrc}
+        src={figEditorSrc}
+        cropOnly
+        enableSaveToInbox={false}
+        confirmText="插入题干"
+        onCancel={() => setFigEditorSrc('')}
+        onConfirm={(p) => void handleFigureCropConfirm(p)}
       />
       {editorBusy ? (
         <View style={{ position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, zIndex: 300 }} />

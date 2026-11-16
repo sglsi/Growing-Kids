@@ -186,6 +186,22 @@ export class TimelineService {
         if (Array.isArray(qImgs) && qImgs.length) {
           enriched.question_image_urls = await Promise.all(qImgs.map((k) => this.storageService.getPublicUrl(k)))
         }
+        // P-034（图文混排）：题干内嵌图逐个补签名 URL，顺序与 content.question_inline_figures 一致。
+        // 单张失败不让整条题目挂掉：该槽位留 undefined，前端把 [图N] 退化成可见文字（fail-closed）。
+        const inlineFigs = it.content?.question_inline_figures
+        if (Array.isArray(inlineFigs) && inlineFigs.length) {
+          enriched.question_inline_figure_urls = await Promise.all(
+            inlineFigs.map(async (f) => {
+              if (!f?.file_key) return undefined
+              try {
+                return await this.storageService.getPublicUrl(f.file_key)
+              } catch (e) {
+                this.logger?.warn?.(`inline figure 签名失败 slot=${f.slot}: ${String(e)}`)
+                return undefined
+              }
+            }),
+          )
+        }
         const aImgs = it.content?.answer_images
         if (Array.isArray(aImgs) && aImgs.length) {
           enriched.answer_image_urls = await Promise.all(aImgs.map((k) => this.storageService.getPublicUrl(k)))

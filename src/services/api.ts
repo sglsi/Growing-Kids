@@ -472,6 +472,8 @@ export interface TimelineContentPayload {
   status?: 'answered' | 'pending'
   /** 题面图 file_key（与答题卡图区分存储） */
   question_images?: string[]
+  /** 题干内嵌图（P-034 图文混排；slot 与题干 [图N] 对应） */
+  question_inline_figures?: import('@/types').QuestionInlineFigure[]
   /** 答题卡/答案图 file_key */
   answer_images?: string[]
   /** 层级：1=大题/父题，2=小题/子题 */
@@ -596,6 +598,8 @@ export function updateQuestion(
     tags?: string[]
     /** 题面图 file_key 全量替换（详情页「编辑图片」后原位替换；后端按 content 合并） */
     question_images?: string[]
+    /** 题干内嵌图全量替换（P-034 图文混排；slot 与题干 [图N] 对应） */
+    question_inline_figures?: import('@/types').QuestionInlineFigure[]
     /** 答题卡/答案图 file_key 全量替换（思傅 2026-10-23：详情页支持删除答案图） */
     answer_images?: string[]
     /** 旧版图片 file_key 全量替换（content.images 兜底渲染路径，思傅 2026-10-23） */
@@ -621,6 +625,7 @@ export function updateQuestion(
     payload.wrong_answer !== undefined ||
     payload.status !== undefined ||
     payload.question_images !== undefined ||
+    payload.question_inline_figures !== undefined ||
     payload.answer_images !== undefined ||
     payload.images !== undefined ||
     payload.answer_attachments !== undefined ||
@@ -635,6 +640,7 @@ export function updateQuestion(
       wrong_answer: payload.wrong_answer,
       status: payload.status,
       ...(payload.question_images !== undefined ? { question_images: payload.question_images } : {}),
+      ...(payload.question_inline_figures !== undefined ? { question_inline_figures: payload.question_inline_figures } : {}),
       // 答题卡/答案图、旧版图片的全量替换（后端按 content 字段合并，未传的字段不受影响）
       ...(payload.answer_images !== undefined ? { answer_images: payload.answer_images } : {}),
       ...(payload.images !== undefined ? { images: payload.images } : {}),
