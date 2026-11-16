@@ -2475,3 +2475,60 @@ D-064 把 `touchmove` 只挂在 `ScrollView` 上，格子矩形又只在 `onLong
 - 侧车**常驻不再空闲回收**（1.64GB 常驻，宿主机 3.7GB / swap 2GB），由 `MemoryMax=2400M` 兜底防拖垮宿主；若日后并发上涨需评估升配。
 - `/api/image/ocr-diagnose` 与 `/api/image/capabilities` 是 **2026-10-27 设计上就公开**的端点（`PUBLIC_ROUTES` 有注释），实测公网无 token **200**、`/api/library` 对 401 正常。这不是本轮新开的口子，但单次诊断会跑一次真实 OCR（~23s CPU），存在被刷的滥用面，**需单独决策**是否在 Caddy 拦这两条路径。
 - 🔴 真机「精准识别」体验是否恢复需思傅在真机点一次确认；本轮只有服务端与端到端证据，**未做真机回归**。
+
+## D-071：OCR 侧车「可回收 + 被调用必能正确启动」（2026-11-16 12:xx，L1 工程类）
+
+> 授权：思傅 11-16「两个顺带发现中的 1 侧车可以回收，但应该确保使用的时候能够正确启动起来」。
+
+### 一、问题：D-070 把侧车救活了，但它再也不回收
+
+D-070 用 `PPSV3_SUPERVISE=0` 把侧车改成「纯外部单元」，代价是 **1.4GB 常驻永不释放**（宿主 3.7G / swap 2G）。而代码里本来就有「懒启动 + 空闲回收」（`SidecarSupervisor`），只是 D-070 证明它**在当前部署形态下必然失败**：spawn 出来的子进程与 gk-api 同 cgroup，吃 `gk-api.service` 的 `MemoryMax=1200M`，而 PPSV3 常驻 1.4-1.6G。
+
+顺带查出旧实现的**第二个 bug**：`stop()` 里 `clearInterval(this.monitorTimer)` ⇒ 第一次空闲回收之后巡检定时器被永久清掉，**只能回收一次**，之后侧车再起来就再也不回收。
+
+### 二、处置：`SidecarSupervisor` 增加「单元模式」
+
+`PPSV3_UNIT=gk-ppsv3` 时启停改走 `systemctl start/stop`（`sudo -n`），不再 spawn：
+- **回收**：`lastUsed` 超 `PPSV3_IDLE_TIMEOUT_MS`（默认 15min）→ `systemctl stop gk-ppsv3`；`stop()` 不再清定时器 ⇒ 可反复「睡下-叫醒」。
+- **拉起**：`ensureReady()` → `systemctl start` → 轮询 `/healthz` → **预热**（见三）→ 才放行真实请求；起不来返回 `null` 由上层降级，不抛错。
+- **退出语义**：gk-api 的 SIGTERM 走 `shutdown()`，单元模式**只清定时器、不停单元**（共享资源，gk-api 重启不该带走侧车）。
+- **自愈**：单元活着但 `/healthz` 连续失败 → `systemctl restart`（不是 kill 子进程）。
+- **健康探针**：新增 `expectedDown`，`isSleeping()` 为真时探活失败**不计数不告警**（否则每次回收后每 60s 报一次 `sidecar-unreachable`）。
+
+### 三、关键坑：`/healthz` 200 ≠ 能用
+
+`main3.py` 的 `/healthz` 只是状态返回，**PP-StructureV3 是首次 `/ppsv3` 才加载模型**（`_get_pipeline()` 懒加载）。只看 `/healthz` 就报 ready，用户的第一次识别请求要把模型加载白等进去。
+
+处置：唤醒后先喂一张仓库内置的已知文字探针图（`diagnose-probe.ts`，不新增二进制）跑一次 `/ppsv3` 把模型烘进内存，再放行。预热失败只记日志、**不阻断**（降级为「首个请求慢」）。
+
+**生产实测（2026-11-16，L3）**：`stop → start → /healthz 200` = **1.56s**；首个 `/ppsv3`（含模型加载）= **16.29s**；热调用 = **3.64s**。⇒ 一次「睡醒」约 **18s**，之后回到常态。所以空闲窗口保持 15min，不设更短。
+
+### 四、生产配套（sudoers，必须）
+
+`gk` 是普通用户，`systemctl` 默认要 root：新增 `/etc/sudoers.d/gk-ppsv3`（0440 root:root，`visudo -c` parsed OK）：
+
+```
+gk ALL=(root) NOPASSWD: /usr/bin/systemctl start gk-ppsv3, /usr/bin/systemctl stop gk-ppsv3, /usr/bin/systemctl restart gk-ppsv3, /usr/bin/systemctl is-active gk-ppsv3
+```
+
+只放行四个动作 + 固定单元名，不给通配。实测 `sudo -u gk -H sudo -n systemctl start/stop gk-ppsv3` 可用。规则与单元文件一起留档在 `docs/gk-ppsv3.service` 顶部注释。
+
+### 五、验证
+
+| 项 | 结果 |
+|---|---|
+| 后端 `tsc --noEmit` | RC=0 |
+| `verify:gate`（M12/M13/M16/M18） | **38/38** |
+| `check:isolation` | **164 处**通过 |
+| M54（新增静态守卫，8 条） | **8/8** |
+| `dynamic-tests/run-sidecar-unit-d071.cjs`（编译产物实跑状态机） | **29/29** |
+| 生产 stop→start→healthz | 1.56s（`inactive` → `active`，`NRestarts=0`） |
+| 生产首个 `/ppsv3` / 热调用 | 16.29s / 3.64s，均 `200`，`blocks=1` |
+
+实证脚本覆盖：睡着被叫醒、连续调用不重复 start、空闲真回收、**回收后还能再叫醒**、`shutdown()` 不停共享单元、启动失败返回 `null`+告警、`expectedDown` 不误报（含无反例对照组）、静态契约。
+
+### 六、边界
+
+- 🔴 本地实现完成；**是否换 `server/dist` + 重启 gk-api 生效，待思傅单独授权**（红线：换 dist/重启必须单独点头）。换之前 `.env` 必须保持 `PPSV3_SUPERVISE=0`——否则旧 dist 会继续在 gk-api 的 cgroup 里 spawn，必然起不来。
+- 唤醒的 ~18s 冷启代价无法消除（Paddle 模型装载），只能靠空闲窗口控制频率；若真机觉得慢，下一步是「上传前置预热」（需要前端配合，未做）。
+- 未做真机回归；不宣称「识别变快」。

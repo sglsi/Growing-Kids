@@ -1,4 +1,4 @@
-import { spawn, execSync, type ChildProcess } from 'child_process'
+import { spawn, exec, type ChildProcess } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -9,6 +9,7 @@ import {
   getOcrAlertSink,
 } from './ocr-health'
 import { toGuiPython, pythonEnv, decodeEngineChunk } from './python-gui'
+import { getDiagnoseProbeBuffer } from './diagnose-probe'
 
 /**
  * OCR 侧车守护进程（lazy-start + 空闲回收 + 资源紧张回收）
@@ -24,7 +25,21 @@ import { toGuiPython, pythonEnv, decodeEngineChunk } from './python-gui'
  *  - 外部已独立部署侧车时，设 `OCR_SUPERVISE=0`，`withSidecar` 直接透传 fn()，行为与改造前一致。
  *  - auto 模式（默认）：仅当 ocr-engine/main.py 存在且 python3 可用时才启用托管，否则降级为透传。
  *  - 任何启动/探活失败都返回 null 交由 OcrService 降级到 VLM，绝不抛错阻断主链路。
+ *
+ * ⭐ 单元模式（D-071，2026-11-16）：配置 `unit`（如 `PPSV3_UNIT=gk-ppsv3`）后，
+ *    启停改为 `systemctl start/stop <unit>`，**不再自己 spawn 子进程**。
+ *    原因：spawn 出来的子进程与 gk-api 同 cgroup，吃 gk-api.service 的 `MemoryMax=1200M`；
+ *    PPSV3 常驻 1.4-1.6G ⇒ 托管必然起不来（D-070 实测）。单元模式下侧车跑在自己
+ *    `MemoryMax=2400M` 的 cgroup 里，空闲回收由本守护发 `systemctl stop`，被调用时发
+ *    `systemctl start` 并等 `/healthz` 通过——「能回收」与「能起来」同时成立。
+ *    代价：需要给运行 gk-api 的用户一条**限定单元名**的 sudoers 免密规则（见 docs/gk-ppsv3.service）。
  */
+
+export type SidecarUnitAction = 'start' | 'stop' | 'restart'
+export interface SidecarUnitResult {
+  ok: boolean
+  out: string
+}
 
 export interface SidecarConfig {
   /** '1' 强制启用托管 | '0' 禁用（外部侧车） | 'auto' 仅当脚本存在且 python 可用时启用 */
@@ -47,6 +62,17 @@ export interface SidecarConfig {
   startTimeoutMs: number
   /** 透传给侧车子进程的环境变量（OCR_ENGINE_MODE 等） */
   engineEnv: Record<string, string>
+  /**
+   * systemd 单元名。非空 ⇒ **单元模式**：启停走 systemctl，不 spawn 子进程（D-071）。
+   * 空字符串 ⇒ 传统 spawn 模式（Windows 本地开发 / 无 systemd 环境）。
+   */
+  unit: string
+  /** 单元控制是否加 `sudo -n`（生产 gk-api 以普通用户 gk 运行，默认 true） */
+  unitSudo: boolean
+  /** 单元控制命令（测试注入用；生产走 systemctl） */
+  unitCmd?: (action: SidecarUnitAction, unit: string) => Promise<SidecarUnitResult>
+  /** 启动后是否跑一次探针图把模型烘热（默认 true；PPSV3_WARMUP=0 关闭） */
+  warmup: boolean
   /** 埋点（与 LocalOcrClient 共享，统一成功率/降级率视图）。默认单例。 */
   telemetry: OcrTelemetry
   /** 告警上报。默认单例（console / webhook）。 */
@@ -59,6 +85,23 @@ const DEFAULT_IDLE_MS = 15 * 60 * 1000
 const DEFAULT_TIGHT_IDLE_MS = 2 * 60 * 1000
 const DEFAULT_MONITOR_MS = 15 * 1000
 const DEFAULT_START_TIMEOUT_MS = 30 * 1000
+/** 单元模式冷启：Paddle 模型装载 + 绑定端口（生产实测 20-40s，留足余量） */
+const DEFAULT_UNIT_START_TIMEOUT_MS = 120 * 1000
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/** 生产实现：`[sudo -n ]systemctl <action> <unit>`。失败不抛错，交由调用方决定降级。 */
+function makeSystemctl(unitSudo: boolean) {
+  return (action: SidecarUnitAction, unit: string): Promise<SidecarUnitResult> =>
+    new Promise((resolve) => {
+      const cmd = `${unitSudo ? 'sudo -n ' : ''}systemctl ${action} ${unit}`
+      exec(cmd, { timeout: 60_000, windowsHide: true }, (err, stdout, stderr) => {
+        const out = `${stdout ?? ''}${stderr ?? ''}`.trim()
+        resolve({ ok: !err, out: err ? `${out}${out ? ' | ' : ''}${err.message}` : out })
+      })
+    })
+}
+
 
 function resolveScript(): { dir: string; script: string } {
   const candidates = [
@@ -170,6 +213,8 @@ function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
     if (process.env[k] !== undefined) engineEnv[k] = process.env[k] as string
   }
   const supervise = ((process.env.OCR_SUPERVISE || 'auto') as '1' | '0' | 'auto')
+  // 单元模式：PPSV3_UNIT（3.x 侧车）/ OCR_UNIT（2.x 侧车）。空=传统 spawn 模式。
+  const unit = String(opts?.unit ?? process.env.PPSV3_UNIT ?? process.env.OCR_UNIT ?? '').trim()
   const cfg: SidecarConfig = {
     supervise,
     engineDir: dir,
@@ -184,8 +229,16 @@ function buildConfig(opts?: Partial<SidecarConfig>): SidecarConfig {
       opts?.tightRssBytes ??
       (process.env.OCR_SHUTDOWN_RSS_MB ? Number(process.env.OCR_SHUTDOWN_RSS_MB) * 1024 * 1024 : 0),
     monitorMs: opts?.monitorMs ?? (Number(process.env.OCR_MONITOR_MS) || DEFAULT_MONITOR_MS),
-    startTimeoutMs: opts?.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
+    // 单元模式冷启要等 Paddle 模型装进内存（生产实测 20-40s），默认 30s 不够 ⇒ 单独给 120s
+    startTimeoutMs:
+      opts?.startTimeoutMs ??
+      (Number(process.env.PPSV3_START_TIMEOUT_MS ?? process.env.OCR_START_TIMEOUT_MS) ||
+        (unit ? DEFAULT_UNIT_START_TIMEOUT_MS : DEFAULT_START_TIMEOUT_MS)),
     engineEnv: { ...engineEnv, ...(opts?.engineEnv ?? {}) },
+    unit,
+    unitSudo: opts?.unitSudo ?? (process.env.PPSV3_UNIT_SUDO ?? '1') !== '0',
+    unitCmd: opts?.unitCmd,
+    warmup: opts?.warmup ?? ((process.env.PPSV3_WARMUP ?? (unit ? '1' : '0')) !== '0'),
     telemetry: opts?.telemetry ?? getOcrTelemetry(),
     alertSink: opts?.alertSink ?? getOcrAlertSink(),
     unhealthyFailThreshold: opts?.unhealthyFailThreshold ?? Number(process.env.OCR_UNHEALTHY_FAILS ?? 3),
@@ -220,27 +273,45 @@ export class SidecarSupervisor {
   private intentionalStop = false
   private unhealthyCount = 0
   private unhealthyAlerted = false
+  /** 单元模式下的「我让它活着」状态；空闲回收后置 false（下次调用再 start） */
+  private unitActive = false
+  /** 单元关闭中：期间不重复发 stop、也不计入健康失败 */
+  private unitStopping = false
   readonly disabled: boolean
   private readonly telemetry: OcrTelemetry
   private readonly alertSink: OcrAlertSink
+  private readonly runUnit: (action: SidecarUnitAction, unit: string) => Promise<SidecarUnitResult>
 
   constructor(opts?: Partial<SidecarConfig>) {
     this.cfg = buildConfig(opts)
     this.disabled = this.computeDisabled()
     this.telemetry = this.cfg.telemetry
     this.alertSink = this.cfg.alertSink
+    this.runUnit = this.cfg.unitCmd ?? makeSystemctl(this.cfg.unitSudo)
     if (!this.disabled) {
       this.monitorTimer = setInterval(() => void this.tick(), this.cfg.monitorMs)
       this.monitorTimer.unref?.()
-      process.once('SIGTERM', () => this.stop('sigterm'))
-      process.once('SIGINT', () => this.stop('sigint'))
+      // ⚠️ 退出只停「自己 spawn 的子进程」；单元模式下侧车是共享资源，gk-api 重启不该把它带走
+      process.once('SIGTERM', () => this.shutdown())
+      process.once('SIGINT', () => this.shutdown())
       console.log(
-        `[sidecar] 守护已启用：监听 ${this.cfg.baseUrl}，` +
-          `空闲回收 ${Math.round(this.cfg.idleTimeoutMs / 1000)}s` +
+        `[sidecar] 守护已启用：${this.cfg.unit ? `单元模式 unit=${this.cfg.unit}` : 'spawn 模式'}，` +
+          `监听 ${this.cfg.baseUrl}，空闲回收 ${Math.round(this.cfg.idleTimeoutMs / 1000)}s` +
           (this.cfg.tightRssBytes > 0
             ? `，资源紧张阈值 ${(this.cfg.tightRssBytes / 1024 / 1024) | 0}MB`
-            : ''),
+            : '') +
+          `，启动等待上限 ${Math.round(this.cfg.startTimeoutMs / 1000)}s`,
       )
+      // 单元模式：启动时同步一次真实状态（gk-api 重启时侧车可能正跑着），避免误判为已停
+      if (this.cfg.unit) {
+        void this.isHealthy().then((ok) => {
+          if (ok) {
+            this.unitActive = true
+            this.lastUsed = Date.now()
+            console.log(`[sidecar] 采纳已在运行的单元 ${this.cfg.unit}（/healthz 通过）`)
+          }
+        })
+      }
     } else {
       const reason = this.disabledReason()
       console.log(
@@ -253,6 +324,8 @@ export class SidecarSupervisor {
   private computeDisabled(): boolean {
     const raw = this.cfg.supervise
     if (raw === '0') return true
+    // 单元模式由 systemd 负责解释器/脚本，本进程不需要脚本或 python 可见
+    if (this.cfg.unit) return false
     if (raw === '1') return false
     // auto：脚本存在且 python 可用才启用
     if (!this.cfg.script || !fs.existsSync(this.cfg.script)) return true
@@ -264,6 +337,7 @@ export class SidecarSupervisor {
   disabledReason(): string {
     const raw = this.cfg.supervise
     if (raw === '0') return 'supervise=0（外部侧车模式）'
+    if (this.cfg.unit) return ''
     if (raw === '1') return ''
     if (!this.cfg.script || !fs.existsSync(this.cfg.script)) {
       return `脚本缺失（${this.cfg.script || '未解析到 main.py/main3.py'}）`
@@ -272,9 +346,21 @@ export class SidecarSupervisor {
     return ''
   }
 
+  /** 侧车当前是否（我们认为）在跑：单元模式看单元状态，spawn 模式看子进程 */
+  private isRunning(): boolean {
+    return this.cfg.unit ? this.unitActive : !!(this.child && !this.child.killed)
+  }
+
+  /** 空闲休眠中（单元模式 + 已被回收）——健康探针据此不把「睡着」当故障 */
+  isSleeping(): boolean {
+    return !!this.cfg.unit && !this.unitActive && !this.starting
+  }
+
   /** 当前是否应回收侧车（纯函数，便于测试）。不在使用中、超过容忍窗口即停。 */
   private shouldStop(now: number): { stop: boolean; reason: string } {
-    if (!this.child || this.starting || this.active > 0) return { stop: false, reason: '' }
+    if (!this.isRunning() || this.starting || this.active > 0 || this.unitStopping) {
+      return { stop: false, reason: '' }
+    }
     const elapsed = now - this.lastUsed
     const rss = process.memoryUsage().rss
     const tight = this.cfg.tightRssBytes > 0 && rss > this.cfg.tightRssBytes
@@ -289,11 +375,10 @@ export class SidecarSupervisor {
       this.stop(reason)
       return
     }
-    // 健康自检：侧车在跑，但 /healthz 连续失败 → 进程可能僵死，自愈（kill 让下次 ensureReady 重启）+ 告警。
-    // 仅在「非启动中、子进程存在且未死」时判定，避免启动期误报。
-    if (this.child && !this.child.killed && !this.starting) {
-      void this.selfCheck()
-    }
+    if (!this.isRunning() || this.starting) return
+    // 健康自检：侧车在跑，但 /healthz 连续失败 → 进程可能僵死，自愈 + 告警。
+    // 仅在「非启动中、在运行」时判定，避免启动期误报。
+    void this.selfCheck()
   }
 
   private async selfCheck(): Promise<void> {
@@ -307,7 +392,19 @@ export class SidecarSupervisor {
           baseUrl: this.cfg.baseUrl,
         })
         this.unhealthyAlerted = true
-        // 自愈：杀掉僵死进程（不标 intentional，允许下次 ensureReady 自动重启）
+        this.unhealthyCount = 0
+        if (this.cfg.unit) {
+          // 单元模式自愈：单元不会「僵死」（systemd 管进程），但可能半死（端口在、/healthz 挂）
+          // ⇒ 重启单元；失败则置为已停，让下次调用走完整 start 流程
+          void this.runUnit('restart', this.cfg.unit).then((r) => {
+            if (!r.ok) {
+              this.unitActive = false
+              console.warn(`[sidecar] 单元重启失败，标记为已停：${r.out.slice(0, 300)}`)
+            }
+          })
+          return
+        }
+        // spawn 模式自愈：杀掉僵死进程（不标 intentional，允许下次 ensureReady 自动重启）
         this.intentionalStop = false
         const c = this.child
         if (c && !c.killed) {
@@ -318,7 +415,6 @@ export class SidecarSupervisor {
           }
         }
         this.child = null
-        this.unhealthyCount = 0
       }
     } else {
       if (this.unhealthyAlerted) {
@@ -343,9 +439,73 @@ export class SidecarSupervisor {
     }
   }
 
+  /**
+   * 唤醒后的「真就绪」预热（D-071）：
+   * `/healthz` 只证明 FastAPI 起来了，PP-StructureV3 是**首次 /ppsv3 才加载模型**（约 10-20s）。
+   * 不预热就报 ready，用户第一次识别的请求会把这段加载时间白等进去。
+   * ⇒ 启动后主动喂一张已知文字的探针图，把模型烘进内存再放行。
+   * 预热失败只记日志、**不阻断**（侧车仍可用，只是首个真实请求慢）。
+   */
+  private async warmup(timeoutMs: number): Promise<void> {
+    const t0 = Date.now()
+    try {
+      const res = await fetch(`${this.cfg.baseUrl}/ppsv3`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_base64: getDiagnoseProbeBuffer().toString('base64'),
+          return_image: false,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const ms = Date.now() - t0
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as { block_count?: number } | null
+        console.log(
+          `[sidecar] 预热完成 ${ms}ms（blocks=${data?.block_count ?? '?'}）——模型已驻留，首个真实请求不再等加载`,
+        )
+      } else {
+        console.warn(`[sidecar] 预热返回 ${res.status}（${ms}ms），模型可能未完全就绪，首次识别会慢一些`)
+      }
+    } catch (e) {
+      console.warn(`[sidecar] 预热未完成（${Date.now() - t0}ms）：${(e as Error)?.message ?? e}`)
+    }
+  }
+
   private async start(timeoutMs = this.cfg.startTimeoutMs): Promise<void> {
     if (this.starting) return this.starting
-    if (this.child && !this.child.killed) return
+    if (this.isRunning()) return
+    // ---- 单元模式：systemctl start + 等 /healthz（子进程归 systemd，不吃 gk-api 的内存上限）----
+    if (this.cfg.unit) {
+      this.lastUsed = Date.now()
+      this.unitStopping = false
+      this.starting = (async () => {
+        const r = await this.runUnit('start', this.cfg.unit)
+        // start 失败仍可能是「已在运行 / 被别的单元占端口」，继续探活判定，交由超时兜底
+        if (!r.ok) console.warn(`[sidecar] systemctl start ${this.cfg.unit} 返回失败：${r.out.slice(0, 300)}`)
+        const t0 = Date.now()
+        const deadline = t0 + timeoutMs
+        while (Date.now() < deadline) {
+          if (await this.isHealthy()) {
+            this.unitActive = true
+            console.log(`[sidecar] 单元 ${this.cfg.unit} 端口就绪（${Math.round((Date.now() - t0) / 1000)}s）`)
+            // /healthz 只代表 FastAPI 起来了：PP-StructureV3 是**首次调用才加载模型**。
+            // 不预热就报 ready，用户第一次识别的请求会把这十几秒白等进去 —— 必须烘热再放行。
+            if (this.cfg.warmup) await this.warmup(Math.min(timeoutMs, 120_000))
+            return
+          }
+          await sleep(500)
+        }
+        throw new Error(
+          `侧车启动超时（${this.cfg.unit} 未在 ${Math.round(timeoutMs / 1000)}s 内通过 /healthz` +
+            `${r.ok ? '' : '；systemctl 报错：' + r.out.slice(0, 200)}）`,
+        )
+      })().finally(() => {
+        this.starting = null
+      })
+      return this.starting
+    }
+    // ---- 传统 spawn 模式（Windows 本地开发 / 无 systemd 环境）----
     if (!this.cfg.script) throw new Error('侧车脚本 main.py 未找到')
     this.lastUsed = Date.now()
     this.intentionalStop = false
@@ -398,7 +558,10 @@ export class SidecarSupervisor {
         if (spawnState.err) {
           throw new Error(`侧车启动失败（spawn ${this.cfg.python}）: ${spawnState.err.message}`)
         }
-        if (await this.isHealthy()) return
+        if (await this.isHealthy()) {
+          if (this.cfg.warmup) await this.warmup(Math.min(timeoutMs, 120_000))
+          return
+        }
         await new Promise((r) => setTimeout(r, 500))
       }
       throw new Error('侧车启动超时（未在超时内通过 /healthz）')
@@ -412,6 +575,8 @@ export class SidecarSupervisor {
   async ensureReady(timeoutMs = this.cfg.startTimeoutMs): Promise<boolean> {
     if (this.disabled) return false
     if (await this.isHealthy()) {
+      // 单元模式：端口活着就是活着（可能被别人/上次的我们启动），采纳并刷新使用时间
+      if (this.cfg.unit) this.unitActive = true
       this.lastUsed = Date.now()
       return true
     }
@@ -448,13 +613,32 @@ export class SidecarSupervisor {
     }
   }
 
-  /** 立即停止侧车（手动 / 信号 / 资源回收共用）。 */
+  /**
+   * 立即停侧车（资源回收用）。
+   * ⚠️ 不再清 monitorTimer：旧实现只在第一次回收后停掉巡检，之后彻底失去回收能力——
+   *    「睡下去 → 被叫醒 → 再睡」必须能反复发生，所以巡检常驻，只有 shutdown() 才停。
+   */
   stop(reason = 'manual'): void {
-    this.intentionalStop = true
-    if (this.monitorTimer) {
-      clearInterval(this.monitorTimer)
-      this.monitorTimer = null
+    // ---- 单元模式：systemctl stop（异步发、立刻置状态，避免阻塞事件循环）----
+    if (this.cfg.unit) {
+      if (!this.unitActive || this.unitStopping) {
+        this.unitActive = false
+        return
+      }
+      this.unitActive = false
+      this.unitStopping = true
+      void this.runUnit('stop', this.cfg.unit)
+        .then((r) => {
+          if (r.ok) console.log(`[sidecar] 已停止单元 ${this.cfg.unit}（${reason}）`)
+          else console.warn(`[sidecar] 停止单元 ${this.cfg.unit} 失败（${reason}）：${r.out.slice(0, 300)}`)
+        })
+        .finally(() => {
+          this.unitStopping = false
+        })
+      return
     }
+    // ---- spawn 模式 ----
+    this.intentionalStop = true
     const c = this.child
     if (c && !c.killed) {
       const pid = c.pid
@@ -485,14 +669,35 @@ export class SidecarSupervisor {
     console.log(`[sidecar] 已停止（${reason}）`)
   }
 
+  /**
+   * 进程退出：只收自己的东西。
+   * ⚠️ 单元模式下侧车是**共享**资源（运维/其他进程也可能用），gk-api 重启不能把它带走；
+   *    停不停由空闲回收与下一次调用决定。spawn 模式仍要杀掉自己的子进程（否则 orphan 占端口）。
+   */
+  shutdown(): void {
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer)
+      this.monitorTimer = null
+    }
+    if (this.cfg.unit) {
+      console.log(`[sidecar] 进程退出：保留单元 ${this.cfg.unit} 运行（空闲由回收策略处理）`)
+      return
+    }
+    this.stop('shutdown')
+  }
+
   /** 测试/诊断用：返回当前状态快照。 */
   getState() {
     return {
       disabled: this.disabled,
-      running: !!(this.child && !this.child.killed),
+      mode: this.cfg.unit ? 'unit' : 'spawn',
+      unit: this.cfg.unit || null,
+      running: this.isRunning(),
+      sleeping: this.isSleeping(),
       active: this.active,
       pid: this.child?.pid ?? null,
       lastUsed: this.lastUsed,
+      idleTimeoutMs: this.cfg.idleTimeoutMs,
       baseUrl: this.cfg.baseUrl,
       telemetry: this.telemetry.snapshot(),
     }

@@ -139,6 +139,8 @@ export class Ppsv3Client {
         alertSink: this.alertSink,
         telemetry: this.telemetry,
         label: `ppsv3:${this.baseUrl}`,
+        // 单元模式下侧车空闲会被主动停掉——「睡着」不是故障，别每分钟报一次不可达（D-071）
+        expectedDown: () => getPpsv3Supervisor().isSleeping(),
       })
     } else {
       this.probe = null
@@ -285,7 +287,13 @@ let ppsv3Supervisor: SidecarSupervisor | null = null
  *   PPSV3_URL          默认 http://127.0.0.1:9301
  *   PPSV3_PYTHON       默认 /opt/pocr3-venv/bin/python（隔离 venv，paddlepaddle ≤3.2.2）
  *   PPSV3_SUPERVISE    auto（默认，脚本+python 可用才托管）| 1 | 0
- *   PPSV3_IDLE_TIMEOUT_MS  默认 15min（3.x 管线驻留 ~2-3GB，空闲及时回收）
+ *   PPSV3_IDLE_TIMEOUT_MS  默认 15min（3.x 管线驻留 ~1.4GB，空闲及时回收）
+ *   PPSV3_UNIT         systemd 单元名（如 gk-ppsv3）——设置后走**单元模式**：空闲 `systemctl stop`、
+ *                      被调用 `systemctl start`，不再由 gk-api spawn 子进程（D-071）。
+ *                      原因：spawn 的子进程与 gk-api 同 cgroup，受 gk-api `MemoryMax=1200M` 限制，
+ *                      PPSV3 常驻 1.4-1.6G ⇒ 必然起不来（D-070 实测）。
+ *   PPSV3_UNIT_SUDO    单元控制是否加 `sudo -n`（默认 1；本地开发设 0）
+ *   PPSV3_START_TIMEOUT_MS  冷启等待上限（默认 120s：Paddle 模型装载 20-40s + 余量）
  *
  * 坐标保真默认值（生产安全）：PPSV3_UNWARP / PPSV3_ORIENT_CLS 未显式设置时注入 '0'——
  * OCR 产物的 box 必须留在输入图坐标系（与彩色笔迹掩膜匹配）；UVDoc/朝向分类改变几何即错位。
@@ -309,6 +317,10 @@ export function getPpsv3Supervisor(): SidecarSupervisor {
       port,
       supervise: (process.env.PPSV3_SUPERVISE as '1' | '0' | 'auto' | undefined) ?? 'auto',
       idleTimeoutMs: Number(process.env.PPSV3_IDLE_TIMEOUT_MS ?? 15 * 60 * 1000),
+      unit: (process.env.PPSV3_UNIT ?? '').trim(),
+      startTimeoutMs: Number(process.env.PPSV3_START_TIMEOUT_MS ?? 120_000),
+      // 唤醒后先喂一张探针图把 Paddle 模型烘热（/healthz 不代表模型已加载），PPSV3_WARMUP=0 可关
+      warmup: (process.env.PPSV3_WARMUP ?? '1') !== '0',
       engineEnv,
     })
   }

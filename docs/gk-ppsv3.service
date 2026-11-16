@@ -9,8 +9,22 @@
 #   3) 独立服务后 gk-api 重启不再牵连侧车，模型也不用反复冷启。
 #
 # 配套（必须）：
-#   /opt/gk/server/.env 里设 PPSV3_SUPERVISE=0  ← 让 gk-api 走「外部侧车模式」，
-#   否则它仍会尝试自己 spawn 并抢 9301 端口。
+#   /opt/gk/server/.env 里设 PPSV3_UNIT=gk-ppsv3（D-071 起「单元模式」）：
+#     · gk-api 不再自己 spawn，空闲 15 分钟后 `systemctl stop`，下次调用 `systemctl start`
+#       并等 /healthz + 跑一张探针图把模型烘热，然后才放行真实请求；
+#     · 因此**不要再设 PPSV3_SUPERVISE=0**（那是 D-070 的「纯外部、永不回收」模式，
+#       设了就等于关掉回收，且空闲侧车会一直占 1.4G）。
+#     · 过渡期若还没换 dist，必须保持 PPSV3_SUPERVISE=0，否则旧 dist 会继续在
+#       gk-api 的 cgroup 里 spawn（内存上限 1200M，必然起不来）。
+#
+# sudoers（必须，gk 是普通用户）：
+#   /etc/sudoers.d/gk-ppsv3（0440，root:root）内容：
+#     gk ALL=(root) NOPASSWD: /usr/bin/systemctl start gk-ppsv3, /usr/bin/systemctl stop gk-ppsv3, /usr/bin/systemctl restart gk-ppsv3, /usr/bin/systemctl is-active gk-ppsv3
+#   ⚠️ 只放行这四个动作 + 固定单元名，不给通配（否则等于给 gk 全机 root）。
+#
+# 实测（2026-11-16，生产 L3）：
+#   stop→start 到 /healthz 200 = 1.56s；首个 /ppsv3（含模型加载）= 16.3s；热调用 = 3.6s。
+#   ⇒ 「睡醒」约 18s，之后每次识别恢复常态。所以空闲窗口默认 15min，别设得太短。
 #
 # 坐标保真：PPSV3_UNWARP=0 / PPSV3_ORIENT_CLS=0 与 server/src/ocr/ppsv3.client.ts
 #   的 getPpsv3Supervisor() 注入的默认值一致；UVDoc 摆正诉求走 /ppsv3/rectify，

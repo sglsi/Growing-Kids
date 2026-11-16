@@ -191,6 +191,11 @@ export interface OcrHealthProbeOptions {
   /** 探针标签（多侧车场景区分），进告警明细 */
   label?: string
   /**
+   * 「预期离线」判定（D-071）：侧车空闲被主动回收时，探活失败是**设计行为**不是故障。
+   * 返回 true 时本次失败不计入连续失败、不告警（也把计数清零，避免唤醒后立刻误报）。
+   */
+  expectedDown?: () => boolean
+  /**
    * 「可用率跌到阈值自动告警」：读取埋点滑动窗口的 successRate()，低于 availThreshold
    * 且窗口样本数 ≥ availMinSamples 时，连续 availFailThreshold 次触发 `sidecar-low-availability`，
    * 恢复到阈值之上（或窗口无样本）时触发 `sidecar-availability-recovered`。
@@ -261,6 +266,15 @@ export class OcrHealthProbe {
       ok = false
     }
     this.telemetry?.markHealthCheck(ok)
+    if (!ok && this.opts.expectedDown?.()) {
+      // 空闲休眠中：不算失败，连历史计数一起清掉（唤醒后从 0 开始，避免旧计数立刻触发告警）
+      this.consecutive = 0
+      if (this.alerted) {
+        this.alertSink.alert('sidecar-recovered', { label: this.label })
+        this.alerted = false
+      }
+      return
+    }
     if (!ok) {
       this.consecutive++
       if (!this.alerted && this.consecutive >= this.failThreshold) {
