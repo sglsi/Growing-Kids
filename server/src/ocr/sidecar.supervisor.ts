@@ -303,15 +303,7 @@ export class SidecarSupervisor {
           `，启动等待上限 ${Math.round(this.cfg.startTimeoutMs / 1000)}s`,
       )
       // 单元模式：启动时同步一次真实状态（gk-api 重启时侧车可能正跑着），避免误判为已停
-      if (this.cfg.unit) {
-        void this.isHealthy().then((ok) => {
-          if (ok) {
-            this.unitActive = true
-            this.lastUsed = Date.now()
-            console.log(`[sidecar] 采纳已在运行的单元 ${this.cfg.unit}（/healthz 通过）`)
-          }
-        })
-      }
+      if (this.cfg.unit) void this.adoptIfUp()
     } else {
       const reason = this.disabledReason()
       console.log(
@@ -375,10 +367,25 @@ export class SidecarSupervisor {
       this.stop(reason)
       return
     }
-    if (!this.isRunning() || this.starting) return
+    if (!this.isRunning()) {
+      // 单元模式：侧车可能被别人/运维/上一次的探针启动——认领它，否则它会一直占内存没人回收
+      if (this.cfg.unit && !this.starting && !this.unitStopping) void this.adoptIfUp()
+      return
+    }
+    if (this.starting) return
     // 健康自检：侧车在跑，但 /healthz 连续失败 → 进程可能僵死，自愈 + 告警。
     // 仅在「非启动中、在运行」时判定，避免启动期误报。
     void this.selfCheck()
+  }
+
+  /** 端口活着就采纳为「我管理的在运行状态」：否则外部启动的侧车永远不在回收视野内（D-071 生产实测） */
+  private async adoptIfUp(): Promise<void> {
+    if (this.unitActive || this.starting) return
+    if (await this.isHealthy()) {
+      this.unitActive = true
+      this.lastUsed = Date.now()
+      console.log(`[sidecar] 采纳外部启动的单元 ${this.cfg.unit}（/healthz 通过）`)
+    }
   }
 
   private async selfCheck(): Promise<void> {

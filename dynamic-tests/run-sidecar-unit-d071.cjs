@@ -167,6 +167,17 @@ async function main() {
   )
   ok(!!server, 'shutdown 后假单元仍在监听')
 
+  // ---- ⑥b 外部启动的单元会被「认领」（否则它一直占内存没人回收）----
+  console.log('\n⑥b 认领外部启动的单元')
+  await stopStub()
+  const adopter = makeSup({ idleTimeoutMs: 60_000 })
+  await startStub() // 外部手段把单元起来，守护并不知情
+  await sleep(350)
+  st = adopter.getState()
+  ok(st.running === true && st.sleeping === false, `tick 后认领为在运行（running=${st.running}）`)
+  adopter.shutdown()
+  await stopStub()
+
   // ---- ⑦ 起不来 → 返回 null 降级 + 告警 ----
   console.log('\n⑦ 启动失败降级')
   await stopStub()

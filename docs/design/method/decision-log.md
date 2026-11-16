@@ -2527,8 +2527,36 @@ gk ALL=(root) NOPASSWD: /usr/bin/systemctl start gk-ppsv3, /usr/bin/systemctl st
 
 实证脚本覆盖：睡着被叫醒、连续调用不重复 start、空闲真回收、**回收后还能再叫醒**、`shutdown()` 不停共享单元、启动失败返回 `null`+告警、`expectedDown` 不误报（含无反例对照组）、静态契约。
 
-### 六、边界
+### 六、上生产（思傅 11-16 明确授权「现在上」）
 
-- 🔴 本地实现完成；**是否换 `server/dist` + 重启 gk-api 生效，待思傅单独授权**（红线：换 dist/重启必须单独点头）。换之前 `.env` 必须保持 `PPSV3_SUPERVISE=0`——否则旧 dist 会继续在 gk-api 的 cgroup 里 spawn，必然起不来。
-- 唤醒的 ~18s 冷启代价无法消除（Paddle 模型装载），只能靠空闲窗口控制频率；若真机觉得慢，下一步是「上传前置预热」（需要前端配合，未做）。
-- 未做真机回归；不宣称「识别变快」。
+**换法**：只换 3 个文件（`dist/ocr/sidecar.supervisor.js`、`ppsv3.client.js`、`ocr-health.js`），不整包换——整包换会连带把 D-068/D-069 那些**未决策要发**的后端一起推上生产。落地指纹逐一比对：`579fc368…` / `54b14113…` / `114385e5…`，第二轮只更新了 supervisor（`789b8d16…`）。备份在 `/tmp/dist-bak-d071-20261116115012/`，`.env` 备份 `.env.bak-d071-20261116115012`。
+
+**`.env` 变更**（`PPSV3_SUPERVISE=0` → `1`，新增 `PPSV3_UNIT=gk-ppsv3` / `PPSV3_IDLE_TIMEOUT_MS=900000` / `PPSV3_START_TIMEOUT_MS=180000` / `PPSV3_UNIT_SUDO=0`）。
+
+**踩到的第二个坑：sudo 被内核拒**。第一次演练（idle=120s）11:52:38 确实触发回收，但失败：
+
+```
+[sidecar] 停止单元 gk-ppsv3 失败（idle）：sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
+```
+
+根因：`gk-api.service` 带 **`NoNewPrivileges=yes`**，`sudo`（setuid）永远无法提权 ⇒ 之前写的 `/etc/sudoers.d/gk-ppsv3` 在生产**是死配置**。处置：改用 **polkit**（D-Bus 授权，不受 NoNewPrivileges 影响），新增 `/etc/polkit-1/rules.d/49-gk-ppsv3.rules`，只放行「用户 gk + 单元 gk-ppsv3 + start/stop/restart」；`.env` 设 `PPSV3_UNIT_SUDO=0`；sudoers 文件保留作备用。实测 `sudo -u gk -H systemctl stop/start gk-ppsv3` 不带 sudo 即可。
+
+**演练结果（idle 临时压到 120s）**
+
+| 动作 | 证据 |
+|---|---|
+| 空闲回收 | 11:56:46 `[sidecar] 已停止单元 gk-ppsv3（idle）`，`systemctl is-active` = `inactive`；`free -m` used 2202MB → **813MB**，available 1521MB → **2909MB** |
+| 被调用拉起 | 用**生产 dist 真实模块** `ensureReady()`：`端口就绪 1s` → `预热完成 15546ms（blocks=1）` → `ensureReady=true / 16978ms`，状态 `{mode:unit, unit:gk-ppsv3, running:true}` |
+| 退出语义 | 该进程 `shutdown()` 后日志 `进程退出：保留单元 gk-ppsv3 运行`，`systemctl is-active` 仍 `active` |
+| 认领外部启动 | 重启 gk-api 时单元正在跑 → `[sidecar] 采纳外部启动的单元 gk-ppsv3（/healthz 通过）`（tick 每 15s 也会认领，防「别人起的没人回收」） |
+| 端到端 | `GET :3000/api/image/ocr-diagnose` **200 / 4.5s**，`preciseEngine=OK`、`fastEngine=OK`、`sidecar.state={mode:unit, unit:gk-ppsv3, running:true, sleeping:false, idleTimeoutMs:900000}` |
+| 对外 | `:3000/api/health` **200**、`https://deep-root.cn/api/health` **200** |
+
+演练后把 `PPSV3_IDLE_TIMEOUT_MS` 恢复 **900000（15min）** 并再重启一次 gk-api；当前生产就是「空闲 15 分钟后自动 `systemctl stop`，下次识别自动 start + 预热 17s 后放行」。
+
+### 七、边界
+
+- 唤醒的 ~18s 冷启代价无法消除（Paddle 模型装载），只能靠窗口控制频率；若真机觉得慢，下一步是「上传前置预热」（需要前端配合，未做）。
+- 未做真机回归；不宣称「识别变快」。本轮只证明「会被回收、且被叫醒后能真实推理」。
+- 本轮只换 3 个 dist 文件，**其余生产 dist 仍是 D-066 状态**：D-068（文件夹/预览编辑）、D-069（按题号裁图）、`0033` 依然**未发货**，与本决策无关。
+- 回滚：`cp /tmp/dist-bak-d071-20261116115012/*.js /opt/gk/server/dist/ocr/` → 还原 `.env.bak-d071-20261116115012` → `systemctl restart gk-api`；polkit 规则可删（`rm /etc/polkit-1/rules.d/49-gk-ppsv3.rules && systemctl restart polkit`）。无数据变更、无迁移。

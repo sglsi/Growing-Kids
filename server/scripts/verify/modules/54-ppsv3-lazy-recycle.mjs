@@ -70,11 +70,13 @@ m.test('A6 起不来就降级，不拖垮主链路', (c) => {
   c.ok(s.includes('return null'), 'withSidecar 启动失败须返回 null')
 })
 
-m.test('A7 生产留档：单元文件 + sudoers 规则都在仓库里', (c) => {
+m.test('A7 生产留档：单元文件 + polkit 授权规则都在仓库里', (c) => {
   c.ok(exists(UNIT), `${UNIT} 缺失（换机无法一键还原）`)
   const u = read(UNIT)
-  c.ok(u.includes('gk ALL=(root) NOPASSWD:') || u.includes('sudoers'), '须写明 gk 用户需要的 sudoers 规则')
-  c.ok(u.includes('start gk-ppsv3') && u.includes('stop gk-ppsv3'), 'sudoers 须限定到具体动作')
+  // 🔴 实测坑：gk-api 带 NoNewPrivileges=yes ⇒ sudo 被内核拒，必须走 polkit
+  c.ok(u.includes('org.freedesktop.systemd1.manage-units'), '须写明 polkit 授权规则')
+  c.ok(u.includes('NoNewPrivileges') && u.includes('sudo'), '须保留「为什么 sudoers 不生效」的原因')
+  c.ok(u.includes('PPSV3_UNIT_SUDO=0'), '须说明配 polkit 后关掉 sudo 前缀')
   c.ok(u.includes('MemoryMax'), '须保留内存上限（防拖垮宿主）')
 })
 

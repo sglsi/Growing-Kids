@@ -17,10 +17,23 @@
 #     · 过渡期若还没换 dist，必须保持 PPSV3_SUPERVISE=0，否则旧 dist 会继续在
 #       gk-api 的 cgroup 里 spawn（内存上限 1200M，必然起不来）。
 #
-# sudoers（必须，gk 是普通用户）：
-#   /etc/sudoers.d/gk-ppsv3（0440，root:root）内容：
-#     gk ALL=(root) NOPASSWD: /usr/bin/systemctl start gk-ppsv3, /usr/bin/systemctl stop gk-ppsv3, /usr/bin/systemctl restart gk-ppsv3, /usr/bin/systemctl is-active gk-ppsv3
-#   ⚠️ 只放行这四个动作 + 固定单元名，不给通配（否则等于给 gk 全机 root）。
+# 授权（必须，gk 是普通用户）——**用 polkit，不要用 sudoers**：
+#   实测坑：gk-api.service 带 NoNewPrivileges=yes，`sudo` 直接被内核拒
+#   （"The no new privileges flag is set, which prevents sudo from running as root"），
+#   所以 /etc/sudoers.d 那条 NOPASSWD 规则在生产**永远不可能生效**（留着只是备用）。
+#
+#   /etc/polkit-1/rules.d/49-gk-ppsv3.rules（0644）：
+#     polkit.addRule(function (action, subject) {
+#       if (action.id !== "org.freedesktop.systemd1.manage-units") return;
+#       var unit = String(action.lookup("unit") || "");
+#       var verb = String(action.lookup("verb") || "");
+#       if (subject.user !== "gk") return;
+#       if (unit !== "gk-ppsv3.service" && unit !== "gk-ppsv3") return;
+#       if (["start", "stop", "restart"].indexOf(verb) < 0) return;
+#       return polkit.Result.YES;
+#     });
+#   ⚠️ 只放行「gk 用户 + gk-ppsv3 单元 + 三个动作」，其余一律不受影响。
+#   配好后 /opt/gk/server/.env 设 PPSV3_UNIT_SUDO=0（不走 sudo，直接 systemctl）。
 #
 # 实测（2026-11-16，生产 L3）：
 #   stop→start 到 /healthz 200 = 1.56s；首个 /ppsv3（含模型加载）= 16.3s；热调用 = 3.6s。
