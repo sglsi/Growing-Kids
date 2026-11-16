@@ -1,5 +1,6 @@
-import { View, Text, Image } from '@tarojs/components'
+import { View, Text, Image, RichText } from '@tarojs/components'
 import Taro from '@tarojs/taro'
+import { questionRichHtml } from '@/lib/question-inline-figure'
 import { Image as ImageIcon, Ellipsis } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -171,6 +172,17 @@ export default function ReviewItemCard({
 
   // ---------- 题目条目：学科色条 + 题干 + 答案摘要 ----------
   const c = item.content || {}
+  // 题干图文混排（P-034 / D-075）：列表摘要也把 [图N] 原位换成图。
+  // 签名 URL 与 content.question_inline_figures 同序，按 slot 组装；无 URL 的槽位
+  // 由 questionRichHtml 降级成 [图N] 文字（fail-closed，不拿邻图顶替）。
+  const inlineFigs = Array.isArray(c.question_inline_figures) ? c.question_inline_figures : []
+  const inlineUrls = item.question_inline_figure_urls || []
+  const stemNodes = inlineFigs.length
+    ? questionRichHtml(
+        truncate(c.question || '', 80),
+        inlineFigs.map((f, i) => ({ slot: f.slot, url: inlineUrls[i] })),
+      )
+    : ''
   // 错因角标：草稿/题目卡一眼看出错因分类（详情页也有完整分析）
   const ea = c.error_analysis
   const eaBadgeCls = ea?.type ? ERROR_ANALYSIS_BADGE[ea.type] ?? ERROR_ANALYSIS_BADGE.unknown : null
@@ -237,9 +249,17 @@ export default function ReviewItemCard({
             </View>
           </View>
 
-          <Text className="block text-sm text-foreground leading-relaxed mb-2">
-            {truncate(c.question || '', 80) || '（图片题目）'}
-          </Text>
+          {stemNodes && /<img\b/i.test(stemNodes) ? (
+            // 有可渲染的内嵌图才用 RichText（列表限高，避免撑爆卡片）；
+            // 否则保持原纯文本 <Text>，零回归。
+            <View className="block text-sm text-foreground leading-relaxed mb-2 overflow-hidden" style={{ maxHeight: 160 }}>
+              <RichText nodes={stemNodes} />
+            </View>
+          ) : (
+            <Text className="block text-sm text-foreground leading-relaxed mb-2">
+              {truncate(c.question || '', 80) || '（图片题目）'}
+            </Text>
+          )}
 
           {c.answer ? (
             <View className="flex flex-row items-start gap-2 bg-muted bg-opacity-60 rounded-lg p-2">
