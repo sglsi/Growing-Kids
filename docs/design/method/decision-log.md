@@ -2907,3 +2907,9 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - **未发货**：后端 dist 未换、未重启 `gk-api`；前端包未上传；`0033` 未执行。D-074 本就未发货，本决策叠加其上。
 - 列表图片统一限高 160px 摘要展示，不按原题宽高比精排（与详情页 D-074 同口径）。
 - **push 未执行**：本地 commit 按约定做，push 等思傅指示。
+
+### D-075 §五、发货回写（2026-11-16 23:4x，思傅授权「换 dist 重启 + 重传开发版」）
+- **后端 dist 精准换**：`build:server` → 打包 627KB scp L3 → 解 `/tmp/gk-dist-d075-new` → diff 出 **11 差异文件**（D-074 timeline 3 个 withUrls 派生 + D-075 document 3 / pdf 2 / 新 helper 3；核实生产 timeline 旧包无 `question_inline_figure_urls`、新包有）。备份 `/tmp/dist-bak-d075-20261116234144`（581 文件，可回退）→ **只覆盖 11 文件** + `chown gk:gk` + `chmod 644` → **复比 diff_count=0** → 才 `systemctl restart gk-api`。
+- **重启验证**：active、启动 +885ms、`:3000/api/health` 与公网 `https://deep-root.cn/api/health` 均 **200**、journal ERROR **0**、`splitQuestionRuns` 在线 4 处、3 个关键 js sha256 与本地逐字一致。
+- **前端**：先 `build:weapp` 把过期角标 `fc0fcc5` 刷为 HEAD `5c3b0bb`（否则上传包角标对不上源码）→ `release-check --dev` 11 通过 / 2 警告 / 0 阻断 → CLI 上传开发版 **2026.11.16.2**（TOTAL 916.3 KB / 938340 Byte、AppID `wx48bf5ba9bae0bf39`、端口 46737、`√ upload` exit 0）。上传前 `islogin` 校验 `login:true`，否则 exit 2 不盲传。
+- 🔴 **边界不变**：上传只产生开发版，未提审未发版 ⇒ D-074/075 全部功能仍未面客；未真机回归；`0033` 未执行；push 未执行（AHEAD 24）。回滚点 `/tmp/dist-bak-d075-20261116234144` 保留。
