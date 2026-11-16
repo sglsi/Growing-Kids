@@ -2423,3 +2423,55 @@ D-064 把 `touchmove` 只挂在 `ScrollView` 上，格子矩形又只在 `onLong
 **验证（实跑）**：`tsc` / `lint:build` / `build:weapp`（recognize 74.91→**75.76 kB**）全 RC=0；M53 由 11 扩到 **13/13**（新增 A12 自动 OCR 不得回退为用户步骤、A13 输入框须显式宽高）；`verify:gate` 38/38、`method:check` H1/H2/H3 全绿；实证 P-031 44/44、D-068 37/37、D-064 27/27 未回退；产物含「正在识别页面文字」「会自动识别本页文字」，旧文案「请先对本页做一次识别」在 `dist` 中计数为 **0**。
 
 **边界**：仍是**本地实现**——后端 `doc-pages` 与题干校验放宽未上生产 dist、`gk-api` 未重启、前端未重新上传（线上开发版仍 `2026.11.15.2`）、**真机未回归**。`精准识别不可达` 是服务端 PPSV3 侧车问题（诊断口径见 `recognize` 页「一键诊断」），本轮不做后端处理，定位走快速识别，故不阻塞主流程。不宣称候选框准确率与解答区归属。
+
+---
+
+## D-070：PPSV3 侧车外部化（生产 :9301 长期不可达修复）+ 真机调试唯一红色行定性（2026-11-16 11:2x）
+
+> 授权：思傅 11-16「真机调试中显示有错误信息，请检查并修复；授权进行侧车修复」。
+
+### 一、真机调试「错误信息」定性：基础库探针噪声，非本项目代码
+
+用 CDP 连 IDE（`:9222`）→ 真机调试面板（`devtools_app.html?ws=127.0.0.1:39225`）逐条读 console 并取计算色：12 条消息里**只有 1 条是红色**（`rgb(255,128,128)`，其余全白），原文：
+
+```
+[wxapplib]] backgroundfetch privacy fail
+{"errno":101,"errMsg":"private_getBackgroundFetchData:fail ... jsapi invalid request data"}
+```
+
+判据（三条互相独立，结论一致）：
+1. **我方零调用**：`grep getBackgroundFetchData|backgroundFetch` 在 `src/`、`server/src/`、`project.config.json` 中命中 **0**；消息前缀 `[wxapplib]]`、来源 `WAServiceMainContext.js` ⇒ 基础库内部。
+2. **不是隐私开关引起**：`dist/app.json` 的 `__usePrivacyCheck__` 实测 **false**、`requiredPrivateInfos` 未配置。
+3. 无 JS 异常、无渲染层错误、无接口失败（同期 `[API Response] 200` 多条，上传也 200）。
+
+结论：**不修**（不是 bug）。要它消失只有环境侧动作：mp 后台「开发管理 → 开发设置」确认「数据预拉取」未开启，或用正式版基础库复测。不因此改 `__usePrivacyCheck__`（发布门要求该字段存在）。
+
+### 二、侧车修复：PPSV3 由「gk-api 子进程托管」改为「独立 systemd 服务」
+
+**现场证据**
+- 生产 `ss -ltnp`：只有 `:9300`（2.x rapid）在听，**`:9301` 无监听**；`/opt/gk/server/.env` 里 `PPSV3_PYTHON` 指向的 venv 完好（paddle 3.2.2 / paddleocr 3.7.0 / py3.12.3）。
+- 侧车子进程日志 `/tmp/ocr-sidecar-9301.log` **停在 10-31 14:20**（最后一次被 SIGTERM 空闲回收），此后无任何新行 ⇒ 托管式拉起一次都没成功。
+- `journalctl -u gk-api` 每次重启都只有两行：`[sidecar] 守护已启用：监听 http://127.0.0.1:9301` → 2 分钟后 `[ocr-alert] sidecar-unreachable`，**没有子进程任何输出**（`PrivateTmp=yes` 使其写入服务私有 `/tmp`，`/proc/<pid>/root/tmp` 下也无该文件）⇒ 子进程根本没起来。
+- 隔离实验（独立 cgroup、`MemoryMax=2600M`）：同一条命令 `/opt/gk/.venv-py322/bin/python /opt/gk/ocr-engine/main3.py --host 127.0.0.1 --port 9301` **25s 内绑定成功、`/healthz` 200** ⇒ 脚本与 venv 没问题，问题在「作为 gk-api 子进程」这个部署形态（该 unit 带 `MemoryMax=1200M`，而侧车常驻 **1.64GB**）。
+
+**处置**
+1. 新建 `/etc/systemd/system/gk-ppsv3.service`：`User=gk`、`WorkingDirectory=/opt/gk/ocr-engine`、`MemoryHigh=2200M` / `MemoryMax=2400M`、`Restart=always`、`NoNewPrivileges=yes`；显式注入 **`PPSV3_UNWARP=0` / `PPSV3_ORIENT_CLS=0`**（与 `getPpsv3Supervisor()` 注入的坐标保真默认值一致，避免外部化后 box 几何漂移）、`PADDLE_PDX_CACHE_HOME=/opt/gk/.cache-paddlex`、`PYTHONUTF8=1`。`systemctl enable --now`。
+2. `/opt/gk/server/.env` 增补 **`PPSV3_SUPERVISE=0`**（外部侧车模式，备份 `.env.bak-ppsv3-20261116112433`），`systemctl restart gk-api`。
+3. 未改任何业务代码、未换 `server/dist`、未动判定层、未碰数据库。
+
+**验证（实跑）**
+- `gk-ppsv3`：`enabled/active`、`NRestarts=0`、`MemoryCurrent=1.64GB`、`:9301` LISTEN、`/healthz` **200**。
+- 直连推理：用仓库内置诊断探针图 `POST /ppsv3` → **200，23.4s，blocks=1**。
+- 端到端：`GET /api/image/ocr-diagnose` → `preciseEngine.status=OK / healthz=true / blockCount=1`，`sidecar.disabledReason="supervise=0（外部侧车模式）"`，`fastEngine=OK`（`OCR诊断测试12345`）。
+- `gk-api` 日志出现预期行：`[sidecar] 守护未启用（supervise=0（外部侧车模式））`（不再尝试自己 spawn）。
+- 对外：`:3000/api/health` **200**、`https://deep-root.cn/api/health` **200**。
+
+### 三、回滚
+
+侧车回滚：`systemctl disable --now gk-ppsv3` → 还原 `/opt/gk/server/.env.bak-ppsv3-*`（去掉 `PPSV3_SUPERVISE`）→ `systemctl restart gk-api`。unit 文件可删。无数据变更。
+
+### 四、边界与遗留
+
+- 侧车**常驻不再空闲回收**（1.64GB 常驻，宿主机 3.7GB / swap 2GB），由 `MemoryMax=2400M` 兜底防拖垮宿主；若日后并发上涨需评估升配。
+- `/api/image/ocr-diagnose` 与 `/api/image/capabilities` 是 **2026-10-27 设计上就公开**的端点（`PUBLIC_ROUTES` 有注释），实测公网无 token **200**、`/api/library` 对 401 正常。这不是本轮新开的口子，但单次诊断会跑一次真实 OCR（~23s CPU），存在被刷的滥用面，**需单独决策**是否在 Caddy 拦这两条路径。
+- 🔴 真机「精准识别」体验是否恢复需思傅在真机点一次确认；本轮只有服务端与端到端证据，**未做真机回归**。

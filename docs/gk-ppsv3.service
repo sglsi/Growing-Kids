@@ -1,0 +1,50 @@
+# Growing-Kids PPSV3（PaddleOCR 3.x / PP-StructureV3）精准识别侧车 —— systemd 单元
+#
+# 为什么必须独立成服务，不能托管在 gk-api 里（D-070 实测结论）：
+#   1) gk-api.service 带 MemoryMax=1200M（Node 常驻约 575M），而 PPSV3 加载
+#      PP-DocLayout_plus-L + OCRv5 det/rec 后常驻约 1.64G —— 子进程与父进程同 cgroup，
+#      托管式拉起从未成功；表现是 journal 只有「守护已启用」+ 两分钟后
+#      「sidecar-unreachable」，侧车日志 /tmp/ocr-sidecar-9301.log 长期不更新。
+#   2) gk-api 的 PrivateTmp=yes 会把握管子进程日志藏进服务私有 /tmp，排查时看不到。
+#   3) 独立服务后 gk-api 重启不再牵连侧车，模型也不用反复冷启。
+#
+# 配套（必须）：
+#   /opt/gk/server/.env 里设 PPSV3_SUPERVISE=0  ← 让 gk-api 走「外部侧车模式」，
+#   否则它仍会尝试自己 spawn 并抢 9301 端口。
+#
+# 坐标保真：PPSV3_UNWARP=0 / PPSV3_ORIENT_CLS=0 与 server/src/ocr/ppsv3.client.ts
+#   的 getPpsv3Supervisor() 注入的默认值一致；UVDoc 摆正诉求走 /ppsv3/rectify，
+#   与这两个开关无关。**改这里就会让 box 几何漂移**，错题提取的框会错位。
+#
+# 安装：
+#   sudo cp docs/gk-ppsv3.service /etc/systemd/system/gk-ppsv3.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gk-ppsv3
+#   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9301/healthz   # 期望 200
+
+[Unit]
+Description=Growing Kids PPSV3 OCR sidecar (PaddleOCR 3.7 / PP-StructureV3, :9301)
+After=network.target
+
+[Service]
+Type=simple
+User=gk
+Group=gk
+WorkingDirectory=/opt/gk/ocr-engine
+Environment=HOME=/home/gk
+Environment=PADDLE_PDX_CACHE_HOME=/opt/gk/.cache-paddlex
+Environment=PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=PPSV3_DEVICE=cpu
+Environment=PPSV3_UNWARP=0
+Environment=PPSV3_ORIENT_CLS=0
+ExecStart=/opt/gk/.venv-py322/bin/python /opt/gk/ocr-engine/main3.py --host 127.0.0.1 --port 9301
+Restart=always
+RestartSec=5
+# 宿主机 3.7G / swap 2G：上限只打侧车自己，不让它把 postgres/caddy 一起拖进 OOM
+MemoryHigh=2200M
+MemoryMax=2400M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
