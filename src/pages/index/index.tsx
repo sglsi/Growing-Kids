@@ -1,6 +1,6 @@
 import { View, Text, ScrollView, Image } from '@tarojs/components'
 import Taro, { useDidShow, useDidHide } from '@tarojs/taro'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Trash2, BookmarkPlus, BookmarkMinus, CircleUser, Crop, Wand, Sparkles, Tag, Camera, FileText, Images } from 'lucide-react-taro'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -140,6 +140,15 @@ export default function IndexPage() {
   const restoreAnchorRef = useRef(-1)
   /** 离开首页时的原始 scrollTop（px）。返回时先还原它，再跑闭环精修 */
   const leaveScrollTopRef = useRef(0)
+  /**
+   * 思傅 2026-11-17：删除列表项后的滚动补偿。
+   * 根因：删除前用户已滚到某处，删掉上面的题后 load() 重拉列表，少一项 ⇒ 下面各项上移，
+   * 而受控 scrollTop 没变 ⇒ 视觉上"跳到下面那道题的位置"。
+   * 修法：删除前量出被删项的总高度（含卡片间距）存起来；列表重排后把 scrollTop 扣掉这段高度，
+   * 用户正在看的那一屏内容就留在原地。pending 防重复消费，且与"详情页返回锚定"互不干扰
+   * （那条走 restoreItemIdRef，删除时它是空的）。
+   */
+  const deleteScrollFixRef = useRef<{ px: number; pending: boolean }>({ px: 0, pending: false })
   const [savingEdit, setSavingEdit] = useState(false)
   /**
    * 在途 load 计数（思傅 2026-10-29）：骨架屏由「最后一个请求」解除。
@@ -224,6 +233,40 @@ export default function IndexPage() {
       }, 40)
     })
   }
+
+  /**
+   * 删除补偿（思傅 2026-11-17）：列表数据重排后，把 scrollTop 扣掉被删项的高度，
+   * 让用户原本在看的内容保持在视口同一位置，不再"跳到下面题目"。
+   * 只在删除流程置了 pending 时消费一次；双帧触发（Taro 受控值相同不滚动）。
+   */
+  useEffect(() => {
+    const fix = deleteScrollFixRef.current
+    if (!fix.pending || fix.px <= 0) return
+    // 等一帧让新列表先渲染（缩略图容器占位已确定），再校正滚动位
+    const timer = setTimeout(() => {
+      const target = Math.max(0, scrollRef.current - fix.px)
+      setScrollTop(Math.max(0, target - 1))
+      setTimeout(() => {
+        setScrollTop(target)
+        scrollRef.current = target
+        deleteScrollFixRef.current = { px: 0, pending: false }
+      }, 40)
+    }, 60)
+    return () => clearTimeout(timer)
+  }, [inbox])
+
+  /** 量出待删项在列表里占的像素高度（含卡片间距），供删除后补偿 scrollTop。 */
+  const measureDeletedHeight = (ids: string[]): Promise<number> =>
+    new Promise((resolve) => {
+      if (!ids.length) { resolve(0); return }
+      const q = Taro.createSelectorQuery()
+      ids.forEach((id) => q.select(`#tl-item-${id}`).boundingClientRect())
+      q.exec((res: any) => {
+        const px = (res || []).reduce((sum: number, r: any) => sum + (r && r.height > 0 ? r.height : 0), 0)
+          + ids.length * 8 // 卡片间距 mb-2 ≈ 8px，只对实际量到的项计；量不到时宁可不补也不乱跳
+        resolve(px > ids.length * 8 ? px : 0)
+      })
+    })
 
   /**
    * 加载列表。
@@ -604,12 +647,16 @@ export default function IndexPage() {
     if (!item) return
     const ok = await confirmDelete(1, '条')
     if (!ok) return
+    // 删除前先量高度：删后列表少一项会整体上移，凭这段高度把视口拉回原位
+    const px = await measureDeletedHeight([item.id])
     try {
       await batchDeleteTimeline([item.id])
       Taro.showToast({ title: '已删除', icon: 'success' })
+      if (px > 0) deleteScrollFixRef.current = { px, pending: true }
       load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
+      if (px > 0) deleteScrollFixRef.current = { px: 0, pending: false }
       Taro.showToast({ title: '删除失败', icon: 'none' })
     }
   }
@@ -673,14 +720,18 @@ export default function IndexPage() {
     if (sel.isEmpty) return
     const ok = await confirmDelete(sel.count, '条')
     if (!ok) return
+    // 删除前先量高度（只对当前页可见的被选项量得到；跨页选的项量不到则不计，不硬凑）
+    const px = await measureDeletedHeight(Array.from(sel.selected))
     setBusy(true)
     try {
       await batchDeleteTimeline(Array.from(sel.selected))
       Taro.showToast({ title: '已删除', icon: 'success' })
       sel.exit()
+      if (px > 0) deleteScrollFixRef.current = { px, pending: true }
       load(subjectFilter, { silent: true })
     } catch (e) {
       console.error(e)
+      if (px > 0) deleteScrollFixRef.current = { px: 0, pending: false }
       Taro.showToast({ title: '删除失败', icon: 'none' })
     } finally {
       setBusy(false)
