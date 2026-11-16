@@ -152,16 +152,41 @@ m.test('A14 候选框精度：末题不得框到页底、x 不得恒为整宽（
   c.ok(s.includes('function rect('), '须有按像素四边生成矩形、x 也收紧的 rect()')
   c.ok(s.includes('lastY1'), '终点须取自「本题最后一段底边」，不能直接用下一锚点/页底')
   c.ok(/Math\.min\(boundPx, lastY1 \+ padY\)/.test(s), '终点 = min(下一题顶边, 末段底边+半行高)')
-  c.ok(/const x0 = Math\.min\(\.\.\.own\.map/.test(s) && /const x1 = Math\.max\(\.\.\.own\.map/.test(s),
-    'x 须取本题段落的并集（左右都收紧）')
+  // r3：x 的并集基准从 own 换成 bodyRows（own 含手写区，会把整行宽度撑开）
+  c.ok(/const x0 = Math\.min\(\.\.\.bodyRows\.map/.test(s) && /const x1 = Math\.max\(\.\.\.bodyRows\.map/.test(s),
+    'x 须取本题正文行的并集（左右都收紧）')
+  c.ok(s.includes('const body = handPx === null ? own'), '正文行须排除手写/批注区（body）')
   c.ok(s.includes('own = arr.filter'), '本题段落集合须按 [本题顶边, 下一题顶边) 显式圈定')
   // 定位失败要能解释原因，而不是只甩一句「未定位」
   c.ok(s.includes('export function detectedLabels'), '须导出 detectedLabels（本页实际认出的题号）')
   const fe = read(FE)
-  c.ok(fe.includes('detectedLabels(segs)'), '前端须把本页认出的题号带上')
+  c.ok(/detectedLabels\(segs(?:, seqs)?\)/.test(fe), '前端须把本页认出的题号带上')
   c.ok(fe.includes('本页 OCR 只认出题号'), '未定位时须显示「本页认出了哪几题」')
   c.ok(fe.includes('没认出任何题号'), '整页零题号时须给兜底提示')
   c.ok(exists('dynamic-tests/fixtures/page-text-exam.json'), '真实分段样本须固化（防回归靠合成样本自证）')
+})
+
+m.test('A15 真机失败样本的三处根因（P-031 r3 / D-069 r3）', (c) => {
+  const s = read(LOC)
+  // 思傅 11-16 真机：输入 7/14/20 → 7 位置不准、14 与 20 未定位。逐条守住四处根因：
+  // ① 13/14 被 XY-Cut 并成一段（段首题号 13）⇒ 必须段内拆行
+  c.ok(/function explodeLines/.test(s), '须有段内拆行 explodeLines（合段里的第二题才可能被认出）')
+  c.ok(/\.split\('\\n'\)/.test(s), '拆行必须按换行符分（后端 buildSegments 保留了行边界）')
+  // ② OCR 吞掉 `14.` 的点（`14如图`）⇒ 定向放宽，但只认用户请求的号
+  c.ok(/export function startsWithLabel/.test(s), '须有定向题号匹配 startsWithLabel')
+  c.ok(!/RE_带分隔符 = \/\^\\s\*\(\\d\{1,3\}\)\\s\*\?\(\?:\[/.test(s) || !/裸/.test(s),
+    '不得把裸题号并进全局 segQuestionNumber（会把手写 35.304 当题号）')
+  // ③ 图注 `第14题图` 曾被 RE_第N题 误认成题号锚点（锚点跑到 y=730）
+  c.ok(/RE_第N题 = \/\^\\s\*第\\s\*\(\\d\{1,3\}\)\\s\*题\(\?!\\s\*图\)\//.test(s),
+    'RE_第N题 必须排除「第N题图」图注（否则图注抢锚点，14 题框从图注开始）')
+  // ④ 末题后面跟着手写解答 ⇒ 连续窄行块视为手写区，不许框到页底
+  c.ok(/function handwritingStart/.test(s), '须有手写/批注区识别 handwritingStart')
+  c.ok(s.includes('run >= 3'), '手写区判据须要求「连续 ≥3 行」（单行窄段是选项/图注/图内标号）')
+  c.ok(/RE_选项行/.test(s) && /RE_图注行/.test(s), '选项行与图注行必须排除在手写判据外（否则会把选项、配图裁掉）')
+  // 样本固化：没有这张真机图，上面四条都只是纸上断言
+  c.ok(exists('dynamic-tests/fixtures/page-text-exam-real.json'), '真机失败样本须固化（7/14/20 三题同页）')
+  const fe = read(FE)
+  c.ok(fe.includes('detectedLabels(segs, seqs)'), '前端须把本次请求的题号传给 detectedLabels（否则定向补回的 14 不会出现在提示里）')
 })
 
 export default m

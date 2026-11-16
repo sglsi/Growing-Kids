@@ -49,7 +49,7 @@ export interface LocatedQuestion {
  * ⚠️ 半角 `.` 必须用 `(?!\d)` 排除小数：D-049 已登记「1.5 被当题号」曾让 15 份资料
  *    整体切题失效（全库 6.3%），这里不能再犯。
  */
-const RE_第N题 = /^\s*第\s*(\d{1,3})\s*题/
+const RE_第N题 = /^\s*第\s*(\d{1,3})\s*题(?!\s*图)/
 const RE_带分隔符 = /^\s*(\d{1,3})\s*(?:[．。、，,：:）)】\]]|[.])\s*(?!\d)/
 const RE_方括号 = /^\s*【\s*(?:例|例题|练习|习题)?\s*(\d{1,3})\s*】/
 
@@ -72,6 +72,88 @@ export function segQuestionNumber(text: string): number | null {
 /** 该段是否是解答区起点 */
 export function isSolutionStart(text: string): boolean {
   return RE_解答标记.test(String(text ?? ''))
+}
+
+/**
+ * 「指定题号」的行首匹配（定向放宽，**只认用户请求的那一个号**）。
+ *
+ * 真实样本（2026-11-16，思傅真机 7/14/20 三题）：OCR 把 `14.` 的点吃掉，输出
+ * `14如图，△ABC和△EPQ均是等边三角形…`，`RE_带分隔符` 要求分隔符 ⇒ 整题定位不到。
+ *
+ * ⛔ 不做「全表枚举裸题号」：同一张卷子的手写批注里有 `35.304`、`23=9`、`09=15`
+ *    这类行，枚举会把它们当成题号（误锚比漏锚更糟，D-020 口径）。只认用户显式
+ *    指定的号 ⇒ 误判面收窄到「用户自己点了这道题」。
+ */
+export function startsWithLabel(text: string, label: number): boolean {
+  const s = String(text ?? '')
+  if (!s.trim()) return false
+  const re = new RegExp(
+    `^\\s*${label}\\s*(?:[.．。、，,：:）)】\\]]\\s*(?!\\d)|(?=[\\u4e00-\\u9fa5A-Za-z△▲□○（(《【])|$)`,
+  )
+  return re.test(s)
+}
+
+/**
+ * 段内拆行：段文本用 `\n` 分行（后端 `buildSegments` 保留了行边界），y 按行数均分。
+ *
+ * 为什么要拆：XY-Cut 会把相邻两题并成一段（真实样本里第 13、14 题的 y 区间重叠
+ * 4px，被并成 `13.已知…\n14如图…`），段首题号永远是 13 ⇒ 14 整题消失。拆行后
+ * 14 在行首，才可能被认出来。行数均分的 y 误差实测 4px（页高 0.25%），够用。
+ */
+function explodeLines(list: Seg[]): Seg[] {
+  const out: Seg[] = []
+  for (const s of list) {
+    const rows = String(s.text ?? '').split('\n')
+    if (rows.length <= 1) {
+      out.push(s)
+      continue
+    }
+    const h = (s.box.y1 - s.box.y0) / rows.length
+    rows.forEach((t, i) => {
+      out.push({
+        text: t,
+        box: { x0: s.box.x0, y0: s.box.y0 + h * i, x1: s.box.x1, y1: s.box.y0 + h * (i + 1) },
+        col: s.col,
+      })
+    })
+  }
+  return out
+}
+
+/** 选项行（`A.平行四边形` / `Ｂ．菱形`）—— 短但属于题目，不能被当手写截掉 */
+const RE_选项行 = /^\s*[A-DＡ-Ｄ]\s*[.．、,，)）]/
+/** 图注行（`第7题图` / `图3`）—— 图形是题目的一部分，必须留在题目区 */
+const RE_图注行 = /第\s*\d{1,3}\s*题\s*图|^\s*图\s*\d{1,3}\s*$/
+
+/** 该行是否「有排版结构」（整栏宽 / 选项 / 图注）；否则视为手写批注或乱码 */
+function isStructuredRow(s: Seg, fullMin: number): boolean {
+  const t = String(s.text ?? '')
+  const w = s.box.x1 - s.box.x0
+  return w >= fullMin || RE_选项行.test(t) || RE_图注行.test(t)
+}
+
+/**
+ * 找「手写 / 批注区」的起点（连续 ≥3 行没有排版结构）。
+ *
+ * 真实样本（2026-11-16 初三数学卷末题 20）：孩子的手写解答被 OCR 认成一串窄行
+ * （`35.304`、`AB=A`、`09=15`、`OABO等膜`…），题干后紧贴。旧逻辑「末段底边」直接
+ * 框到页底 1600，其中 26% 是手写 ⇒ 用户看到的就是「这题没识别出来」。
+ *
+ * 为什么不看置信度：前端只拿到 text+box，拿不到 score（手写行 0.52~0.83、印刷体
+ * 0.93+，本来是最干净的判据）。等后端把 score 透传下来可以换掉这条启发式。
+ * 为什么不看「中文占比」：`内有口ABOD`（37%）和 `又是b，下是D中`（62%）都会漏判。
+ */
+function handwritingStart(rows: Seg[], fullMin: number): number | null {
+  let run = 0
+  for (let i = 0; i < rows.length; i++) {
+    if (isStructuredRow(rows[i], fullMin)) {
+      run = 0
+      continue
+    }
+    run++
+    if (run >= 3) return rows[i - run + 1].box.y0
+  }
+  return null
 }
 
 /**
@@ -127,7 +209,7 @@ export function locateQuestions(
   // 页面尺寸未知时无法把像素换算成比例 ⇒ 一律只给整页候选（不猜）
   const valid = pageW > 0 && pageH > 0
 
-  // 段落按栏分组，栏内按 y 升序（同 y 用 x 稳定排序）
+  // 段落按栏分组，栏内按 y 升序（同 y 用 x 稳定排序）；同时做段内拆行（见 explodeLines）
   const byCol = new Map<number, Seg[]>()
   for (const s of list) {
     const c = Number.isFinite(s.col as number) ? (s.col as number) : 0
@@ -137,21 +219,34 @@ export function locateQuestions(
   }
   const cols = [...byCol.keys()].sort((a, b) => a - b)
   for (const c of cols) {
-    byCol.get(c)!.sort((a, b) => a.box.y0 - b.box.y0 || a.box.x0 - b.box.x0)
+    const rows = explodeLines(byCol.get(c)!)
+    rows.sort((a, b) => a.box.y0 - b.box.y0 || a.box.x0 - b.box.x0)
+    byCol.set(c, rows)
   }
 
   // 题号锚点：记录「每个题号第一次出现」的 (栏, 栏内下标, y0) —— 全部用像素
   interface Anchor { label: number; col: number; order: number; y0: number }
   const anchors: Anchor[] = []
   for (const c of cols) {
-    const arr = byCol.get(c)!
-    arr.forEach((s, i) => {
+    byCol.get(c)!.forEach((s, i) => {
       const n = segQuestionNumber(s.text)
       if (n === null) return
       // 同题号重复出现（页眉残留等）只认第一次
       if (anchors.some((a) => a.label === n)) return
       anchors.push({ label: n, col: c, order: i, y0: s.box.y0 })
     })
+  }
+  // 定向兜底：用户明确要、但正规正则没认出的题号（OCR 吞了分隔符，如 `14如图`）
+  for (const label of seqs) {
+    if (anchors.some((a) => a.label === label)) continue
+    for (const c of cols) {
+      const arr = byCol.get(c)!
+      const i = arr.findIndex((s) => startsWithLabel(s.text, label))
+      if (i >= 0) {
+        anchors.push({ label, col: c, order: i, y0: arr[i].box.y0 })
+        break
+      }
+    }
   }
 
   return seqs.map((label) => {
@@ -178,15 +273,23 @@ export function locateQuestions(
     //    末题没有下一锚点 ⇒ 会一路框到页底：干净试卷实测末题框高占页 70%（全是空白），
     //    用户看到的就是「位置不准」。改为「本题最后一段底边 + 半个行高」，且不超过下一题顶边。
     const own = arr.filter((s) => s.box.y0 >= topPx && s.box.y0 < boundPx)
-    const lastY1 = Math.max(...own.map((s) => s.box.y1))
+    // ⚠️ r3：本题区间内若尾部跟着「手写/批注区」（连续 ≥3 行没有排版结构），
+    //    末段底边就变成手写区底边 ⇒ 末题一路框到页底。真实样本第 20 题就是这么错的。
+    //    栏宽基准取本栏**最宽行**（整栏行），双栏卷自动按单栏宽自适应。
+    const fullMin = Math.max(...arr.map((s) => s.box.x1 - s.box.x0), 1) * 0.6
+    const handPx = handwritingStart(own, fullMin)
+    const body = handPx === null ? own : own.filter((s) => s.box.y0 < handPx)
+    const bodyRows = body.length ? body : own
+
+    const lastY1 = Math.max(...bodyRows.map((s) => s.box.y1))
     const padY = Math.max(4, 0.5 * (arr[hit.order].box.y1 - arr[hit.order].box.y0))
     const endPx = Math.min(boundPx, lastY1 + padY)
 
     // ⚠️ r2：x 也按本题题面范围收紧。原先恒为整宽（x=0,w=1）⇒ 裁出来带整条空白栏，
     //    双栏卷更糟（会把另一栏的字一起裁进图里）。留 2% 页宽余量兜住贴边图形。
     const padX = Math.max(4, 0.02 * pageW)
-    const x0 = Math.min(...own.map((s) => s.box.x0)) - padX
-    const x1 = Math.max(...own.map((s) => s.box.x1)) + padX
+    const x0 = Math.min(...bodyRows.map((s) => s.box.x0)) - padX
+    const x1 = Math.max(...bodyRows.map((s) => s.box.x1)) + padX
 
     // 解答区起点：本题区间内第一个「解答标记」段（没有 ⇒ 该题只有题目区）
     let solPx: number | null = null
@@ -212,12 +315,23 @@ export function locateQuestions(
  * 用途：定位不到时把「本页只认出了哪几题」直接告诉用户——区分「系统瞎了」与
  * 「OCR 确实没认出这个题号」，避免用户反复重试同一个必然失败的数字。
  */
-export function detectedLabels(segments: Seg[]): number[] {
+export function detectedLabels(segments: Seg[], seqs: number[] = []): number[] {
   const out: number[] = []
+  const rows: Seg[] = []
   for (const s of Array.isArray(segments) ? segments : []) {
-    if (!s) continue
+    if (s) rows.push(...explodeLines([s]))
+  }
+  for (const s of rows) {
     const n = segQuestionNumber(s.text)
-    if (n !== null && !out.includes(n)) out.push(n)
+    if (n !== null) {
+      if (!out.includes(n)) out.push(n)
+      continue
+    }
+    // 定向：OCR 吞了分隔符的号（`14如图`）只对「用户本次要的题号」认，
+    // 否则手写里的 `35.304` 会被当成第 35 题列出来。
+    for (const label of seqs) {
+      if (!out.includes(label) && startsWithLabel(s.text, label)) out.push(label)
+    }
   }
   return out
 }

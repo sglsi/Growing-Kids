@@ -1,0 +1,372 @@
+{
+ "_meta": {
+  "source": "生产 fast 侧车（:9300 RapidOCR）真实输出，经 dist/ocr/ocr-segment.buildSegments 分段",
+  "captured_at": "2026-11-16",
+  "image": "1200x1600 手机拍摄的初三数学卷局部（手写批注多、纸面轻微弯曲）",
+  "why": "D-069 r3 的真实失败样本：用户输入题号 7/14/20，7 位置不准（整宽框）、14 与 20 未定位。三处根因都在这里可复现：① 13/14 被 XY-Cut 并成一段（段首题号 13 ⇒ 14 消失）；② OCR 吞掉 14 后的分隔符（`14如图`）；③ 图注 `第14题图` 被 RE_第N题 误认成第 14 题锚点（锚点跑到 y=730）；④ 末题 20 后面紧跟手写解答（一串窄乱码行）⇒ 旧逻辑框到页底 1600。",
+  "regions_count": 42
+ },
+ "w": 1200,
+ "h": 1600,
+ "segs": [
+  {
+   "text": "（四）",
+   "box": {
+    "x0": 70,
+    "y0": 16,
+    "x1": 115,
+    "y1": 46
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "7.如图，在四边形ABCD 中，AB=CD，AC、BD是对角线，E、F、G、H分别是AD、BD、BC、AC\n的中点，连接EF、FG、GH、HE，则四边形EFGH的形状是（）\nA.平行四边形",
+   "box": {
+    "x0": 66,
+    "y0": 66,
+    "x1": 1092,
+    "y1": 154
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 3,
+   "source": "xycut"
+  },
+  {
+   "text": "B.菱形",
+   "box": {
+    "x0": 320,
+    "y0": 130,
+    "x1": 395,
+    "y1": 158
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "C.矩形",
+   "box": {
+    "x0": 468,
+    "y0": 130,
+    "x1": 544,
+    "y1": 161
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "D.正方形",
+   "box": {
+    "x0": 625,
+    "y0": 130,
+    "x1": 725,
+    "y1": 163
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "G",
+   "box": {
+    "x0": 275,
+    "y0": 351,
+    "x1": 297,
+    "y1": 375
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "第7题图",
+   "box": {
+    "x0": 177,
+    "y0": 397,
+    "x1": 313,
+    "y1": 440
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "13.已知关于x的一元二次方程（m-1）x²+2x+1=0有实数根，则m的取值范围是mz且m\n14如图，△ABC和△EPQ均是等边三角形，点EF分别是△ABC边BC、AC的中点点P在AB边上，\n连接EF、QE.若AB=6，PB=1，则QE=7-}",
+   "box": {
+    "x0": 67,
+    "y0": 462,
+    "x1": 1120,
+    "y1": 555
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 3,
+   "source": "xycut"
+  },
+  {
+   "text": "5\n第14题图",
+   "box": {
+    "x0": 332,
+    "y0": 730,
+    "x1": 441,
+    "y1": 776
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 2,
+   "source": "xycut"
+  },
+  {
+   "text": "E\n第16题图",
+   "box": {
+    "x0": 814,
+    "y0": 707,
+    "x1": 925,
+    "y1": 770
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 2,
+   "source": "xycut"
+  },
+  {
+   "text": "16.如图，矩形ABCD中，AC，BD相交于点O过点B作BF上AC交CD于点F，交AC于点M，过点D\n作DE//BF交AB于点E，交AC于点N，连接FN，EM则下列结论：DN=BM；②EM/FN：③\nAE=FC：当AO=AD时，四边形DEBF是菱形：其中正确结论是O（只填正确结论的序号）",
+   "box": {
+    "x0": 56,
+    "y0": 885,
+    "x1": 1107,
+    "y1": 990
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 3,
+   "source": "xycut"
+  },
+  {
+   "text": "20.如图，在口ABCD中，对角线AC与BD相交于点O，点E，F分别为OB，OD的中点，延长AE至G，\n使EG=AE，连接CG.\n（1）求证：△ABE△CDF；\n（2）当AB与AC满足什么数量关系时，四边形EGCF是矩形？请说明理由",
+   "box": {
+    "x0": 63,
+    "y0": 1019,
+    "x1": 1085,
+    "y1": 1157
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 4,
+   "source": "xycut"
+  },
+  {
+   "text": "35.304",
+   "box": {
+    "x0": 419,
+    "y0": 1153,
+    "x1": 552,
+    "y1": 1191
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "AB=A",
+   "box": {
+    "x0": 681,
+    "y0": 1146,
+    "x1": 766,
+    "y1": 1177
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "内有口ABOD",
+   "box": {
+    "x0": 118,
+    "y0": 1173,
+    "x1": 295,
+    "y1": 1214
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "09=15",
+   "box": {
+    "x0": 449,
+    "y0": 1189,
+    "x1": 517,
+    "y1": 1230
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "又：AO=AC",
+   "box": {
+    "x0": 677,
+    "y0": 1174,
+    "x1": 797,
+    "y1": 1212
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "ABCD,OB=OD",
+   "box": {
+    "x0": 129,
+    "y0": 1215,
+    "x1": 336,
+    "y1": 1259
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "ELIFC",
+   "box": {
+    "x0": 439,
+    "y0": 1229,
+    "x1": 522,
+    "y1": 1260
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "AB=C",
+   "box": {
+    "x0": 690,
+    "y0": 1209,
+    "x1": 791,
+    "y1": 1247
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "=L2",
+   "box": {
+    "x0": 138,
+    "y0": 1258,
+    "x1": 219,
+    "y1": 1296
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "又:EL=AE,AE=F",
+   "box": {
+    "x0": 418,
+    "y0": 1264,
+    "x1": 600,
+    "y1": 1297
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "又是b，下是D中",
+   "box": {
+    "x0": 132,
+    "y0": 1286,
+    "x1": 359,
+    "y1": 1329
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": ".Eh=F",
+   "box": {
+    "x0": 451,
+    "y0": 1300,
+    "x1": 538,
+    "y1": 1324
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 1,
+   "source": "xycut"
+  },
+  {
+   "text": "BE=F\nOABEOCDF(SAS)",
+   "box": {
+    "x0": 153,
+    "y0": 1331,
+    "x1": 355,
+    "y1": 1417
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 2,
+   "source": "xycut"
+  },
+  {
+   "text": "9=90\n23=9\n..MELBO\n又：是点\nOABO等膜",
+   "box": {
+    "x0": 437,
+    "y0": 1391,
+    "x1": 566,
+    "y1": 1581
+   },
+   "col": 0,
+   "kind": "text",
+   "lines": 5,
+   "source": "xycut"
+  }
+ ],
+ "expect": {
+  "labels": [
+   7,
+   14,
+   20
+  ],
+  "stem_px": {
+   "7": [
+    66,
+    455
+   ],
+   "14": [
+    493,
+    792
+   ],
+   "20": [
+    1019,
+    1174
+   ]
+  }
+ }
+}

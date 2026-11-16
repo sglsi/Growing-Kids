@@ -121,6 +121,44 @@ if (Q) {
   ok(Math.round(real[0].stemRect.x * fx.w) >= 30 && Math.round(real[0].stemRect.x * fx.w) <= 60,
      '真实样本：第 1 题左边界落在 30~60px（原图文字 x0=58，留 2% 页宽余量）')
   ok(real.every((g) => g.answerRect === null), '真实样本：无解答标记 ⇒ 每题只存题目区')
+
+  // ---- ①-c 真机失败样本（2026-11-16，用户输入 7/14/20：7 位置不准、14 与 20 未定位）----
+  const fr = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'page-text-exam-real.json'), 'utf8'))
+  const rr = Q.locateQuestions(fr.segs, fr.w, fr.h, [7, 14, 20])
+  ok(rr.every((g) => g.located), `真机样本：7/14/20 必须全部定位（实际 ${rr.map((g) => `${g.label}:${g.located}`).join(',')}）`)
+
+  // 拆行：13/14 被 XY-Cut 并成一段，段内第 2 行才是第 14 题
+  const mergedSeg = fr.segs.find((s) => /^13\./.test(s.text) && /14\s*如/.test(s.text))
+  ok(!!mergedSeg, '真机样本：确实存在「13/14 被并成一段」的分段（前提条件）')
+
+  // 14 未被图注抢锚点：图注 `第14题图` 在 y≈730，若被当锚点，框会从 730 起
+  const q14 = rr.find((g) => g.label === 14)
+  ok(Math.round(q14.stemRect.y * fr.h) < 520, `第 14 题上边界必须落在题干处(<520px)，实际 ${Math.round(q14.stemRect.y * fr.h)}px（被图注抢锚点会到 730）`)
+  ok(Math.round(q14.stemRect.y * fr.h) >= 480, '第 14 题上边界不得早于题干（不能把 13 题一起框进来）')
+  // 14 题的配图在 y≈707~776，框要包住
+  ok(Math.round((q14.stemRect.y + q14.stemRect.h) * fr.h) > 740, '第 14 题框须包住自己的配图（下边界 >740px）')
+
+  // 20 题后面跟着孩子的手写解答（一串窄乱码行）⇒ 不许框到页底
+  const q20 = rr.find((g) => g.label === 20)
+  ok(Math.round((q20.stemRect.y + q20.stemRect.h) * fr.h) < 1200,
+     `末题 20 框下边界必须止于题干末(<1200px)，实际 ${Math.round((q20.stemRect.y + q20.stemRect.h) * fr.h)}px（改前 1600=页底，含 26% 手写）`)
+  ok(Math.round((q20.stemRect.y + q20.stemRect.h) * fr.h) > 1140, '末题 20 框须包住（2）小问末行（>1140px）')
+
+  // 第 7 题：题干+选项+配图+图注，且不含 13 题
+  const q7 = rr.find((g) => g.label === 7)
+  ok(Math.round((q7.stemRect.y + q7.stemRect.h) * fr.h) > 430, '第 7 题框须包住「第7题图」图注（>430px）')
+  ok(Math.round((q7.stemRect.y + q7.stemRect.h) * fr.h) < 470, '第 7 题框不得吃到第 13 题（<470px）')
+
+  // 定向放宽不能把乱码认成题号
+  ok(Q.segQuestionNumber('第14题图') === null, '图注「第14题图」不得被当成第 14 题锚点')
+  ok(Q.segQuestionNumber('第7题图') === null, '图注「第7题图」不得被当成第 7 题锚点')
+  ok(Q.startsWithLabel('14如图，△ABC', 14) === true, '定向：`14如图` 认得出第 14 题')
+  ok(Q.startsWithLabel('35.304', 35) === false, '定向：手写 `35.304` 不得认成第 35 题')
+  ok(Q.startsWithLabel('35.304', 14) === false, '定向：手写 `35.304` 更不得认成别的题')
+  ok(Q.startsWithLabel('140 名学生', 14) === false, '定向：`140` 不得认成第 14 题')
+  ok(Q.startsWithLabel('14.5 米', 14) === false, '定向：小数 `14.5` 不得认成第 14 题')
+  ok(JSON.stringify(Q.detectedLabels(fr.segs, [7, 14, 20]).slice().sort((a, b) => a - b)) === JSON.stringify([7, 13, 14, 16, 20]),
+     `本页题号清单须含被定向补回的 14（实际 ${JSON.stringify(Q.detectedLabels(fr.segs, [7, 14, 20]))}）`)
 }
 
 // ---- ② 编译产物特征串 ----

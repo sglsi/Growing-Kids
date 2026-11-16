@@ -1590,7 +1590,7 @@ export default function RecognizePage() {
       }
     }
     const got = locateQuestions(segs, pw, ph, seqs)
-    setSeqDetected(detectedLabels(segs))
+    setSeqDetected(detectedLabels(segs, seqs))
     setSeqRows(
       got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
     )
