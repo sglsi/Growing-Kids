@@ -14,6 +14,7 @@ import { packPages, type PackInput } from './pdf-layout'
 // D-063：A4 / 页边距提到共用模块（一图一页与智能拼页同一套版面常量）
 import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
 import { normalizeImageSource } from './image-normalize'
+import { splitQuestionRuns, hasInlineFigure } from '../shared/inline-figure-runs'
 
 // 图与图之间保留 12pt 空隙，便于剪裁/批注（智能拼页专用）。
 const IMAGE_GAP = 12
@@ -127,8 +128,33 @@ export class PdfService {
           // 纯 OCR 文字题（用户只存了识别文字、没有题块照片）：
           // 旧逻辑会一路走到「所选素材中没有可合成的图片」直接 400，练习卷出不来。
           // 改为把题干渲染成文本块，至少保证题目可打印、可作答。
-          const stem = ((it.content as { question?: string } | null)?.question || '').trim()
-          if (stem) units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') } })
+          const content = (it.content || {}) as {
+            question?: string
+            question_inline_figures?: Array<{ slot: number; file_key: string }>
+          }
+          const stem = (content.question || '').trim()
+          if (stem) {
+            const inlineFigs = Array.isArray(content.question_inline_figures) ? content.question_inline_figures : []
+            const urls = it.question_inline_figure_urls || []
+            const keyBySlot = new Map<number, string>()
+            // 槽位 → 签名 URL：按 content 里的顺序对齐（与 withUrls 派生顺序一致）
+            inlineFigs.forEach((f, i) => {
+              if (f && typeof f.slot === 'number' && urls[i] && !keyBySlot.has(f.slot)) keyBySlot.set(f.slot, urls[i]!)
+            })
+            if (hasInlineFigure(stem)) {
+              // D-075：题干里的 [图N] 原位切成文字块 + 图片单元，避免图统一堆到末尾。
+              // 无对应 URL 的标记由 splitQuestionRuns 原样留成文字（fail-closed，不拿邻图顶）。
+              splitQuestionRuns(stem, (slot) => keyBySlot.get(slot)).forEach((run, i) => {
+                if (run.kind === 'text') {
+                  if (run.text.trim()) units.push({ id: `${it.id}#t-stem-${i}`, text: { lines: run.text.split('\n') } })
+                } else {
+                  units.push({ id: `${it.id}#inline-${run.slot}`, url: run.ref })
+                }
+              })
+            } else {
+              units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') } })
+            }
+          }
         }
         if (includeAnswers) {
           const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }

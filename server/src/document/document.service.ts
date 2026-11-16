@@ -7,6 +7,7 @@ import sharp from 'sharp'
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { cleanStr, cleanDate } from '../shared/query-param'
+import { splitQuestionRuns, hasInlineFigure } from '../shared/inline-figure-runs'
 
 /** 单题最多嵌入的图片数：防止一份汇总卷被几十张原图撑到打不开 */
 const MAX_IMAGES_PER_QUESTION = 6
@@ -58,6 +59,11 @@ interface RawRow {
      */
     question_images?: string[]
     images?: string[]
+    /**
+     * 题干内嵌图（P-034 / D-075）：`[图N]` 与 slot 一一对应，导出时原位交错插图，
+     * 而不是像 question_images 那样统一堆在题干之后。
+     */
+    question_inline_figures?: Array<{ slot: number; file_key: string }>
     /** 答案图只在 include_answers=true 时导出，避免练习卷泄答案 */
     answer_images?: string[]
     error_analysis?: { type?: string; label?: string; reason?: string; suggestion?: string } | null
@@ -144,6 +150,53 @@ export class DocumentService {
         }),
       )
       embedded += 1
+    }
+    return out
+  }
+
+  /**
+   * 单张内嵌图段落：复用 loadImage 的 storage key 直读与同一套缩放护栏。
+   * 读不到就写一行诚实提示，不阻断整卷、也不拿别的图顶替（D-020 fail-closed）。
+   */
+  private async inlineFigureParagraph(key: string): Promise<Paragraph> {
+    const img = await this.loadImage(key)
+    if (!img) {
+      return new Paragraph({
+        spacing: { after: 60 },
+        children: [new TextRun({ text: '（本题内嵌图未能嵌入，请回原流程查看）', size: 18, color: '9A948A', italics: true })],
+      })
+    }
+    const w = Math.min(DOCX_IMAGE_MAX_W, img.width)
+    const h = Math.max(1, Math.round((img.height * w) / img.width))
+    return new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 80, after: 160 },
+      children: [new ImageRun({ data: img.data, type: img.type, transformation: { width: w, height: h } })],
+    })
+  }
+
+  /**
+   * 题干段落：把 `[图N]` 切成文字段 + 内嵌图段，原位交错输出。
+   * 没有标记时走原纯文本路径（零回归）；同一 slot 只取第一张、超过上限降级为文字。
+   */
+  private async questionParagraphs(question: string, figs: Array<{ slot: number; file_key: string }>): Promise<Paragraph[]> {
+    if (!hasInlineFigure(question)) return this.textParagraphs(question, { size: 22 })
+    const keyBySlot = new Map<number, string>()
+    for (const f of figs || []) {
+      if (f && typeof f.slot === 'number' && f.file_key && !keyBySlot.has(f.slot)) keyBySlot.set(f.slot, f.file_key)
+    }
+    const runs = splitQuestionRuns(question, (slot) => keyBySlot.get(slot))
+    const out: Paragraph[] = []
+    let embedded = 0
+    for (const run of runs) {
+      if (run.kind === 'text') {
+        out.push(...this.textParagraphs(run.text, { size: 22 }))
+      } else if (embedded >= MAX_IMAGES_PER_QUESTION) {
+        out.push(...this.textParagraphs(`[图${run.slot}]`, { size: 22 })) // 超上限：降级为文字
+      } else {
+        out.push(await this.inlineFigureParagraph(run.ref))
+        embedded += 1
+      }
     }
     return out
   }
@@ -253,7 +306,7 @@ export class DocumentService {
             children: [new TextRun({ text: `${questionNo}. `, bold: true, size: 24, font: '宋体' })],
           }),
         )
-        children.push(...this.textParagraphs(c.question || '', { size: 22 }))
+        children.push(...(await this.questionParagraphs(c.question || '', Array.isArray(c.question_inline_figures) ? c.question_inline_figures : [])))
 
         // 题面配图：OCR 只把题干转成了文字，几何图/图表/示意图留在题块照片里。
         // 旧实现 100% 纯文本，打印出来孩子看不到图、题目没法作答。
