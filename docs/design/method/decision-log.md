@@ -2913,3 +2913,32 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - **重启验证**：active、启动 +885ms、`:3000/api/health` 与公网 `https://deep-root.cn/api/health` 均 **200**、journal ERROR **0**、`splitQuestionRuns` 在线 4 处、3 个关键 js sha256 与本地逐字一致。
 - **前端**：先 `build:weapp` 把过期角标 `fc0fcc5` 刷为 HEAD `5c3b0bb`（否则上传包角标对不上源码）→ `release-check --dev` 11 通过 / 2 警告 / 0 阻断 → CLI 上传开发版 **2026.11.16.2**（TOTAL 916.3 KB / 938340 Byte、AppID `wx48bf5ba9bae0bf39`、端口 46737、`√ upload` exit 0）。上传前 `islogin` 校验 `login:true`，否则 exit 2 不盲传。
 - 🔴 **边界不变**：上传只产生开发版，未提审未发版 ⇒ D-074/075 全部功能仍未面客；未真机回归；`0033` 未执行；push 未执行（AHEAD 24）。回滚点 `/tmp/dist-bak-d075-20261116234144` 保留。
+
+## D-076：小程序体检四修复 + 0033 上生产 + 开发版 2026.11.16.3（2026-11-17 凌晨，思傅授权）
+
+**触发**：思傅报 4 个真机问题 + 1 个咨询 + 真机验收要求。分档 L1 工程级（不动学习行为/判定层/`question-match.ts`），不过 20a §5.1 三问。
+
+### 一、四修复
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| ① | 最近题目列表删除上面的题→跳到下面题目位置 | 删后 `load()` 重拉列表、少一项整体上移，受控 `scrollTop` 未变 | `index.tsx`：删前 `measureDeletedHeight()` 量被删项高度（含间距），`useEffect(inbox)` 在重排后把 scrollTop 扣掉该段、双帧触发；单点+批量删除都接。与"详情页返回锚定"（`restoreItemIdRef`）互不干扰 |
+| ② | 资料页点"新建文件夹"→"服务端升级后可用" | 生产 **0033 迁移未执行**（`library_folders` 表/`library_docs.folder_id` 列均不存在）⇒ 前端探测 `/api/library/folders` 404 ⇒ `folderSupported=false` 降级灰显 | 生产备份后执行 0033 迁移（见下） |
+| ③ | 按题号提取输入框与其他内容重叠看不清 | 原生 `<Input>` 与"定位/加入题目"按钮挤同一行，`flex:1 1 0 + minWidth:0` 被压窄、原生层级盖住按钮 | `recognize/index.tsx`：输入框独占一行（整行可点/聚焦即输入），按钮移到下一行；`boxSizing:border-box` + placeholder 加"点这里直接输入" |
+| ④ | 错题提取裁剪框缩到一定宽度不能再缩 | `image-editor.tsx` `MIN_SIZE=0.12`（单边下限 12%） | `MIN_SIZE=0.03`（允许精确到 3%，仍留极小下限防退化空图）；四边形 `MIN_QUAD_AREA=0.05` 独立不动 |
+
+### 二、0033 上生产（数据层，非代码）
+- 改库前即时备份：`gk-db-20261117-001350.gkbk`（237 MB / 25 表 / 403242 行、读回自检通过；首次未带 `NODE_OPTIONS=--max-old-space-size=2560` OOM，带上后成功）。
+- 0033 文件经 `/tmp` 中转 scp（`ubuntu` 对 `/opt/gk/migrations` 无写权限），sha256 与本地逐字一致 `ce53d8da…`。
+- `migrate.mjs --dry --only` → `--only 0033_library_folders.sql`：新增 1 / 跳过 0。验证：`library_folders` 表在、`library_docs.folder_id` 列在、`schema_migrations` 有 0033 记账；dist 有 `library-folder.controller.js`、裸探 `/api/library/folders` = 401（非 404，路由在）。
+
+### 三、验证 / 发货
+- `tsc` RC=0、`verify:gate` 38/38、`release-check --dev` 11 通过 / 2 警告 / 0 阻断、角标 `4559044`=HEAD。
+- 开发版 **2026.11.16.3**（917.2 KB / 939215 Byte、`√ upload` exit 0）。特征串已确认进包（输入框占位在 recognize chunk、裁剪 0.03 在 common.js）。
+- 模拟器 CDP：特征串命中、逻辑层无异常、首页 target 已加载；`ide-verify` 冒烟脚本报 `wx.reLaunch is not a function`（脚本选到 about:blank target 的工具问题，非小程序 bug，未列入修复）。
+
+### 四、⑤小题号咨询（未改，等方向）
+- 现状：`parseSeqSpec` 只认纯数字 `3,5,8-12`；`segQuestionNumber` 认 `第N题`/`3.`/`(3)`/`【例3】` 等**阿拉伯数字**前缀。（一）（二）是**中文数字分节** + 阿拉伯小题号的两级编号，当前不支持。
+- 这是判定层真相源 `question-locate.ts` 的扩展，触及"⛔ 不扩正则"红线；且思傅原话是"如何解决"（咨询）。已给出方案选项，**不擅自改判定层**，等思傅拍板。
+
+### 五、边界
+- 上传只产生开发版，未提审未发版；**真机交互手感（删除不跳/裁剪拖动/输入聚焦/文件夹新建）必须在思傅手机上验收**，模拟器测不出。未 push（AHEAD 28，按约定等指示）。
