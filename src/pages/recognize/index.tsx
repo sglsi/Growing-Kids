@@ -21,7 +21,7 @@ import WrongqOcrPanel from '@/components/wrongq-ocr-panel'
 import {
   fetchSubjects, recognizePaper, recognizeSeparate,
   recognizeDocumentByUrl, uploadFile, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
-  recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr,
+  recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr, fetchDocPages,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
@@ -32,6 +32,8 @@ import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
 // P-014 / D-017：录入侧引导（前端镜像，与 server/src/shared/input-guard.ts 逐字一致）
 import { guardQuestionInput } from '@/constants/input-guard'
+// P-031：按题号定位候选框（零依赖纯函数，可离线实证）
+import { parseSeqSpec, locateQuestions, type Rect01 } from '@/lib/question-locate'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -62,6 +64,11 @@ interface BoardEntry {
   id: number
   text: string
   images: { url: string; key: string }[]
+  /**
+   * P-031：解答区裁剪图（保存时挂 `content.answer_images`）。
+   * 可选：既有构造点不必全部改，读取侧一律 `?? []`。
+   */
+  answerImages?: { url: string; key: string }[]
   /** 本题（首图）OCR 出的段落 */
   segments: PageTextSegment[]
   /** idle=未识别 | busy=识别中 | done=已识别 | error=识别失败 */
@@ -88,6 +95,16 @@ interface BoardPage {
   lastMode?: 'fast' | 'precise'
   /** 朝向未经 OCR 消歧（侧车缺席时几何保守不转，本页可能侧躺） */
   suspect?: boolean
+}
+
+/** P-031：按题号提取的一行——题号、是否定位到、候选框、已裁出的图 */
+interface SeqRow {
+  label: number
+  located: boolean
+  stemRect: Rect01
+  answerRect: Rect01 | null
+  stem?: { key: string; url: string }
+  answer?: { key: string; url: string }
 }
 
 /** 人工整理流程的上限（防滥用 + 控导出体积） */
@@ -134,6 +151,10 @@ export default function RecognizePage() {
   const [exporting, setExporting] = useState(false)
   // #109 部分序号识别：序号输入框（如 "3,5,8-12"）+ 勾选态存 Draft.selected
   const [seqInput, setSeqInput] = useState('')
+  // ── P-031 按题号提取：输入题号 → 系统给候选框 → 逐题确认裁图（只存图片）──
+  const [seqRows, setSeqRows] = useState<SeqRow[]>([])
+  const [seqCropping, setSeqCropping] = useState<{ idx: number; kind: 'stem' | 'answer' } | null>(null)
+  const [seqBusy, setSeqBusy] = useState(false)
 
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
@@ -763,6 +784,52 @@ export default function RecognizePage() {
     setBoardBusy(false)
   }
 
+  /**
+   * P-031：导入 PDF → 逐页图（含文字层页面）加入来源页。
+   * 加入后仍要用户先点「识别」，才有段落框可供按题号定位——不自动跑，避免选完文件长时间无反馈。
+   */
+  const addBoardPagesFromPdf = async () => {
+    if (boardBusy) return
+    const room = MAX_BOARD_PAGES - boardPages.length
+    if (room <= 0) {
+      Taro.showToast({ title: `最多添加 ${MAX_BOARD_PAGES} 页`, icon: 'none' })
+      return
+    }
+    let picked = ''
+    let pickedName = ''
+    await pickDoc((p, name) => { picked = p; pickedName = name })
+    if (!picked) return
+    if (!/\.pdf$/i.test(pickedName || picked)) {
+      Taro.showToast({ title: '按题号裁剪只支持 PDF；Word/TXT 没有页图', icon: 'none' })
+      return
+    }
+    setBoardBusy(true)
+    Taro.showLoading({ title: '正在生成页图…', mask: true })
+    try {
+      const up = await uploadFile(picked)
+      const r = await fetchDocPages(up.url || '', room)
+      if (!r.pages.length) throw new Error('没有渲染出页图')
+      const added: BoardPage[] = r.pages.map((p) => ({
+        id: ++boardIdRef.current,
+        url: p.url,
+        w: p.width,
+        h: p.height,
+        segments: [],
+        ocr: 'idle' as const,
+      }))
+      const firstNew = boardPages.length
+      setBoardPages((prev) => [...prev, ...added])
+      setActivePage(firstNew)
+      Taro.showToast({ title: `已加入 ${added.length} 页，请先识别再按题号定位`, icon: 'none' })
+    } catch (e) {
+      console.error('PDF 页图生成失败', e)
+      Taro.showToast({ title: e instanceof Error ? e.message : '生成页图失败，请改用图片', icon: 'none' })
+    } finally {
+      Taro.hideLoading()
+      setBoardBusy(false)
+    }
+  }
+
   /** 单页全页 OCR（用户手动触发：快速/精准）；失败置 error 态并记录原因，不抛 */
   const runPageOcr = async (p: BoardPage, ocrMode: 'fast' | 'precise') => {
     setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
@@ -1144,7 +1211,8 @@ export default function RecognizePage() {
   }
 
   /** 粘贴栏有效条目（有文字或有图） */
-  const boardValidItems = () => board.filter((e) => e.text.trim() || e.images.length)
+  const boardValidItems = () =>
+    board.filter((e) => e.text.trim() || e.images.length || (e.answerImages?.length ?? 0) > 0)
 
   /**
    * 粘贴栏存入错题库（#150）：条目 → kind=question timeline 批量落库。
@@ -1207,6 +1275,8 @@ export default function RecognizePage() {
           wrong_answer: '',
           status: 'pending' as const,
           question_images: e.images.map((i) => i.key),
+          // P-031：解答区裁剪图单独落 answer_images（Q2=A 只存图片，不解文本）
+          ...((e.answerImages?.length ?? 0) > 0 ? { answer_images: e.answerImages!.map((i) => i.key) } : {}),
         },
       }))
       await createTimelineBatch(payloads)
@@ -1470,6 +1540,89 @@ export default function RecognizePage() {
   /** #150 人工整理：当前展示/裁剪的来源页 */
   const curPage = boardPages[activePage]
 
+  // ── P-031 按题号提取：定位 → 逐题确认裁图 → 加入题目清单 ──
+  /**
+   * 只在「错题提取」模式使用。依赖当前页已有的 OCR 段落（每段带像素框）：
+   * 没有段落就没有位置信息，只能提示先识别 —— 绝不猜坐标、绝不拿相邻题区间顶替（D-020）。
+   */
+  const handleLocateBySeq = () => {
+    const seqs = parseSeqSpec(seqInput)
+    if (!seqs) {
+      Taro.showToast({ title: '题号格式如 3,5,8-12', icon: 'none' })
+      return
+    }
+    const page = boardPages[activePage]
+    if (!page) {
+      Taro.showToast({ title: '请先选择来源图片', icon: 'none' })
+      return
+    }
+    if (!page.segments.length) {
+      Taro.showToast({ title: '请先对本页做一次识别', icon: 'none' })
+      return
+    }
+    const got = locateQuestions(page.segments, page.w, page.h, seqs)
+    setSeqRows(
+      got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
+    )
+    const miss = got.filter((g) => !g.located).map((g) => g.label)
+    Taro.showToast({
+      title: miss.length ? `第 ${miss.join('、')} 题未定位，可手工框` : `已定位 ${got.length} 题`,
+      icon: 'none',
+    })
+  }
+
+  /** 编辑器确认：先把裁好的图传成附件（不建条目，避免首页多出重复行），再回填该行 */
+  const handleSeqCropConfirm = async (tempPath: string) => {
+    const task = seqCropping
+    setSeqCropping(null)
+    if (!task) return
+    setSeqBusy(true)
+    try {
+      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      setSeqRows((prev) =>
+        prev.map((r, i) => {
+          if (i !== task.idx) return r
+          return task.kind === 'stem'
+            ? { ...r, stem: { key: up.key, url: up.url } }
+            : { ...r, answer: { key: up.key, url: up.url } }
+        }),
+      )
+    } catch (e) {
+      console.error('按题号裁剪上传失败', e)
+      Taro.showToast({ title: '上传失败，请重试', icon: 'none' })
+    } finally {
+      setSeqBusy(false)
+    }
+  }
+
+  /** 已裁好的题追加进题目清单：一题一条，题目图→question_images、解答图→answer_images */
+  const handleSeqApply = () => {
+    // 题目区是必需的：只有解答图没有题面的条目，后端「题干或题面图至少有一个」也会拒，
+    // 且复习时无法作答。解答可以没有（Q「无解答时只存题目区」）。
+    const usable = seqRows.filter((r) => r.stem)
+    if (!usable.length) {
+      Taro.showToast({ title: '请先裁剪题目图', icon: 'none' })
+      return
+    }
+    setBoard((prev) => [
+      ...prev,
+      ...usable.map((r) => ({
+        id: ++boardIdRef.current,
+        // Q2=A：只存图片，题干文本留空（后端已放宽为「有题面图即可」）
+        text: '',
+        images: r.stem ? [r.stem] : [],
+        answerImages: r.answer ? [r.answer] : [],
+        segments: [] as PageTextSegment[],
+        ocr: 'idle' as const,
+      })),
+    ])
+    setSeqRows([])
+    Taro.showToast({ title: `已加入 ${usable.length} 题`, icon: 'success' })
+  }
+
+  /** 当前待裁行（给编辑器预置候选框；kind 决定用题目区还是解答区） */
+  const seqCropRow = seqCropping ? seqRows[seqCropping.idx] : undefined
+
   return (
     <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
       <View className="px-4 pt-4 pb-40" style={{ paddingBottom: kb.bottomPadding }}>
@@ -1643,6 +1796,101 @@ export default function RecognizePage() {
               )}
             </Card>
 
+            {/* P-031：按题号提取 —— 输入题号 → 系统给候选框 → 逐题确认裁图（Q2=A 只存图片） */}
+            <Card className="rounded-2xl border-border p-4 mb-4">
+              <View className="flex flex-row items-center justify-between mb-2">
+                <Text className="block text-sm font-semibold text-foreground">按题号提取</Text>
+                <Text className="block text-xs text-muted-foreground">只存图片，不写题干文字</Text>
+              </View>
+              <Text className="block text-xs text-muted-foreground mb-2">
+                先在上方来源页做一次识别，系统才能按题号找到位置；定位不到的题会给整页框，由你手工圈定
+              </Text>
+              <View className="flex flex-row items-center gap-2 mb-3">
+                <View className="px-3 py-1 rounded-lg border border-border" onClick={() => void addBoardPagesFromPdf()}>
+                  <Text className="block text-xs text-primary">从 PDF 取页图</Text>
+                </View>
+                <Text className="block text-xs text-muted-foreground">Word/TXT 没有页图，请另存为 PDF</Text>
+              </View>
+              <View className="flex flex-row items-center gap-2 mb-3">
+                <View className="flex-1 h-9 rounded-xl border border-border bg-white flex flex-row items-center px-3">
+                  <Input
+                    className="flex-1 text-sm"
+                    value={seqInput}
+                    placeholder="如 3,5,8-12"
+                    placeholderClass="text-muted-foreground"
+                    onInput={(e) => setSeqInput(e.detail.value)}
+                    onConfirm={handleLocateBySeq}
+                  />
+                </View>
+                <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={handleLocateBySeq}>
+                  <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>定位</Text>
+                </View>
+                {seqRows.length > 0 ? (
+                  <View
+                    className="h-9 px-3 rounded-xl flex items-center justify-center"
+                    style={{ backgroundColor: BRAND, opacity: seqBusy ? 0.6 : 1 }}
+                    onClick={() => { if (!seqBusy) handleSeqApply() }}
+                  >
+                    <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>
+                      加入题目（{seqRows.filter((r) => r.stem).length}）
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+              {seqRows.map((r, i) => (
+                <View
+                  key={`seq-${r.label}-${i}`}
+                  className="rounded-xl p-3 mb-2"
+                  style={{ backgroundColor: '#fff', border: '1px solid #ece8e0' }}
+                >
+                  <View className="flex flex-row items-center justify-between mb-2">
+                    <Text className="block text-xs font-medium text-foreground">第 {r.label} 题</Text>
+                    <Text className="block text-xs" style={{ color: r.located ? BRAND_TEXT : '#B08D84' }}>
+                      {r.located ? (r.answerRect ? '含解答区候选' : '无解答，只存题目区') : '未定位，请手工框'}
+                    </Text>
+                  </View>
+                  <View className="flex flex-row gap-2">
+                    <View
+                      className="flex-1 rounded-lg border border-border px-2 py-2"
+                      onClick={() => setSeqCropping({ idx: i, kind: 'stem' })}
+                    >
+                      <Text className="block text-xs text-center" style={{ color: r.stem ? BRAND_TEXT : INK }}>
+                        {r.stem ? '✓ 题目图已裁（点击重裁）' : '裁题目图'}
+                      </Text>
+                    </View>
+                    {r.answerRect || r.answer ? (
+                      <View
+                        className="flex-1 rounded-lg border border-border px-2 py-2"
+                        onClick={() => setSeqCropping({ idx: i, kind: 'answer' })}
+                      >
+                        <Text className="block text-xs text-center" style={{ color: r.answer ? BRAND_TEXT : INK }}>
+                          {r.answer ? '✓ 解答图已裁（点击重裁）' : '裁解答图'}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  {r.stem || r.answer ? (
+                    <View className="flex flex-row gap-2 mt-2">
+                      {r.stem ? (
+                        <TaroImage
+                          src={r.stem.url}
+                          mode="aspectFit"
+                          style={{ width: 72, height: 72, borderRadius: 6, backgroundColor: '#f6f2ea' }}
+                        />
+                      ) : null}
+                      {r.answer ? (
+                        <TaroImage
+                          src={r.answer.url}
+                          mode="aspectFit"
+                          style={{ width: 72, height: 72, borderRadius: 6, backgroundColor: '#f6f2ea' }}
+                        />
+                      ) : null}
+                    </View>
+                  ) : null}
+                </View>
+              ))}
+            </Card>
+
             {/* 题目清单：每题 = 裁剪图 + 本题 OCR 段落 + 题干（① 裁剪 ② 识别 ③ 勾选入题干） */}
             <Card className="rounded-2xl border-border p-4 mb-4">
               <View className="flex flex-row items-center justify-between mb-2">
@@ -1685,6 +1933,23 @@ export default function RecognizePage() {
                           }}
                         >
                           <Text style={{ color: '#fff', fontSize: 12, lineHeight: '14px' }}>×</Text>
+                        </View>
+                      </View>
+                    ))}
+                    {/* P-031：解答区裁剪图（与题目图同排展示，左下角标「解答」以免混淆） */}
+                    {(e.answerImages ?? []).map((img, j) => (
+                      <View
+                        key={`ans-${j}`}
+                        style={{ width: 64, height: 64, borderRadius: 8, overflow: 'hidden', position: 'relative', border: '1px solid #cfe3d8' }}
+                      >
+                        <TaroImage src={img.url} mode="aspectFill" style={{ width: '100%', height: '100%' }} />
+                        <View
+                          style={{
+                            position: 'absolute', left: 2, bottom: 2, paddingLeft: 4, paddingRight: 4,
+                            borderRadius: 4, backgroundColor: 'rgba(0,0,0,0.55)',
+                          }}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 9, lineHeight: '12px' }}>解答</Text>
                         </View>
                       </View>
                     ))}
@@ -2161,6 +2426,24 @@ export default function RecognizePage() {
       />
 
       {/* #150 人工整理：页内裁剪编辑器（只裁不处理，结果入粘贴栏题目） */}
+      {/* P-031 按题号提取：把系统候选框预置进裁剪器，用户确认/微调后才出图（Q3=B / Q4=C） */}
+      {seqCropping && seqCropRow ? (
+        <ImageEditor
+          visible
+          cropOnly
+          src={curPage?.url || ''}
+          initialCrop={
+            seqCropping.kind === 'stem' ? seqCropRow.stemRect : (seqCropRow.answerRect ?? seqCropRow.stemRect)
+          }
+          cropKey={`p031-${seqCropRow.label}-${seqCropping.kind}`}
+          confirmText="用这张图"
+          cropTargetLabel={`第 ${seqCropRow.label} 题 · ${seqCropping.kind === 'stem' ? '题目区' : '解答区'}`}
+          enableSaveToInbox={false}
+          onCancel={() => setSeqCropping(null)}
+          onConfirm={(p) => void handleSeqCropConfirm(p)}
+        />
+      ) : null}
+
       {cropEditor ? (
         <ImageEditor
           visible

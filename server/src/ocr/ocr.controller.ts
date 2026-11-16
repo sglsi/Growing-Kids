@@ -55,6 +55,17 @@ export class OcrController {
   }
 
   /**
+   * P-031：PDF → 逐页图 URL（含文字层页面）。
+   * 供「错题提取 · 按题号裁剪」使用：前端拿到页图后才能跑 OCR 拿段落框、再按框裁图。
+   */
+  @Post('doc-pages')
+  @HttpCode(200)
+  async docPages(@Body() dto: { file_url?: string; max_pages?: number }) {
+    const data = await this.ocrService.docPages(dto.file_url ?? '', dto.max_pages)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /**
    * 把识别结果直接存储为一个 Word 文档：
    * 生成 docx → 上传存储 → 写入 documents 记录（从而在「文档」页可见、可打开）。
    */

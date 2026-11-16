@@ -34,6 +34,17 @@ interface ImageEditorProps {
    * 解决 OCR 文字粘到题 A、裁剪图却进题 B——同题图文"分家"存成两道题的问题。
    */
   cropTargetLabel?: string
+  /**
+   * P-031：按题号裁剪时，把系统算出的候选框**预置**为初始裁剪框（归一化 0~1）。
+   * 用户可直接确认，也可拖动微调——这正是「系统给候选、人来拍板」（Q3=B）。
+   * 只给候选、不做判定：定位不到时父组件传整页框，由用户自己画。
+   */
+  initialCrop?: Rect
+  /**
+   * P-031：同一张来源图连续裁多题时 `src` 不变，但候选框要换。
+   * 必须进 useEffect 依赖，否则会沿用上一题的框（只靠 `src` 变化触发不了复位）。
+   */
+  cropKey?: string
 }
 
 interface Rect {
@@ -184,7 +195,7 @@ const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
 
 export default function ImageEditor({
   visible, src, onCancel, onConfirm, autoAction = null, enableSaveToInbox = true,
-  cropOnly = false, confirmText, cropTargetLabel,
+  cropOnly = false, confirmText, cropTargetLabel, initialCrop, cropKey,
 }: ImageEditorProps) {
   const [currentSrc, setCurrentSrc] = useState(src)
   const [naturalW, setNaturalW] = useState(0)
@@ -352,7 +363,8 @@ export default function ImageEditor({
     setCurrentSrc(src)
     // 基础编辑态
     setRotation(0)
-    setCrop(DEFAULT_CROP)
+    // P-031：候选框预置（绝对不信任外部传值，一律过 clampCrop 收敛到图内）
+    setCrop(initialCrop ? clampCrop(initialCrop) : DEFAULT_CROP)
     setQuad(DEFAULT_QUAD)
     setCornerMode('rect')
     setActiveCorner(null)
@@ -385,7 +397,7 @@ export default function ImageEditor({
     setColorPenMode(false)
     void openImage(src)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, src])
+  }, [visible, src, cropKey])
 
   // 打开后自动执行指定 AI 处理（等图片尺寸就绪后再跑，避免基于空图）
   useEffect(() => {

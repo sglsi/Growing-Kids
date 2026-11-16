@@ -2354,3 +2354,47 @@ D-064 把 `touchmove` 只挂在 `ScrollView` 上，格子矩形又只在 `onLong
 - 修复：探测失败时改为**可见的禁用态入口**（`📁 文件夹分类` ＋ `＋ 新建文件夹` ＋「需升级服务端后可用，当前按全部资料展示」），点击 toast 说明原因；不伪造本地假目录、不放宽 fail-safe、不传 `folder_id`；探测成功仍走完整无限层级目录树。判定层 `question-match.ts`／`CACHE_VERSION v17`／r11 均未动。
 - 验证：`pnpm tsc`／`lint:build`／`build:weapp` 全 RC=0；`M51+M52` **19/19**、D-068 实证 **37/37**、D-064 **27/27**、`method:check` H1/H2/H3 全绿；编译产物 `dist/pages/library/index.js` 含新文案。
 - 🔴 边界**不变**：这只是让「未就绪」状态可见，**不是让功能可用**。要真正可用仍需三步单独授权（生产库执行 `0033` → 换 `server/dist` + 重启 `gk-api` → 重新 `build:weapp` 上传）。零生产写入、未上传、未 push、真机未回归。
+
+---
+
+## D-069：错题提取「按题号裁剪题目区/解答区」（2026-11-16，L1 工程类，提案 `P-031`）
+
+> 授权：思傅 11-15「错题提取功能可按以下流程进行设计：用户导入图片/文档，用户输入提取图片/文档中的哪些题目的题号，按题号对导入的图片/文档中的题目及解答内容进行裁剪，分别存入该题的题目区和解答区，无解答时只存题目区；有不确定的地方及时问我」
+> 五问答复（逐题确认，不代做取舍）：**Q1**「当前系统中已经有『错题提取』的入口/页面了，和『拍照识别』并列，以这个为基础进行修改」⇒ 改造 `pages/recognize` 的 `split` 模式；**Q2 A** ⇒ 只存图片、题干文本留空；**Q3 B** ⇒ 系统给候选框、用户逐题确认后再裁；**Q4 C** ⇒ 定位不到给整页框让用户手工圈；**Q5 A** ⇒ 单张图片 / 单份文档，题号口径沿用现有「印刷题号优先、回落列表序号」。
+
+### 一、实测现状（读代码，不是推测）
+
+- 「错题提取」= `src/pages/recognize/index.tsx` 的 `split` 模式（`{ value: 'split', label: '错题提取' }`，与「拍照识别」`paper`、「导入文档」`doc` 并列）。
+- 已有：`seqInput` 题号输入框（「如 3,5,8-12」）、`parseSeqInput()`、`applySeqSelection()`（印刷题号优先）、`createTimelineBatch` 批量分别落库、无解答时 `status='pending'` 且 `answer/solution` 落 `''`。
+- 缺口：题号只用于前端勾选过滤，**后端所有识别 DTO 都没有「用户给定题号列表」字段**；裁剪全靠人工逐个框选。
+- 🔴 硬冲突：`timeline.service.ts` 唯一强校验是 `content.question` 非空 ⇒ Q2=A「文本留空只存图片」会被 400 拒；而 `recognize/index.tsx` 自 2026-10-21 起注释写明「允许只裁剪、不识别（图片题）」，属**校验未同步**，本轮一并修正。
+- 文档出图：`PdfToolPage.image_base64` 只在「文字少于 `min_text`」的扫描页渲染，纯文字层 PDF 无页图；`docx/txt` 零 LO 不出图。
+
+### 二、落地口径
+
+- 前端新增 `src/lib/question-locate.ts`（**零依赖纯函数**）：`parseSeqSpec()` 解析 `3,5,8-12`（全角/顿号/去重/单次 ≤60 题）、`segQuestionNumber()`（`第 N 题` / `【例 N】` / `N．`，**半角小数用 `(?!\d)` 排除**，不复犯 D-049 的「1.5 当题号」）、`locateQuestions()` 按栏分组、以「下一个题号锚点」为本题终点、区间内首个解答标记为解答区起点。
+- 定位不到 ⇒ `located=false` + **整页候选** + `answerRect=null`（Q4=C），**绝不借用相邻题区间**（D-020）。
+- 候选框（归一化 0~1）传 `ImageEditor` 新增的 `initialCrop` + `cropKey`；预置值一律过 `clampCrop` 收敛，`cropKey` 进 `useEffect` 依赖（同一张图连裁多题必须复位，只靠 `src` 变化触发不了）。
+- 裁出的图以 `purpose='attach'` 上传（不建条目），`handleSeqApply()` 一题一条追加进 `board`：`images → question_images`、`answerImages → answer_images`、`text: ''`；**题目区为必需**（只有解答图的条目不提交）。
+- 后端：① 题干校验放宽为「`question` 非空 **或** `question_images` 非空」，**双空仍拒**；② 新增 `POST /api/ocr/doc-pages`（`docPages()`，`minText` 推到大值强制每页渲染，Word/TXT 直接 400）。前端「从 PDF 取页图」把返回页图加入来源页，之后与图片走**同一套**定位/确认/裁剪。
+
+### 三、验证（本轮实跑）
+
+- `pnpm tsc` / `lint:build` / `build:weapp`（`dist/pages/recognize/index.js` 65.98 → **74.91 kB**）/ 后端 `tsc` / `build:server` 全 RC=0；`check-isolation` **164 处**通过。
+- 新增 M53 **11/11**；M51 9/9、M52 10/10 未回退（合计 **30/30**）。
+- 新增 `dynamic-tests/run-recognize-p031.cjs` **44/44 PASS**：真实转译执行 `question-locate.ts`（区间展开、全角、去重、倒序/超大/非法/0 拒绝、`1.5 米` 不当题号、`【例 5】` 识别、`解决…` 不当解答起点、题目区与解答区不重叠、第 3 题无解答 `answerRect=null`、第 99 题未定位退回整页、页面尺寸未知不猜比例、空段落不编框），并断言编译产物 6 条新特征串 + 4 条既有能力未被冲掉。
+
+### 四、生效边界（不得误传）
+
+- 🔴 **一个都没面客**：后端 `doc-pages` 与校验放宽**未上生产 `server/dist`**、`gk-api` 未重启；前端未重新上传（线上开发版仍是 `2026.11.15.2`）；**真机未回归**（候选框是否贴合、Canvas 裁剪是否出图、PDF 页图在真机的加载速度全部只有纯函数与编译产物级证据）。
+- 🔴 **不宣称**：候选框准确率、解答区归属正确率、自动切题、`docx/txt` 支持、所有用户可用。解答区归属在纯文本上不可靠是 D-012/D-013 已用 40/40 ROC 证伪的既有结论，本轮只做**候选**，判定权在用户。
+- 判定层 `shared/question-match.ts` **一行未动**、`CACHE_VERSION` 仍 **v17**、r11 与两道发布门未动、未加数据库表、未动 `paper`/`doc` 两条既有流程。
+- 未 push（本地领先 11，本轮后再 +1）、未提审、未发版、零生产写入、未动 Caddy。
+
+### 五、回滚（未执行）
+
+纯代码：`git revert` 本轮 commit 即可；无 migration、无数据反向操作。若已发货需回滚：前端重新上传 `2026.11.15.2`、后端按 D-066 的 `dist.bak-*` 回滚并重启。
+
+### 六、登记
+
+提案 **P-031**、台账 **D-069**、今日日志 `.workbuddy/memory/2026-11-16.md`、项目记忆升 **r71**。

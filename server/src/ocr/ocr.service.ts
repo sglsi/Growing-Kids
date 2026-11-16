@@ -532,6 +532,54 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
     return { items, rawText }
   }
 
+  /**
+   * P-031：把 PDF **逐页渲染成图片 URL**（含纯文字层页面）。
+   *
+   * 与 `recognizePdfDoc` 的差别：那里只渲染「文字少于 min_text」的扫描页（为 OCR 服务），
+   * 纯文字层 PDF 一页图都没有；而「按题号裁剪题目区/解答区」必须有页图可裁，
+   * 故这里把 `minText` 推到不可达的大值，强制每页都走渲染分支。
+   *
+   * ⚠️ Word/TXT 走零 LO 的文字提取，没有页概念 ⇒ 明确拒绝并提示改用 PDF/图片，
+   *    不做「用 LibreOffice 渲染」这种高成本兜底（生产 soffice 红线：每 worker 独立
+   *    profile、~1000 份后需重启、单份小文档可能死循环空转）。
+   */
+  async docPages(
+    fileUrl: string,
+    maxPagesRaw?: number,
+  ): Promise<{ page_count: number; pages: { index: number; url: string; width: number; height: number }[] }> {
+    const url = String(fileUrl ?? '').trim()
+    if (!url) throw new BadRequestException('缺少 file_url')
+    if (/\.docx?(\?|$)/i.test(url) || /\.txt(\?|$)/i.test(url)) {
+      throw new BadRequestException('Word / TXT 没有页图，请另存为 PDF 或直接传图片')
+    }
+    // 页数上限与前端 MAX_BOARD_PAGES（9）同量级：再多既超小程序渲染能力，也拖垮上传
+    const maxPages = Math.min(Math.max(Number(maxPagesRaw ?? 10) || 10, 1), 10)
+    const extracted = await extractDocContent({
+      kind: 'pdf',
+      url,
+      // 单页文字永远达不到此值 ⇒ 每页都按「扫描页」渲染 PNG
+      minText: 999999999,
+      scale: 2,
+      maxPages,
+      timeoutMs: 180000,
+    })
+    if (!extracted.ok || !extracted.data) {
+      throw new BadRequestException(`PDF 页渲染失败：${extracted.detail || '未知错误'}`)
+    }
+    const pages: { index: number; url: string; width: number; height: number }[] = []
+    for (const p of extracted.data.pages) {
+      if (!p.image_base64) continue
+      const buf = Buffer.from(p.image_base64, 'base64')
+      const key = await this.storageService.uploadBuffer(buf, `doc-page-${Date.now()}-${p.index}.png`, 'image/png')
+      pages.push({ index: p.index, url: await this.storageService.getPublicUrl(key), width: p.width, height: p.height })
+    }
+    if (!pages.length) {
+      throw new BadRequestException('未能渲染出任何页图，请确认 PDF 未损坏')
+    }
+    console.log(`[ocr/doc-pages] ${extracted.data.page_count} 页 → 渲染 ${pages.length} 页`)
+    return { page_count: extracted.data.page_count, pages }
+  }
+
   /** DOCX 文档识别（#118）：zip 剥 XML 得全文 → structureTextDoc。 */
   private async recognizeDocxDoc(fileUrl: string): Promise<{ items: RecognizedItem[]; rawText: string }> {
     const extracted = await extractDocContent({ kind: 'docx', url: fileUrl })

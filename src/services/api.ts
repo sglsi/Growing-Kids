@@ -1277,6 +1277,22 @@ export async function exportRecognizedDocx(
  * 返回摆正后的页面图 URL：前端展示与「页内裁剪」都用它（与 OCR 同一坐标系）。
  * @param mode fast=快速（RapidOCR 1~3s/页）| precise=精准（PaddleOCR 全链路 15~20s/页，默认）
  */
+/**
+ * P-031：把 PDF 逐页渲染成图片 URL（含纯文字层页面）。
+ * 供「错题提取 · 按题号裁剪」——只有拿到页图，才能在该页跑 OCR 拿段落框、再按框裁图。
+ * Word/TXT 没有页概念（零 LO 提取），后端直接 400 并提示改用 PDF 或图片。
+ */
+export async function fetchDocPages(fileUrl: string, maxPages = 10) {
+  return unwrap<{ page_count: number; pages: { index: number; url: string; width: number; height: number }[] }>(
+    Network.request({
+      url: '/api/ocr/doc-pages',
+      method: 'POST',
+      data: { file_url: fileUrl, max_pages: maxPages },
+      header: authHeaders(),
+    }),
+  )
+}
+
 export async function ocrPage(
   imageUrl: string,
   mode: 'fast' | 'precise' = 'precise',

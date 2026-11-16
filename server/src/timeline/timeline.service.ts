@@ -463,8 +463,14 @@ export class TimelineService {
     if (dto.kind === 'image' && !dto.file_key) {
       throw new BadRequestException('图片条目缺少 file_key')
     }
-    if (dto.kind === 'question' && !dto.content?.question) {
-      throw new BadRequestException('题目条目缺少 content.question')
+    // P-031（Q2=A「只存图片」）：题干文本与题面图**至少要有一个**。
+    // 放宽原因：错题提取按题号裁出题目区后，题干就是图，不该被迫编一串假文字；
+    // 而 `recognize/index.tsx` 自 2026-10-21 起本就允许「只裁剪、不识别（图片题）」，
+    // 是这里的校验没跟上。双空条目仍然拒绝——否则复习本会出现无法作答的空白卡片。
+    const hasQuestionText = String(dto.content?.question ?? '').trim().length > 0
+    const hasQuestionImage = (dto.content?.question_images?.length ?? 0) > 0
+    if (dto.kind === 'question' && !hasQuestionText && !hasQuestionImage) {
+      throw new BadRequestException('题目条目缺少 content.question（也没有题面图）')
     }
 
     // D-059：题干 / 答案 / 解题过程 / 题目名称 / 标签都是用户可编辑文本，
