@@ -2320,7 +2320,13 @@ function isValidQuad(pts: Corner[]): boolean {
  * （Canvas 规范保证的精确映射）+ CSS 同步为缓冲 + 全区域导出，对口径完全免疫。
  */
 
-const MIN_SIZE = 0.12
+/**
+ * 矩形裁剪的单边最小尺寸（占整图比例）。
+ * 旧值 0.12（12%）太大：用户把宽度拖到约 1/8 图宽就再也缩不动，无法精确圈住窄图/小题。
+ * 降到 0.03（3%）——既能精确微调，又保留极小下限防止拖成 0 宽/0 高产生空图。
+ * 四边形模式另有 MIN_QUAD_AREA 防退化，与此独立。
+ */
+const MIN_SIZE = 0.03
 
 function applyDrag(r: Rect, target: DragTarget, dx: number, dy: number): Rect {
   const next = { ...r }
