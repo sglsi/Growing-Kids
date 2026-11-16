@@ -1,0 +1,242 @@
+{
+ "_meta": {
+  "source": "生产精准侧车 gk-ppsv3（PP-StructureV3）对真机失败原图的真实输出",
+  "captured_at": "2026-11-16",
+  "image": "1200x1600 手机拍摄的初三数学卷局部（与 page-text-exam-real.json 同一张）",
+  "why": "D-069 r4 取证：文字分段里图形等于空白，所以按题号定位必然把图切在外。这里保留版面块的 label+bbox+content，用于复跑 extractFigures（图形块 + 图注归属）与 locateQuestions 的并框断言。",
+  "note": "第 16 题的图（y 563-724）排在**第 14 题正文区间内**，只有图注 `第16题图` 能把它纠正回 16 —— 只按 y 重叠会归错题。"
+ },
+ "blocks": [
+  {
+   "label": "text",
+   "bbox": [
+    74.0,
+    18.0,
+    109.0,
+    40.0
+   ],
+   "order": "normal_text",
+   "content": "（四）"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    62.0,
+    66.0,
+    1088.0,
+    124.0
+   ],
+   "order": "normal_text",
+   "content": "7.如图，在四边形ABCD中，AB=CD，AC、BD是对角线，E、F、G、H分别是AD、BD、BC、AC 的中点，连接EF、FG、GH、HE，则四边形EFGH的形状是（）\n"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    109.0,
+    127.0,
+    735.0,
+    161.0
+   ],
+   "order": "normal_text",
+   "content": "A.平行四边形B.菱形C.矩形D.正方形"
+  },
+  {
+   "label": "image",
+   "bbox": [
+    117.0,
+    187.0,
+    450.0,
+    371.0
+   ],
+   "order": "vision",
+   "content": "G \n"
+  },
+  {
+   "label": "figure_title",
+   "bbox": [
+    175.0,
+    400.0,
+    310.0,
+    431.0
+   ],
+   "order": "vision_title",
+   "content": "第7题图"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    62.0,
+    460.0,
+    1117.0,
+    552.0
+   ],
+   "order": "normal_text",
+   "content": "13.已知关于x的一元二次方程(m-1)x2²+2x+1=0有实数根，则m的取值范围是m2且_mq 14.如图，△ABC和△EPQ均是等边三角形，点E，F分别是△ABC边BC、AC的中点，点P在AB边上，连接EF、QE.若AB=6，PB=1，则QE=2"
+  },
+  {
+   "label": "image",
+   "bbox": [
+    274.0,
+    559.0,
+    489.0,
+    745.0
+   ],
+   "order": "vision",
+   "content": "5\n"
+  },
+  {
+   "label": "figure_title",
+   "bbox": [
+    331.0,
+    747.0,
+    438.0,
+    771.0
+   ],
+   "order": "vision_title",
+   "content": "第14题图"
+  },
+  {
+   "label": "image",
+   "bbox": [
+    747.0,
+    563.0,
+    990.0,
+    724.0
+   ],
+   "order": "vision",
+   "content": "E \n\n"
+  },
+  {
+   "label": "figure_title",
+   "bbox": [
+    815.0,
+    739.0,
+    921.0,
+    763.0
+   ],
+   "order": "vision_title",
+   "content": "第16题图"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    54.0,
+    890.0,
+    1104.0,
+    983.0
+   ],
+   "order": "normal_text",
+   "content": "16.如图，矩形ABCD中，AC，BD相交于点O过点B作BF⊥AC交CD于点F，交AC于点M，过点D 作DE//BF交AB于点E，交AC于点N，连接FN，EM则下列结论：①DN=BM；②EM//FN；③AE=FC：④当AO=AD时，四边形DEBF是菱形.其中正确结论是OO④（只填正确结论的序号）"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    58.0,
+    1026.0,
+    1099.0,
+    1091.0
+   ],
+   "order": "normal_text",
+   "content": "20.如图，在口ABCD中，对角线AC与BD相交于点O，点E，F分别为OB，OD的中点，延长AE至G，使EG=AE，连接CG.X "
+  },
+  {
+   "label": "image",
+   "bbox": [
+    830.0,
+    1062.0,
+    1106.0,
+    1256.0
+   ],
+   "order": "cross_layout",
+   "content": "D 0\n"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    75.0,
+    1113.0,
+    836.0,
+    1150.0
+   ],
+   "order": "normal_text",
+   "content": "∴AB=A$ "
+  },
+  {
+   "label": "text",
+   "bbox": [
+    76.0,
+    1095.0,
+    396.0,
+    1119.0
+   ],
+   "order": "normal_text",
+   "content": "（1）求证：△ABE△CDF "
+  },
+  {
+   "label": "text",
+   "bbox": [
+    120.0,
+    1172.0,
+    358.0,
+    1416.0
+   ],
+   "order": "normal_text",
+   "content": "∴四有口ABoD ∴ABCD，OB=0D ∴y=L2\n又下是B，是D中BE=BDF OABEOCDF(SAS)"
+  },
+  {
+   "label": "formula",
+   "bbox": [
+    417.0,
+    1155.0,
+    549.0,
+    1189.0
+   ],
+   "order": "normal_text",
+   "content": "23=25，∠3-04"
+  },
+  {
+   "label": "text",
+   "bbox": [
+    422.0,
+    1231.0,
+    669.0,
+    1575.0
+   ],
+   "order": "normal_text",
+   "content": "Eh/IFC \n\n又:Eh=AE，AE=oF \n.En=cF \n\n四E行形\n要国形EF造知形\n.q=9\n\n∠3=9\n\n.KELBO \n\n又，E是B点\n\n∴DABo等膜\n\n"
+  },
+  {
+   "label": "formula",
+   "bbox": [
+    699.0,
+    1212.0,
+    787.0,
+    1240.0
+   ],
+   "order": "normal_text",
+   "content": "∴AB=\\AC$ "
+  },
+  {
+   "label": "formula",
+   "bbox": [
+    704.0,
+    1147.0,
+    760.0,
+    1170.0
+   ],
+   "order": "normal_text",
+   "content": "∴AB=A$ "
+  },
+  {
+   "label": "formula",
+   "bbox": [
+    717.0,
+    1176.0,
+    788.0,
+    1204.0
+   ],
+   "order": "normal_text",
+   "content": "又∵∴AD=Ac$ "
+  }
+ ]
+}

@@ -199,6 +199,87 @@ function isSkippableLabel(label: string | null): boolean {
   return l === 'image' || l === 'seal' || l === 'chart' || l === 'figure' || l === 'background'
 }
 
+// ---------- 图形块（P-031 r4：让「图」参与定位） ----------
+
+/**
+ * 图形块：引擎版面分析给出的图/图表外接框。
+ *
+ * ⭐ 为什么必须单独取：**图上没有文字**。行级 OCR（快速通道）与文本分段里，
+ *    一块几何图在数据上等于「空白」——按题号定位只看文字行，就必然把图切在外。
+ *    2026-11-16 真机样本（1200×1600 初三卷）实测：第 20 题的平行四边形图
+ *    版面块为 `[830,1062,1106,1256]`，而纯文字框止于 y=1174，图形下半截被切掉。
+ */
+export interface SegmentFigure {
+  box: { x0: number; y0: number; x1: number; y1: number }
+  /** 由图注（`第N题图`）得到的归属题号；无图注为 null */
+  label: number | null
+}
+
+/** 图注里的题号：`第14题图` → 14（只认图注，不认「第14题」正文） */
+const RE_图注题号 = /第\s*(\d{1,3})\s*题\s*图/
+
+function isFigureLabel(label: string | null): boolean {
+  const l = (label || '').toLowerCase()
+  return l === 'image' || l === 'chart' || l === 'figure'
+}
+
+function isFigureTitleLabel(label: string | null): boolean {
+  const l = (label || '').toLowerCase()
+  return l === 'figure_title' || l === 'image_title'
+}
+
+/**
+ * 从版面块里提取图形块，并用**图注**给它们挂上归属题号。
+ *
+ * ⚠️ 图注是唯一可靠的归属信号，不能只按 y 区间猜：
+ *    真实样本里第 16 题的图（y 563-724）排在**第 14 题正文区间内**（14 题题干 462-555、
+ *    16 题题干 885-990，两图并排夹在中间）。按 y 重叠归题会把它判给第 14 题，
+ *    于是 14 的框把 16 的图一起圈走——这就是「连带邻题」的真实成因。
+ *    图注 `第16题图`（y 739-763）紧贴该图下方，能把它纠正回第 16 题。
+ *
+ * @param blocks 引擎版面块（仅 PP-StructureV3 有；RapidOCR 传空数组）
+ */
+export function extractFigures(blocks: SegmentLayoutBlock[] | null | undefined): SegmentFigure[] {
+  const list = Array.isArray(blocks) ? blocks : []
+  const figs: Array<{ box: SegmentFigure['box']; label: number | null; matched: boolean }> = []
+  const titles: Array<{ box: SegmentFigure['box']; label: number }> = []
+
+  for (const b of list) {
+    const box = normBBox(b.bbox)
+    if (!(box.x1 > box.x0 && box.y1 > box.y0)) continue
+    if (isFigureLabel(b.label)) {
+      figs.push({ box, label: null, matched: false })
+      continue
+    }
+    if (isFigureTitleLabel(b.label)) {
+      const m = RE_图注题号.exec(b.content || '')
+      if (m) titles.push({ box, label: Number(m[1]) })
+    }
+  }
+  if (!figs.length) return []
+
+  // 图注配对：图注在图**下方**（或紧贴上沿），纵向距离取最近的一个，且 x 有重叠
+  for (const f of figs) {
+    const fh = Math.max(1, f.box.y1 - f.box.y0)
+    const tol = Math.max(24, 0.6 * fh)
+    let best: { label: number; d: number } | null = null
+    for (const t of titles) {
+      const dx = Math.min(f.box.x1, t.box.x1) - Math.max(f.box.x0, t.box.x0)
+      if (dx <= 0) continue
+      // 图注 y0 落在图框底边上下 tol 之内（允许略微压进图内）
+      const d = Math.abs(t.box.y0 - f.box.y1)
+      if (d > tol) continue
+      if (!best || d < best.d) best = { label: t.label, d }
+    }
+    if (best) {
+      f.label = best.label
+      f.matched = true
+    }
+  }
+
+  return figs.map((f) => ({ box: f.box, label: f.label }))
+}
+
 function blockOrder(b: SegmentLayoutBlock, i: number): number {
   if (b.order == null) return Number.POSITIVE_INFINITY
   const n = typeof b.order === 'number' ? b.order : Number(String(b.order).replace(/[^\d.-]/g, ''))

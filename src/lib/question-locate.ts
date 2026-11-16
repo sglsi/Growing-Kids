@@ -42,6 +42,23 @@ export interface LocatedQuestion {
   answerRect: Rect01 | null
   /** 是否按题号在文本里真正定位到 */
   located: boolean
+  /**
+   * 归入本题的图形块（像素外接框；null = 本题没有可识别的图）。
+   * 仅供调试与断言使用，前端不必消费——图已经并进 `stemRect`。
+   */
+  figureBox: SegBox | null
+}
+
+/**
+ * 图形块输入：来自版面分析（PP-StructureV3）的 image/chart 块。
+ *
+ * ⚠️ 快速通道（RapidOCR）拿不到这个——它只返回文字行，**图上没有文字**，
+ *    所以在纯文本链路里「图」等于空白，按题号定位必然把图切在外面。
+ */
+export interface FigureSeg {
+  box: SegBox
+  /** 图注（`第N题图`）给出的归属题号；null/缺省 = 无图注，只能按 y 区间归 */
+  label?: number | null
 }
 
 /**
@@ -125,6 +142,19 @@ const RE_选项行 = /^\s*[A-DＡ-Ｄ]\s*[.．、,，)）]/
 /** 图注行（`第7题图` / `图3`）—— 图形是题目的一部分，必须留在题目区 */
 const RE_图注行 = /第\s*\d{1,3}\s*题\s*图|^\s*图\s*\d{1,3}\s*$/
 
+/**
+ * 图注里的题号（`第14题图` → 14）；不是图注返回 null。
+ *
+ * 用途：图注是「这张图属于哪一题」的**显式声明**。真实卷面上，第 16 题的图
+ * 会排在第 14 题的正文区间内（两图并排夹在 14/16 题干之间），只按 y 区间归题
+ * 会把它判给 14 —— 这正是「14 的框把 16 的图一起圈走」的成因。
+ */
+function figureTitleLabel(text: string): number | null {
+  const m = /第\s*(\d{1,3})\s*题\s*图/.exec(String(text ?? ''))
+  return m ? Number(m[1]) : null
+}
+
+
 /** 该行是否「有排版结构」（整栏宽 / 选项 / 图注）；否则视为手写批注或乱码 */
 function isStructuredRow(s: Seg, fullMin: number): boolean {
   const t = String(s.text ?? '')
@@ -204,6 +234,7 @@ export function locateQuestions(
   pageW: number,
   pageH: number,
   seqs: number[],
+  figures: FigureSeg[] = [],
 ): LocatedQuestion[] {
   const list = Array.isArray(segments) ? segments.filter((s) => s && s.box) : []
   // 页面尺寸未知时无法把像素换算成比例 ⇒ 一律只给整页候选（不猜）
@@ -249,6 +280,42 @@ export function locateQuestions(
     }
   }
 
+  // ── P-031 r4：图形块归题（让「图」参与定位，不再被当作空白） ──────────
+  // 归属优先级：① 图注声明的题号（强信号，能纠正「16 的图排在 14 正文区间里」）
+  //             ② 与该题 y 区间重叠高度最大（20 题这种无图注的图只能靠这条）
+  // 两条都不成立 ⇒ 不归任何题：宁可漏图也不乱塞（与 D-020「错框比没框更糟」同口径）
+  const anchorRange = (a: Anchor): [number, number] => {
+    const next = anchors
+      .filter((x) => x.col === a.col && x.y0 > a.y0)
+      .sort((p, q) => p.y0 - q.y0)[0]
+    return [a.y0, next ? next.y0 : pageH]
+  }
+  const figuresByLabel = new Map<number, SegBox[]>()
+  const figList = (Array.isArray(figures) ? figures : []).filter(
+    (f) => f && f.box && f.box.x1 > f.box.x0 && f.box.y1 > f.box.y0,
+  )
+  for (const f of figList) {
+    let owner: number | null = null
+    const declared = typeof f.label === 'number' && Number.isFinite(f.label) ? f.label : null
+    if (declared !== null && anchors.some((a) => a.label === declared)) {
+      owner = declared
+    } else {
+      let bestOv = 0
+      for (const a of anchors) {
+        const [lo, hi] = anchorRange(a)
+        const ov = Math.min(f.box.y1, hi) - Math.max(f.box.y0, lo)
+        if (ov > bestOv) {
+          bestOv = ov
+          owner = a.label
+        }
+      }
+    }
+    if (owner === null) continue
+    const bucket = figuresByLabel.get(owner)
+    if (bucket) bucket.push(f.box)
+    else figuresByLabel.set(owner, [f.box])
+  }
+
   return seqs.map((label) => {
     const hit = anchors.find((a) => a.label === label)
     if (!hit || !valid) {
@@ -259,6 +326,7 @@ export function locateQuestions(
         stemRect: { x: 0, y: 0, w: 1, h: 1 },
         answerRect: null,
         located: !!hit,
+        figureBox: null,
       }
     }
     const arr = byCol.get(hit.col)!
@@ -272,14 +340,22 @@ export function locateQuestions(
     // ⚠️ r2（2026-11-16）：终点不能直接取 boundPx。
     //    末题没有下一锚点 ⇒ 会一路框到页底：干净试卷实测末题框高占页 70%（全是空白），
     //    用户看到的就是「位置不准」。改为「本题最后一段底边 + 半个行高」，且不超过下一题顶边。
-    const own = arr.filter((s) => s.box.y0 >= topPx && s.box.y0 < boundPx)
+    // ⚠️ r4：本题区间内可能夹着**别题**的图注（真实样本：16 题的图与图注都排在
+    //    14 题正文区间里）。图注是别题的 ⇒ 不参与本题的 y/x 计算，否则 14 的框会
+    //    一路右伸到 x=1144 把 16 的图圈进来（连带邻题）。
+    const own = arr.filter((s) => {
+      if (s.box.y0 < topPx || s.box.y0 >= boundPx) return false
+      const tl = figureTitleLabel(s.text)
+      return tl === null || tl === label
+    })
     // ⚠️ r3：本题区间内若尾部跟着「手写/批注区」（连续 ≥3 行没有排版结构），
     //    末段底边就变成手写区底边 ⇒ 末题一路框到页底。真实样本第 20 题就是这么错的。
     //    栏宽基准取本栏**最宽行**（整栏行），双栏卷自动按单栏宽自适应。
     const fullMin = Math.max(...arr.map((s) => s.box.x1 - s.box.x0), 1) * 0.6
     const handPx = handwritingStart(own, fullMin)
     const body = handPx === null ? own : own.filter((s) => s.box.y0 < handPx)
-    const bodyRows = body.length ? body : own
+    // own 可能被「排除别题图注」清空（该题区间内只剩邻题的图与图注）⇒ 退回题号行本身
+    const bodyRows = body.length ? body : own.length ? own : [arr[hit.order]]
 
     const lastY1 = Math.max(...bodyRows.map((s) => s.box.y1))
     const padY = Math.max(4, 0.5 * (arr[hit.order].box.y1 - arr[hit.order].box.y0))
@@ -288,8 +364,8 @@ export function locateQuestions(
     // ⚠️ r2：x 也按本题题面范围收紧。原先恒为整宽（x=0,w=1）⇒ 裁出来带整条空白栏，
     //    双栏卷更糟（会把另一栏的字一起裁进图里）。留 2% 页宽余量兜住贴边图形。
     const padX = Math.max(4, 0.02 * pageW)
-    const x0 = Math.min(...bodyRows.map((s) => s.box.x0)) - padX
-    const x1 = Math.max(...bodyRows.map((s) => s.box.x1)) + padX
+    let x0 = Math.min(...bodyRows.map((s) => s.box.x0)) - padX
+    let x1 = Math.max(...bodyRows.map((s) => s.box.x1)) + padX
 
     // 解答区起点：本题区间内第一个「解答标记」段（没有 ⇒ 该题只有题目区）
     let solPx: number | null = null
@@ -299,12 +375,43 @@ export function locateQuestions(
       if (isSolutionStart(s.text)) { solPx = s.box.y0; break }
     }
 
+    let topOut = topPx
+    // 底边初值取本题正文终点（endPx）；解答区终点也是 endPx，题目区与解答区在 solPx 处切开
+    let botOut = endPx
+
+    // ── r4：把归入本题的图形块并进候选框（只外扩，绝不内缩） ──
+    // 为什么要单独并：图形块**没有文字**，纯文本链路里它不存在（20 题平行四边形
+    // 下半截被切掉就是这个原因）。图可以排在题干上方（16 题），因此 y0 也要能上探；
+    // 但不得侵入上一题题号行 —— 那是别人题目的起点。
+    const figs = figuresByLabel.get(label) || []
+    let figBox: SegBox | null = null
+    if (figs.length) {
+      figBox = figs.reduce<SegBox>(
+        (acc, b) => ({
+          x0: Math.min(acc.x0, b.x0),
+          y0: Math.min(acc.y0, b.y0),
+          x1: Math.max(acc.x1, b.x1),
+          y1: Math.max(acc.y1, b.y1),
+        }),
+        { ...figs[0] },
+      )
+      const prevAnchor = anchors
+        .filter((a) => a.col === hit.col && a.y0 < topPx)
+        .sort((p, q) => q.y0 - p.y0)[0]
+      const floorY = prevAnchor ? prevAnchor.y0 : 0
+      topOut = Math.max(floorY, Math.min(topPx, figBox.y0))
+      botOut = Math.min(boundPx, Math.max(botOut, figBox.y1))
+      x0 = Math.min(x0, figBox.x0)
+      x1 = Math.max(x1, figBox.x1)
+    }
+
     return {
       label,
       index: hit.order,
-      stemRect: rect(x0, topPx, x1, solPx ?? endPx, pageW, pageH),
-      answerRect: solPx === null ? null : rect(x0, solPx, x1, endPx, pageW, pageH),
+      stemRect: rect(x0, topOut, x1, solPx ?? botOut, pageW, pageH),
+      answerRect: solPx === null ? null : rect(x0, solPx, x1, botOut, pageW, pageH),
       located: true,
+      figureBox: figBox,
     }
   })
 }

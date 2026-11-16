@@ -44,7 +44,7 @@ import { splitBlocksByNumber, type RowSplitContext } from './wrongq-pureblock'
 import { estimateSharpness, sharpnessHint } from './image-sharpness'
 import type { WrongqBlock } from './wrongq.types'
 import { structureLocalItems } from '../ocr/ocr-struct'
-import { buildSegments } from '../ocr/ocr-segment'
+import { buildSegments, extractFigures, type SegmentFigure } from '../ocr/ocr-segment'
 import type { Ppsv3Block } from '../ocr/ppsv3.client'
 import { parseQuestionNumber, inferHierarchy, linkHierarchy } from '../ocr/ocr-hierarchy'
 import { attachKeywordTags, dedupItems } from '../ocr/ocr-dedup'
@@ -955,7 +955,10 @@ export class ImageService {
           contentHashes: [hash],
           kind: 'page',
           mode: dto.mode === 'fast' ? 'fast' : 'precise',
-          extra: dto.rectify === false ? 'no-rectify' : 'rectify',
+          // ⚠️ `fig-v1`：P-031 r4 起结果里多了 page_figures。不把它写进缓存键，
+          //    旧的精确模式缓存会继续命中「没有图块」的旧结果 ⇒ 补图永远拿不到东西，
+          //    且用户会觉得「改了跟没改一样」。改结果结构就要让它自然失效。
+          extra: `${dto.rectify === false ? 'no-rectify' : 'rectify'}|fig-v1`,
         }
       : null
     if (ref) {
@@ -1085,9 +1088,21 @@ export class ImageService {
       throw new BadRequestException(`识别结果整理失败（${reason}），请重试或改用手动输入`)
     }
 
+    // P-031 r4：图形块（版面分析给出）。**图上没有文字**，文字分段里它等于空白，
+    // 前端按题号定位就会把图切在外面（真机第 20 题的平行四边形下半截被切掉）。
+    // 这里单独下发，前端只在「补图」阶段消费；拿不到（快速模式 / 侧车缺席）就是空数组，
+    // 前端必须按空数组降级，结果与不补图时逐像素一致。
+    let pageFigures: SegmentFigure[] = []
+    try {
+      pageFigures = extractFigures(pageBlocks)
+    } catch (e) {
+      console.warn('[ocr-page] 图形块提取失败:', brief(e))
+    }
+
     return {
       page: { w: pageW, h: pageH },
       page_text: pageText,
+      page_figures: pageFigures,
       image_url: pageUrl,
       // 朝向未经 OCR 消歧（侧车缺席）：前端可提示"本页可能侧躺，识别结果供参考"
       orient_suspect: orientSuspect,

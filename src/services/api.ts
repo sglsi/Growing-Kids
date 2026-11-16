@@ -1156,6 +1156,18 @@ export interface PageTextSegment {
   source?: 'layout' | 'xycut'
 }
 
+/**
+ * P-031 r4：版面分析给出的图形块（图/图表外接框）。
+ *
+ * ⚠️ **图上没有文字**：文字分段里一块几何图等于空白，所以「按题号定位」只看文字时
+ *    必然把图切在外面（真机第 20 题的平行四边形下半截就是这样丢的）。
+ *    `label` 是图注（`第N题图`）声明的归属题号；无图注时为 null，只能按 y 区间归。
+ */
+export interface PageFigure {
+  box: { x0: number; y0: number; x1: number; y1: number }
+  label: number | null
+}
+
 /** P2：用户改框后的重切重识（与 extract-wrong 同链路，保存以用户框为准） */
 export async function recropWrongBlock(params: {
   image_url: string
@@ -1318,6 +1330,7 @@ export async function ocrPage(
     ? await runJob<{
         page: { w: number; h: number }
         page_text: PageTextSegment[]
+        page_figures?: PageFigure[]
         image_url: string
         orient_suspect?: boolean
       }>('ocr-page', params, {
@@ -1327,6 +1340,7 @@ export async function ocrPage(
     : await unwrapResponse<{
         page: { w: number; h: number }
         page_text: PageTextSegment[]
+        page_figures?: PageFigure[]
         image_url: string
         orient_suspect?: boolean
       }>(
@@ -1344,6 +1358,8 @@ export async function ocrPage(
   return {
     page: data?.page || { w: 0, h: 0 },
     page_text: data?.page_text || [],
+    // 快速模式恒为空（RapidOCR 没版面能力）；拿不到就是空数组，调用方必须按空降级
+    page_figures: data?.page_figures || [],
     image_url: data?.image_url || imageUrl,
     orient_suspect: data?.orient_suspect === true,
   }

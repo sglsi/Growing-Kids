@@ -153,7 +153,8 @@ m.test('A14 候选框精度：末题不得框到页底、x 不得恒为整宽（
   c.ok(s.includes('lastY1'), '终点须取自「本题最后一段底边」，不能直接用下一锚点/页底')
   c.ok(/Math\.min\(boundPx, lastY1 \+ padY\)/.test(s), '终点 = min(下一题顶边, 末段底边+半行高)')
   // r3：x 的并集基准从 own 换成 bodyRows（own 含手写区，会把整行宽度撑开）
-  c.ok(/const x0 = Math\.min\(\.\.\.bodyRows\.map/.test(s) && /const x1 = Math\.max\(\.\.\.bodyRows\.map/.test(s),
+  // r4：x0/x1 由 const 改为 let —— 归入本题的图形块要能外扩（图形没文字，纯文本框必然切图）
+  c.ok(/let x0 = Math\.min\(\.\.\.bodyRows\.map/.test(s) && /let x1 = Math\.max\(\.\.\.bodyRows\.map/.test(s),
     'x 须取本题正文行的并集（左右都收紧）')
   c.ok(s.includes('const body = handPx === null ? own'), '正文行须排除手写/批注区（body）')
   c.ok(s.includes('own = arr.filter'), '本题段落集合须按 [本题顶边, 下一题顶边) 显式圈定')
@@ -187,6 +188,47 @@ m.test('A15 真机失败样本的三处根因（P-031 r3 / D-069 r3）', (c) => 
   c.ok(exists('dynamic-tests/fixtures/page-text-exam-real.json'), '真机失败样本须固化（7/14/20 三题同页）')
   const fe = read(FE)
   c.ok(fe.includes('detectedLabels(segs, seqs)'), '前端须把本次请求的题号传给 detectedLabels（否则定向补回的 14 不会出现在提示里）')
+})
+
+m.test('A16 图形块参与定位（P-031 r4 / D-069 r4）', (c) => {
+  const s = read(LOC)
+  const seg = read('server/src/ocr/ocr-segment.ts')
+  const svc = read('server/src/image/image.service.ts')
+  const types = read('server/src/image/image.types.ts')
+  const api = read(API)
+  const fe = read(FE)
+
+  // 根因：图上没有文字 ⇒ 只吃文字行的定位必然把图切在外面（真机第 20 题平行四边形下半截）
+  c.ok(/export function extractFigures/.test(seg), '后端须从版面块提取图形块 extractFigures')
+  c.ok(/RE_图注题号/.test(seg), '图注（第N题图）须用于图形归属：真实卷面 16 的图排在 14 正文区间内，只按 y 会归错')
+  c.ok(/c\.ok|isFigureTitleLabel/.test(seg) || /isFigureTitleLabel/.test(seg), '须识别 figure_title 版面标签')
+  // 图形块不得混进文字分段（会污染段落文本、影响既有消费方）
+  c.ok(/isSkippableLabel\(b\.label\)/.test(seg), '图形块不得并入 page_text（文本链路保持原样）')
+  // 下发契约 + 缓存键
+  c.ok(/page_figures/.test(types), 'OcrPageResult 须声明 page_figures')
+  c.ok(/page_figures: pageFigures/.test(svc), 'ocr-page 须下发 page_figures')
+  c.ok(/fig-v1/.test(svc), '缓存键须带 fig-v1：否则旧缓存继续命中「没有图形块」的结果，补图永远拿不到东西')
+  c.ok(/page_figures: data\?\.page_figures \|\| \[\]/.test(api), '前端 ocrPage 须透传 page_figures（缺省空数组）')
+
+  // 定位：图形归题 + 只外扩
+  c.ok(/figures: FigureSeg\[\] = \[\]/.test(s), 'locateQuestions 须接受图形块参数（缺省空 ⇒ 行为与旧版一致）')
+  c.ok(/figureTitleLabel/.test(s), '前端须能解析图注题号（纠正「邻题图排在本区间」的误归）')
+  c.ok(/figuresByLabel/.test(s), '须按题号归并图形块')
+  c.ok(/bestOv/.test(s), '无图注的图须按 y 重叠最大归题，且重叠为 0 时不归（宁漏不误）')
+  c.ok(/topOut = Math\.max\(floorY/.test(s), '图排在题干上方时 y0 须能上探，但不得侵入上一题题号行')
+
+  // 前端：两段式（先文字框、再按需补图），补图必须用同一份段落重算
+  c.ok(fe.includes('handleFillFigures'), '前端须有「补全图形」入口')
+  c.ok(fe.includes('lastLocateRef'), '补图须复用同一次定位的段落（换成精准分段等于偷偷换结果）')
+  c.ok(/locateQuestions\(task\.segs, task\.pw, task\.ph, task\.seqs, figs\)/.test(fe), '补图须用同一份段落 + 新图形块重算')
+  c.ok(fe.includes('题里有几何图'), '补图入口须有可供家长理解的说明文案')
+  // 失败降级：catch 分支不得改框
+  const fill = fe.slice(fe.indexOf('const handleFillFigures'), fe.indexOf('const handleFillFigures') + 3000)
+  const catchPart = fill.slice(fill.indexOf('} catch (e) {'))
+  c.ok(!/setSeqRows/.test(catchPart.slice(0, 400)), '补图失败不得改任何框（fail-closed）')
+  // 样本固化
+  c.ok(exists('dynamic-tests/fixtures/page-text-exam-real.json'), '真机样本须固化')
+  c.ok(exists('dynamic-tests/run-figure-join-p031r4.cjs'), '图形并框须有可复跑的实证脚本')
 })
 
 export default m

@@ -113,6 +113,14 @@ export interface OcrPageResult {
   /** 全页 OCR 文本片段（阅读序：分栏 → 行序），OCR 不可用时为空数组 */
   page_text: PageTextSegment[]
   /**
+   * P-031 r4：图形块（版面分析给出的图/图表外接框 + 图注归属题号）。
+   *
+   * ⚠️ **图上没有文字**：文字分段里一块几何图等于空白，前端按题号定位必然把图切在外
+   *    （真机第 20 题平行四边形下半截被切掉即此）。这里单独下发，前端只在「补图」
+   *    阶段并入候选框。快速模式（RapidOCR 无版面能力）恒为空数组，前端按空降级。
+   */
+  page_figures?: { box: { x0: number; y0: number; x1: number; y1: number }; label: number | null }[]
+  /**
    * 摆正后的页面图 URL。前端展示与「页内裁剪」均基于此图——
    * 与 OCR 文本同一坐标系，裁剪入题的图即用户看到的图。
    */

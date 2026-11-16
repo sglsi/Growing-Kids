@@ -22,7 +22,7 @@ import {
   fetchSubjects, recognizePaper, recognizeSeparate,
   recognizeDocumentByUrl, uploadFile, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr, fetchDocPages,
-  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload,
+  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload, type PageFigure,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 import { isJobAborted } from '@/services/jobs'
@@ -33,7 +33,7 @@ import { guardPolicy } from '@/services/policy-gate'
 // P-014 / D-017：录入侧引导（前端镜像，与 server/src/shared/input-guard.ts 逐字一致）
 import { guardQuestionInput } from '@/constants/input-guard'
 // P-031：按题号定位候选框（零依赖纯函数，可离线实证）
-import { parseSeqSpec, locateQuestions, detectedLabels, type Rect01 } from '@/lib/question-locate'
+import { parseSeqSpec, locateQuestions, detectedLabels, type Rect01, type FigureSeg } from '@/lib/question-locate'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -95,6 +95,13 @@ interface BoardPage {
   lastMode?: 'fast' | 'precise'
   /** 朝向未经 OCR 消歧（侧车缺席时几何保守不转，本页可能侧躺） */
   suspect?: boolean
+  /**
+   * P-031 r4：版面分析给出的图形块（只有精准模式才有，快速模式恒空）。
+   * 用途只有一个——定位时把图并进题目框（图上没文字，纯文本链路里它等于空白）。
+   */
+  figures?: PageFigure[]
+  /** 图形块是否已尝试补全（避免用户反复点） */
+  figTried?: boolean
 }
 
 /** P-031：按题号提取的一行——题号、是否定位到、候选框、已裁出的图 */
@@ -157,6 +164,21 @@ export default function RecognizePage() {
   const [seqDetected, setSeqDetected] = useState<number[]>([])
   const [seqCropping, setSeqCropping] = useState<{ idx: number; kind: 'stem' | 'answer' } | null>(null)
   const [seqBusy, setSeqBusy] = useState(false)
+  /** P-031 r4：正在补全图形（精准模式跑版面分析，较慢，独立于定位本身的忙碌态） */
+  const [figBusy, setFigBusy] = useState(false)
+  /**
+   * 上一次定位用的输入（段落 + 尺寸 + 图形块）。
+   * 补图时**必须用同一份段落**重算：若换成精准识别的分段，文字框也会跟着变，
+   * 用户会看到「点了个补图，结果所有框都挪了」——那不是补图，是换了另一套结果。
+   */
+  const lastLocateRef = useRef<{
+    pageId: number
+    seqs: number[]
+    segs: PageTextSegment[]
+    pw: number
+    ph: number
+    figs: FigureSeg[]
+  } | null>(null)
 
   // 图片编辑器：{ slot, src, autoAction }
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
@@ -839,7 +861,7 @@ export default function RecognizePage() {
   const runPageOcr = async (
     p: BoardPage,
     ocrMode: 'fast' | 'precise',
-  ): Promise<{ segments: PageTextSegment[]; w: number; h: number } | null> => {
+  ): Promise<{ segments: PageTextSegment[]; w: number; h: number; figures: PageFigure[] } | null> => {
     setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'busy', err: undefined, lastMode: ocrMode } : x)))
     // ⚠️ 精准模式实测 ~67s（R-上线-01），必须给等待反馈：
     //    页面上的转圈太小，用户不知道是「在跑」还是「卡死了」，只会反复点。
@@ -866,6 +888,9 @@ export default function RecognizePage() {
                 w: r.page.w,
                 h: r.page.h,
                 segments: r.page_text,
+                // P-031 r4：精准模式才有图形块（快速模式恒空 ⇒ 定位行为与旧版完全一致）
+                figures: r.page_figures || [],
+                figTried: (r.page_figures || []).length > 0,
                 ocr: 'done' as const,
                 err: undefined,
                 lastMode: ocrMode,
@@ -881,7 +906,7 @@ export default function RecognizePage() {
       } else {
         Taro.showToast({ title: `识别到 ${r.page_text.length} 段文字`, icon: 'success' })
       }
-      return { segments: r.page_text, w: r.page.w, h: r.page.h }
+      return { segments: r.page_text, w: r.page.w, h: r.page.h, figures: r.page_figures || [] }
     } catch (e) {
       // 用户已离开本页：不是失败，别把它写成 error 态（也没人看得见）
       if (isJobAborted(e) || unmountedRef.current) return null
@@ -1572,6 +1597,8 @@ export default function RecognizePage() {
     let segs = page.segments
     let pw = page.w
     let ph = page.h
+    // 本页若已经跑过精准识别，图形块直接拿来用；快速识别拿不到（图上没文字）
+    let figs: FigureSeg[] = (page.figures || []).map((f) => ({ box: f.box, label: f.label }))
     if (!segs.length) {
       setSeqBusy(true)
       Taro.showLoading({ title: '正在识别页面文字…', mask: true })
@@ -1580,6 +1607,7 @@ export default function RecognizePage() {
         segs = r?.segments ?? []
         pw = r?.w || pw
         ph = r?.h || ph
+        if (r?.figures?.length) figs = r.figures.map((f) => ({ box: f.box, label: f.label }))
       } finally {
         Taro.hideLoading()
         setSeqBusy(false)
@@ -1589,7 +1617,10 @@ export default function RecognizePage() {
         return
       }
     }
-    const got = locateQuestions(segs, pw, ph, seqs)
+    const got = locateQuestions(segs, pw, ph, seqs, figs)
+    // 记住这次定位的输入：用户点「补全图形」时要用同一份段落重算（不能换成精准分段，
+    // 否则文字框会跟着变，等于偷偷换了另一套结果）
+    lastLocateRef.current = { pageId: page.id, seqs, segs, pw, ph, figs }
     setSeqDetected(detectedLabels(segs, seqs))
     setSeqRows(
       got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
@@ -1599,6 +1630,68 @@ export default function RecognizePage() {
       title: miss.length ? `第 ${miss.join('、')} 题未定位，可手工框` : `已定位 ${got.length} 题`,
       icon: 'none',
     })
+  }
+
+  /**
+   * P-031 r4「补全图形」：用精准模式的版面分析找出图形块，把图并进题目候选框。
+   *
+   * 为什么单独一步：**图上没有文字**，快速识别（1~3s）根本不知道那里有图，定位
+   * 必然把图切在外面（真机第 20 题的平行四边形下半截就是这么丢的）。图形块只有
+   * 版面分析给得出，而精准模式单页要几十秒（走异步任务轮询）——所以做成
+   * 「先看文字框，需要时再等」。
+   * 失败时**一律不改任何框**（fail-closed）：宁可维持文字框，不能给出更差的结果。
+   */
+  const handleFillFigures = async () => {
+    const task = lastLocateRef.current
+    if (!task || figBusy) return
+    const page = boardPages.find((p) => p.id === task.pageId)
+    if (!page) return
+    if (task.figs.length) {
+      Taro.showToast({ title: '图形已补全', icon: 'none' })
+      return
+    }
+    setFigBusy(true)
+    Taro.showLoading({ title: '正在检测图形…', mask: true })
+    let shownAt = 0
+    try {
+      const r = await ocrPage(page.url, 'precise', {
+        onProgress: ({ waitedMs }) => {
+          const sec = Math.round(waitedMs / 1000)
+          if (sec >= shownAt + 10) {
+            shownAt = sec
+            Taro.showLoading({ title: `正在检测图形…已等待 ${sec}s`, mask: true })
+          }
+        },
+      })
+      const figs: FigureSeg[] = (r.page_figures || []).map((f) => ({ box: f.box, label: f.label }))
+      setBoardPages((prev) => prev.map((x) => (x.id === page.id ? { ...x, figures: r.page_figures || [] } : x)))
+      if (!figs.length) {
+        Taro.showToast({ title: '本页没检测到图形，按文字框即可', icon: 'none', duration: 2500 })
+        return
+      }
+      // 用**同一次定位的段落**重算，只把图形块加进去；文字框只会外扩，不会挪位
+      const got = locateQuestions(task.segs, task.pw, task.ph, task.seqs, figs)
+      lastLocateRef.current = { ...task, figs }
+      setSeqRows((prev) => {
+        if (!prev.length) {
+          return got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect }))
+        }
+        const byLabel = new Map(got.map((g) => [g.label, g]))
+        return prev.map((row) => {
+          const g = byLabel.get(row.label)
+          // 只更新候选框，保留用户已经裁好的图（补图不该抹掉人工成果）
+          return g ? { ...row, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect } : row
+        })
+      })
+      Taro.showToast({ title: `已把 ${figs.length} 处图形并入题目框`, icon: 'none', duration: 2500 })
+    } catch (e) {
+      if (isJobAborted(e)) return
+      console.error('补全图形失败', e)
+      Taro.showToast({ title: '图形检测失败，可用手工框', icon: 'none', duration: 2500 })
+    } finally {
+      Taro.hideLoading()
+      setFigBusy(false)
+    }
   }
 
   /** 编辑器确认：先把裁好的图传成附件（不建条目，避免首页多出重复行），再回填该行 */
@@ -1876,6 +1969,22 @@ export default function RecognizePage() {
                   </View>
                 ) : null}
               </View>
+              {seqRows.length > 0 && !(curPage?.figures?.length) ? (
+                <View className="flex flex-row items-center gap-2 mb-2">
+                  <View
+                    className="h-7 px-2 rounded-lg flex items-center justify-center"
+                    style={{ backgroundColor: '#F4F1EA', opacity: figBusy ? 0.6 : 1 }}
+                    onClick={() => { if (!figBusy) void handleFillFigures() }}
+                  >
+                    <Text className="block text-[11px] font-medium" style={{ color: BRAND_TEXT }}>
+                      {figBusy ? '检测中…' : '补全图形'}
+                    </Text>
+                  </View>
+                  <Text className="block text-[11px]" style={{ color: '#8A7F72' }}>
+                    题里有几何图？把图也框进来（要等十几秒）
+                  </Text>
+                </View>
+              ) : null}
               {seqRows.some((r) => !r.located) ? (
                 <Text className="block text-[11px] leading-4 mb-2" style={{ color: '#8A7F72' }}>
                   {seqDetected.length
