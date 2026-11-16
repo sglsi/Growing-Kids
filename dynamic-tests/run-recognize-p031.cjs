@@ -87,8 +87,10 @@ if (Q) {
      Math.abs(got[0].stemRect.y - 0.2) < 1e-9 && Math.abs((got[0].stemRect.y + got[0].stemRect.h) - 0.25) < 1e-9,
      '第 2 题题目区截止到解答标记（0.20~0.25）')
   ok(got[0].answerRect !== null, '第 2 题应给出解答区候选')
-  ok(Math.abs(got[0].answerRect.y - 0.25) < 1e-9 && Math.abs((got[0].answerRect.y + got[0].answerRect.h) - 0.4) < 1e-9,
-     '第 2 题解答区候选 = 解答标记 → 下一题（0.25~0.40）')
+  // r2：解答区终点不再是「下一题顶边」（那样会带一整段空白），而是最后一段底边 + 半行高
+  ok(Math.abs(got[0].answerRect.y - 0.25) < 1e-9, '第 2 题解答区候选起点 = 解答标记段（0.25）')
+  ok(Math.abs((got[0].answerRect.y + got[0].answerRect.h) - 0.29) < 1e-9,
+     '第 2 题解答区终点 = 末段底边 270 + 半行高 20 = 290（0.29，不吃下一题前的空白）')
   ok(got[0].answerRect.y >= got[0].stemRect.y + got[0].stemRect.h - 1e-9, '题目区与解答区不得重叠')
 
   ok(got[1].label === 3 && got[1].located === true, '第 3 题应定位成功')
@@ -105,6 +107,20 @@ if (Q) {
 
   const empty = Q.locateQuestions([], PAGE_W, PAGE_H, [1])
   ok(empty[0].located === false, '没有段落时必须标记未定位（不编框）')
+
+  // ---- ①-b 真实分段样本（生产 fast 侧车实测，2026-11-16）----
+  // 这张样本暴露了两个必然发生的缺陷：末题框一路到页底（占页 70%）、框恒为整宽。
+  const fx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'page-text-exam.json'), 'utf8'))
+  const real = Q.locateQuestions(fx.segs, fx.w, fx.h, [1, 2, 3, 4])
+  ok(real.every((g) => g.located), '真实样本：4 题全部按题号定位成功')
+  const lastQ = real[3]
+  ok(lastQ.stemRect.h < 0.15, `真实样本：末题框高 ${(lastQ.stemRect.h * 100).toFixed(1)}% 必须 <15%（改前是 70%，一路框到页底）`)
+  ok(lastQ.stemRect.y + lastQ.stemRect.h < 0.5, '真实样本：末题框不得延伸到页底')
+  ok(real.every((g) => g.stemRect.x > 0 || g.stemRect.w < 1), '真实样本：框不再恒为整宽（x 按题面收紧）')
+  ok(real.every((g) => g.stemRect.w < 0.95), '真实样本：框宽必须小于页宽 95%（否则等于没裁）')
+  ok(Math.round(real[0].stemRect.x * fx.w) >= 30 && Math.round(real[0].stemRect.x * fx.w) <= 60,
+     '真实样本：第 1 题左边界落在 30~60px（原图文字 x0=58，留 2% 页宽余量）')
+  ok(real.every((g) => g.answerRect === null), '真实样本：无解答标记 ⇒ 每题只存题目区')
 }
 
 // ---- ② 编译产物特征串 ----
@@ -123,6 +139,9 @@ for (const kw of ['拍照识别', '错题提取', '如 3,5,8-12', '裁剪入题'
   ok(dist.includes(kw), `既有能力仍在：${kw}`)
 }
 ok(dist.includes('解答'), '产物含「解答」标识（解答图与题目图区分展示）')
+// r2：定位失败要能解释「本页到底认出了哪几题」
+ok(dist.includes('本页 OCR 只认出题号'), '产物含「本页认出的题号」提示（解释未定位原因）')
+ok(dist.includes('没认出任何题号'), '产物含「整页没认出题号」的兜底提示')
 
 console.log(`\nP-031 实证：${pass} PASS / ${fail} FAIL`)
 process.exit(fail ? 1 : 0)

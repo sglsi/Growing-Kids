@@ -33,7 +33,7 @@ import { guardPolicy } from '@/services/policy-gate'
 // P-014 / D-017：录入侧引导（前端镜像，与 server/src/shared/input-guard.ts 逐字一致）
 import { guardQuestionInput } from '@/constants/input-guard'
 // P-031：按题号定位候选框（零依赖纯函数，可离线实证）
-import { parseSeqSpec, locateQuestions, type Rect01 } from '@/lib/question-locate'
+import { parseSeqSpec, locateQuestions, detectedLabels, type Rect01 } from '@/lib/question-locate'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -153,6 +153,8 @@ export default function RecognizePage() {
   const [seqInput, setSeqInput] = useState('')
   // ── P-031 按题号提取：输入题号 → 系统给候选框 → 逐题确认裁图（只存图片）──
   const [seqRows, setSeqRows] = useState<SeqRow[]>([])
+  /** 本次定位时本页实际识别到的题号（用于解释「为什么第 N 题没定位」） */
+  const [seqDetected, setSeqDetected] = useState<number[]>([])
   const [seqCropping, setSeqCropping] = useState<{ idx: number; kind: 'stem' | 'answer' } | null>(null)
   const [seqBusy, setSeqBusy] = useState(false)
 
@@ -1588,6 +1590,7 @@ export default function RecognizePage() {
       }
     }
     const got = locateQuestions(segs, pw, ph, seqs)
+    setSeqDetected(detectedLabels(segs))
     setSeqRows(
       got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
     )
@@ -1873,6 +1876,13 @@ export default function RecognizePage() {
                   </View>
                 ) : null}
               </View>
+              {seqRows.some((r) => !r.located) ? (
+                <Text className="block text-[11px] leading-4 mb-2" style={{ color: '#8A7F72' }}>
+                  {seqDetected.length
+                    ? `本页 OCR 只认出题号 ${seqDetected.join('、')}；未列出的题号没被认出，可手工框或换清晰图重试`
+                    : '本页没认出任何题号，可手工框，或换更清晰/正对拍摄的图'}
+                </Text>
+              ) : null}
               {seqRows.map((r, i) => (
                 <View
                   key={`seq-${r.label}-${i}`}

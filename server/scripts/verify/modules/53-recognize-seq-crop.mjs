@@ -144,4 +144,24 @@ m.test('A13 题号输入框须显式约束宽度（否则文字压到按钮上�
   c.ok(fe.includes('overflow: \'hidden\'') || fe.includes("overflow: 'hidden'"), '容器须裁剪溢出')
 })
 
+m.test('A14 候选框精度：末题不得框到页底、x 不得恒为整宽（P-031 r2）', (c) => {
+  const s = read(LOC)
+  // 思傅 11-16 真机测试：3 个题号里 1 个位置不准 ⇒ 真实样本实测出两个必然缺陷：
+  //   末题无下一锚点 ⇒ 一路框到页底（占页 70%）；框恒为 x=0/w=1 ⇒ 裁进整条空白栏。
+  c.ok(!/function band\(/.test(s), '整宽横带写法必须去掉（band 会把 x 写死为 0/1）')
+  c.ok(s.includes('function rect('), '须有按像素四边生成矩形、x 也收紧的 rect()')
+  c.ok(s.includes('lastY1'), '终点须取自「本题最后一段底边」，不能直接用下一锚点/页底')
+  c.ok(/Math\.min\(boundPx, lastY1 \+ padY\)/.test(s), '终点 = min(下一题顶边, 末段底边+半行高)')
+  c.ok(/const x0 = Math\.min\(\.\.\.own\.map/.test(s) && /const x1 = Math\.max\(\.\.\.own\.map/.test(s),
+    'x 须取本题段落的并集（左右都收紧）')
+  c.ok(s.includes('own = arr.filter'), '本题段落集合须按 [本题顶边, 下一题顶边) 显式圈定')
+  // 定位失败要能解释原因，而不是只甩一句「未定位」
+  c.ok(s.includes('export function detectedLabels'), '须导出 detectedLabels（本页实际认出的题号）')
+  const fe = read(FE)
+  c.ok(fe.includes('detectedLabels(segs)'), '前端须把本页认出的题号带上')
+  c.ok(fe.includes('本页 OCR 只认出题号'), '未定位时须显示「本页认出了哪几题」')
+  c.ok(fe.includes('没认出任何题号'), '整页零题号时须给兜底提示')
+  c.ok(exists('dynamic-tests/fixtures/page-text-exam.json'), '真实分段样本须固化（防回归靠合成样本自证）')
+})
+
 export default m

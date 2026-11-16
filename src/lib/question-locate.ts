@@ -104,12 +104,13 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v
 }
 
-/** 把 [top, bottom] 两个归一化 y 值合成整宽框 */
-function band(yTop: number, yBottom: number): Rect01 {
-  const y = clamp01(yTop)
-  const bottom = clamp01(yBottom)
-  const h = Math.max(bottom - y, 0.01)
-  return { x: 0, y, w: 1, h }
+/** 由像素四个边界合成归一化框（x 也按题面收紧，不再整宽） */
+function rect(x0: number, y0: number, x1: number, y1: number, pageW: number, pageH: number): Rect01 {
+  const xa = clamp01(x0 / pageW)
+  const xb = clamp01(x1 / pageW)
+  const ya = clamp01(y0 / pageH)
+  const yb = clamp01(y1 / pageH)
+  return { x: xa, y: ya, w: Math.max(xb - xa, 0.02), h: Math.max(yb - ya, 0.01) }
 }
 
 /**
@@ -166,12 +167,26 @@ export function locateQuestions(
       }
     }
     const arr = byCol.get(hit.col)!
-    // 本题终点 = 同栏下一个题号锚点的 y0（无则页底），全程像素
+    // 本题终点「上界」= 同栏下一个题号锚点的 y0（无则页底），全程像素
     const nextAnchor = anchors
       .filter((a) => a.col === hit.col && a.y0 > hit.y0)
       .sort((a, b) => a.y0 - b.y0)[0]
     const topPx = arr[hit.order].box.y0
-    const endPx = nextAnchor ? nextAnchor.y0 : pageH
+    const boundPx = nextAnchor ? nextAnchor.y0 : pageH
+
+    // ⚠️ r2（2026-11-16）：终点不能直接取 boundPx。
+    //    末题没有下一锚点 ⇒ 会一路框到页底：干净试卷实测末题框高占页 70%（全是空白），
+    //    用户看到的就是「位置不准」。改为「本题最后一段底边 + 半个行高」，且不超过下一题顶边。
+    const own = arr.filter((s) => s.box.y0 >= topPx && s.box.y0 < boundPx)
+    const lastY1 = Math.max(...own.map((s) => s.box.y1))
+    const padY = Math.max(4, 0.5 * (arr[hit.order].box.y1 - arr[hit.order].box.y0))
+    const endPx = Math.min(boundPx, lastY1 + padY)
+
+    // ⚠️ r2：x 也按本题题面范围收紧。原先恒为整宽（x=0,w=1）⇒ 裁出来带整条空白栏，
+    //    双栏卷更糟（会把另一栏的字一起裁进图里）。留 2% 页宽余量兜住贴边图形。
+    const padX = Math.max(4, 0.02 * pageW)
+    const x0 = Math.min(...own.map((s) => s.box.x0)) - padX
+    const x1 = Math.max(...own.map((s) => s.box.x1)) + padX
 
     // 解答区起点：本题区间内第一个「解答标记」段（没有 ⇒ 该题只有题目区）
     let solPx: number | null = null
@@ -184,11 +199,27 @@ export function locateQuestions(
     return {
       label,
       index: hit.order,
-      stemRect: band(topPx / pageH, (solPx ?? endPx) / pageH),
-      answerRect: solPx === null ? null : band(solPx / pageH, endPx / pageH),
+      stemRect: rect(x0, topPx, x1, solPx ?? endPx, pageW, pageH),
+      answerRect: solPx === null ? null : rect(x0, solPx, x1, endPx, pageW, pageH),
       located: true,
     }
   })
+}
+
+/**
+ * 本页**实际识别到的题号**（按出现顺序去重）。
+ *
+ * 用途：定位不到时把「本页只认出了哪几题」直接告诉用户——区分「系统瞎了」与
+ * 「OCR 确实没认出这个题号」，避免用户反复重试同一个必然失败的数字。
+ */
+export function detectedLabels(segments: Seg[]): number[] {
+  const out: number[] = []
+  for (const s of Array.isArray(segments) ? segments : []) {
+    if (!s) continue
+    const n = segQuestionNumber(s.text)
+    if (n !== null && !out.includes(n)) out.push(n)
+  }
+  return out
 }
 
 /** 段落的像素外接框（用于把「多段解答」合并时取整体） */
