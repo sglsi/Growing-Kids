@@ -1934,32 +1934,38 @@ export default function RecognizePage() {
                 </View>
                 <Text className="block text-xs text-muted-foreground">Word/TXT 没有页图，请另存为 PDF</Text>
               </View>
-              <View className="flex flex-row items-center gap-2 mb-3" style={{ flexWrap: 'wrap' }}>
-                {/* 输入框：微信原生 input 的默认宽度按整行解析，会横向压到「定位」按钮上（文字与界面交错）。
-                    这里用显式 flex + minWidth:0 + 内层 100% 宽度把它约束在自身容器内。 */}
+              {/*
+                思傅 2026-11-17：题号输入框与按钮挤同一行时，微信原生 input 层级最高、
+                宽度解析异常，会盖住/被盖住右侧按钮导致文字看不清、点不到输入框。
+                改为两行：第一行输入框独占整行（整行可点、聚焦即输入），
+                第二行放「定位 / 加入题目」按钮。彻底隔离原生组件与按钮的层叠。
+              */}
+              <View style={{ marginBottom: 8 }}>
                 <View
                   style={{
-                    flex: '1 1 0', minWidth: 0, height: 36, borderRadius: 12,
+                    width: '100%', height: 36, borderRadius: 12,
                     border: '1px solid #ece8e0', backgroundColor: '#fff',
                     display: 'flex', flexDirection: 'row', alignItems: 'center',
-                    paddingLeft: 12, paddingRight: 12, overflow: 'hidden',
+                    paddingLeft: 12, paddingRight: 12, overflow: 'hidden', boxSizing: 'border-box',
                   }}
                 >
                   <Input
-                    style={{ width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
+                    style={{ flex: 1, width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
                     value={seqInput}
-                    placeholder="如 3,5,8-12"
+                    placeholder="如 3,5,8-12，点这里直接输入"
                     placeholderClass="text-muted-foreground"
                     onInput={(e) => setSeqInput(e.detail.value)}
                     onConfirm={() => void handleLocateBySeq()}
                   />
                 </View>
-                <View className="h-9 px-3 rounded-xl bg-muted flex items-center justify-center" onClick={() => void handleLocateBySeq()}>
+              </View>
+              <View className="flex flex-row items-center gap-2 mb-3">
+                <View className="h-9 px-4 rounded-xl bg-muted flex items-center justify-center" onClick={() => void handleLocateBySeq()}>
                   <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>{seqBusy ? '识别中…' : '定位'}</Text>
                 </View>
                 {seqRows.length > 0 ? (
                   <View
-                    className="h-9 px-3 rounded-xl flex items-center justify-center"
+                    className="h-9 px-4 rounded-xl flex items-center justify-center"
                     style={{ backgroundColor: BRAND, opacity: seqBusy ? 0.6 : 1 }}
                     onClick={() => { if (!seqBusy) handleSeqApply() }}
                   >
