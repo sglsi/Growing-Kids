@@ -1,7 +1,7 @@
 import { View, Text, ScrollView, Image, Swiper, SwiperItem, Canvas } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useRef, useState, type ReactNode } from 'react'
-import { FileText, Trash2, Upload, Ellipsis, RotateCcw, RotateCw, Crop, Maximize2 } from 'lucide-react-taro'
+import { FileText, Trash2, Upload, Ellipsis, RotateCcw, RotateCw, Crop, Maximize2, FolderInput } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -301,8 +301,8 @@ export default function LibraryPage() {
   const [folderBusy, setFolderBusy] = useState(false)
   /** 新建 / 重命名共用的输入弹层 */
   const [folderDialog, setFolderDialog] = useState<{ mode: 'create' | 'rename'; id?: string; initial?: string } | null>(null)
-  /** 移动选择器：资料或文件夹的目标目录 */
-  const [folderPicker, setFolderPicker] = useState<{ kind: 'doc' | 'folder'; id: string; name: string } | null>(null)
+  /** 移动选择器：资料 / 文件夹 / 批量资料（kind=batch，id 不用）的目标目录 */
+  const [folderPicker, setFolderPicker] = useState<{ kind: 'doc' | 'folder' | 'batch'; id: string; name: string; ids?: string[] } | null>(null)
   /** ref 与 state 同步：useDidShow / 异步回调里拿到的闭包不能是旧的文件夹口径 */
   const folderSupportedRef = useRef(true)
   const currentFolderRef = useRef<string | null>(null)
@@ -968,6 +968,30 @@ export default function LibraryPage() {
     if (!p || folderBusy) return
     setFolderBusy(true)
     try {
+      if (p.kind === 'batch') {
+        // 批量移动：后端只有单条 PATCH，前端逐条调用（不动后端 dist）。
+        // 逐条统计：个别失败不掩盖已成功的，也不回滚（与批量删除口径一致）。
+        const ids = p.ids || []
+        let okCount = 0
+        let failCount = 0
+        for (const id of ids) {
+          try {
+            await moveLibraryDocToFolder(id, target)
+            okCount++
+          } catch (e) {
+            failCount++
+            console.error('[library] 批量移动单条失败', id, e)
+          }
+        }
+        await refreshFolders()
+        sel.exit()
+        load({ silent: true })
+        Taro.showToast({
+          title: failCount ? `已移动 ${okCount} 份，${failCount} 份失败` : `已移动 ${okCount} 份`,
+          icon: failCount ? 'none' : 'success',
+        })
+        return
+      }
       if (p.kind === 'doc') await moveLibraryDocToFolder(p.id, target)
       else await moveLibraryFolder(p.id, target)
       await refreshFolders()
@@ -1204,6 +1228,19 @@ export default function LibraryPage() {
 
       {sel.selecting && (
         <BottomActionBar>
+          {folderSupported && (
+            <View style={{ flex: 1 }}>
+              <ActionBtn
+                icon={<FolderInput size={16} color="#fff" />}
+                label="移动到…"
+                primary
+                disabled={sel.isEmpty || busy || folderBusy}
+                onClick={() => setFolderPicker({
+                  kind: 'batch', id: '', name: `选中的 ${sel.count} 份`, ids: Array.from(sel.selected),
+                })}
+              />
+            </View>
+          )}
           <View style={{ flex: 1 }}>
             <ActionBtn
               icon={<Trash2 size={16} color="#fff" />}
