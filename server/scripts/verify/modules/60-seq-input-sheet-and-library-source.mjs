@@ -14,25 +14,27 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8')
 const REC = 'src/pages/recognize/index.tsx'
 const PICKER = 'src/components/material-picker.tsx'
 
-m.test('A1 题号输入：原生 input 只在独立顶部输入层里出现', (c) => {
+// ⚠️ D-081（同日）撤销了 D-080 的弹层方案：弹层里打字看不到内容，且用户要边看原图边输入。
+//    这里改为守「当前页顶部常驻输入框」的新契约，A3/A4 仍然有效。
+m.test('A1 题号输入：常驻当前页顶部，不弹层', (c) => {
   const s = read(REC)
-  c.ok(/function SeqSpecInputSheet\(/.test(s), '须有独立的题号输入层组件')
-  c.ok(/<SeqSpecInputSheet[\s\S]{0,400}\/>/.test(s), '输入层须真正挂载')
-  c.ok(
-    /<\/ScrollView>[\s\S]{0,500}<SeqSpecInputSheet/.test(s),
-    '输入层须在 ScrollView 之外（不能嵌在滚动容器里，否则光标仍会被顶走）',
-  )
-  c.ok(/adjustPosition=\{false\}/.test(s), '输入层不许微信再上推页面')
+  c.ok(/id="seq-top-input"/.test(s), '须有页顶常驻输入框')
+  c.ok(!/SeqSpecInputSheet/.test(s), 'D-080 的弹层组件必须撤销（打字时看不到已输入内容）')
+  c.ok(!/fixed inset-0/.test(s), '不许再盖一层全屏弹层')
+  c.ok(/打字时可往下看原图/.test(s), '须明示「不遮原图」的使用方式')
+  c.ok(/当前题号：\{seqInput\}/.test(s), '须有回显，已输入内容看得见')
+  const topAt = s.indexOf('id="seq-top-input"')
+  const scrollAt = s.indexOf('<ScrollView scrollY')
+  const tabsAt = s.indexOf('<SegmentedTabs<Mode>')
+  c.ok(topAt > scrollAt && topAt > tabsAt, '输入框须在当前页内容区顶部（模式切换之后、来源图之前）')
+  c.ok(/adjustPosition=\{false\}/.test(s), '不许微信再上推页面')
   c.ok(/cursorSpacing=\{24\}/.test(s), '光标与键盘之间须留空隙')
-  c.ok(/focus\b/.test(s), '打开输入层时须直接聚焦，用户点一下就能打字')
-  c.ok(/固定.{0,40}屏幕最上方|固定在屏幕最上方/.test(s), '注释须写明设计意图（固定在最上方）')
 
-  // 行内那一行现在是「点按展示」，不能再留一个原生 Input
   const cardStart = s.indexOf('P-031：按题号提取 ——')
   const cardEnd = s.indexOf('题目清单：每题', cardStart)
   const card = s.slice(cardStart, cardEnd)
-  c.ok(!/<Input[\s\S]{0,300}value=\{seqInput\}/.test(card), '卡片里不许再有原生 Input（原故障源）')
-  c.ok(/onClick=\{\(\) => setSeqSheetOpen\(true\)\}/.test(card), '卡片那行改为点按打开输入层')
+  c.ok(!/<Input[\s\S]{0,300}value=\{seqInput\}/.test(card), '下方卡片里不许再有第二个原生 Input')
+  c.ok(/scrollTo\(0\); setSeqTopFocus\(true\)/.test(card), '卡片那行改为回到页顶并聚焦')
   c.ok(!/defaultValue\s*=/.test(s), '不许下发 defaultValue 属性（会覆盖原生当前文本、光标甩末尾）')
 })
 
@@ -40,15 +42,15 @@ m.test('A2 输入光标纪律：同步上抛 + flushSync + 丢非字符串回抛
   const s = read(REC)
   c.ok(/import \{ flushSync \} from '@tarojs\/react'/.test(s), '必须用 Taro 的 flushSync（不是 react-dom 的）')
   c.ok(
-    /const next = e\?\.detail\?\.value\s*\n\s*if \(typeof next !== 'string'\) return/.test(s),
+    /const handleSeqInput = \(e: \{ detail\?: \{ value\?: string \} \}\) => \{[\s\S]{0,200}if \(typeof next !== 'string'\) return/.test(s),
     'detail.value 不是字符串的回抛事件须丢掉（否则会把刚打的字清空）',
   )
   c.ok(
-    /flushSync\(\(\) => onChange\(next\)\)/.test(s),
+    /flushSync\(\(\) => setSeqInput\(next\)\)/.test(s),
     'input 事件里当场同步刷新，让 Taro 恢复受控值时看到的值等于本拍文本',
   )
-  c.ok(/value=\{value\}/.test(s), '受控 value 必须传（不传时微信打不进字）')
-  c.ok(!/setTimeout[\s\S]{0,80}onChange/.test(s), '不许延迟上抛（实测会把文本改回上一拍）')
+  c.ok(/value=\{seqInput\}/.test(s), '受控 value 必须传（不传时微信打不进字）')
+  c.ok(!/setTimeout[\s\S]{0,80}setSeqInput/.test(s), '不许延迟上抛（实测会把文本改回上一拍）')
 })
 
 m.test('A3 加入题目：只在按题号提取区最下方出现一次', (c) => {

@@ -3078,3 +3078,32 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - 提交后重新 `build:weapp`，角标 `661c6ca` = HEAD；`release:check --dev` 11 通过 / 2 警告 / 0 阻断。
 - 微信 CLI（IDE 自带 `node.exe` + 清代理 + `NO_PROXY` + 显式 `--port 46737`，`islogin` 返回 `true`）：上传开发版 **2026.11.17.2**，TOTAL **922.3 KB / 944417 Byte**，AppID `wx48bf5ba9bae0bf39`，`√ upload` exit 0。描述「D-080: 题号输入改屏顶输入层、加入题目移区尾、错题提取可从资料库选文件」。
 - 🔴 边界不变：**只到开发版**，未提审未发版 ⇒ D-074~D-080 全部功能仍未面客；**未真机验收**（光标位置、按钮顺手程度、资料库 PDF/图片出图都需思傅手机实测）；未 push（AHEAD=43）。后端 dist 本轮未动（D-079 版本仍在跑）。
+
+## D-081：撤销输入弹层 / 删除滚动定位 / 资料库文件夹（2026-11-17，L1 UI）
+
+**触发**：思傅开发版实测四报：①弹层里打字看不到任何已输入内容；②打字时要看原图确认题号，不希望另弹输入框，要求直接在当前页输入；③最近题目列表删题后跳到列表顶部，应停在删除位置的上一个；④从资料库选择时最好带文件夹信息。
+
+### 一、根因 / 取舍
+- D-080 把 input 移出 ScrollView、放进 fixed 弹层，解决了「光标跑到别处」，但**牺牲了可见性与上下文**：原生 input 在弹层里打字不回显，且遮住来源页图片——用户没法边看原图边定题号。本轮**撤销弹层**，改为**当前页顶部常驻输入框**（在 SegmentedTabs 之后、来源页图片之前），保留 `flushSync` 受控纪律并加「当前题号：xxx」文字回显，双重保证看得见输入内容。
+- 删除跳顶：受控 `ScrollView`（`scrollTop={kb.scrollTop}`）在 children 变化时会把滚动位置打回 0。必须显式写回，而不是指望组件自己保持。
+- 资料库选择器原来只显示文件名/类型/时间，多个文件夹里的同名资料无法区分。
+
+### 二、改动
+| # | 改动 | 落点 |
+|---|---|---|
+| ①② | 删除 `SeqSpecInputSheet` 与 `seqSheetOpen`；新增页顶 `#seq-top-input` 常驻 input + 「当前题号」回显；`handleSeqInput` 统一非字符串丢弃 + `flushSync`；下方卡片那行改为「回到页顶并聚焦」（`kb.scrollTo(0)` + `setSeqTopFocus(true)`） | `pages/recognize/index.tsx` |
+| ③ | `useKeyboardAvoid` 增加 `scrollTo(top)`（同步写 ref + state）；`removeEntry` 先量 `#board-entry-N` 高度，删完后按该高度回退 `scrollTop`（30ms 后写，等新列表渲染），不置 0 | `lib/use-keyboard-avoid.ts`、`recognize/index.tsx` |
+| ④ | `MaterialPicker` 拉 `fetchLibraryFolders()`（失败降级为空，不挡选文件），用 `folderPathOf()`（32 层防环）显示「文件夹：根 / 子 / 孙」，长路径 `truncate` | `components/material-picker.tsx` |
+
+### 三、验证
+| 项 | 结果 |
+|---|---|
+| M61（新模块：删题滚动补偿 / Hook 写入口 / 文件夹路径与降级） | **3/3** |
+| M60（A1/A2 改写为新「页顶常驻、不弹层」契约，A3/A4 保留） | **4/4** |
+| `verify:gate`（M12/13/16/18） | **38/38** |
+| `tsc` / `lint:build` / `build:weapp` | RC=0 / RC=0 / RC=0 |
+
+### 四、边界 / 不宣称
+- **未真机验证**：页顶输入是否真的可见且光标不跑、删除后停留位置是否顺手、文件夹路径是否够用——必须思傅手机验收。
+- 仍是**纯前端**，后端 dist 不动；未提审未发版；未 push（按约定等思傅指示）。
+- D-080 的弹层方案已在代码层撤销，但保留其台账记录作为「试过并被否掉」的证据，避免以后重走。
