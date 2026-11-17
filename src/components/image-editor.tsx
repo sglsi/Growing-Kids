@@ -287,19 +287,34 @@ export default function ImageEditor({
   const boxRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
   // 触摸层相对视口的位置（含 -24 外扩）；用它本身的坐标系算触摸点，避免父级 inset 带来的偏移
   const layerRectRef = useRef<{ left: number; top: number }>({ left: 0, top: 0 })
+  /**
+   * 触摸层是否已测量过。
+   *
+   * ⭐ 思傅 2026-11-17「裁剪时系统卡住、点任何按钮都没反应」修复：
+   *   旧实现在 **每次 touchstart** 里都走一遍 `createSelectorQuery().exec()`，并在**异步回调里**
+   *   才写 `dragRef`。两个后果：
+   *    ① 手势起手到 dragRef 落地之间有异步间隙，快速拖动时 move 先到、dragRef 还是空 ⇒ 拖不动，
+   *       用户感受就是「卡住了」；
+   *    ② 手指反复按下/抬起会堆积一串 SelectorQuery，主线程被查询+回调挤满 ⇒ 整层按钮都点不动。
+   *   现在改为：先用**已缓存**的矩形同步判定（有缓存就不再查询），只在首次进入裁剪或布局变化时
+   *   后台补测一次，手势路径彻底同步。
+   */
+  const layerMeasuredRef = useRef(false)
   const measureLayer = (cb?: () => void) => {
     Taro.createSelectorQuery()
       .select('#cropTouchLayer')
       .boundingClientRect((rect) => {
         const r = Array.isArray(rect) ? rect[0] : rect
-        if (r) layerRectRef.current = { left: r.left, top: r.top }
+        if (r) {
+          layerRectRef.current = { left: r.left, top: r.top }
+          layerMeasuredRef.current = true
+        }
         cb?.()
       })
       .exec()
   }
 
-  const measureBox = (cb?: () => void) => {
-    Taro.createSelectorQuery()
+  const measureBox = (cb?: () => void) => {    Taro.createSelectorQuery()
       .select('#imgEditorBox')
       .boundingClientRect((rect) => {
         const r = Array.isArray(rect) ? rect[0] : rect
@@ -371,6 +386,10 @@ export default function ImageEditor({
     setBusy(false)
     setAiBusy(false)
     setFraming(!!cropOnly)
+    // 触摸层矩形缓存作废：每次打开/换图都重新量一次（布局/图片尺寸都变了）
+    layerMeasuredRef.current = false
+    // 裁剪模式开局就测一次，保证首帧手势即可同步命中
+    if (cropOnly) setTimeout(() => measureLayer(), 50)
     setPreviewError(false)
     setNaturalW(0)
     setNaturalH(0)
@@ -469,9 +488,11 @@ export default function ImageEditor({
   }
 
   const onTouchStart = (e: any) => {
-    // 每次触摸前重新测量「触摸层」自身位置（含 -24 外扩），用其坐标系算点，规避布局/inset 漂移
-    measureLayer(() => {
-      const t = e.touches[0]
+    // ⭐ 同步起手（勿改回「测量回调里才设 dragRef」）：手势必须先落地，否则快速拖动会丢手。
+    //    用已缓存的矩形算点；缓存缺失/布局可能变化时，仅后台补测一次，不阻塞本次判定。
+    const t = e.touches && e.touches[0]
+    if (!t) return
+    const begin = () => {
       const rx = t.clientX - layerRectRef.current.left - 24
       const ry = t.clientY - layerRectRef.current.top - 24
       // 四角模式优先命中角点
@@ -485,13 +506,21 @@ export default function ImageEditor({
       const target = hitTarget(rx, ry)
       if (!target) return
       dragRef.current = { target, startX: rx, startY: ry, start: { ...crop } }
-    })
+    }
+    begin()
+    if (!layerMeasuredRef.current) measureLayer()
   }
 
+  /** 拖动帧节流：16ms 内多次 move 只取最后一帧，避免大图上高频 setState 把渲染层压死 */
+  const lastMoveTsRef = useRef(0)
   const onTouchMove = (e: any) => {
     const drag = dragRef.current
     if (!drag) return
-    const t = e.touches[0]
+    const t = e.touches && e.touches[0]
+    if (!t) return
+    const now = Date.now()
+    if (now - lastMoveTsRef.current < 16) return
+    lastMoveTsRef.current = now
     const rx = t.clientX - layerRectRef.current.left - 24
     const ry = t.clientY - layerRectRef.current.top - 24
 
@@ -961,6 +990,9 @@ export default function ImageEditor({
   const handleConfirmCrop = async () => {
     if (busy || aiBusy) return
     setBusy(true)
+    // mask:false —— 只做「正在处理」反馈，不拦点击：大图导出可能花上几秒，
+    // 但「退出」必须一直能按（否则就是用户报的「卡住」）
+    Taro.showLoading({ title: '裁剪中…', mask: false })
     try {
       const out = await exportEdited()
       const info = await Taro.getImageInfo({ src: out })
@@ -973,8 +1005,10 @@ export default function ImageEditor({
       setQuad(DEFAULT_QUAD)
       setCornerMode('rect')
       setFraming(false)  // 不再显示裁剪框（干净预览）
+      Taro.hideLoading()
       Taro.showToast({ title: '已裁剪，点「使用此图」返回', icon: 'none' })
     } catch (err) {
+      Taro.hideLoading()
       console.error('裁剪失败', err)
       Taro.showToast({ title: (err as any)?.message || '裁剪失败，请重试', icon: 'none' })
     } finally {
@@ -1328,6 +1362,26 @@ export default function ImageEditor({
   const showFrame = framing && !aiBusy
 
   /**
+   * ⭐ 思傅 2026-11-17「裁剪时卡住、点任何按钮都没反应，只能返回上层界面」修复：
+   *   给编辑器留一条**一定能用的逃生通道**。此前若 busy/aiBusy 因某次异常没复位
+   *   （如 AI/导出链路在 hideLoading 之前抛错、或上传长时间挂住），主按钮永久停在
+   *   「处理中…」且 disabled，「退出」又没有强制复位 ⇒ 整个全屏层像死掉一样。
+   *   现在「退出」任何时候都可点，且会主动收干净全局 loading 与内部忙态再关闭。
+   */
+  const handleForceExit = () => {
+    try {
+      Taro.hideLoading()
+    } catch {
+      /* ignore */
+    }
+    setBusy(false)
+    setAiBusy(false)
+    dragRef.current = null
+    setActiveCorner(null)
+    onCancel()
+  }
+
+  /**
    * AI 动作派发：
    *  - 智能高清(enhance)：先弹出模式选择面板（基础画面模式 + 高清扩展），选定后再处理。
    *  - 自动调正(auto)：若当前处于四角模式，带上手动四角（归一化）提交 → 精准透视压平。
@@ -1550,7 +1604,7 @@ export default function ImageEditor({
     <View className="fixed inset-0 bg-black z-[200] flex flex-col">
       {/* 顶部栏 */}
       <View className="flex flex-row items-center justify-between px-4 h-14">
-        <View className="flex items-center gap-1" onClick={onCancel}>
+        <View className="flex items-center gap-1" onClick={handleForceExit}>
           <X size={22} color="#ffffff" />
           <Text className="block text-white text-sm">退出</Text>
         </View>
