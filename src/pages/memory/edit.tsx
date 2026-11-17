@@ -12,13 +12,10 @@ import { useKeyboardAvoid } from '@/lib/use-keyboard-avoid'
 import {
   fetchMemoryDetail, createMemory, updateMemory,
   addMemoryMedia, deleteMemoryMedia,
-  type Memory, type MemoryCategory, type MemoryMood, type MemoryKind,
-  MEMORY_CATEGORIES, MEMORY_MOODS,
+  type Memory, type MemoryMood, type MemoryKind,
+  MEMORY_MOODS,
 } from '@/services/memory'
-import {
-  fetchSubjects, uploadFile,
-} from '@/services/api'
-import type { Subject } from '@/types'
+import { uploadFile } from '@/services/api'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
@@ -79,9 +76,9 @@ export default function MemoryEditPage() {
    * 它就按 value 重建文本、光标落末尾。实时文本放 ref，失焦/保存时再同步。
    */
   const contentRef = useRef('')
-  const [category, setCategory] = useState<MemoryCategory>('life')
+  // 思傅 2026-11-17：分类/学科界面整体移除。新建固定 category='life'、不写 subject_id；
+  // 编辑时不传 category 字段（保留服务端原值），避免历史分类被偷偷改成 life。
   const [mood, setMood] = useState<MemoryMood | ''>('')
-  const [subjectId, setSubjectId] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [tagInput, setTagInput] = useState('')
   const [occurredAt, setOccurredAt] = useState(() => {
@@ -99,7 +96,6 @@ export default function MemoryEditPage() {
   const initialMediaIdsRef = useRef<Set<string>>(new Set())
 
   // ---------- 元数据 ----------
-  const [subjects, setSubjects] = useState<Subject[]>([])
   const [recording, setRecording] = useState(false)
   const [recordSec, setRecordSec] = useState(0)
   const recorderRef = useRef<Taro.RecorderManager | null>(null)
@@ -110,7 +106,6 @@ export default function MemoryEditPage() {
   // ---------- 加载 ----------
   useEffect(() => {
     let alive = true
-    fetchSubjects().then((s) => { if (alive) setSubjects(s) }).catch(() => undefined)
     if (editId) {
       // service 层已解包 + 驼峰化（原双重解包拿到的仍是 snake_case，导致时间框 NaN）
       fetchMemoryDetail(editId).then((data) => {
@@ -119,9 +114,7 @@ export default function MemoryEditPage() {
         setTitle(mem.title || '')
         contentRef.current = mem.content || ''
         setContent(mem.content || '')
-        setCategory(mem.category || 'life')
         setMood(mem.mood || '')
-        setSubjectId(mem.subjectId || '')
         setTags(mem.tags || [])
         setOccurredAt(formatDateTimeLocal(new Date(mem.occurredAt)))
         const existing: Media[] = (data.media || []) as Media[]
@@ -153,9 +146,7 @@ export default function MemoryEditPage() {
               setTitle(draft.title || '')
               contentRef.current = draft.content || ''
               setContent(draft.content || '')
-              setCategory(draft.category || 'life')
               setMood(draft.mood || '')
-              setSubjectId(draft.subjectId || '')
               setTags(draft.tags || [])
               setOccurredAt(draft.occurredAt || formatDateTimeLocal(new Date()))
             }
@@ -172,11 +163,11 @@ export default function MemoryEditPage() {
     const timer = setInterval(() => {
       if (!title && !content) return
       Taro.setStorageSync(`${DRAFT_KEY_PREFIX}new`, {
-        title, content, category, mood, subjectId, tags, occurredAt,
+        title, content, mood, tags, occurredAt,
       })
     }, DRAFT_DEBOUNCE_MS)
     return () => clearInterval(timer)
-  }, [editId, title, content, category, mood, subjectId, tags, occurredAt])
+  }, [editId, title, content, mood, tags, occurredAt])
 
   // ---------- 添加媒体：图片 ----------
   const onPickImages = useCallback(async () => {
@@ -420,12 +411,12 @@ export default function MemoryEditPage() {
       // 🔴 编辑必须走 update（2026-10-29 分模块测试发现并修复，缺陷 P1-D）：
       // 原实现无条件 `createMemory`，`editId` 只用于加载 ⇒ 每次编辑都多出一条
       // 一模一样的记忆，原条目永远不变。
-      const payload = {
+      const payload: Record<string, unknown> = {
         title: title.trim() || undefined,
         content: contentRef.current.trim() || undefined,
-        category,
+        // 思傅 2026-11-17：分类/学科界面移除。新建固定 life；编辑保留原值不覆盖。
+        ...(editId ? {} : { category: 'life' }),
         mood: mood || undefined,
-        subject_id: category === 'study' ? (subjectId || undefined) : undefined,
         tags: tags.length ? tags : undefined,
         occurred_at: new Date(occurredAt).toISOString(),
       }
@@ -473,7 +464,7 @@ export default function MemoryEditPage() {
     } finally {
       setSaving(false)
     }
-  }, [content, title, media, category, mood, subjectId, tags, occurredAt])
+  }, [content, title, media, mood, tags, occurredAt])
 
   // ---------- 渲染 ----------
   const imageCount = media.filter((m) => m.kind === 'image').length
@@ -530,22 +521,6 @@ export default function MemoryEditPage() {
           </View>
         </View>
 
-        <Text className="block text-xs text-muted-foreground mb-1 mt-3">分类</Text>
-        <View className="flex flex-row gap-2 flex-wrap">
-          {MEMORY_CATEGORIES.map((c) => {
-            const active = category === c.value
-            return (
-              <View
-                key={c.value}
-                className={`rounded-full border px-4 py-2 ${active ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
-                onClick={() => setCategory(c.value)}
-              >
-                <Text className={`block text-sm ${active ? 'text-brand-text' : 'text-foreground'}`}>{c.label}</Text>
-              </View>
-            )
-          })}
-        </View>
-
         <Text className="block text-xs text-muted-foreground mb-1 mt-3">心情</Text>
         <View className="flex flex-row gap-2 flex-wrap">
           {MEMORY_MOODS.map((m) => {
@@ -562,32 +537,6 @@ export default function MemoryEditPage() {
             )
           })}
         </View>
-
-        {category === 'study' && (
-          <>
-            <Text className="block text-xs text-muted-foreground mb-1 mt-3">学科</Text>
-            <View className="flex flex-row gap-2 flex-wrap">
-              <View
-                className={`rounded-full border px-4 py-2 ${!subjectId ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
-                onClick={() => setSubjectId('')}
-              >
-                <Text className={`block text-sm ${!subjectId ? 'text-brand-text' : 'text-foreground'}`}>不限</Text>
-              </View>
-              {subjects.map((s) => {
-                const a = subjectId === s.id
-                return (
-                  <View
-                    key={s.id}
-                    className={`rounded-full border px-4 py-2 ${a ? 'bg-brand-soft border-brand-line' : 'bg-background border-border'}`}
-                    onClick={() => setSubjectId(s.id)}
-                  >
-                    <Text className={`block text-sm ${a ? 'text-brand-text' : 'text-foreground'}`}>{s.name}</Text>
-                  </View>
-                )
-              })}
-            </View>
-          </>
-        )}
       </View>
 
       {/* 标题 + 内容 */}

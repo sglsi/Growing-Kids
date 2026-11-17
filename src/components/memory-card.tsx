@@ -1,12 +1,11 @@
 import { View, Text, Image } from '@tarojs/components'
 import { Camera, Music, Film, Ellipsis, Play } from 'lucide-react-taro'
 import { Card } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { CheckDot } from '@/components/selection-bar'
-import { getSubjectColor, formatDate } from '@/types'
+import { formatDate } from '@/types'
 import {
   type Memory, type MemoryMedia,
-  MEMORY_CATEGORIES, getMemoryCategoryLabel, getMemoryMoodLabel, getMemoryMoodEmoji,
+  getMemoryMoodLabel, getMemoryMoodEmoji,
 } from '@/services/memory'
 
 interface Props {
@@ -44,9 +43,6 @@ export default function MemoryCard({
   memory, media, selecting = false, checked = false,
   onClick, onLongPress, onMore,
 }: Props) {
-  const subjectName = memory.subject?.name || ''
-  const subjectColor = getSubjectColor(memory.subject?.color)
-  const categoryLabel = getMemoryCategoryLabel(memory.category)
   const moodEmoji = getMemoryMoodEmoji(memory.mood)
   const moodLabel = getMemoryMoodLabel(memory.mood)
   const time = formatDate(memory.occurredAt || memory.createdAt || '')
@@ -100,25 +96,13 @@ export default function MemoryCard({
             <CheckDot checked={!!checked} size={20} />
           </View>
         )}
-        {/* 学习类记忆显示学科色条；其余用边线色中性条（不抢层级） */}
-        {memory.category === 'study' && subjectName ? (
-          <View className={`w-2 self-stretch ${subjectColor.bar}`} />
-        ) : (
-          <View className="w-2 self-stretch bg-border" />
-        )}
+        {/* 思傅 2026-11-17：学科色条移除，统一用中性边线条（不抢层级） */}
+        <View className="w-2 self-stretch bg-border" />
         <View className="flex-1 p-4">
-          {/* 第一行：日期 + 分类 + 心情 + 更多 */}
+          {/* 第一行：日期 + 心情 + 更多（分类/学科徽章 2026-11-17 移除） */}
           <View className="flex flex-row items-center justify-between mb-2">
             <View className="flex flex-row items-center gap-2 flex-1 min-w-0">
               <Text className="block text-xs text-muted-foreground shrink-0">{time}</Text>
-              <Badge variant="outline" className="bg-muted text-foreground border rounded-full px-2 py-0 text-xs">
-                {categoryLabel}
-              </Badge>
-              {memory.category === 'study' && subjectName && (
-                <Badge variant="outline" className={`${subjectColor.badge} border rounded-full px-2 py-0 text-xs`}>
-                  {subjectName}
-                </Badge>
-              )}
               {moodEmoji && (
                 <Text className="block text-sm shrink-0">
                   {moodEmoji}
@@ -230,6 +214,3 @@ function formatDurationShort(sec: number): string {
   const s = sec % 60
   return `${m}:${s.toString().padStart(2, '0')}`
 }
-
-// 导出分类列表给页面级 SegmentedTabs 使用
-export { MEMORY_CATEGORIES }

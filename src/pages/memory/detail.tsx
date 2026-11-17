@@ -6,10 +6,10 @@ import { Button } from '@/components/ui/button'
 import {
   fetchMemoryDetail, deleteMemory, deleteMemoryMedia,
   type Memory, type MemoryMedia,
-  MEMORY_CATEGORIES, getMemoryCategoryLabel, getMemoryMoodLabel, getMemoryMoodEmoji,
+  getMemoryMoodLabel, getMemoryMoodEmoji,
 } from '@/services/memory'
 import { cacheGet, cacheSet } from '@/services/cache'
-import { getSubjectColor, formatDate } from '@/types'
+import { formatDate } from '@/types'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER } from '@/lib/theme'
 
 /** 秒 → "1:32" */
@@ -202,11 +202,8 @@ export default function MemoryDetailPage() {
     )
   }
 
-  const catLabel = getMemoryCategoryLabel(memory.category)
   const moodEmoji = getMemoryMoodEmoji(memory.mood)
   const moodLabel = getMemoryMoodLabel(memory.mood)
-  const subjectName = memory.subject?.name || ''
-  const subjectColor = getSubjectColor(memory.subject?.color)
   const dateLabel = formatDate(memory.occurredAt || memory.createdAt)
 
   return (
@@ -219,18 +216,10 @@ export default function MemoryDetailPage() {
         </Button>
       </View>
 
-      {/* 头部：分类 + 时间 + 心情 + 学科 */}
+      {/* 头部：时间 + 心情（分类/学科 2026-11-17 移除） */}
       <View className="px-4 pt-4 pb-3 border-b border-border">
         <Text className="block text-xs text-muted-foreground">{dateLabel}</Text>
         <View className="flex flex-row items-center gap-2 mt-2 flex-wrap">
-          <View className="bg-muted rounded-full px-3 py-1">
-            <Text className="block text-xs text-foreground">{catLabel}</Text>
-          </View>
-          {memory.category === 'study' && subjectName && (
-            <View className={`rounded-full border px-3 py-1 ${subjectColor.badge}`}>
-              <Text className="block text-xs">{subjectName}</Text>
-            </View>
-          )}
           {moodEmoji && (
             <View className="flex flex-row items-center gap-1 bg-muted rounded-full px-3 py-1">
               <Text className="block text-sm">{moodEmoji}</Text>
@@ -366,6 +355,3 @@ export default function MemoryDetailPage() {
     </ScrollView>
   )
 }
-
-// 避免 lint 警告：预留常量导出（页面用到 MEMORY_CATEGORIES 时此处引用）
-void MEMORY_CATEGORIES
