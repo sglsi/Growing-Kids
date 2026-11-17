@@ -33,7 +33,16 @@ import { guardPolicy } from '@/services/policy-gate'
 // P-014 / D-017：录入侧引导（前端镜像，与 server/src/shared/input-guard.ts 逐字一致）
 import { guardQuestionInput } from '@/constants/input-guard'
 // P-031：按题号定位候选框（零依赖纯函数，可离线实证）
-import { parseSeqSpec, locateQuestions, detectedLabels, type Rect01, type FigureSeg } from '@/lib/question-locate'
+import {
+  parseSeqSpec,
+  locateQuestions,
+  detectedLabels,
+  parseSectionedSpec,
+  locateSectionedQuestions,
+  type Rect01,
+  type FigureSeg,
+  type SectionedRef,
+} from '@/lib/question-locate'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -107,6 +116,8 @@ interface BoardPage {
 /** P-031：按题号提取的一行——题号、是否定位到、候选框、已裁出的图 */
 interface SeqRow {
   label: number
+  /** 方案 A 分节号（'一'~'十'）；null/缺省 = 无分节普通题 */
+  section?: string | null
   located: boolean
   stemRect: Rect01
   answerRect: Rect01 | null
@@ -174,6 +185,8 @@ export default function RecognizePage() {
   const lastLocateRef = useRef<{
     pageId: number
     seqs: number[]
+    /** 方案 A：分节输入；null = 老路径（纯数字题号） */
+    refs: SectionedRef[] | null
     segs: PageTextSegment[]
     pw: number
     ph: number
@@ -1583,9 +1596,11 @@ export default function RecognizePage() {
    * 识别本身失败/无文字则明确告知，仍可手工「裁题目图」——绝不猜坐标、绝不拿相邻题区间顶替（D-020）。
    */
   const handleLocateBySeq = async () => {
-    const seqs = parseSeqSpec(seqInput)
+    // 方案 A：分节写法（一6,二5,二6）优先；否则回落纯数字老路径
+    const sectioned = parseSectionedSpec(seqInput)
+    const seqs = sectioned ? sectioned.map((r) => r.label) : parseSeqSpec(seqInput)
     if (!seqs) {
-      Taro.showToast({ title: '题号格式如 3,5,8-12', icon: 'none' })
+      Taro.showToast({ title: '题号格式如 3,5,8-12，或分节 一6,二5', icon: 'none' })
       return
     }
     const page = boardPages[activePage]
@@ -1617,13 +1632,20 @@ export default function RecognizePage() {
         return
       }
     }
-    const got = locateQuestions(segs, pw, ph, seqs, figs)
+    // 分节走逐节定位（节尾收口不跨节）；纯数字走已验证的老路径，逐字不变
+    const got = sectioned ? locateSectionedQuestions(segs, pw, ph, sectioned, figs) : locateQuestions(segs, pw, ph, seqs, figs)
     // 记住这次定位的输入：用户点「补全图形」时要用同一份段落重算（不能换成精准分段，
     // 否则文字框会跟着变，等于偷偷换了另一套结果）
-    lastLocateRef.current = { pageId: page.id, seqs, segs, pw, ph, figs }
+    lastLocateRef.current = { pageId: page.id, seqs, refs: sectioned, segs, pw, ph, figs }
     setSeqDetected(detectedLabels(segs, seqs))
     setSeqRows(
-      got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect })),
+      got.map((g, i) => ({
+        label: g.label,
+        section: sectioned ? sectioned[i]?.section ?? null : null,
+        located: g.located,
+        stemRect: g.stemRect,
+        answerRect: g.answerRect,
+      })),
     )
     const miss = got.filter((g) => !g.located).map((g) => g.label)
     Taro.showToast({
@@ -1670,15 +1692,25 @@ export default function RecognizePage() {
         return
       }
       // 用**同一次定位的段落**重算，只把图形块加进去；文字框只会外扩，不会挪位
-      const got = locateQuestions(task.segs, task.pw, task.ph, task.seqs, figs)
+      // 分节任务必须用同一份 refs 重算，否则节区间丢了、框会跨节
+      const got = task.refs
+        ? locateSectionedQuestions(task.segs, task.pw, task.ph, task.refs, figs)
+        : locateQuestions(task.segs, task.pw, task.ph, task.seqs, figs)
       lastLocateRef.current = { ...task, figs }
       setSeqRows((prev) => {
         if (!prev.length) {
-          return got.map((g) => ({ label: g.label, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect }))
+          return got.map((g, i) => ({
+            label: g.label,
+            section: task.refs ? task.refs[i]?.section ?? null : null,
+            located: g.located,
+            stemRect: g.stemRect,
+            answerRect: g.answerRect,
+          }))
         }
-        const byLabel = new Map(got.map((g) => [g.label, g]))
-        return prev.map((row) => {
-          const g = byLabel.get(row.label)
+        // ⚠️ 按 index 而非 label 合并：方案 A 下同号不同节（（一）6 /（二）6）是两行，
+        //    用 label 建 Map 会互相覆盖。got 与 prev 都来自同一份输入，顺序严格一致。
+        return prev.map((row, i) => {
+          const g = got[i]
           // 只更新候选框，保留用户已经裁好的图（补图不该抹掉人工成果）
           return g ? { ...row, located: g.located, stemRect: g.stemRect, answerRect: g.answerRect } : row
         })
@@ -1952,7 +1984,7 @@ export default function RecognizePage() {
                   <Input
                     style={{ flex: 1, width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
                     value={seqInput}
-                    placeholder="如 3,5,8-12，点这里直接输入"
+                    placeholder="如 3,5,8-12 或分节 一6,二5"
                     placeholderClass="text-muted-foreground"
                     onInput={(e) => setSeqInput(e.detail.value)}
                     onConfirm={() => void handleLocateBySeq()}
@@ -2000,12 +2032,14 @@ export default function RecognizePage() {
               ) : null}
               {seqRows.map((r, i) => (
                 <View
-                  key={`seq-${r.label}-${i}`}
+                  key={`seq-${r.section || 'n'}-${r.label}-${i}`}
                   className="rounded-xl p-3 mb-2"
                   style={{ backgroundColor: '#fff', border: '1px solid #ece8e0' }}
                 >
                   <View className="flex flex-row items-center justify-between mb-2">
-                    <Text className="block text-xs font-medium text-foreground">第 {r.label} 题</Text>
+                    <Text className="block text-xs font-medium text-foreground">
+                      {r.section ? `（${r.section}）第 ${r.label} 题` : `第 ${r.label} 题`}
+                    </Text>
                     <Text className="block text-xs" style={{ color: r.located ? BRAND_TEXT : '#B08D84' }}>
                       {r.located ? (r.answerRect ? '含解答区候选' : '无解答，只存题目区') : '未定位，请手工框'}
                     </Text>
