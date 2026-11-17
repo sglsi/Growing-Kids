@@ -481,7 +481,32 @@ export class SidecarSupervisor {
 
   private async start(timeoutMs = this.cfg.startTimeoutMs): Promise<void> {
     if (this.starting) return this.starting
-    if (this.isRunning()) return
+    /**
+     * ⭐ 思傅 2026-11-17「直接 OCR 时侧车没起来、换个入口又能用」修复（D-079）：
+     *   旧实现只信 `isRunning()`（单元模式看 unitActive）就直接 return。但单元可能被
+     *   systemd OOM / 运维 / 上一次回收**在后台停掉**，而本进程的 unitActive 仍为 true
+     *   ⇒ start() 认定「已在跑」直接返回 ⇒ ensureReady 返回 true ⇒ 调用方以为就绪打过去
+     *   ⇒ 请求失败。表现就是第一次识别必挂、隔一会儿或换个入口又好了。
+     *   现在：认为在跑也必须先探活，探不通就明确重建（单元置停后走 systemctl start；
+     *   spawn 模式先杀旧子进程，否则端口被占，新进程绑不上）。
+     */
+    if (this.isRunning()) {
+      if (await this.isHealthy()) return
+      console.warn('[sidecar] 运行状态与实际不符（认为在跑但 /healthz 不通）→ 强制重建')
+      if (this.cfg.unit) {
+        this.unitActive = false
+      } else {
+        const c = this.child
+        this.intentionalStop = true
+        try {
+          if (c && !c.killed) c.kill('SIGKILL')
+        } catch {
+          /* ignore */
+        }
+        this.child = null
+        this.intentionalStop = false
+      }
+    }
     // ---- 单元模式：systemctl start + 等 /healthz（子进程归 systemd，不吃 gk-api 的内存上限）----
     if (this.cfg.unit) {
       this.lastUsed = Date.now()

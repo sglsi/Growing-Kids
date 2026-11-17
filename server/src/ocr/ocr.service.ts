@@ -685,6 +685,37 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
     return { contentHashes: hashes as string[], kind, mode: opts.mode, extra: opts.extra }
   }
 
+  /**
+   * 预热 3.x OCR 侧车（D-079）。
+   *
+   * 背景：侧车空闲 15min 会被回收（省 1.6G 内存），下次调用要 `systemctl start`
+   * + **探针预热约 15s**（`/healthz` 200 ≠ 模型就绪，首次 `/ppsv3` 才加载模型）。
+   * 这段冷启动成本若落在真正的识别请求里，会顶到微信 60s 预算边缘 ⇒ 用户看到
+   * 「识别失败」，而侧车其实刚起来（换个入口再点又好了）。
+   *
+   * 这里把「烘热引擎」独立出来给前端在**点识别之前**调用，不参与识别请求的计时。
+   * 语义：**永不抛错**（预热失败不该挡住用户），只回报状态。
+   */
+  async warmupSidecar(timeoutMs = 45_000): Promise<{
+    ready: boolean
+    disabled: boolean
+    sleeping: boolean
+    elapsedMs: number
+  }> {
+    const t0 = Date.now()
+    const sup = this.sidecar
+    if (sup.disabled) {
+      return { ready: false, disabled: true, sleeping: false, elapsedMs: 0 }
+    }
+    let ready = false
+    try {
+      ready = await sup.ensureReady(timeoutMs)
+    } catch (e) {
+      console.warn('[ocr-warmup] 侧车预热失败：', String(e))
+    }
+    return { ready, disabled: false, sleeping: sup.isSleeping(), elapsedMs: Date.now() - t0 }
+  }
+
   async recognizeExam(
     subjectId: string,
     imageKeys: string[],

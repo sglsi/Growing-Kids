@@ -970,6 +970,15 @@ export class ImageService {
     return out
   }
 
+  /**
+   * OCR 侧车预热（D-079）：前端在「点识别之前」先调一次，把侧车冷启动
+   * （systemctl start + 探针预热约 15s）从识别请求的 60s 预算里挪出来。
+   * 永不抛错，只回报状态。
+   */
+  async warmupOcrSidecar(): Promise<{ ready: boolean; disabled: boolean; sleeping: boolean; elapsedMs: number }> {
+    return this.ocrService.warmupSidecar()
+  }
+
   private async ocrPageInner(
     dto: OcrPageDto,
     forwardHeaders: Record<string, string>,

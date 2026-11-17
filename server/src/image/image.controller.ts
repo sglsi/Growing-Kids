@@ -171,6 +171,26 @@ export class ImageController {
     return { code: 200, msg: 'success', data }
   }
 
+  /**
+   * OCR 侧车预热。POST /api/image/ocr-warmup
+   *
+   * ⭐ 思傅 2026-11-17「直接 OCR 识别时侧车没启动」修复（D-079）：
+   *   侧车空闲 15 分钟会被回收，下次冷启动要 `systemctl start` + **探针预热约 15s**。
+   *   这段耗时如果算进真正的 OCR 请求里，会顶到微信 request 60s 预算的边缘，
+   *   前端就表现为「识别失败」，而侧车其实刚刚才起来（换个入口再点又成功了）。
+   *   这里单独给一个「提前把引擎烘热」的轻端点：前端在进页面 / 点识别前先打它，
+   *   冷启动成本就从识别请求里挪了出来。
+   *
+   * 语义：**不抛错**（预热失败不该阻断用户操作），只回报当前状态，调用方据此决定是否等待。
+   */
+  @Post('ocr-warmup')
+  @HttpCode(200)
+  async ocrWarmup(@Req() req: RequestWithUser) {
+    requireUserId(req)
+    const data = await this.imageService.warmupOcrSidecar()
+    return { code: 200, msg: 'success', data }
+  }
+
   /** 判断是否为 SR 限流类错误（429 / 503）——用于跳过 hybrid 兜底 */
   private isRateLimitError(e: HttpException): boolean {
     const status = e.getStatus()
