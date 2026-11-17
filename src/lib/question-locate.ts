@@ -226,6 +226,149 @@ export function parseSeqSpec(raw: string): number[] | null {
   return [...out].sort((x, y) => x - y)
 }
 
+/**
+ * ── 方案 A：分节题号（思傅 2026-11-17 拍板）─────────────────────────────
+ *
+ * 真实卷面：`（一）6`、`（二）5,6,16,22` —— 中文数字分节 + 阿拉伯小题号。
+ * 旧 `parseSeqSpec` 只认纯数字题号，分节号被吞、且不同节下的同名小题号（如
+ * （一）6 与（二）6）无法区分。这里在**输入解析与定位编排层**扩展，判定层
+ * `question-match.ts` 与既有正则一行不动（红线）。
+ */
+export interface SectionedRef {
+  /** 中文节号（'一'~'十'）；null = 无分节的普通题号 */
+  section: string | null
+  /** 节内/整页的小题号 */
+  label: number
+}
+
+const CN_SECTIONS = '一二三四五六七八九十'
+const RE_SEC_MARK = /^\s*(?:[（(]\s*([一二三四五六七八九十])\s*[)）]|[（(]?\s*([一二三四五六七八九十])\s*[、.．:：])\s*/
+
+/**
+ * 解析分节题号输入：`一6,二5,二6,二16,二22` / `（一）6,(二)5` / `一、6-8`。
+ * 纯数字项（如 `3`）保留为 `section:null`，走整页定位，与原路径等价。
+ * 无分节标记时返回 null（调用方回落到 parseSeqSpec 老路径）。
+ */
+export function parseSectionedSpec(raw: string): SectionedRef[] | null {
+  // `一、6` / `二：5` 的顿号/冒号是节号后缀，不是项分隔符——先归一化到节号上，
+  // 避免被下面的 split 拆成两截。
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/([（(]?[一二三四五六七八九十][)）]?)\s*[、.．:：]\s*(?=\d)/g, '$1')
+  if (!s) return null
+  const parts = s.split(/[,，、;；\s]+/).filter(Boolean)
+  if (!parts.length) return null
+  const out: SectionedRef[] = []
+  let hasSection = false
+  for (const p of parts) {
+    const m = p.match(/^(?:[（(]\s*([一二三四五六七八九十])\s*[)）]|[（(]?\s*([一二三四五六七八九十])\s*[、.．:：]?)\s*(\d{1,3})(?:\s*[-~～]\s*(\d{1,3}))?$/)
+    if (m) {
+      const sec = m[1] || m[2]
+      if (!CN_SECTIONS.includes(sec)) return null
+      const a = Number(m[3])
+      const b = m[4] === undefined ? a : Number(m[4])
+      if (!Number.isFinite(a) || !Number.isFinite(b) || a < 1 || b < 1 || a > 300 || b > 300 || a > b) return null
+      if (b - a + 1 > 60) return null
+      hasSection = true
+      for (let i = a; i <= b; i++) out.push({ section: sec, label: i })
+      continue
+    }
+    // 纯数字项：与 parseSeqSpec 同样的区间语义，section=null
+    const q = p.match(/^(\d{1,3})(?:\s*[-~～]\s*(\d{1,3}))?$/)
+    if (!q) return null
+    const a = Number(q[1])
+    const b = q[2] === undefined ? a : Number(q[2])
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a < 1 || b < 1 || a > 300 || b > 300 || a > b) return null
+    if (b - a + 1 > 60) return null
+    for (let i = a; i <= b; i++) out.push({ section: null, label: i })
+  }
+  if (!out.length || out.length > 60 || !hasSection) return null
+  return out
+}
+
+/** 行首分节标记 → 规范中文节号；认 `（一）` / `(二)5` / `一、` / `二．` */
+function segSectionMark(text: string): string | null {
+  const m = RE_SEC_MARK.exec(String(text ?? ''))
+  if (!m) return null
+  const sec = m[1] || m[2]
+  return CN_SECTIONS.includes(sec) ? sec : null
+}
+
+/** 分节区间：每个节的 y 起点，终点为下一节起点（最后一节到 +∞，由 pageH 收口） */
+function sectionRanges(rows: Seg[]): Array<{ section: string; y0: number; y1: number }> {
+  const marks: Array<{ section: string; y0: number }> = []
+  for (const s of rows) {
+    const sec = segSectionMark(s.text)
+    if (!sec || marks.some((m) => m.section === sec)) continue
+    marks.push({ section: sec, y0: s.box.y0 })
+  }
+  marks.sort((a, b) => a.y0 - b.y0)
+  return marks.map((m, i) => ({ ...m, y1: i + 1 < marks.length ? marks[i + 1].y0 : Number.POSITIVE_INFINITY }))
+}
+
+/**
+ * 节内题号：`（二）5` / `二5` / `二、5` 这类"节号贴着小题号"的行 → 5。
+ *
+ * ⚠️ 与裸号枚举的区别：这里要求**节号显式贴在数字前**，是卷面的分节声明，
+ *    不是从任意行里捞数字（D-020 禁的就是后者）。仅在 scope 模式启用。
+ */
+function sectionedQuestionNumber(text: string, section: string): number | null {
+  const s = String(text ?? '')
+  const re = new RegExp(
+    `^\\s*(?:[（(]\\s*${section}\\s*[)）]|${section}\\s*[、.．:：]?)\\s*(\\d{1,3})\\s*` +
+      `(?:[.．。、，,：:）)】\\]]\\s*(?!\\d)|(?=[\\u4e00-\\u9fa5A-Za-z△▲□○（《【])|$)`,
+  )
+  const m = re.exec(s)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) && n >= 1 && n <= 300 ? n : null
+}
+
+/** 节内定向题号锚点（复用 sectionedQuestionNumber，口径一致） */
+function sectionedStartsWithLabel(text: string, label: number, section: string): boolean {
+  return sectionedQuestionNumber(text, section) === label
+}
+
+/** 分节定位：逐节锁定 y 区间后复用已验证的 locateQuestions 切框逻辑 */
+export function locateSectionedQuestions(
+  segments: Seg[],
+  pageW: number,
+  pageH: number,
+  refs: SectionedRef[],
+  figures: FigureSeg[] = [],
+): LocatedQuestion[] {
+  const out: LocatedQuestion[] = []
+  const ranges = sectionRanges(explodeLines((Array.isArray(segments) ? segments : []).filter((s) => s && s.box)))
+  for (const ref of refs) {
+    if (ref.section === null) {
+      out.push(...locateQuestions(segments, pageW, pageH, [ref.label], figures))
+      continue
+    }
+    const range = ranges.find((r) => r.section === ref.section)
+    if (!range) {
+      // 卷面没识别到该节 ⇒ fail-closed 整页候选，绝不借邻节的区间（D-020）
+      out.push({
+        label: ref.label,
+        index: -1,
+        stemRect: { x: 0, y: 0, w: 1, h: 1 },
+        answerRect: null,
+        located: false,
+        figureBox: null,
+        figureBoxes: [],
+      })
+      continue
+    }
+    out.push(
+      ...locateQuestions(segments, pageW, pageH, [ref.label], figures, {
+        y0: range.y0,
+        y1: range.y1,
+        section: ref.section,
+      }),
+    )
+  }
+  return out
+}
+
 function clamp01(v: number): number {
   if (!Number.isFinite(v)) return 0
   return v < 0 ? 0 : v > 1 ? 1 : v
@@ -250,10 +393,16 @@ export function locateQuestions(
   pageH: number,
   seqs: number[],
   figures: FigureSeg[] = [],
+  /** 方案 A 分节区间；不传 ⇒ 老行为逐字不变 */
+  scope?: { y0: number; y1: number; section: string },
 ): LocatedQuestion[] {
   const list = Array.isArray(segments) ? segments.filter((s) => s && s.box) : []
   // 页面尺寸未知时无法把像素换算成比例 ⇒ 一律只给整页候选（不猜）
   const valid = pageW > 0 && pageH > 0
+  // 区间底：有 scope 时用节尾收口（不跨节），否则页底
+  const bottomPx = scope ? Math.min(pageH, scope.y1) : pageH
+  const inScope = (y0: number): boolean =>
+    !scope || (y0 >= scope.y0 && y0 < scope.y1)
 
   // 段落按栏分组，栏内按 y 升序（同 y 用 x 稳定排序）；同时做段内拆行（见 explodeLines）
   const byCol = new Map<number, Seg[]>()
@@ -275,7 +424,9 @@ export function locateQuestions(
   const anchors: Anchor[] = []
   for (const c of cols) {
     byCol.get(c)!.forEach((s, i) => {
-      const n = segQuestionNumber(s.text)
+      if (!inScope(s.box.y0)) return
+      // scope 模式：节号贴号行（`（二）6`）也登记为锚点，保证前题框不越界吃掉本题题号
+      const n = segQuestionNumber(s.text) ?? (scope ? sectionedQuestionNumber(s.text, scope.section) : null)
       if (n === null) return
       // 同题号重复出现（页眉残留等）只认第一次
       if (anchors.some((a) => a.label === n)) return
@@ -287,7 +438,12 @@ export function locateQuestions(
     if (anchors.some((a) => a.label === label)) continue
     for (const c of cols) {
       const arr = byCol.get(c)!
-      const i = arr.findIndex((s) => startsWithLabel(s.text, label))
+      const i = arr.findIndex(
+        (s) =>
+          inScope(s.box.y0) &&
+          (startsWithLabel(s.text, label) ||
+            (!!scope && sectionedStartsWithLabel(s.text, label, scope.section))),
+      )
       if (i >= 0) {
         anchors.push({ label, col: c, order: i, y0: arr[i].box.y0 })
         break
@@ -307,7 +463,7 @@ export function locateQuestions(
     const next = anchors
       .filter((x) => x.col === a.col && x.y0 > a.y0)
       .sort((p, q) => p.y0 - q.y0)[0]
-    return [a.y0, next ? next.y0 : pageH]
+    return [a.y0, next ? next.y0 : bottomPx]
   }
   const figuresByLabel = new Map<number, SegBox[]>()
   const figList = (Array.isArray(figures) ? figures : []).filter(
@@ -355,7 +511,7 @@ export function locateQuestions(
       .filter((a) => a.col === hit.col && a.y0 > hit.y0)
       .sort((a, b) => a.y0 - b.y0)[0]
     const topPx = arr[hit.order].box.y0
-    const boundPx = nextAnchor ? nextAnchor.y0 : pageH
+    const boundPx = nextAnchor ? nextAnchor.y0 : bottomPx
 
     // ⚠️ r2（2026-11-16）：终点不能直接取 boundPx。
     //    末题没有下一锚点 ⇒ 会一路框到页底：干净试卷实测末题框高占页 70%（全是空白），
