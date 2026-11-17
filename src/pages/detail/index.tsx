@@ -8,7 +8,7 @@ import { Switch } from '@/components/ui/switch'
 import {
   fetchTimelineDetail, fetchSubjects, updateQuestion, updateTimeline, exportDocument,
   addToReviewBook, removeFromReviewBook, deleteTimeline,
-  fetchSimilar, markReviewed, uploadImage, ocrPage,
+  fetchSimilar, markReviewed, uploadImage, ocrPage, warmupQuiet,
   type Subject, type TimelineItem,
 } from '@/services/api'
 import { cacheGet, cacheSet } from '@/services/cache'
@@ -367,6 +367,8 @@ export default function DetailPage() {
   const handleOcrImage = async (url: string) => {
     setOcrBusy(true)
     try {
+      // D-079：统一先烘热 OCR 侧车（冷启动 ~15s，别算进识别请求的 60s 预算）
+      await warmupQuiet()
       const r = await ocrPage(url, 'fast', { rectify: false })
       const text = (r.page_text || []).map((s) => s.text.trim()).filter(Boolean).join('\n')
       if (!text) {

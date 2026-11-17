@@ -22,6 +22,7 @@ import {
   fetchSubjects, recognizePaper, recognizeSeparate,
   recognizeDocumentByUrl, uploadFile, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr, fetchDocPages,
+  warmupOcr, warmupQuiet,
   type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload, type PageFigure,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
@@ -123,6 +124,12 @@ interface SeqRow {
   answerRect: Rect01 | null
   stem?: { key: string; url: string }
   answer?: { key: string; url: string }
+  /**
+   * 补充裁剪图（思傅 2026-11-17）：跨 2~3 栏 / 跨 2 页的题，一个矩形框不住，
+   * 需要再裁几块补进同一题。这些图与 stem 一起进 `content.question_images`，顺序即裁剪顺序。
+   * 存在这里而不是把 stem 改成数组，是为了老逻辑（stem 单张、解答单张）逐字不变。
+   */
+  extra?: { key: string; url: string }[]
 }
 
 /** 人工整理流程的上限（防滥用 + 控导出体积） */
@@ -173,7 +180,7 @@ export default function RecognizePage() {
   const [seqRows, setSeqRows] = useState<SeqRow[]>([])
   /** 本次定位时本页实际识别到的题号（用于解释「为什么第 N 题没定位」） */
   const [seqDetected, setSeqDetected] = useState<number[]>([])
-  const [seqCropping, setSeqCropping] = useState<{ idx: number; kind: 'stem' | 'answer' } | null>(null)
+  const [seqCropping, setSeqCropping] = useState<{ idx: number; kind: 'stem' | 'answer' | 'extra' } | null>(null)
   const [seqBusy, setSeqBusy] = useState(false)
   /** P-031 r4：正在补全图形（精准模式跑版面分析，较慢，独立于定位本身的忙碌态） */
   const [figBusy, setFigBusy] = useState(false)
@@ -248,6 +255,20 @@ export default function RecognizePage() {
     Taro.removeStorageSync('recog_mode')
   }, [])
 
+  /**
+   * ⭐ 思傅 2026-11-17（D-079）：进页面就在后台把 OCR 侧车烘热。
+   *
+   * 侧车空闲 15 分钟会被回收，冷启动要 `systemctl start` + 探针预热约 15s。
+   * 这段以前是算在「第一次识别」的请求里的，加上摆正/推理就顶到微信 60s 上限
+   * ⇒ 用户看到「识别失败」，而侧车其实刚起来（换个入口再点又成功了）。
+   *
+   * 这里 fire-and-forget：不挡界面、失败静默（真正的识别请求还有一层兜底）；
+   * 用户真正点识别时 `warmupQuiet()` 复用同一个 promise，已热则秒回。
+   */
+  useEffect(() => {
+    void warmupOcr().catch(() => undefined)
+  }, [])
+
   /** 确保学科列表已加载（#111：失败不抛、返回空数组，由调用方做 sid 守卫） */
   const ensureSubjects = async (): Promise<Subject[]> => {
     if (subjects.length > 0) return subjects
@@ -313,6 +334,8 @@ export default function RecognizePage() {
     setSeqInput('')
     setUnmatched([])
     try {
+      // D-079：先确保 OCR 侧车已烘热（冷启动 ~15s），别把这段时间算进识别请求
+      await warmupQuiet()
       const result = await recognizePaper(paperImage, sid)
       setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
@@ -471,6 +494,8 @@ export default function RecognizePage() {
     Taro.showLoading({ title: '正在识别文档…', mask: true })
     let docShownAt = 0
     try {
+      // D-079：文档链路同样先烘热侧车（页图 OCR 依赖它）
+      await warmupQuiet()
       const result = await recognizeDocumentByUrl(docUrl, sid, {
         shouldAbort: () => unmountedRef.current,
         onProgress: ({ waitedMs }) => {
@@ -664,6 +689,8 @@ export default function RecognizePage() {
     const label = existing?.question_label ?? sysBlocks.find((b) => b.id === id)?.question_label
     setRecropBusy(true)
     try {
+      // D-079：改框重切内部还要跑 OCR，先烘热侧车
+      await warmupQuiet()
       const rc = await recropWrongBlock({
         image_url: questionUrl,
         box,
@@ -882,6 +909,8 @@ export default function RecognizePage() {
     if (precise) Taro.showLoading({ title: '精准识别中，约需 1 分钟', mask: true })
     let shownAt = 0
     try {
+      // D-079：先把侧车烘热再发识别请求（冷启动 15s 不该算进 60s 预算）
+      await warmupQuiet()
       const r = await ocrPage(p.url, ocrMode, {
         onProgress: ({ waitedMs }) => {
           const sec = Math.round(waitedMs / 1000)
@@ -1069,6 +1098,8 @@ export default function RecognizePage() {
     if (precise) Taro.showLoading({ title: '精准识别中，约需 1 分钟', mask: true })
     let shownAt = 0
     try {
+      // D-079：同上，先烘热侧车
+      await warmupQuiet()
       const r = await ocrPage(src, ocrMode, {
         rectify: false,
         onProgress: ({ waitedMs }) => {
@@ -1676,6 +1707,8 @@ export default function RecognizePage() {
     Taro.showLoading({ title: '正在检测图形…', mask: true })
     let shownAt = 0
     try {
+      // D-079：补图走精准模式，同样先烘热侧车
+      await warmupQuiet()
       const r = await ocrPage(page.url, 'precise', {
         onProgress: ({ waitedMs }) => {
           const sec = Math.round(waitedMs / 1000)
@@ -1737,11 +1770,20 @@ export default function RecognizePage() {
       setSeqRows((prev) =>
         prev.map((r, i) => {
           if (i !== task.idx) return r
+          if (task.kind === 'extra') {
+            // 跨栏/跨页补齐：追加到本题图组，与主图一起入库；与主图合计不超上限
+            const cur = r.extra || []
+            if (cur.length >= MAX_ENTRY_IMAGES - 1) return r
+            return { ...r, extra: [...cur, { key: up.key, url: up.url }] }
+          }
           return task.kind === 'stem'
             ? { ...r, stem: { key: up.key, url: up.url } }
             : { ...r, answer: { key: up.key, url: up.url } }
         }),
       )
+      if (task.kind === 'extra') {
+        Taro.showToast({ title: '已补充一块，可继续补', icon: 'success' })
+      }
     } catch (e) {
       console.error('按题号裁剪上传失败', e)
       Taro.showToast({ title: '上传失败，请重试', icon: 'none' })
@@ -1765,7 +1807,8 @@ export default function RecognizePage() {
         id: ++boardIdRef.current,
         // Q2=A：只存图片，题干文本留空（后端已放宽为「有题面图即可」）
         text: '',
-        images: r.stem ? [r.stem] : [],
+        // 跨栏/跨页补的图跟在主裁图之后，顺序即用户的裁剪顺序
+        images: r.stem ? [r.stem, ...(r.extra || [])] : [...(r.extra || [])],
         answerImages: r.answer ? [r.answer] : [],
         segments: [] as PageTextSegment[],
         ocr: 'idle' as const,
@@ -2064,9 +2107,19 @@ export default function RecognizePage() {
                         </Text>
                       </View>
                     ) : null}
+                    {/* 思傅 2026-11-17：跨 2~3 栏 / 跨 2 页的题，一个框框不住 ⇒ 补裁一块追加到本题 */}
+                    <View
+                      className="flex-1 rounded-lg px-2 py-2"
+                      style={{ border: `1px dashed ${BRAND}`, backgroundColor: '#FFF9F4' }}
+                      onClick={() => setSeqCropping({ idx: i, kind: 'extra' })}
+                    >
+                      <Text className="block text-xs text-center" style={{ color: BRAND_TEXT }}>
+                        ＋补一块{(r.extra && r.extra.length) ? `（已${r.extra.length}）` : ''}
+                      </Text>
+                    </View>
                   </View>
-                  {r.stem || r.answer ? (
-                    <View className="flex flex-row gap-2 mt-2">
+                  {r.stem || r.answer || (r.extra && r.extra.length) ? (
+                    <View className="flex flex-row gap-2 mt-2" style={{ flexWrap: 'wrap' }}>
                       {r.stem ? (
                         <TaroImage
                           src={r.stem.url}
@@ -2074,6 +2127,15 @@ export default function RecognizePage() {
                           style={{ width: 72, height: 72, borderRadius: 6, backgroundColor: '#f6f2ea' }}
                         />
                       ) : null}
+                      {/* 补充裁剪块：跨栏/跨页的另一段，和主图一起入库 */}
+                      {(r.extra || []).map((ex, j) => (
+                        <TaroImage
+                          key={`ex-${j}`}
+                          src={ex.url}
+                          mode="aspectFit"
+                          style={{ width: 72, height: 72, borderRadius: 6, backgroundColor: '#f6f2ea', border: `1px dashed ${BRAND}` }}
+                        />
+                      ))}
                       {r.answer ? (
                         <TaroImage
                           src={r.answer.url}
@@ -2637,11 +2699,16 @@ export default function RecognizePage() {
           cropOnly
           src={curPage?.url || ''}
           initialCrop={
-            seqCropping.kind === 'stem' ? seqCropRow.stemRect : (seqCropRow.answerRect ?? seqCropRow.stemRect)
+            seqCropping.kind === 'stem'
+              ? seqCropRow.stemRect
+              // 'extra'（跨栏/跨页补块）不从原题框起步：要在整页上另框一块，给满页更省事
+              : seqCropping.kind === 'extra'
+                ? undefined
+                : (seqCropRow.answerRect ?? seqCropRow.stemRect)
           }
-          cropKey={`p031-${seqCropRow.label}-${seqCropping.kind}`}
+          cropKey={`p031-${seqCropRow.label}-${seqCropping.kind}-${(seqCropRow.extra || []).length}`}
           confirmText="用这张图"
-          cropTargetLabel={`第 ${seqCropRow.label} 题 · ${seqCropping.kind === 'stem' ? '题目区' : '解答区'}`}
+          cropTargetLabel={`第 ${seqCropRow.label} 题 · ${seqCropping.kind === 'stem' ? '题目区' : seqCropping.kind === 'extra' ? '补充块（跨栏/跨页）' : '解答区'}`}
           enableSaveToInbox={false}
           onCancel={() => setSeqCropping(null)}
           onConfirm={(p) => void handleSeqCropConfirm(p)}

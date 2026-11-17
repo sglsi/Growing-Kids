@@ -1378,6 +1378,58 @@ export interface BoardExportItem {
 }
 
 /**
+ * 预热 OCR 侧车（D-079）。`POST /api/image/ocr-warmup`
+ *
+ * 为什么需要：侧车空闲 15 分钟会被回收，下次冷启动要 `systemctl start` + **探针预热约 15s**
+ * （`/healthz` 200 ≠ 模型就绪，首次 `/ppsv3` 才加载模型）。这段成本若算进识别请求，
+ * 会顶到微信 60s 上限 ⇒ 表现为「识别失败」，而侧车其实刚起来——用户换个入口再点又成功了
+ * （思傅 2026-11-17 实测：直接识别失败、按题号提取却能拉起侧车）。
+ *
+ * 用法：
+ *  - 进页面先 `void warmupOcr().catch(() => {})` 后台烘热（不挡用户）；
+ *  - 点识别前 `await warmupQuiet()`（已热则立即返回）。
+ *
+ * 结果按 10 分钟 TTL 缓存：侧车空闲回收窗口是 15 分钟，10 分钟后允许重新预热，
+ * 避免「一次预热过就再也不管」，也避免每点一次都打一次启动检查。
+ */
+const OCR_WARM_TTL_MS = 10 * 60 * 1000
+let ocrWarmPromise: Promise<{ ready: boolean; disabled: boolean; sleeping: boolean; elapsedMs: number }> | null = null
+let ocrWarmAt = 0
+
+export function warmupOcr(): Promise<{ ready: boolean; disabled: boolean; sleeping: boolean; elapsedMs: number }> {
+  if (ocrWarmPromise && Date.now() - ocrWarmAt < OCR_WARM_TTL_MS) return ocrWarmPromise
+  ocrWarmAt = Date.now()
+  ocrWarmPromise = unwrapResponse<{ ready: boolean; disabled: boolean; sleeping: boolean; elapsedMs: number }>(
+    Network.request({
+      url: '/api/image/ocr-warmup',
+      method: 'POST',
+      data: {},
+      header: authHeaders(),
+      // 服务端预热上限 45s；这里留到 55s（必须 < 60s，微信 request 硬上限）
+      timeout: 55000,
+    }),
+  ).catch((e) => {
+    // 失败不缓存：下次仍要能重试（否则一次网络抖动就永久放弃预热）
+    ocrWarmPromise = null
+    ocrWarmAt = 0
+    throw e
+  })
+  return ocrWarmPromise
+}
+
+/**
+ * 预热但**永不抛错**：识别入口统一先 await 它。
+ * 预热失败不该挡住识别本身（侧车也可能已被别处拉起来），交给真正的请求去判定。
+ */
+export async function warmupQuiet(): Promise<void> {
+  try {
+    await warmupOcr()
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * 粘贴栏导出 Word（#150）：与 exportRecognizedDocx 同一端点，
  * items 带 images 时服务端把裁剪图嵌入 docx（题干之后，宽度自适应）。
  */
