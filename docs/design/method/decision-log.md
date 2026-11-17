@@ -2993,3 +2993,43 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - **未真机验证**：批量移动是否真成功（逐条 PATCH）、两按钮真机是否等宽美观、记忆页是否清爽——均需思傅真机验收，静态断言不构成真机证据。
 - **数据兼容**：历史记忆的 `category='study'`/`subject_id` 数据仍在库里、详情页不再显示；若将来恢复界面，数据可直接读回。编辑历史学习类记忆并保存 → 分类字段保持原值（因不传该字段）。
 - **未发货**：本次只改前端、后端 dist 无需换（批量移动复用既有单端点）；未上传开发版、未提审发版、未真机验收。未 push（按约定等思傅指示）。
+
+## D-079：OCR 侧车统一唤起 + 跨栏跨页补裁图 + 裁剪卡死（2026-11-17，L1 工程级）
+
+**触发**：思傅真机三报：①错题提取「直接 OCR」时侧车没启动，改用「按题号提取」又能把侧车拉起来；②跨 2~3 栏 / 跨 2 页的题一个框框不住，要能补裁图；③裁剪进行中整页卡住、点什么都没反应，只能返回上层。
+
+### 一、根因（生产日志实测，不是猜）
+`journalctl -u gk-api` 2026-11-17 14:35 段：
+```
+14:35:42 [image-dewarp] 朝向摆正：旋转 270°（方法 ocr…）
+14:35:44 [sidecar] 单元 gk-ppsv3 端口就绪（1s）
+14:35:59 [sidecar] 预热完成 14975ms（blocks=1）
+14:36:02 [image-dewarp] UVDoc 矫正完成（2839ms）
+14:51:17 [sidecar] 已停止单元 gk-ppsv3（idle）
+```
+- **侧车冷启动 ≈16s**（systemd start 1s + **探针预热 15s**；`/healthz` 200 ≠ 模型就绪）。侧车空闲 15min 即被回收（省 1.6G），所以「冷静期后的第一次识别」必然吃到这 16s。
+- 这 16s 以前**算在识别请求里**，再叠摆正/推理就顶到微信 request 60s 硬上限 ⇒ 前端报失败，而侧车其实刚起来——换个入口再点（侧车已热）就成功。这正是思傅描述的「直接识别失败、按题号提取又能起来」。
+- 另一条潜伏缺陷：`SidecarSupervisor.start()` 开头 `if (this.isRunning()) return`，unit 模式只看 `unitActive`。单元若被 systemd OOM/运维/回收**在后台停掉**，`unitActive` 仍为 true ⇒ start 直接返回 ⇒ `ensureReady` 报 true ⇒ 打过去必失败，且要等自检周期才发现。
+
+### 二、修复
+| # | 改动 | 落点 |
+|---|---|---|
+| ① | **预热独立成端点** `POST /api/image/ocr-warmup`（`ocrService.warmupSidecar()` → `supervisor.ensureReady(45s)`，永不抛错、只回报状态） | `image.controller.ts` / `image.service.ts` / `ocr.service.ts` |
+| ① | 前端 `warmupOcr()`（10min TTL + 失败清缓存）+ `warmupQuiet()`（永不抛错）；**识别页进页面即 fire-and-forget 预热**，点识别前 `await warmupQuiet()`（已热秒回） | `src/services/api.ts`、`recognize/index.tsx`、`detail/index.tsx` |
+| ① | 覆盖全部 OCR 入口：识别文字 / 文档识别 / 整页快速·精准 / 单题识别 / 补全图形 / 改框重切 / 详情页识别文字（共 6 处 await + 1 处进页预热） | 同上 |
+| ① | `start()` 改为「认为在跑也必须先探活」，探不通强制重建（单元置 `unitActive=false` 走 systemctl start；spawn 模式先 SIGKILL 旧子进程再 spawn） | `sidecar.supervisor.ts` |
+| ② | `SeqRow.extra`（补充裁剪块数组）+ 题目行「＋补一块」入口 + `kind:'extra'` 裁剪器（整页起框、目标提示「补充块（跨栏/跨页）」）；入库时 `images: [stem, ...extra]` | `recognize/index.tsx` |
+| ③ | 手势**同步起手**（旧实现只在 SelectorQuery 回调里设 `dragRef` ⇒ 快速拖动丢手 + 查询堆积）；触摸层矩形缓存；拖动帧 16ms 节流；新增 `handleForceExit` 强制退出（先 `hideLoading` 再复位忙态）；裁剪导出改 `showLoading('裁剪中…', mask:false)` 不挡退出 | `components/image-editor.tsx` |
+
+### 三、验证
+| 项 | 结果 |
+|---|---|
+| M59（新模块：侧车探活重建 / 预热链路 / 全入口烘热 / 补块真入库 / 手势与逃生通道） | **5/5** |
+| `verify:gate`（M12/13/16/18） / `tsc` / `lint` / `build:server` | 38/38 / RC=0 / RC=0 / RC=0 |
+
+### 四、边界 / 不宣称 / 未发货
+- **未真机验证**：冷启动后第一次识别是否不再失败、补块是否真的合成同一题、裁剪拖动是否顺畅——必须思傅真机验收，静态断言不构成证据。
+- 预热只解决「冷启动计入请求」这一条；若单次识别本身超 60s（超大图/精准模式），仍要走 jobs 异步（本决策不改）。
+- 侧车 unit 若被 systemd 反复 OOM，预热也救不了——那属于资源问题，需看 `gk-ppsv3` 的 MemoryMax 与宿主内存。
+- ②只补识别页「按题号提取」行；题目清单（board）侧原本就有「＋裁剪题目」追加多图。
+- 未 push（按约定等思傅指示）。
