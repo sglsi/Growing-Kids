@@ -291,7 +291,7 @@ export default function RecognizePage() {
     const slot = editor?.slot
     setEditor(null)
     if (!slot) return
-    // 回填到对应 slot，供后续「开始识别 / 直接保存」复用编辑结果（不在此落库）
+    // 回填到对应 slot，供后续「识别文字 / 直接保存」复用编辑结果（不在此落库）
     if (slot === 'paper') setPaperImage(path)
     else if (slot === 'question') setQuestionImage(path)
     else setAnswerImage(path)
@@ -1825,13 +1825,14 @@ export default function RecognizePage() {
               <ImgActionBtn icon={Sparkles} label="智能高清" onClick={() => openEditorWithAction('paper', 'enhance')} />
               <ImgActionBtn icon={Eraser} label="去手写" onClick={() => openEditorWithAction('paper', 'erase_v2')} />
             </View>
-            <Button className="w-full h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
-              <Text className="block text-sm">{loading ? '识别中…' : '开始识别'}</Text>
-            </Button>
-            <View className="flex flex-row items-center justify-center mt-3">
-              <View onClick={() => handleSaveImageDirect()} className="self-center rounded-lg border border-border px-3 py-1">
-                <Text className="block text-xs text-primary">以图片形式直接保存到最近题目</Text>
-              </View>
+            {/* 思傅 2026-11-17：两个并列主操作等宽同款并排，文案改为「识别文字 / 以图片形式保存」 */}
+            <View className="flex flex-row gap-3">
+              <Button className="flex-1 h-11 rounded-xl" disabled={loading} onClick={handleRecognizePaper}>
+                <Text className="block text-sm">{loading ? '识别中…' : '识别文字'}</Text>
+              </Button>
+              <Button className="flex-1 h-11 rounded-xl" onClick={() => handleSaveImageDirect()}>
+                <Text className="block text-sm">以图片形式保存</Text>
+              </Button>
             </View>
           </Card>
         ) : mode === 'split' ? (
@@ -2619,7 +2620,7 @@ export default function RecognizePage() {
         // 思傅 2026-11-01：这个编辑器里只需要一个出口。
         // ① 工具栏那只「保存图片」是「存进最近题目」，与主按钮的两个「保存」并排出现，
         //    实测中我本人就在这里点错过（点了它以为图会回传，结果页面停在编辑器）；
-        //    页面上本来就有「以图片形式直接保存到最近题目」的入口，不依赖这只按钮。
+        //    页面上本来就有「以图片形式保存」的入口，不依赖这只按钮。
         // ② 底部的默认文案「保存并替换原图」与该动作完全不符：handleEditorConfirm
         //    只是把图回填到 slot（不落库、也没有原图可替换），所以改成「用这张图」。
         enableSaveToInbox={false}
