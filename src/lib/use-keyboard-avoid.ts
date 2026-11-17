@@ -61,6 +61,8 @@ export interface KeyboardAvoid {
   keyboardHeight: number
   /** 输入框聚焦时调用：参数是包裹输入框的容器选择器，如 `#answer-box` */
   reveal: (selector: string) => void
+  /** 主动把 ScrollView 滚到指定位置（删除列表项后原位补偿用） */
+  scrollTo: (top: number) => void
 }
 
 export function useKeyboardAvoid(basePadding = 0): KeyboardAvoid {
@@ -110,6 +112,12 @@ export function useKeyboardAvoid(basePadding = 0): KeyboardAvoid {
     }, WAIT_KEYBOARD_MS)
   }, [])
 
+  const scrollTo = useCallback((top: number) => {
+    const next = Math.max(0, top)
+    scrollTopRef.current = next
+    setScrollTop(next)
+  }, [])
+
   return {
     scrollTop,
     onScroll,
@@ -117,5 +125,6 @@ export function useKeyboardAvoid(basePadding = 0): KeyboardAvoid {
     // 键盘高度已经够让内容滚到输入框露出来；再加 basePadding（页面原本的 pb）
     bottomPadding: basePadding + keyboardHeight,
     reveal,
+    scrollTo,
   }
 }

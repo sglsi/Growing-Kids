@@ -179,11 +179,11 @@ export default function RecognizePage() {
   const [seqInput, setSeqInput] = useState('')
   // ── P-031 按题号提取：输入题号 → 系统给候选框 → 逐题确认裁图（只存图片）──
   /**
-   * 思傅 2026-11-17：原生 input 嵌在卡片行里时，键盘弹起会把光标顶到别的
-   * 内容上（与背景混在一起看不清）。改为独立的顶部输入层：卡片里那一行只
-   * 做展示与点按，真正打字只在输入层顶部的白底 input 里发生。
+   * 思傅 2026-11-17 二修：弹层输入看不到已输入内容，且打字时还要看原图 ⇒
+   * 撤销弹层，改为**当前页顶部的常驻输入框**。这个 state 只用于从下方
+   * 「按题号提取」卡片一键回到顶部并聚焦，不再代表弹层开关。
    */
-  const [seqSheetOpen, setSeqSheetOpen] = useState(false)
+  const [seqTopFocus, setSeqTopFocus] = useState(false)
   const [seqRows, setSeqRows] = useState<SeqRow[]>([])
   /** 本次定位时本页实际识别到的题号（用于解释「为什么第 N 题没定位」） */
   const [seqDetected, setSeqDetected] = useState<number[]>([])
@@ -1041,7 +1041,20 @@ export default function RecognizePage() {
   }
 
   const removeEntry = (idx: number) => {
-    setBoard((prev) => prev.filter((_, i) => i !== idx))
+    /**
+     * 思傅 2026-11-17：删除后列表跳到顶部，应该停在「被删那题的上一个」位置。
+     * 受控 ScrollView 在 children 变化时会把 scrollTop 打回 0，所以先量被删
+     * 卡片高度，删完显式把滚动位置回退这一段（相当于上一题顶到被删题原位）。
+     */
+    if (idx < 0 || idx >= board.length) return
+    Taro.createSelectorQuery().select(`#board-entry-${idx}`).boundingClientRect().exec((res) => {
+      const rect = res?.[0] as { height?: number } | null
+      const shift = (rect?.height || 0) + 12 // 卡片 mb-3
+      const keepAt = Math.max(0, kb.scrollTop - shift)
+      setBoard((prev) => prev.filter((_, i) => i !== idx))
+      // 等新列表渲染完再写 scrollTop，否则会被下一次受控更新覆盖
+      setTimeout(() => kb.scrollTo(keepAt), 30)
+    })
   }
 
   const moveEntry = (idx: number, dir: -1 | 1) => {
@@ -1678,6 +1691,21 @@ export default function RecognizePage() {
 
   // ── P-031 按题号提取：定位 → 逐题确认裁图 → 加入题目清单 ──
   /**
+   * 题号输入框的受控上抛（D-081）。
+   * 与 ui/Textarea 同一套光标纪律：非字符串回抛丢掉；当场 setState +
+   * Taro flushSync，让 Taro 恢复受控值时看到的值等于本拍事件里的文本。
+   */
+  const handleSeqInput = (e: { detail?: { value?: string } }) => {
+    const next = e?.detail?.value
+    if (typeof next !== 'string') return
+    try {
+      flushSync(() => setSeqInput(next))
+    } catch {
+      setSeqInput(next)
+    }
+  }
+
+  /**
    * 只在「错题提取」模式使用。
    * 用户只输题号、点定位：**识别是系统内部步骤，不要求用户先点 OCR**（D-069 r1）。
    * 本页还没有文字段落时自动跑一次快速识别，再拿刚返回的段落定位；
@@ -1879,7 +1907,6 @@ export default function RecognizePage() {
   const seqCropRow = seqCropping ? seqRows[seqCropping.idx] : undefined
 
   return (
-    <>
     <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
       <View className="px-4 pt-4 pb-40" style={{ paddingBottom: kb.bottomPadding }}>
         {/* 模式切换 */}
@@ -1893,6 +1920,46 @@ export default function RecognizePage() {
             { value: 'doc', label: '导入文档' },
           ]}
         />
+
+        {/* 思傅 2026-11-17 二修：题号输入常驻**当前页面顶部**，不再弹层。
+            打字时下面的来源页图片仍然可见，可以边看原图边改题号。 */}
+        {mode === 'split' ? (
+          <View
+            id="seq-top-input"
+            className="rounded-2xl p-3 mb-4"
+            style={{ backgroundColor: '#fff', border: '1px solid #ece8e0' }}
+          >
+            <View className="flex flex-row items-center justify-between mb-2">
+              <Text className="block text-xs font-medium text-foreground">题号提取 · 在这里输入题号</Text>
+              <Text className="block text-[11px] text-muted-foreground">打字时可往下看原图</Text>
+            </View>
+            <View
+              style={{
+                width: '100%', height: 44, borderRadius: 10,
+                backgroundColor: '#fff', border: `1px solid ${BRAND}`,
+                display: 'flex', flexDirection: 'row', alignItems: 'center',
+                paddingLeft: 12, paddingRight: 12, boxSizing: 'border-box',
+              }}
+            >
+              <Input
+                focus={seqTopFocus}
+                adjustPosition={false}
+                cursorSpacing={24}
+                style={{ flex: 1, width: '100%', height: 42, fontSize: 16, lineHeight: '42px', padding: 0, margin: 0, color: INK }}
+                value={seqInput}
+                placeholder="如 3,5,8-12 或分节 一6,二5"
+                placeholderClass="text-muted-foreground"
+                onInput={handleSeqInput}
+                onFocus={() => setSeqTopFocus(true)}
+                onBlur={() => setSeqTopFocus(false)}
+                onConfirm={() => void handleLocateBySeq()}
+              />
+            </View>
+            {seqInput ? (
+              <Text className="block text-xs mt-2" style={{ color: BRAND_TEXT }}>当前题号：{seqInput}</Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* 学科选择（人工整理的粘贴栏内容也要入错题库，故 split 模式同样需要学科） */}
         <View className="flex flex-row items-center justify-between mb-4">
@@ -2090,9 +2157,8 @@ export default function RecognizePage() {
                 资料库里 PDF 会生成页图、图片直接作来源页；Word/TXT 没有页图，请另存为 PDF
               </Text>
               {/*
-                思傅 2026-11-17 二修：原生 input 嵌在滚动卡片里，键盘弹起时
-                光标仍会被顶到别处、和背景混在一起。这里只留「点按展示」，
-                真正打字只在页面顶部的独立输入层（SeqSpecInputSheet）里发生。
+                思傅 2026-11-17 二修：这里只做展示与「回到顶部输入框」的快捷入口，
+                真正打字在当前页顶部的常驻输入框（不弹层，能边看原图边输入）。
               */}
               <View
                 className="mb-3"
@@ -2102,7 +2168,7 @@ export default function RecognizePage() {
                   display: 'flex', flexDirection: 'row', alignItems: 'center',
                   paddingLeft: 12, paddingRight: 12, boxSizing: 'border-box',
                 }}
-                onClick={() => setSeqSheetOpen(true)}
+                onClick={() => { kb.scrollTo(0); setSeqTopFocus(true) }}
               >
                 <Text
                   className="block text-sm"
@@ -2115,7 +2181,7 @@ export default function RecognizePage() {
                 <View className="h-9 px-4 rounded-xl bg-muted flex items-center justify-center" onClick={() => void handleLocateBySeq()}>
                   <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>{seqBusy ? '识别中…' : '定位'}</Text>
                 </View>
-                <Text className="block text-xs text-muted-foreground">点上方文字框输入题号，完成后点这里定位</Text>
+                <Text className="block text-xs text-muted-foreground">点上方文字框回到页顶输入框，完成后点这里定位</Text>
               </View>
               {seqRows.length > 0 && !(curPage?.figures?.length) ? (
                 <View className="flex flex-row items-center gap-2 mb-2">
@@ -2234,7 +2300,7 @@ export default function RecognizePage() {
                 <Text className="block text-xs text-muted-foreground">① 裁剪题目 ② 识别本题（可选）③ 勾选入题干 · 点图=打开编辑</Text>
               </View>
               {board.map((e, idx) => (
-                <View key={e.id} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? BRAND : '#ece8e0'}` }}>
+                <View key={e.id} id={`board-entry-${idx}`} className="rounded-xl p-3 mb-3" style={{ backgroundColor: '#fff', border: `1px solid ${cropEditor?.entryIdx === idx ? BRAND : '#ece8e0'}` }}>
                   <View className="flex flex-row items-center justify-between mb-2">
                     <View className="flex flex-row items-center gap-2">
                       <Text className="block text-xs font-medium text-foreground">第 {idx + 1} 题</Text>
@@ -2843,102 +2909,6 @@ export default function RecognizePage() {
         }}
       />
     </ScrollView>
-
-    {/* 题号输入层：脱离滚动容器，固定在屏幕最上方。原生 input 只在打字时出现，
-        下方是整块白底，光标不会再跑到别的内容上跟背景糊在一起。 */}
-    <SeqSpecInputSheet
-      visible={seqSheetOpen}
-      value={seqInput}
-      busy={seqBusy}
-      onClose={() => setSeqSheetOpen(false)}
-      onChange={setSeqInput}
-      onLocate={() => { setSeqSheetOpen(false); void handleLocateBySeq() }}
-    />
-    </>
-  )
-}
-
-/**
- * 题号专用输入层（D-080）。
- *
- * 为什么不用原来的行内 input：
- *  - 微信原生 input 层级最高，嵌在 ScrollView 里 keyboard 弹起时会把光标推到
- *    别的内容区域；用户看到的就是「光标跑到别处、和背景混在一起」。
- *  - 放在独立 fixed 层，输入框本身就在屏幕顶部白底上，下面没有其它内容；
- *    `adjustPosition={false}` 不让微信再上推页面，位置完全由这一层自己控制。
- *
- * 光标纪律（与 ui/Textarea 同一套，别改）：
- *  - `value` 必须传，且每次 onInput 当场 setState + `flushSync()`，
- *    让 Taro 恢复受控值时看到的值等于本拍事件里的文本；
- *  - 丢掉 `detail.value` 不是字符串的回抛事件；
- *  - 不用 defaultValue、不延迟上抛。
- */
-function SeqSpecInputSheet({
-  visible, value, busy, onClose, onChange, onLocate,
-}: {
-  visible: boolean
-  value: string
-  busy: boolean
-  onClose: () => void
-  onChange: (v: string) => void
-  onLocate: () => void
-}) {
-  if (!visible) return null
-  return (
-    <View
-      className="fixed inset-0 flex flex-col"
-      style={{ zIndex: 260, backgroundColor: '#FFFFFF' }}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <View className="flex flex-row items-center justify-between px-4 pt-4 pb-3" style={{ backgroundColor: '#FFFFFF' }}>
-        <Text className="block text-sm font-semibold" style={{ color: INK }}>输入题号</Text>
-        <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: '#F4F1EA' }} onClick={onClose}>
-          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>完成</Text>
-        </View>
-      </View>
-      <View className="px-4">
-        <View
-          style={{
-            width: '100%', height: 48, borderRadius: 12,
-            border: `1px solid ${BRAND}`, backgroundColor: '#FFFFFF',
-            display: 'flex', flexDirection: 'row', alignItems: 'center',
-            paddingLeft: 12, paddingRight: 12, boxSizing: 'border-box',
-          }}
-        >
-          <Input
-            focus
-            adjustPosition={false}
-            cursorSpacing={24}
-            style={{ flex: 1, width: '100%', height: 46, fontSize: 16, lineHeight: '46px', padding: 0, margin: 0, color: INK }}
-            value={value}
-            placeholder="如 3,5,8-12 或分节 一6,二5"
-            placeholderClass="text-muted-foreground"
-            onInput={(e) => {
-              const next = e?.detail?.value
-              if (typeof next !== 'string') return
-              try {
-                flushSync(() => onChange(next))
-              } catch {
-                onChange(next)
-              }
-            }}
-            onConfirm={onLocate}
-          />
-        </View>
-        <Text className="block text-xs mt-3 leading-5" style={{ color: '#8A7F72' }}>
-          直接在这里输入题号。多个题号用逗号分隔，连续范围写 8-12；分节写 一6,二5。
-        </Text>
-        <View
-          className="w-full h-11 rounded-xl flex items-center justify-center mt-5"
-          style={{ backgroundColor: BRAND, opacity: busy ? 0.6 : 1 }}
-          onClick={() => { if (!busy) onLocate() }}
-        >
-          <Text className="block text-sm font-medium" style={{ color: BRAND_FOREGROUND }}>
-            {busy ? '识别中…' : '定位这些题'}
-          </Text>
-        </View>
-      </View>
-    </View>
   )
 }
 

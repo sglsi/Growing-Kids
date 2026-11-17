@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { View, Text, ScrollView } from '@tarojs/components'
 import { FileText } from 'lucide-react-taro'
-import { fetchLibrary, type LibraryDoc } from '@/services/api'
+import { fetchLibrary, fetchLibraryFolders, type LibraryDoc, type LibraryFolder } from '@/services/api'
 import { formatTime } from '@/lib/use-selection'
-import { INK, BRAND, BRAND_FOREGROUND } from '@/lib/theme'
+import { INK, BRAND, BRAND_FOREGROUND, BRAND_TEXT } from '@/lib/theme'
 
 interface Props {
   visible: boolean
@@ -27,8 +27,31 @@ interface Props {
  * 等满超时，界面永远转圈。改为 deps 只跟 visible + reloadKey，失败落
  * error 态停手，由用户点「重试」再拉。
  */
+/**
+ * 文件夹完整路径（根 → 当前）。MAX_DEPTH 防脏数据成环把选择器卡死。
+ * 返回 '' 表示根目录（老数据 folder_id 为空）。
+ */
+function folderPathOf(folders: LibraryFolder[], folderId: string | null | undefined): string {
+  if (!folderId) return ''
+  const byId = new Map(folders.map((f) => [f.id, f]))
+  const names: string[] = []
+  const seen = new Set<string>()
+  let cursor: string | null = folderId
+  for (let depth = 0; cursor && depth < 32; depth++) {
+    if (seen.has(cursor)) break
+    seen.add(cursor)
+    const f = byId.get(cursor)
+    if (!f) break
+    names.unshift(f.name)
+    cursor = f.parent_id ?? null
+  }
+  return names.join(' / ')
+}
+
 export default function MaterialPicker({ visible, onClose, onSelect, title }: Props) {
   const [docs, setDocs] = useState<LibraryDoc[]>([])
+  /** 思傅 2026-11-17：资料选择要能看到文件夹，否则同名文件分不清 */
+  const [folders, setFolders] = useState<LibraryFolder[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** 重试计数器：变一次就重跑一次加载 effect（visible 不变也能刷新） */
@@ -41,9 +64,17 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
     setError(null)
     ;(async () => {
       try {
-        const res = await fetchLibrary({ pageSize: 100 })
+        // 文件夹信息是辅助展示：拉取失败不能挡住选文件（老库可能没有该表）
+        const [res, folderList] = await Promise.all([
+          fetchLibrary({ pageSize: 100 }),
+          fetchLibraryFolders().catch((e) => {
+            console.warn('资料库文件夹加载失败（不影响选文件）', e)
+            return [] as LibraryFolder[]
+          }),
+        ])
         if (cancelled) return
         setDocs(res.list)
+        setFolders(folderList)
       } catch (e) {
         if (cancelled) return
         console.error('资料库加载失败', e)
@@ -105,23 +136,31 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
             </View>
           ) : (
             <View className="p-3">
-              {docs.map((d) => (
-                <View
-                  key={d.id}
-                  className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2"
-                  onClick={() => { onSelect(d); onClose() }}
-                >
-                  <View className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
-                    <FileText size={18} color={INK} />
+              {docs.map((d) => {
+                const folderPath = folderPathOf(folders, d.folder_id)
+                return (
+                  <View
+                    key={d.id}
+                    className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2"
+                    onClick={() => { onSelect(d); onClose() }}
+                  >
+                    <View className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
+                      <FileText size={18} color={INK} />
+                    </View>
+                    <View className="flex-1 min-w-0">
+                      <Text className="block text-sm text-foreground truncate">{d.name}</Text>
+                      <Text className="block text-xs text-muted-foreground mt-1">
+                        {/pdf/i.test(d.mime_type || '') ? 'PDF' : '资料'} · {formatTime(d.created_at)}
+                      </Text>
+                      {folderPath ? (
+                        <Text className="block text-[11px] mt-1 truncate" style={{ color: BRAND_TEXT }}>
+                          文件夹：{folderPath}
+                        </Text>
+                      ) : null}
+                    </View>
                   </View>
-                  <View className="flex-1 min-w-0">
-                    <Text className="block text-sm text-foreground truncate">{d.name}</Text>
-                    <Text className="block text-xs text-muted-foreground mt-1">
-                      {/pdf/i.test(d.mime_type || '') ? 'PDF' : '资料'} · {formatTime(d.created_at)}
-                    </Text>
-                  </View>
-                </View>
-              ))}
+                )
+              })}
             </View>
           )}
         </ScrollView>
