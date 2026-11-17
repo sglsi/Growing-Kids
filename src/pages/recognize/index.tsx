@@ -3,6 +3,7 @@
 // 该处只需要一个无装饰的原生输入体，故保留 Taro 原生 Input。
 // eslint-disable-next-line no-restricted-syntax
 import { View, Text, ScrollView, Input, Image as TaroImage, Picker } from '@tarojs/components'
+import { flushSync } from '@tarojs/react'
 import Taro from '@tarojs/taro'
 import { useState, useEffect, useRef } from 'react'
 import { Crop, Wand, Sparkles, Eraser } from 'lucide-react-taro'
@@ -177,6 +178,12 @@ export default function RecognizePage() {
   // #109 部分序号识别：序号输入框（如 "3,5,8-12"）+ 勾选态存 Draft.selected
   const [seqInput, setSeqInput] = useState('')
   // ── P-031 按题号提取：输入题号 → 系统给候选框 → 逐题确认裁图（只存图片）──
+  /**
+   * 思傅 2026-11-17：原生 input 嵌在卡片行里时，键盘弹起会把光标顶到别的
+   * 内容上（与背景混在一起看不清）。改为独立的顶部输入层：卡片里那一行只
+   * 做展示与点按，真正打字只在输入层顶部的白底 input 里发生。
+   */
+  const [seqSheetOpen, setSeqSheetOpen] = useState(false)
   const [seqRows, setSeqRows] = useState<SeqRow[]>([])
   /** 本次定位时本页实际识别到的题号（用于解释「为什么第 N 题没定位」） */
   const [seqDetected, setSeqDetected] = useState<number[]>([])
@@ -204,6 +211,8 @@ export default function RecognizePage() {
   const [editor, setEditor] = useState<{ slot: 'paper' | 'question' | 'answer'; src: string; autoAction?: ImageAction | null } | null>(null)
 
   const [picker, setPicker] = useState(false)
+  /** 资料库弹窗这次是给「导入文档」选，还是给「错题提取」选来源文件 */
+  const [pickerForBoard, setPickerForBoard] = useState(false)
 
   // P2 叠加视图：页面尺寸 / 题面图 URL / 全部系统块 / 编辑器开关 / 重切中
   const [pageSize, setPageSize] = useState({ w: 0, h: 0 })
@@ -867,11 +876,20 @@ export default function RecognizePage() {
       Taro.showToast({ title: '按题号裁剪只支持 PDF；Word/TXT 没有页图', icon: 'none' })
       return
     }
+    const up = await uploadFile(picked)
+    await appendDocPageImages(up.url || '', room)
+  }
+
+  /** 已有云端 URL 的 PDF → 页图，本地 PDF 与资料库 PDF 共用同一条渲染链 */
+  const appendDocPageImages = async (fileUrl: string, room: number) => {
+    if (!fileUrl) {
+      Taro.showToast({ title: '该文档暂无可用文件链接', icon: 'none' })
+      return
+    }
     setBoardBusy(true)
     Taro.showLoading({ title: '正在生成页图…', mask: true })
     try {
-      const up = await uploadFile(picked)
-      const r = await fetchDocPages(up.url || '', room)
+      const r = await fetchDocPages(fileUrl, room)
       if (!r.pages.length) throw new Error('没有渲染出页图')
       const added: BoardPage[] = r.pages.map((p) => ({
         id: ++boardIdRef.current,
@@ -892,6 +910,45 @@ export default function RecognizePage() {
       Taro.hideLoading()
       setBoardBusy(false)
     }
+  }
+
+  /**
+   * 思傅 2026-11-17：错题提取支持从资料库选文件。
+   * PDF → 走同一条 `/api/ocr/doc-pages` 出页图；图片 → 资料库已有云端 URL，
+   * 直接作为来源页（不再二次上传）；Word/TXT 没有页图，明确告知不静默跳过。
+   */
+  const addBoardPagesFromLibraryDoc = async (d: LibraryDoc) => {
+    if (boardBusy) return
+    const room = MAX_BOARD_PAGES - boardPages.length
+    if (room <= 0) {
+      Taro.showToast({ title: `最多添加 ${MAX_BOARD_PAGES} 页`, icon: 'none' })
+      return
+    }
+    if (!d.url) {
+      Taro.showToast({ title: '该文档暂无可用文件链接', icon: 'none' })
+      return
+    }
+    const isPdf = /\.pdf$/i.test(d.name || '') || /\/pdf$/i.test(d.mime_type || '')
+    if (isPdf) {
+      await appendDocPageImages(d.url, room)
+      return
+    }
+    const isImage = /^image\//i.test(d.mime_type || '') || /\.(png|jpe?g|webp|bmp)$/i.test(d.name || '')
+    if (isImage) {
+      const added: BoardPage[] = [{
+        id: ++boardIdRef.current,
+        url: d.url,
+        w: d.width || 0,
+        h: d.height || 0,
+        segments: [],
+        ocr: 'idle' as const,
+      }]
+      setBoardPages((prev) => [...prev, ...added])
+      setActivePage(boardPages.length)
+      Taro.showToast({ title: '已从资料库加入 1 页，请先识别再按题号定位', icon: 'none' })
+      return
+    }
+    Taro.showToast({ title: 'Word/TXT 没有页图，请先转成 PDF 再从资料库选择', icon: 'none' })
   }
 
   /**
@@ -1822,6 +1879,7 @@ export default function RecognizePage() {
   const seqCropRow = seqCropping ? seqRows[seqCropping.idx] : undefined
 
   return (
+    <>
     <ScrollView scrollY className="h-full bg-background" scrollTop={kb.scrollTop} onScroll={kb.onScroll}>
       <View className="px-4 pt-4 pb-40" style={{ paddingBottom: kb.bottomPadding }}>
         {/* 模式切换 */}
@@ -1892,6 +1950,13 @@ export default function RecognizePage() {
                   <View className="flex flex-col items-center">
                     <Text className="block text-sm text-muted-foreground">点击拍照 / 选择作业图片</Text>
                     <Text className="block text-xs text-muted-foreground mt-1">支持一次多选，再从图里逐题裁剪</Text>
+                    {/* 思傅 2026-11-17：错题提取也能从资料库直接选 PDF / 图片 */}
+                    <View
+                      className="mt-2 rounded-lg border border-border px-3 py-1"
+                      onClick={(e) => { e.stopPropagation(); setPickerForBoard(true); setPicker(true) }}
+                    >
+                      <Text className="block text-xs text-primary">从资料库选择文件</Text>
+                    </View>
                   </View>
                 </View>
               ) : (
@@ -1970,6 +2035,12 @@ export default function RecognizePage() {
                       <View className="rounded-lg border border-border px-2 py-1" onClick={() => void addBoardPages()}>
                         <Text className="block text-xs text-primary">添加图片</Text>
                       </View>
+                      <View
+                        className="rounded-lg border border-border px-2 py-1"
+                        onClick={() => { setPickerForBoard(true); setPicker(true) }}
+                      >
+                        <Text className="block text-xs text-primary">资料库</Text>
+                      </View>
                     </View>
                   </View>
 
@@ -2004,52 +2075,47 @@ export default function RecognizePage() {
               <Text className="block text-xs text-muted-foreground mb-2">
                 输入题号后点「定位」，系统会自动识别本页文字并算出每题候选框；定位不到的题会给整页框，由你手工圈定
               </Text>
-              <View className="flex flex-row items-center gap-2 mb-3">
+              <View className="flex flex-row items-center gap-2 mb-2">
                 <View className="px-3 py-1 rounded-lg border border-border" onClick={() => void addBoardPagesFromPdf()}>
                   <Text className="block text-xs text-primary">从 PDF 取页图</Text>
                 </View>
-                <Text className="block text-xs text-muted-foreground">Word/TXT 没有页图，请另存为 PDF</Text>
-              </View>
-              {/*
-                思傅 2026-11-17：题号输入框与按钮挤同一行时，微信原生 input 层级最高、
-                宽度解析异常，会盖住/被盖住右侧按钮导致文字看不清、点不到输入框。
-                改为两行：第一行输入框独占整行（整行可点、聚焦即输入），
-                第二行放「定位 / 加入题目」按钮。彻底隔离原生组件与按钮的层叠。
-              */}
-              <View style={{ marginBottom: 8 }}>
                 <View
-                  style={{
-                    width: '100%', height: 36, borderRadius: 12,
-                    border: '1px solid #ece8e0', backgroundColor: '#fff',
-                    display: 'flex', flexDirection: 'row', alignItems: 'center',
-                    paddingLeft: 12, paddingRight: 12, overflow: 'hidden', boxSizing: 'border-box',
-                  }}
+                  className="px-3 py-1 rounded-lg border border-border"
+                  onClick={() => { setPickerForBoard(true); setPicker(true) }}
                 >
-                  <Input
-                    style={{ flex: 1, width: '100%', height: 34, minHeight: 34, fontSize: 14, lineHeight: '34px', padding: 0, margin: 0, color: INK }}
-                    value={seqInput}
-                    placeholder="如 3,5,8-12 或分节 一6,二5"
-                    placeholderClass="text-muted-foreground"
-                    onInput={(e) => setSeqInput(e.detail.value)}
-                    onConfirm={() => void handleLocateBySeq()}
-                  />
+                  <Text className="block text-xs text-primary">从资料库选择</Text>
                 </View>
+              </View>
+              <Text className="block text-xs text-muted-foreground mb-3">
+                资料库里 PDF 会生成页图、图片直接作来源页；Word/TXT 没有页图，请另存为 PDF
+              </Text>
+              {/*
+                思傅 2026-11-17 二修：原生 input 嵌在滚动卡片里，键盘弹起时
+                光标仍会被顶到别处、和背景混在一起。这里只留「点按展示」，
+                真正打字只在页面顶部的独立输入层（SeqSpecInputSheet）里发生。
+              */}
+              <View
+                className="mb-3"
+                style={{
+                  width: '100%', height: 40, borderRadius: 12,
+                  border: '1px solid #ece8e0', backgroundColor: '#fff',
+                  display: 'flex', flexDirection: 'row', alignItems: 'center',
+                  paddingLeft: 12, paddingRight: 12, boxSizing: 'border-box',
+                }}
+                onClick={() => setSeqSheetOpen(true)}
+              >
+                <Text
+                  className="block text-sm"
+                  style={{ color: seqInput ? INK : '#9A948A', lineHeight: '38px' }}
+                >
+                  {seqInput || '点此输入题号：如 3,5,8-12 或分节 一6,二5'}
+                </Text>
               </View>
               <View className="flex flex-row items-center gap-2 mb-3">
                 <View className="h-9 px-4 rounded-xl bg-muted flex items-center justify-center" onClick={() => void handleLocateBySeq()}>
                   <Text className="block text-xs font-medium" style={{ color: BRAND_TEXT }}>{seqBusy ? '识别中…' : '定位'}</Text>
                 </View>
-                {seqRows.length > 0 ? (
-                  <View
-                    className="h-9 px-4 rounded-xl flex items-center justify-center"
-                    style={{ backgroundColor: BRAND, opacity: seqBusy ? 0.6 : 1 }}
-                    onClick={() => { if (!seqBusy) handleSeqApply() }}
-                  >
-                    <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>
-                      加入题目（{seqRows.filter((r) => r.stem).length}）
-                    </Text>
-                  </View>
-                ) : null}
+                <Text className="block text-xs text-muted-foreground">点上方文字框输入题号，完成后点这里定位</Text>
               </View>
               {seqRows.length > 0 && !(curPage?.figures?.length) ? (
                 <View className="flex flex-row items-center gap-2 mb-2">
@@ -2147,6 +2213,18 @@ export default function RecognizePage() {
                   ) : null}
                 </View>
               ))}
+              {/* 思傅 2026-11-17：「加入题目」放到按题号提取区最下方，逐题确认完再统一加入 */}
+              {seqRows.length > 0 ? (
+                <View
+                  className="w-full h-11 rounded-xl flex items-center justify-center mt-1"
+                  style={{ backgroundColor: BRAND, opacity: seqBusy ? 0.6 : 1 }}
+                  onClick={() => { if (!seqBusy) handleSeqApply() }}
+                >
+                  <Text className="block text-sm font-medium" style={{ color: BRAND_FOREGROUND }}>
+                    加入题目（{seqRows.filter((r) => r.stem).length}）
+                  </Text>
+                </View>
+              ) : null}
             </Card>
 
             {/* 题目清单：每题 = 裁剪图 + 本题 OCR 段落 + 题干（① 裁剪 ② 识别 ③ 勾选入题干） */}
@@ -2399,7 +2477,7 @@ export default function RecognizePage() {
                 {docFile ? '已选择文件：请先点「导入」上传，再点「识别题目」' : '请先选择文档文件（或从资料库选择），点「导入」后再识别题目'}
               </Text>
             ) : null}
-            <View className="flex items-center justify-center mt-3" onClick={() => setPicker(true)}>
+            <View className="flex items-center justify-center mt-3" onClick={() => { setPickerForBoard(false); setPicker(true) }}>
               <Text className="block text-xs text-primary rounded-lg border border-border px-3 py-1">从资料库选择文档</Text>
             </View>
           </Card>
@@ -2756,11 +2834,111 @@ export default function RecognizePage() {
 
       <MaterialPicker
         visible={picker}
-        title="从资料库选择文档"
+        title={pickerForBoard ? '从资料库选择来源文件' : '从资料库选择文档'}
         onClose={() => setPicker(false)}
-        onSelect={(d) => void handleSelectDoc(d)}
+        onSelect={(d) => {
+          setPicker(false)
+          if (pickerForBoard) void addBoardPagesFromLibraryDoc(d)
+          else handleSelectDoc(d)
+        }}
       />
     </ScrollView>
+
+    {/* 题号输入层：脱离滚动容器，固定在屏幕最上方。原生 input 只在打字时出现，
+        下方是整块白底，光标不会再跑到别的内容上跟背景糊在一起。 */}
+    <SeqSpecInputSheet
+      visible={seqSheetOpen}
+      value={seqInput}
+      busy={seqBusy}
+      onClose={() => setSeqSheetOpen(false)}
+      onChange={setSeqInput}
+      onLocate={() => { setSeqSheetOpen(false); void handleLocateBySeq() }}
+    />
+    </>
+  )
+}
+
+/**
+ * 题号专用输入层（D-080）。
+ *
+ * 为什么不用原来的行内 input：
+ *  - 微信原生 input 层级最高，嵌在 ScrollView 里 keyboard 弹起时会把光标推到
+ *    别的内容区域；用户看到的就是「光标跑到别处、和背景混在一起」。
+ *  - 放在独立 fixed 层，输入框本身就在屏幕顶部白底上，下面没有其它内容；
+ *    `adjustPosition={false}` 不让微信再上推页面，位置完全由这一层自己控制。
+ *
+ * 光标纪律（与 ui/Textarea 同一套，别改）：
+ *  - `value` 必须传，且每次 onInput 当场 setState + `flushSync()`，
+ *    让 Taro 恢复受控值时看到的值等于本拍事件里的文本；
+ *  - 丢掉 `detail.value` 不是字符串的回抛事件；
+ *  - 不用 defaultValue、不延迟上抛。
+ */
+function SeqSpecInputSheet({
+  visible, value, busy, onClose, onChange, onLocate,
+}: {
+  visible: boolean
+  value: string
+  busy: boolean
+  onClose: () => void
+  onChange: (v: string) => void
+  onLocate: () => void
+}) {
+  if (!visible) return null
+  return (
+    <View
+      className="fixed inset-0 flex flex-col"
+      style={{ zIndex: 260, backgroundColor: '#FFFFFF' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <View className="flex flex-row items-center justify-between px-4 pt-4 pb-3" style={{ backgroundColor: '#FFFFFF' }}>
+        <Text className="block text-sm font-semibold" style={{ color: INK }}>输入题号</Text>
+        <View className="px-3 py-1 rounded-lg" style={{ backgroundColor: '#F4F1EA' }} onClick={onClose}>
+          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>完成</Text>
+        </View>
+      </View>
+      <View className="px-4">
+        <View
+          style={{
+            width: '100%', height: 48, borderRadius: 12,
+            border: `1px solid ${BRAND}`, backgroundColor: '#FFFFFF',
+            display: 'flex', flexDirection: 'row', alignItems: 'center',
+            paddingLeft: 12, paddingRight: 12, boxSizing: 'border-box',
+          }}
+        >
+          <Input
+            focus
+            adjustPosition={false}
+            cursorSpacing={24}
+            style={{ flex: 1, width: '100%', height: 46, fontSize: 16, lineHeight: '46px', padding: 0, margin: 0, color: INK }}
+            value={value}
+            placeholder="如 3,5,8-12 或分节 一6,二5"
+            placeholderClass="text-muted-foreground"
+            onInput={(e) => {
+              const next = e?.detail?.value
+              if (typeof next !== 'string') return
+              try {
+                flushSync(() => onChange(next))
+              } catch {
+                onChange(next)
+              }
+            }}
+            onConfirm={onLocate}
+          />
+        </View>
+        <Text className="block text-xs mt-3 leading-5" style={{ color: '#8A7F72' }}>
+          直接在这里输入题号。多个题号用逗号分隔，连续范围写 8-12；分节写 一6,二5。
+        </Text>
+        <View
+          className="w-full h-11 rounded-xl flex items-center justify-center mt-5"
+          style={{ backgroundColor: BRAND, opacity: busy ? 0.6 : 1 }}
+          onClick={() => { if (!busy) onLocate() }}
+        >
+          <Text className="block text-sm font-medium" style={{ color: BRAND_FOREGROUND }}>
+            {busy ? '识别中…' : '定位这些题'}
+          </Text>
+        </View>
+      </View>
+    </View>
   )
 }
 
