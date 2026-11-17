@@ -3033,3 +3033,15 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - 侧车 unit 若被 systemd 反复 OOM，预热也救不了——那属于资源问题，需看 `gk-ppsv3` 的 MemoryMax 与宿主内存。
 - ②只补识别页「按题号提取」行；题目清单（board）侧原本就有「＋裁剪题目」追加多图。
 - 未 push（按约定等思傅指示）。
+
+### D-079 §五、发货回写（2026-11-17 15:0x，思傅「修改完成后上传开发版」）
+- **后端 dist 精准换**：`build:server` → 打包 628KB scp L3 → 解 `/tmp/gk-dist-d079-new` → diff 出 **11 差异文件**（`image.controller` 3 / `image.service` 3 / `ocr.service` 3 / `sidecar.supervisor` 2，全属 D-079 预期范围）→ 备份 `/tmp/dist-bak-d079-20261117150151`（584 文件，可回退）→ 只覆盖这 11 个 + `chown gk:gk` + `chmod 644` → **复比 diff_count=0** → 才 `systemctl restart gk-api`。
+- **重启验证**：active、启动 +926ms、`:3000/api/health` **200**、`POST /api/image/ocr-warmup` 裸探 **401**（路由在，非 404）、journal ERROR **0**。
+- **预热端点端到端实测**（用真实用户短期令牌，不是猜）：
+  | 轮次 | 侧车前状态 | 返回 | 侧车后状态 |
+  |---|---|---|---|
+  | 第一次（冷） | `inactive` | `{ready:true, disabled:false, sleeping:false, elapsedMs:17719}` | `active` |
+  | 第二次（已热） | `active` | `{…elapsedMs:3}`，HTTP 200 / 总耗时 **5.7ms** | `active` |
+  对应日志 `[sidecar] 单元 gk-ppsv3 端口就绪（2s）` → `[sidecar] 预热完成 15797ms`。**结论：17.7s 冷启动现在可以完全发生在识别请求之外，幂等且秒回。**
+- **前端**：`build:weapp` 角标 `403bdf9`=HEAD → `release-check --dev` 11 通过 / 2 警告 / 0 阻断 → CLI 上传开发版 **2026.11.17.1**（TOTAL 918.4 KB / 940405 Byte、AppID `wx48bf5ba9bae0bf39`、`√ upload` exit 0）。
+- 🔴 **边界不变**：只产生开发版，未提审未发版 ⇒ D-079 及 D-074~078 全部功能仍未面客；**真机未验收**（冷启动后首次识别、补块合成、裁剪拖动都需思傅手机实测）；未 push（按约定等指示）。回滚点 `/tmp/dist-bak-d079-20261117150151` 保留。
