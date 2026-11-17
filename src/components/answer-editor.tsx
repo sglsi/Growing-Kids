@@ -13,7 +13,7 @@ import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
-import { uploadImage, uploadFile, searchAnswer, saveAnswer } from '@/services/api'
+import { uploadImage, uploadFile, fetchDocPages, searchAnswer, saveAnswer } from '@/services/api'
 import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import type { AnswerAttachment, TimelineItem } from '@/types'
@@ -187,6 +187,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   // 裁剪：进入编辑器前先记住目标，确认后写回**同一条** item
   const [cropSrc, setCropSrc] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  /** D-082：资料库选择器这次是「整份加入答案」还是「选页/选图裁剪成答案图」 */
+  const [pickerCrop, setPickerCrop] = useState(false)
 
   const label = targetLabel(item)
 
@@ -328,6 +330,69 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }
 
+  /**
+   * D-082：已存题目「加入答案」也能从文件/图片裁剪。
+   *  - 图片：直接进裁剪器（本地临时路径或资料库云端 URL 都支持）；
+   *  - PDF：先出页图，多页让用户选页，再进裁剪器；
+   *  - Word/TXT：没有页图，明确告知，不静默当成图片。
+   * 裁剪结果仍走 handleCropConfirm → attach 上传 → 答案附件，不建新条目。
+   */
+  const openCroppableSource = async (url: string, kind: 'image' | 'pdf' | 'other') => {
+    if (!url) {
+      Taro.showToast({ title: '这个文件没有可用链接', icon: 'none' })
+      return
+    }
+    if (kind === 'image') {
+      setCropSrc(url)
+      return
+    }
+    if (kind !== 'pdf') {
+      Taro.showToast({ title: 'Word/TXT 没有页图，请另存为 PDF 或图片', icon: 'none', duration: 2500 })
+      return
+    }
+    Taro.showLoading({ title: '正在生成页图…', mask: true })
+    try {
+      const r = await fetchDocPages(url, 10)
+      if (!r.pages.length) throw new Error('没有渲染出页图')
+      if (r.pages.length === 1) {
+        setCropSrc(r.pages[0].url)
+        return
+      }
+      Taro.showActionSheet({
+        itemList: r.pages.map((p, i) => `第 ${p.index || i + 1} 页`),
+        success: (res) => {
+          const p = r.pages[res.tapIndex]
+          if (p) setCropSrc(p.url)
+        },
+        fail: () => undefined,
+      })
+    } catch (e) {
+      console.error('答案 PDF 页图生成失败', e)
+      Taro.showToast({
+        title: e instanceof Error ? e.message.slice(0, 30) : '生成页图失败',
+        icon: 'none',
+      })
+    } finally {
+      Taro.hideLoading()
+    }
+  }
+
+  /** D-082：资料库里选图片/PDF → 裁剪成答案图；其它格式仍走「整份加入」 */
+  const handlePickLibraryForCrop = async (d: {
+    id: string; name: string; file_key: string; url?: string; mime_type?: string | null
+  }) => {
+    setPickerOpen(false)
+    setPickerCrop(false)
+    const mime = d.mime_type || ''
+    const kind: 'image' | 'pdf' | 'other' =
+      /^image\//i.test(mime) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(d.name || '')
+        ? 'image'
+        : /\.pdf$/i.test(d.name) || /pdf$/i.test(mime)
+          ? 'pdf'
+          : 'other'
+    await openCroppableSource(d.url || '', kind)
+  }
+
   // ---------- 文档：会话选文件 → 上传 ----------
   const pickDoc = async () => {
     // GK-23-24：监护人同意（业务）→ 平台授权（基础库），两道闸门都要过
@@ -337,6 +402,23 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       const res = await Taro.chooseMessageFile({ count: 1 })
       const f = res.tempFiles?.[0]
       if (!f?.path) return
+      // D-082：图片/PDF 走「选页/选图 → 裁剪 → 答案图」；其余格式维持整份附加。
+      const isImage = f.type === 'image' || /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name || '')
+      const isPdf = /\.pdf$/i.test(f.name || '')
+      if (isImage) {
+        setCropSrc(f.path)
+        return
+      }
+      if (isPdf) {
+        Taro.showLoading({ title: '上传中…', mask: true })
+        try {
+          const up = await uploadFile(f.path, { purpose: 'temp' })
+          await openCroppableSource(up.url, 'pdf')
+        } finally {
+          Taro.hideLoading()
+        }
+        return
+      }
       Taro.showLoading({ title: '上传中' })
       const up = await uploadFile(f.path, { purpose: 'attach' })
       await addAttachment({
@@ -623,9 +705,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           <Plus size={12} color={INK} />
           <Text className="block text-xs">资料</Text>
         </View>
-        <View className={btn} onClick={() => setPickerOpen(true)}>
+        <View className={btn} onClick={() => { setPickerCrop(false); setPickerOpen(true) }}>
           <FileText size={12} color={INK} />
           <Text className="block text-xs">资料库</Text>
+        </View>
+        {/* D-082：资料库里的图片/PDF 也能选页裁剪成答案图（Word/TXT 明确告知没有页图） */}
+        <View className={btn} onClick={() => { setPickerCrop(true); setPickerOpen(true) }}>
+          <Crop size={12} color={INK} />
+          <Text className="block text-xs">裁剪资料库</Text>
         </View>
         {/* 资料库搜题：只查运营者提供的公共资料库（文件名/路径 + 资料正文双通道），D-060 已移除外部知识库；
             全程只检索、不生成内容、不喂给 AI。
@@ -899,9 +986,12 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
 
       <MaterialPicker
         visible={pickerOpen}
-        title="从资料库选为答案"
-        onClose={() => setPickerOpen(false)}
-        onSelect={(d) => void handlePickLibrary(d)}
+        title={pickerCrop ? '从资料库选图/PDF 裁剪为答案' : '从资料库选为答案'}
+        onClose={() => { setPickerOpen(false); setPickerCrop(false) }}
+        onSelect={(d) => {
+          if (pickerCrop) void handlePickLibraryForCrop(d)
+          else void handlePickLibrary(d)
+        }}
       />
     </View>
   )

@@ -231,8 +231,17 @@ export default function RecognizePage() {
   const [activePage, setActivePage] = useState(0)
   const [board, setBoard] = useState<BoardEntry[]>([])
   const [boardBusy, setBoardBusy] = useState(false)
-  /** 页内裁剪编辑器：{ src, entryIdx }——裁出的图进入指定题目 */
-  const [cropEditor, setCropEditor] = useState<{ src: string; entryIdx: number } | null>(null)
+  /**
+   * 页内裁剪编辑器（D-082）：
+   *  - `entryIdx >= 0`：裁出的图进指定题（补图 / 裁答案）；
+   *  - `entryIdx < 0`：**新建一题**再放图——思傅 2026-11-17 报「多图时后一张裁完
+   *    把前面裁的题覆盖」，根因就是所有页都往同一道题里塞。现在一次裁剪任务默认一题。
+   */
+  const [cropEditor, setCropEditor] = useState<{
+    src: string
+    entryIdx: number
+    kind: 'stem' | 'answer' | 'extra'
+  } | null>(null)
   // 题目卡里点开已裁剪的图 → 编辑器（思傅 2026-10-21：支持裁剪/旋转/灰度/高清等）
   const [editImg, setEditImg] = useState<{ entryIdx: number; imgIdx: number; url: string } | null>(null)
   // 来源页点开大图 → 编辑器（思傅 2026-10-21：来源页同样「点图片 = 打开并编辑」，与「＋裁剪题目」分开）
@@ -1291,26 +1300,44 @@ export default function RecognizePage() {
     }
   }
 
-  /** 打开页内裁剪编辑器：从当前页图片裁出错题区域，结果进入指定题目 */
-  const startCrop = (entryIdx: number) => {
+  /**
+   * 打开页内裁剪编辑器（D-082）。
+   *  - entryIdx='new'：一次裁剪 = 一道新题（默认入口，跨页连裁不再互相覆盖）；
+   *  - entryIdx=数字 + kind='extra'：把另一块补进同一题（跨栏/跨页的同一道题）；
+   *  - entryIdx=数字 + kind='answer'：裁这道题的解答图。
+   */
+  const startCrop = (entryIdx: number | 'new', kind: 'stem' | 'answer' | 'extra' = 'stem') => {
     const page = boardPages[activePage]
     if (!page) {
       Taro.showToast({ title: '请先选择页面图片', icon: 'none' })
       return
     }
+    if (entryIdx === 'new') {
+      if (board.length >= MAX_BOARD_ENTRIES) {
+        Taro.showToast({ title: `最多 ${MAX_BOARD_ENTRIES} 题`, icon: 'none' })
+        return
+      }
+      setCropEditor({ src: page.url, entryIdx: -1, kind: 'stem' })
+      return
+    }
     const e = board[entryIdx]
-    if (e && e.images.length >= MAX_ENTRY_IMAGES) {
+    if (!e) return
+    const list = kind === 'answer' ? (e.answerImages ?? []) : e.images
+    if (list.length >= MAX_ENTRY_IMAGES) {
       Taro.showToast({ title: `每题最多 ${MAX_ENTRY_IMAGES} 张图`, icon: 'none' })
       return
     }
-    setCropEditor({ src: page.url, entryIdx })
+    setCropEditor({ src: page.url, entryIdx, kind })
   }
 
-  /** 裁剪确认：上传裁剪图 → 追加到题目图片组 */
+  /**
+   * 裁剪确认：上传裁剪图 → 新建一题或追加到指定题的题干图 / 解答图。
+   * ⚠️ 新题在**确认之后**才建（不是打开编辑器时就建）：中途退出不会留下空题。
+   */
   const handleCropConfirm = async (path: string) => {
-    const entryIdx = cropEditor?.entryIdx
+    const task = cropEditor
     setCropEditor(null)
-    if (entryIdx == null || !path) return
+    if (!task || !path) return
     setBoardBusy(true)
     try {
       // ⭐⚠️ purpose='attach'（思傅 2026-10-21 复测修复，勿改回 'save'）：
@@ -1323,13 +1350,32 @@ export default function RecognizePage() {
       //    只返回 key/url，由本题保存时写进 content.question_images。
       //    对照：handleSaveImageDirect（整卷图直存）确需 'save'，那是要单独成条目的。
       const up = await uploadImage(path, { purpose: 'attach' })
-      setBoard((prev) =>
-        prev.map((e, i) => (i === entryIdx ? { ...e, images: [...e.images, { url: up.url, key: up.key }] } : e)),
-      )
+      const img = { url: up.url, key: up.key }
+      if (task.entryIdx < 0) {
+        // 一次裁剪任务 = 一道新题；空题在退出时不会建，只有确认成图才落进清单
+        setBoard((prev) => [
+          ...prev,
+          { id: ++boardIdRef.current, text: '', images: [img], segments: [], ocr: 'idle' },
+        ])
+      } else {
+        setBoard((prev) =>
+          prev.map((e, i) => {
+            if (i !== task.entryIdx) return e
+            return task.kind === 'answer'
+              ? { ...e, answerImages: [...(e.answerImages ?? []), img] }
+              : { ...e, images: [...e.images, img] }
+          }),
+        )
+      }
       // ⚠️ 思傅 2026-10-21：裁剪后**不再自动识别**——识别与否交给用户点「识别本题」决定。
       //    （旧行为裁完自动跑快速 OCR：不想要文字的题白等 1~3s，想精准识别的还要先清一遍）
       //    不识别也能直接存入错题库（只存图），后端已放宽「无题干但有题面图」的校验。
-      Taro.showToast({ title: '已裁剪入题，需要文字请点「识别本题」', icon: 'success' })
+      Taro.showToast({
+        title: task.kind === 'answer'
+          ? '已裁剪解答图，随本题一起存入'
+          : '已作为新题加入，需要文字请点「识别本题」',
+        icon: 'success',
+      })
     } catch (e) {
       console.error('裁剪图上传失败', e)
       Taro.showToast({ title: '裁剪图上传失败，请重试', icon: 'none' })
@@ -1754,6 +1800,10 @@ export default function RecognizePage() {
     // 否则文字框会跟着变，等于偷偷换了另一套结果）
     lastLocateRef.current = { pageId: page.id, seqs, refs: sectioned, segs, pw, ph, figs }
     setSeqDetected(detectedLabels(segs, seqs))
+    // ⭐ D-082：换页/换题号重新定位时，先把上一批**已裁好但还没加入**的题收编进清单，
+    //    否则 setSeqRows 直接覆盖，上一页的裁剪成果全丢（思傅报的「被后一张图覆盖」）。
+    //    没有已裁题目图时原样替换，不弹空题、不打扰。
+    const carried = appendSeqRowsToBoard(seqRows)
     setSeqRows(
       got.map((g, i) => ({
         label: g.label,
@@ -1764,9 +1814,13 @@ export default function RecognizePage() {
       })),
     )
     const miss = got.filter((g) => !g.located).map((g) => g.label)
+    const prefix = carried ? `上一批 ${carried} 题已先加入清单；` : ''
     Taro.showToast({
-      title: miss.length ? `第 ${miss.join('、')} 题未定位，可手工框` : `已定位 ${got.length} 题`,
+      title: miss.length
+        ? `${prefix}第 ${miss.join('、')} 题未定位，可手工框`
+        : `${prefix}已定位 ${got.length} 题`,
       icon: 'none',
+      duration: carried ? 2500 : 1500,
     })
   }
 
@@ -1877,15 +1931,15 @@ export default function RecognizePage() {
     }
   }
 
-  /** 已裁好的题追加进题目清单：一题一条，题目图→question_images、解答图→answer_images */
-  const handleSeqApply = () => {
+  /**
+   * 已裁好的题追加进题目清单：一题一条，题目图→question_images、解答图→answer_images。
+   * 返回真正加入的条数，供「换页重新定位」先收编上一页成果（D-082：多页裁剪不互相覆盖）。
+   */
+  const appendSeqRowsToBoard = (rows: SeqRow[]): number => {
     // 题目区是必需的：只有解答图没有题面的条目，后端「题干或题面图至少有一个」也会拒，
     // 且复习时无法作答。解答可以没有（Q「无解答时只存题目区」）。
-    const usable = seqRows.filter((r) => r.stem)
-    if (!usable.length) {
-      Taro.showToast({ title: '请先裁剪题目图', icon: 'none' })
-      return
-    }
+    const usable = rows.filter((r) => r.stem)
+    if (!usable.length) return 0
     setBoard((prev) => [
       ...prev,
       ...usable.map((r) => ({
@@ -1899,8 +1953,17 @@ export default function RecognizePage() {
         ocr: 'idle' as const,
       })),
     ])
+    return usable.length
+  }
+
+  const handleSeqApply = () => {
+    const n = appendSeqRowsToBoard(seqRows)
+    if (!n) {
+      Taro.showToast({ title: '请先裁剪题目图', icon: 'none' })
+      return
+    }
     setSeqRows([])
-    Taro.showToast({ title: `已加入 ${usable.length} 题`, icon: 'success' })
+    Taro.showToast({ title: `已加入 ${n} 题`, icon: 'success' })
   }
 
   /** 当前待裁行（给编辑器预置候选框；kind 决定用题目区还是解答区） */
@@ -2355,13 +2418,33 @@ export default function RecognizePage() {
                         </View>
                       </View>
                     ))}
+                    {/*
+                      D-082：一次裁剪 = 一道题。默认入口「＋新题」不往当前题里塞图，
+                      跨页/跨栏属于同一道题时用「补图」；解答另走「裁答案」。
+                    */}
                     <View
-                      onClick={() => startCrop(idx)}
+                      onClick={() => startCrop('new', 'stem')}
                       className="flex flex-col items-center justify-center"
                       style={{ width: 64, height: 64, borderRadius: 8, border: '1px dashed #C9C2B8' }}
                     >
                       <Text style={{ fontSize: 14, color: BRAND_TEXT, lineHeight: '16px' }}>＋</Text>
-                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>裁剪题目</Text>
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>新题</Text>
+                    </View>
+                    <View
+                      onClick={() => startCrop(idx, 'extra')}
+                      className="flex flex-col items-center justify-center"
+                      style={{ width: 64, height: 64, borderRadius: 8, border: `1px solid ${BRAND}`, backgroundColor: '#FFF9F4' }}
+                    >
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>补图</Text>
+                      <Text className="block text-[10px]" style={{ color: '#8A7F72' }}>同一题</Text>
+                    </View>
+                    <View
+                      onClick={() => startCrop(idx, 'answer')}
+                      className="flex flex-col items-center justify-center"
+                      style={{ width: 64, height: 64, borderRadius: 8, border: `1px solid ${BRAND}`, backgroundColor: '#F4F9F6' }}
+                    >
+                      <Text className="block text-xs" style={{ color: BRAND_TEXT }}>裁答案</Text>
+                      <Text className="block text-[10px]" style={{ color: '#8A7F72' }}>解答图</Text>
                     </View>
                   </View>
 
@@ -2399,7 +2482,7 @@ export default function RecognizePage() {
                     </View>
                   ) : (
                     <Text className="block text-xs text-muted-foreground mb-2">
-                      点上方「＋裁剪题目」，从来源页框出这道题的区域；不需要文字可直接存入错题库
+                      「＋新题」从当前来源页框一道题（多页连裁互不覆盖）；同一道题跨页/跨栏用「补图」，有解答用「裁答案」
                     </Text>
                   )}
 
@@ -2864,8 +2947,13 @@ export default function RecognizePage() {
           visible
           cropOnly
           src={cropEditor.src}
-          confirmText="裁剪入题"
-          cropTargetLabel={`图片将存入：第 ${cropEditor.entryIdx + 1} 题`}
+          cropKey={`manual-${cropEditor.entryIdx}-${cropEditor.kind}-${cropEditor.src}`}
+          confirmText={cropEditor.kind === 'answer' ? '裁剪答案' : '裁剪入题'}
+          cropTargetLabel={cropEditor.entryIdx < 0
+            ? '这张图将作为一道新题'
+            : cropEditor.kind === 'answer'
+              ? `解答图将存入：第 ${cropEditor.entryIdx + 1} 题`
+              : `题目图将补进：第 ${cropEditor.entryIdx + 1} 题`}
           enableSaveToInbox={false}
           onCancel={() => setCropEditor(null)}
           onConfirm={(p) => void handleCropConfirm(p)}
