@@ -29,7 +29,7 @@ const check = (name, ok, extra = '') => {
 
 const A4 = { width: 595.28, height: 841.89 }
 const MARGIN = 34
-const HEADER_H = 34
+const HEADER_H = 0 // D-088：不要顶部「复习资料」页头
 const FOOTER_H = 26
 const bin = { width: A4.width - MARGIN * 2, height: A4.height - MARGIN * 2 - HEADER_H - FOOTER_H }
 const contentTop = A4.height - MARGIN - HEADER_H
@@ -54,30 +54,33 @@ const byKey = new Map()
 for (const s of specs) {
   const im = await png(s.text, { w: s.w, h: s.h, size: 38, color: s.color || '#1A1A1A' })
   byKey.set(s.key, { image: await pdf.embedPng(im.buffer), width: im.width, height: im.height })
-  const labelW = Math.min(500, Math.max(120, [...(s.label || '题目')].length * 30 + 44))
-  const lb = await png(s.label || '题目', { w: labelW, h: 48, size: 30, accent: true })
+  // D-088：题号字号 30 → 15（半大），标签高度同步 48 → 24
+  const labelW = Math.min(500, Math.max(120, [...(s.label || '题目')].length * 15 + 44))
+  const lb = await png(s.label || '题目', { w: labelW, h: 24, size: 15, accent: true })
   byKey.set(`label:${s.key}`, { image: await pdf.embedPng(lb.buffer), width: lb.width, height: lb.height })
 }
 const answerLb = await png('解答（思路与过程）', { w: 400, h: 42, size: 26, color: '#2E6F4E', accent: true })
 const answerLabel = { image: await pdf.embedPng(answerLb.buffer), width: answerLb.width, height: answerLb.height }
-const header = await png('复习资料 · 2026/11/18', { w: 360, h: 36, size: 22, color: '#8A7F72', accent: true })
 
 const blocks = [
   { key: 'q1', label: '预习案·Ⅱ 16', rows: [
     { key: 'label:q1', width: byKey.get('label:q1').width, height: byKey.get('label:q1').height, kind: 'label' },
     { key: 'q1', width: byKey.get('q1').width, height: byKey.get('q1').height, kind: 'question' },
+    { key: '__space:q1', width: 1, height: 96, kind: 'space' },
     { key: '__ans:q1', width: answerLabel.width, height: answerLabel.height, kind: 'label' },
     { key: 'q1a', width: byKey.get('q1a').width, height: byKey.get('q1a').height, kind: 'answer' },
   ] },
   { key: 'q2', label: '第 14 题', rows: [
     { key: 'label:q2', width: byKey.get('label:q2').width, height: byKey.get('label:q2').height, kind: 'label' },
     { key: 'q2', width: byKey.get('q2').width, height: byKey.get('q2').height, kind: 'question' },
+    { key: '__space:q2', width: 1, height: 96, kind: 'space' },
     { key: '__ans:q2', width: answerLabel.width, height: answerLabel.height, kind: 'label' },
     { key: 'q2a', width: byKey.get('q2a').width, height: byKey.get('q2a').height, kind: 'answer' },
   ] },
   { key: 'q3', label: '练习册 23', rows: [
     { key: 'label:q3', width: byKey.get('label:q3').width, height: byKey.get('label:q3').height, kind: 'label' },
     { key: 'q3', width: byKey.get('q3').width, height: byKey.get('q3').height, kind: 'question' },
+    { key: '__space:q3', width: 1, height: 24, kind: 'space' },
   ] },
 ]
 
@@ -88,6 +91,11 @@ const allRows = pages.flatMap((p) => p.blocks.flatMap((b) => b.rows.map((r) => (
 check('所有素材都排入', allRows.length === blocks.reduce((s, b) => s + b.rows.length, 0), `${allRows.length}`)
 const keyOrder = allRows.map((r) => r.key)
 check('题面图与答案图在同一题内相邻', keyOrder.indexOf('q1') < keyOrder.indexOf('__ans:q1') && keyOrder.indexOf('__ans:q1') < keyOrder.indexOf('q1a'))
+const spaces = allRows.filter((r) => r.kind === 'space')
+check('每题都有做题空白，且应用题 > 填空（整块超高时按比例压缩）',
+  spaces.length === 3 && spaces[0].height > spaces[2].height * 2 && Math.abs(spaces[2].height - 24) < 1,
+  spaces.map((r) => `${r.key}:${r.height.toFixed(1)}`).join(','))
+check('空白插在题面之后、解答之前', keyOrder.indexOf('q1') < keyOrder.indexOf('__space:q1') && keyOrder.indexOf('__space:q1') < keyOrder.indexOf('__ans:q1'))
 check('区块不跨页', pages.every((p) => new Set(p.blocks.map((b) => b.key)).size === p.blocks.length))
 let overlap = false
 let outside = false
@@ -106,14 +114,12 @@ for (const p of pages) {
   }
 }
 check('页内无重叠、无越界', !overlap && !outside, `overlap=${overlap} outside=${outside}`)
-const tiny = allRows.filter((r) => r.kind !== 'label' && r.height < bin.height * 0.05)
+const tiny = allRows.filter((r) => r.kind !== 'label' && r.kind !== 'space' && r.height < bin.height * 0.05)
 check('没有把题图缩成指甲盖（高 ≥ 5% 可用高）', tiny.length === 0, tiny.map((r) => `${r.key}:${r.height.toFixed(1)}`).join(','))
 
 // 真出 PDF 样张
-const headerImg = await pdf.embedPng(header.buffer)
 for (let pi = 0; pi < pages.length; pi += 1) {
   const page = pdf.addPage([A4.width, A4.height])
-  page.drawImage(headerImg, { x: MARGIN, y: A4.height - MARGIN - HEADER_H, width: header.width, height: header.height })
   for (const b of pages[pi].blocks) {
     for (const r of b.rows) {
       const im = byKey.get(r.key)?.image || (r.key === '__ans:q1' || r.key === '__ans:q2' ? answerLabel.image : null)

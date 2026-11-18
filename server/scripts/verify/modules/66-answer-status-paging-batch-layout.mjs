@@ -73,7 +73,7 @@ m.test('A3 批量选择态常驻「全选」「全部取消」', (c) => {
   c.ok(!/forEach\(\(m\) => sel\.toggle\(m\.id\)\)/.test(read(pages[3])), '记忆页不许再 toggle 式伪全选')
 })
 
-m.test('A4 复习资料按题分块、保序、带题号与页眉页脚', (c) => {
+m.test('A4 复习资料按题分块、保序、带题号与页脚（D-088 去页头）', (c) => {
   c.ok(fs.existsSync(path.join(ROOT, LAYOUT)), '须有独立的逐题版式纯函数模块')
   const layout = read(LAYOUT)
   c.ok(/export function layoutQuestionBlocks/.test(layout) &&
@@ -87,7 +87,7 @@ m.test('A4 复习资料按题分块、保序、带题号与页眉页脚', (c) =>
   c.ok(/role: 'answer'/.test(pdf) && /`\$\{g\}:answer`/.test(pdf), '含答案时须有「解答」分隔标签')
   c.ok(/renderLabelPng\(/.test(pdf) && /question_label/.test(pdf), '题号来自 question_label，中文标签走位图')
   c.ok(/第 \$\{pi \+ 1\} \/ \$\{packed\.length\} 页?|`\$\{pi \+ 1\} \/ \$\{packed\.length\}`/.test(pdf), '每页须标页码')
-  c.ok(/layout: 'question-blocks-v1'/.test(pdf), '产物须记版式版本，便于回溯旧文件')
+  c.ok(/layout: 'question-blocks-v2'/.test(pdf), '产物须记版式版本（D-088 bump v2），便于回溯旧文件')
 })
 
 export default m
