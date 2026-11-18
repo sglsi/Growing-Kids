@@ -3187,3 +3187,29 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - CLI（`islogin:true`、`--port 46737`、AppID `wx48bf5ba9bae0bf39`）上传开发版 **2026.11.18.1**，TOTAL **925.9 KB / 948126 Byte**，`√ upload` exit 0。
 - 上传后再次 CLI `open --project` 重载 IDE，避免「IDE 开着时 build 清空 dist」留下的假 ENOENT 缓存。
 - 🔴 边界：仍未提审未发版 ⇒ 未面客；**思傅那条真机错误原文仍未拿到，本轮修的是审代码发现的两个确定真机 API 约束，不宣称与其同根因**；未 push（AHEAD=52）。
+
+## D-084（2026-11-18 09:1x）：资料库裁剪上下不可调 + 答案附件只显「资料」
+
+### 一、现象（思傅真机反馈）
+① 资料库选 PDF 页图后，裁剪框**只能左右调整、不能上下调整**；② 裁剪结果存入答案后，解答区只显示「资料」+删除键，**点不开查看**；③ 继续添加裁剪内容时上下可用了，但裁剪后的图片仍不能显示查看。
+
+### 二、根因（静态定位，非真机日志）
+1. 预览区高度用 `windowHeight - 260` **估算**。资料库 PDF 出的页图是竖长图，真机底部工具栏比估算更高时，contain 后的 `imgH` 超出预览区，裁剪框的**上/下边（含角手柄）落到顶栏或工具栏下面**，手指抓不到；左右边仍在可视区 ⇒ 表现为「只能左右调整」。第二次打开时图片尺寸已知、布局稳定 ⇒ 上下又能用，与思傅描述吻合。
+2. `resetBox()` 改了 `imgW/imgH`，但触摸层缓存 `layerMeasuredRef` 只在打开后 50ms 量一次（那时远程图还没下载完），此后一直为 true；`onTouchStart` 拿的是旧矩形，`ry` 整体偏移。
+3. `hitTarget()` 用固定 32px 命中半径 + if-else 顺序；矮/窄图上、下边会同时判为「靠近」，先判到的永远抢走手势。
+4. 新答案附件只写 `file_key/thumb_key`，**没有 `url/thumb_url`**；后端只在详情列表 enrich 签名 URL，`update` 返回不带 ⇒ 渲染处 `thumb_url || url` 为空 ⇒ 落到「资料」占位分支，且该分支没有 `previewImage` 点击。连续裁同一张图时 `setCropSrc` 值相同被 React 合并，编辑器不再走重置 effect。
+
+### 三、修复
+| 位置 | 改动 |
+|---|---|
+| `image-editor.tsx` `resetBox` | 量 `#imgEditorPreview` **真实高度**再 contain（同步给保守值防首帧溢出）；尺寸变化后作废触摸层缓存，60ms 后重测触摸层与图片盒 |
+| `image-editor.tsx` `hitTarget` | 命中半径改为 `max(10, min(32, imgW/6, imgH/6))`，按**距离最近**的手柄命中，不再靠 if-else 顺序 |
+| `types/index.ts` | `AnswerAttachment` 增加可选 `url` / `thumb_url` |
+| `answer-editor.tsx` | 裁剪上传结果带 `url/thumb_url`；资料库整份加入的图片也带 url（文档仍占位）；`openCrop()` 递增 `cropSeqRef`，`ImageEditor cropKey` 每次打开都变，强制重置会话态 |
+
+### 四、验证
+M63 4/4；M60+M61+M62 11/11；`verify:gate` 38/38；`tsc` / `lint:build` / `build:weapp` 全部 RC=0。
+
+### 五、边界 / 不宣称
+- 全部是**静态契约 + 源码推导**，不宣称真机已修；需思傅在开发版上验：竖长 PDF 页图上下拖动、附件缩略图与点开预览、连续裁同一图。
+- 纯前端改动；后端 dist 不动；未提审未发版 ⇒ 未面客；未 push。
