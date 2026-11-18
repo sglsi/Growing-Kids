@@ -351,30 +351,54 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       return
     }
     Taro.showLoading({ title: '正在生成页图…', mask: true })
+    let pages: { index: number; url: string }[] = []
     try {
       const r = await fetchDocPages(url, 10)
       if (!r.pages.length) throw new Error('没有渲染出页图')
-      if (r.pages.length === 1) {
-        setCropSrc(r.pages[0].url)
-        return
-      }
-      Taro.showActionSheet({
-        itemList: r.pages.map((p, i) => `第 ${p.index || i + 1} 页`),
-        success: (res) => {
-          const p = r.pages[res.tapIndex]
-          if (p) setCropSrc(p.url)
-        },
-        fail: () => undefined,
-      })
+      pages = r.pages
     } catch (e) {
       console.error('答案 PDF 页图生成失败', e)
       Taro.showToast({
         title: e instanceof Error ? e.message.slice(0, 30) : '生成页图失败',
         icon: 'none',
       })
+      return
     } finally {
+      // ⚠️ 必须先关 mask loading 再弹 ActionSheet：真机上两者叠在一起会冲突，
+      //    表现为「点了没反应」或直接报 showActionSheet fail。
       Taro.hideLoading()
     }
+    if (pages.length === 1) {
+      setCropSrc(pages[0].url)
+      return
+    }
+    /**
+     * 🔴 微信 showActionSheet 的 itemList 硬上限 6 项（真机直接拒，模拟器可能不报）。
+     * PDF 出页图最多 10 页 ⇒ 每批只放 5 页 + 1 个「更多页」，选完分组再进下一批。
+     */
+    const PAGE_CHOICES = 5
+    const askPage = (offset: number) => {
+      const slice = pages.slice(offset, offset + PAGE_CHOICES)
+      if (!slice.length) return
+      const hasMore = offset + PAGE_CHOICES < pages.length
+      const itemList = slice.map((p, i) => `第 ${p.index || offset + i + 1} 页`)
+      if (hasMore) itemList.push('更多页…')
+      Taro.showActionSheet({
+        itemList,
+        success: (res) => {
+          const i = res.tapIndex
+          if (i === undefined || i < 0 || i > slice.length) return
+          if (i === slice.length) {
+            askPage(offset + PAGE_CHOICES)
+            return
+          }
+          const p = slice[i]
+          if (p) setCropSrc(p.url)
+        },
+        fail: () => undefined,
+      })
+    }
+    askPage(0)
   }
 
   /** D-082：资料库里选图片/PDF → 裁剪成答案图；其它格式仍走「整份加入」 */
@@ -410,13 +434,18 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         return
       }
       if (isPdf) {
+        // 只在这一层关掉「上传中」loading 后才交给 openCroppableSource：
+        // 后者自己会开「正在生成页图」loading，且之后要弹 ActionSheet 选页——
+        // 两个 mask loading 叠加会让真机上的选页弹窗失效。
+        let fileUrl = ''
         Taro.showLoading({ title: '上传中…', mask: true })
         try {
           const up = await uploadFile(f.path, { purpose: 'temp' })
-          await openCroppableSource(up.url, 'pdf')
+          fileUrl = up.url
         } finally {
           Taro.hideLoading()
         }
+        await openCroppableSource(fileUrl, 'pdf')
         return
       }
       Taro.showLoading({ title: '上传中' })
