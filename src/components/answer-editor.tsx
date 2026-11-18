@@ -4,6 +4,7 @@ import Taro from '@tarojs/taro'
 import { Plus, Trash2, Crop, FileText, Check, X, BookOpen } from 'lucide-react-taro'
 import ImageEditor from '@/components/image-editor'
 import MaterialPicker from '@/components/material-picker'
+import PdfPagePicker, { type PdfPageItem, type PdfPageHit } from '@/components/pdf-page-picker'
 import MathSymbolBar from '@/components/math-symbol-bar'
 import MathText from '@/components/math-text'
 // P-028 / D-045：参考例题卡片上的知识点讲解标签（只展示、默认关、事先声明常驻）
@@ -13,7 +14,8 @@ import { latexToReadable, readableToLatex } from '@/utils/latex'
 import { useCaret } from '@/utils/use-caret'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
-import { uploadImage, uploadFile, fetchDocPages, searchAnswer, saveAnswer } from '@/services/api'
+import { uploadImage, uploadFile, fetchDocPages, ocrPage, warmupQuiet, searchAnswer, saveAnswer } from '@/services/api'
+import { locateQuestions, type Rect01 } from '@/lib/question-locate'
 import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import type { AnswerAttachment, TimelineItem } from '@/types'
@@ -141,6 +143,24 @@ function newId(): string {
   return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
+/**
+ * 从题目里抠出可用于「按题号定位」的数字题号（D-085）。
+ *
+ * 优先级：`question_label`（文档导入/切题时写入的印刷题号，如「预习案·Ⅱ 18」）>
+ * 题干里的「第N题」> 行首「3.」「3．」。都取不到就返回空串——**不猜**，
+ * 面板上直接不显示定位按钮，用户仍可用缩略图手工选页。
+ */
+function pickQuestionNo(item: TimelineItem | null | undefined): string {
+  const label = (item?.content?.question_label || '').trim()
+  const fromLabel = label.match(/\d+/)
+  if (fromLabel) return fromLabel[0]
+  const text = `${item?.content?.question || ''}\n${item?.content?.stem || ''}`
+  const byDi = text.match(/第\s*(\d+)\s*题/)
+  if (byDi && byDi[1]) return byDi[1]
+  const byLine = text.match(/(?:^|\n)\s*(\d{1,3})\s*[.．、]/)
+  return byLine && byLine[1] ? byLine[1] : ''
+}
+
 export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Props) {
   // ⚠️ item 可能为 null（调用方未等数据到位就挂载时会走到）——全部可选链，
   //    保证永不因空 item 崩渲染（2026-10-22 详情页打不开的直接崩溃点）。
@@ -191,15 +211,34 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
    * 裁剪器不走重置 effect，残留上一次的框。每次打开都换 key 强制重建会话态。
    */
   const cropSeqRef = useRef(0)
-  const openCrop = (src: string) => {
+  /** 按题号命中时预置的裁剪框（归一化）；null = 整页起框 */
+  const [cropRect, setCropRect] = useState<Rect01 | null>(null)
+  const openCrop = (src: string, rect?: Rect01 | null) => {
     cropSeqRef.current += 1
+    setCropRect(rect || null)
     setCropSrc(src)
   }
+  /**
+   * D-085：资料库 PDF 的「页缩略图会话」。非空即面板打开。
+   * 裁完一页后自动回到这里，用户接着选下一页 —— 不再重复「添加文件 → 选第几页」。
+   */
+  const [pdfPages, setPdfPages] = useState<{ docName: string; pages: PdfPageItem[] } | null>(null)
+  /** 会话缓存：裁剪器关闭后要能回到同一个 PDF 的页列表 */
+  const cropFromPdfRef = useRef<{ docName: string; pages: PdfPageItem[] } | null>(null)
+  const [pageHits, setPageHits] = useState<Record<number, PdfPageHit>>({})
+  const [locating, setLocating] = useState(false)
+  const [locateHint, setLocateHint] = useState('')
+  /** 关面板/选页时中止逐页 OCR 循环（别在后台白烧 10 页的识别配额） */
+  const locateCancelRef = useRef(false)
+  /** 本次 PDF 会话已经加入答案的页数（提示可继续选） */
+  const [addedFromPdf, setAddedFromPdf] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
   /** D-082：资料库选择器这次是「整份加入答案」还是「选页/选图裁剪成答案图」 */
   const [pickerCrop, setPickerCrop] = useState(false)
 
   const label = targetLabel(item)
+  /** D-085：可用于「按题号定位」的数字题号；空串 = 面板上不显示该按钮（不猜） */
+  const questionNo = pickQuestionNo(item)
 
   /**
    * 写库：附件 / 来源**一次调用**提交（后端按 content 字段合并，不会清掉题干）。
@@ -335,6 +374,16 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         created_at: new Date().toISOString(),
       })
       Taro.showToast({ title: '已加入答案', icon: 'success' })
+      /**
+       * D-085：从 PDF 页列表进来的裁剪，裁完**自动回到页列表**继续选下一页。
+       * 答案跨 2~3 页时不用再走一遍「添加文件 → 选第几页」。
+       */
+      const back = cropFromPdfRef.current
+      if (back) {
+        Taro.hideLoading()
+        setAddedFromPdf((n) => n + 1)
+        setPdfPages(back)
+      }
     } catch (e) {
       console.error('答案图片上传失败', e)
       Taro.showToast({ title: '上传失败', icon: 'none' })
@@ -350,7 +399,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
    *  - Word/TXT：没有页图，明确告知，不静默当成图片。
    * 裁剪结果仍走 handleCropConfirm → attach 上传 → 答案附件，不建新条目。
    */
-  const openCroppableSource = async (url: string, kind: 'image' | 'pdf' | 'other') => {
+  const openCroppableSource = async (url: string, kind: 'image' | 'pdf' | 'other', name?: string) => {
     if (!url) {
       Taro.showToast({ title: '这个文件没有可用链接', icon: 'none' })
       return
@@ -364,11 +413,11 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       return
     }
     Taro.showLoading({ title: '正在生成页图…', mask: true })
-    let pages: { index: number; url: string }[] = []
+    let pages: PdfPageItem[] = []
     try {
       const r = await fetchDocPages(url, 10)
       if (!r.pages.length) throw new Error('没有渲染出页图')
-      pages = r.pages
+      pages = r.pages.map((p, i) => ({ index: p.index || i + 1, url: p.url }))
     } catch (e) {
       console.error('答案 PDF 页图生成失败', e)
       Taro.showToast({
@@ -377,41 +426,84 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       })
       return
     } finally {
-      // ⚠️ 必须先关 mask loading 再弹 ActionSheet：真机上两者叠在一起会冲突，
-      //    表现为「点了没反应」或直接报 showActionSheet fail。
+      // 先关 mask loading 再开面板（真机上 loading 与浮层叠加会吞掉点击）
       Taro.hideLoading()
     }
+    /**
+     * ⭐ 思傅 2026-11-18（D-085）：不再用 showActionSheet 列页码。
+     * 答案常跨 2~3 页，纯文字页码只能靠猜；一屏缩略图能直接看到内容在哪页，
+     * 且裁完自动回到本列表继续选 —— 不必重复「添加文件 → 选页」。
+     */
+    const session = { docName: name || 'PDF 资料', pages }
+    setPageHits({})
+    setAddedFromPdf(0)
     if (pages.length === 1) {
+      // 单页没有“选页”的意义，直接进裁剪；但仍记住会话，取消后可回到列表
+      cropFromPdfRef.current = session
       openCrop(pages[0].url)
       return
     }
-    /**
-     * 🔴 微信 showActionSheet 的 itemList 硬上限 6 项（真机直接拒，模拟器可能不报）。
-     * PDF 出页图最多 10 页 ⇒ 每批只放 5 页 + 1 个「更多页」，选完分组再进下一批。
-     */
-    const PAGE_CHOICES = 5
-    const askPage = (offset: number) => {
-      const slice = pages.slice(offset, offset + PAGE_CHOICES)
-      if (!slice.length) return
-      const hasMore = offset + PAGE_CHOICES < pages.length
-      const itemList = slice.map((p, i) => `第 ${p.index || offset + i + 1} 页`)
-      if (hasMore) itemList.push('更多页…')
-      Taro.showActionSheet({
-        itemList,
-        success: (res) => {
-          const i = res.tapIndex
-          if (i === undefined || i < 0 || i > slice.length) return
-          if (i === slice.length) {
-            askPage(offset + PAGE_CHOICES)
-            return
-          }
-          const p = slice[i]
-          if (p) openCrop(p.url)
-        },
-        fail: () => undefined,
+    setPdfPages(session)
+  }
+
+  /** D-085：点缩略图 → 记住会话、关面板、带命中框进裁剪 */
+  const handlePickPdfPage = (page: PdfPageItem, rect: PdfPageHit['rect']) => {
+    locateCancelRef.current = true
+    cropFromPdfRef.current = pdfPages
+    setPdfPages(null)
+    openCrop(page.url, rect)
+  }
+
+  /**
+   * D-085「按题号定位」：逐页跑快速 OCR，再用 P-031 的纯函数找题号。
+   *
+   * 为什么是手动触发而不是默认跑：每页 fast OCR 1~3s，最多 10 页 ⇒ 最坏 30s，
+   * 不该让「只想随便选一页」的用户白等。命中即停，命中页带预置框。
+   * OCR 失败/找不到题号都不改任何东西（fail-closed），缩略图仍是兜底通道。
+   */
+  const locateAnswerPage = async () => {
+    const session = pdfPages
+    const no = Number(questionNo)
+    if (!session || !Number.isFinite(no) || no <= 0 || locating) return
+    setLocating(true)
+    locateCancelRef.current = false
+    try {
+      // 连续 OCR 多页，先把侧车烘热，别让冷启动 15s 叠在第一页上
+      await warmupQuiet()
+      for (let i = 0; i < session.pages.length; i += 1) {
+        if (locateCancelRef.current) return
+        const p = session.pages[i]
+        setLocateHint(`正在识别第 ${i + 1}/${session.pages.length} 页…`)
+        try {
+          const r = await ocrPage(p.url, 'fast', { rectify: false })
+          if (!r.page_text || !r.page_text.length) continue
+          const hit = locateQuestions(r.page_text, r.page.w, r.page.h, [no])[0]
+          if (!hit || !hit.located) continue
+          const rect = hit.answerRect || hit.stemRect
+          setPageHits((prev) => ({ ...prev, [p.index]: { label: `第 ${no} 题`, rect } }))
+          Taro.showToast({
+            title: hit.answerRect
+              ? `第 ${no} 题解答在第 ${p.index} 页，点该页直接裁`
+              : `第 ${no} 题在第 ${p.index} 页（没找到解答标记，已框题目区）`,
+            icon: 'none',
+            duration: 2800,
+          })
+          return
+        } catch (e) {
+          // 单页失败不终止：PDF 页图里可能有空页/纯图页
+          console.warn(`[答案页定位] 第 ${p.index} 页识别失败，继续下一页`, e)
+          continue
+        }
+      }
+      Taro.showToast({
+        title: `前 ${session.pages.length} 页没找到第 ${no} 题，可点缩略图手工框`,
+        icon: 'none',
+        duration: 2800,
       })
+    } finally {
+      setLocating(false)
+      setLocateHint('')
     }
-    askPage(0)
   }
 
   /** D-082：资料库里选图片/PDF → 裁剪成答案图；其它格式仍走「整份加入」 */
@@ -427,7 +519,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         : /\.pdf$/i.test(d.name) || /pdf$/i.test(mime)
           ? 'pdf'
           : 'other'
-    await openCroppableSource(d.url || '', kind)
+    await openCroppableSource(d.url || '', kind, d.name)
   }
 
   // ---------- 文档：会话选文件 → 上传 ----------
@@ -448,8 +540,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       }
       if (isPdf) {
         // 只在这一层关掉「上传中」loading 后才交给 openCroppableSource：
-        // 后者自己会开「正在生成页图」loading，且之后要弹 ActionSheet 选页——
-        // 两个 mask loading 叠加会让真机上的选页弹窗失效。
+        // 后者自己会开「正在生成页图」loading，且之后要开页缩略图面板——
+        // 两个 mask loading 叠加会让真机上的浮层点不动。
         let fileUrl = ''
         Taro.showLoading({ title: '上传中…', mask: true })
         try {
@@ -458,7 +550,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         } finally {
           Taro.hideLoading()
         }
-        await openCroppableSource(fileUrl, 'pdf')
+        await openCroppableSource(fileUrl, 'pdf', f.name || '本地 PDF')
         return
       }
       Taro.showLoading({ title: '上传中' })
@@ -1021,12 +1113,39 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         visible={!!cropSrc}
         src={cropSrc}
         cropKey={String(cropSeqRef.current)}
+        // D-085：按题号命中时直接框住该题；未命中/手工选页则整页起框
+        initialCrop={cropRect || undefined}
         cropOnly
         enableSaveToInbox={false}
         confirmText="用作答案图"
         cropTargetLabel={`答案将存入：${label}`}
-        onCancel={() => setCropSrc('')}
+        onCancel={() => {
+          setCropSrc('')
+          // 从 PDF 页列表进来的 ⇒ 退回列表继续选，不逼用户重新选文件
+          const back = cropFromPdfRef.current
+          if (back) setPdfPages(back)
+        }}
         onConfirm={(p) => void handleCropConfirm(p)}
+      />
+
+      {/* D-085：PDF 页缩略图选择器（替代文字页码 ActionSheet） */}
+      <PdfPagePicker
+        visible={!!pdfPages}
+        docName={pdfPages?.docName}
+        pages={pdfPages?.pages || []}
+        addedCount={addedFromPdf}
+        questionLabel={questionNo}
+        locating={locating}
+        locateHint={locateHint}
+        hits={pageHits}
+        onClose={() => {
+          locateCancelRef.current = true
+          setPdfPages(null)
+          cropFromPdfRef.current = null
+        }}
+        onPreview={(u) => Taro.previewImage({ urls: [u], current: u })}
+        onPick={handlePickPdfPage}
+        onLocate={questionNo ? () => void locateAnswerPage() : undefined}
       />
 
       <MaterialPicker
