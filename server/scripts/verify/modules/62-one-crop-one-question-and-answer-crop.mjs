@@ -56,7 +56,13 @@ m.test('A4 已存题目：答案可从本地图片/文件/PDF/资料库裁剪', 
   const s = read(ANS)
   c.ok(/openCroppableSource = async/.test(s), '须有统一的「选源→裁剪」入口')
   c.ok(/fetchDocPages\(url, 10\)/.test(s), 'PDF 须出页图后才可裁剪')
-  c.ok(/Taro\.showActionSheet\(\{[\s\S]{0,300}itemList: r\.pages\.map/.test(s), '多页 PDF 须让用户选页')
+  c.ok(/const askPage = \(offset: number\)/.test(s), '多页 PDF 须让用户选页')
+  c.ok(/PAGE_CHOICES = 5/.test(s), 'showActionSheet 真机硬上限 6 项，每批最多 5 页 + 更多页')
+  c.ok(/if \(hasMore\) itemList\.push\('更多页…'\)/.test(s), '超过 5 页须能翻到下一批')
+  c.ok(
+    /Taro\.showLoading\(\{ title: '正在生成页图…'[\s\S]*finally \{[\s\S]*Taro\.hideLoading\(\)[\s\S]*askPage\(0\)/.test(s),
+    '必须先关 mask loading 再弹 ActionSheet（真机冲突）',
+  )
   c.ok(/setCropSrc\(f\.path\)/.test(s), '本地图片须直接进裁剪器')
   c.ok(/uploadFile\(f\.path, \{ purpose: 'temp' \}\)/.test(s), '本地 PDF 须先临时上传拿 URL 再出页图')
   c.ok(/handlePickLibraryForCrop/.test(s), '资料库选择须分「整份加入 / 裁剪」两种意图')

@@ -3145,3 +3145,39 @@ L1 工程级（仅渲染/导出，不动学习行为、不动判定层、不动 
 - 提交后重新 `build:weapp`，角标 `f8af7a4` = HEAD；`release:check --dev` 11 通过 / 2 警告 / 0 阻断。
 - CLI（`islogin:true`、`--port 46737`、AppID `wx48bf5ba9bae0bf39`）上传开发版 **2026.11.17.4**，TOTAL **925.7 KB / 947885 Byte**，`√ upload` exit 0。
 - 🔴 边界不变：只到开发版，未提审未发版 ⇒ D-074~D-082 仍未面客；**未真机验收**（多页连裁不丢题、答案裁剪图随题入库、PDF 选页裁剪都要思傅手机实测）；未 push（AHEAD=49）。后端 dist 未动。
+
+## D-083（2026-11-18 08:2x）真机报错排查 + 两处 ActionSheet 硬上限修复
+
+**触发**：思傅报「微信开发者工具中显示有错误信息，请检查并修复」。追问后确认：**错误在真机运行时显示、不是编译问题**；IDE 已关闭重开，原始错误文案丢失。
+
+### 一、排查结果（如实）
+| 查项 | 结果 |
+|---|---|
+| `pnpm tsc` / `lint:build` / `build:weapp` | RC=0，无编译错误 |
+| `dist/` 完整性 | 64 文件，`app.json` 1637B、`project.config.json`、各页 js/json/wxml 齐全 |
+| IDE 日志中 `dist/**` ENOENT + `未找到 app.json` | **我 08:15 在 IDE 开着时跑 build 造成**（Taro 先清空 dist，IDE watcher 在空窗期热重载并缓存错误状态），已用 CLI `open --project` 重新加载消除，08:18:39 后无新增 |
+| IDE 在思傅报障时段（08:00–08:15）的 ERROR | **0 条** |
+| 后端 `gk-api` 近 24h `-p err` | **0 条** |
+| 小程序运行日志 `miniprogramLog/log2` | 只有 `wx.*` API 流水，无 JS 异常 |
+
+⇒ **思傅看到的那条真机错误原文已不可考**，本轮不宣称"已修复思傅报的那条"。
+
+### 二、代码审查发现的两个确定真机 bug（本轮修复）
+| # | 问题 | 修法 |
+|---|---|---|
+| ① | `openCroppableSource()` 在 `showLoading({mask:true})` 未关时就调 `showActionSheet`；真机上两者冲突，表现为选页弹窗失效/报错 | 出页图请求放在 try/finally，`finally` 里先 `hideLoading()`，出 try 后才 `askPage(0)` |
+| ② | PDF 出页图最多 10 页，直接塞进 `itemList`；微信 `showActionSheet` **硬上限 6 项**，>6 页真机必报 `itemList.length exceeds 6` | 每批最多 5 页 + 1 个「更多页…」，`askPage(offset)` 递归翻批；单页仍直接进裁剪器 |
+| ③ | `pickDoc()` 的 PDF 分支外层 `mask:true` loading 未关就调内层 `openCroppableSource` | 上传阶段独立开关 loading，拿到 URL 并关掉后再交给选页流程 |
+
+### 三、验证
+| 项 | 结果 |
+|---|---|
+| M62 A4（追加：分批选页 / 5 页上限 / 先关 loading 再弹窗） | **4/4** |
+| M60 + M61 回归 | **7/7** |
+| `verify:gate`（M12/13/16/18） | **38/38** |
+| `tsc` / `lint:build` | RC=0 / RC=0 |
+
+### 四、边界 / 不宣称
+- 改动**有真实依据**（两个真机 API 硬约束），但**不是根据思傅那条错误原文定位的**；原文丢失，无法确认同一根因。
+- 需要思傅在真机上重新触发并**记下错误文案**；若仍报错，按原文再定位，不靠猜。
+- 纯前端改动；后端 dist 不动；未提审未发版；未 push。
