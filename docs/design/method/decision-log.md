@@ -3335,3 +3335,11 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - 提交 `cab29f1`（前端）/ `bc977f5`（后端）/ `c950042`（测试+台账）；`build:weapp` 角标 `c950042` = HEAD；`release:check --dev` 11 通过 / 2 警告 / 0 阻断。
 - CLI（`islogin:true`、`--port 46737`）上传开发版 **2026.11.18.5**，TOTAL **936.5 KB / 959017 Byte**，`√ upload` exit 0；上传后 `cli open` 重载 IDE。
 - 🔴 后端未发货：`server/dist` 与 `/opt/gk/ocr-engine/pdf_tool.py` 均未动生产。因此**「加载后续页」和新版逐题排版在开发版上还看不到效果**，等思傅确认是否部署；未真机验收、未提审未发版、未 push（AHEAD=65）。
+
+### D-087 §九、后端生产部署回写（2026-11-18 12:0x，思傅明确授权）
+- 备份：生产旧件 5 份存 `/opt/gk/backups/D-087-20261118_115652/`（路径见 `/tmp/gk-d087-backup-path`），新文件无旧件。
+- 覆盖点名 6 件：`server/dist/pdf/pdf.service.js`、`server/dist/pdf/question-block-layout.js`（新增）、`server/dist/ocr/{ocr.controller,ocr.service,pdf-tool}.js`、`/opt/gk/ocr-engine/pdf_tool.py`；全部 `chown gk:gk` + `chmod 644`，本地与生产 sha256 逐件零差异后才 `systemctl restart gk-api`。
+- 健康：`gk-api=active`，`:3000/api/health=200`（真正健康探针），`:8080/api/health=200`。备份目录保留可回滚。
+- 实跑 1（start_page）：3 页测试 PDF，`--max-pages 3` 回 `page_count=3, index=0,1,2`；`--start-page 2 --max-pages 1` 回 `page_count=3, extracted_pages=1, index=2`（第 3 页），证明只渲增量页且页码仍是源文件绝对 0 基。
+- 实跑 2（新版式）：用原文档 `review-pack-1794972481361.pdf` 的 11 个 `source_ids` 重新调 `/api/pdf/combine`，返回 200；新文件 `review-pack-1794974312027.pdf`（doc_id `b9dfe914…`）**6 页 / 14 图 / 填充率 44.8%**（旧版 1 页）。渲染页图核对：第 1~2 页「第 1 题…第 5 题」逐题独立、题号标题清楚、图形与题面同区不撕裂，页眉日期/页脚页码齐全；裁剪图内的荧光高亮是素材本身，不是排版问题。
+- 🔴 本次为验证在正式用户 `cc6d7b10…` 文档页新增了 1 份同名 `复习资料-2026/11/18.pdf`（新版式 6 页），旧文件仍在；未在小程序端做真机验收、未提审未发版、未 push（AHEAD=67）。
