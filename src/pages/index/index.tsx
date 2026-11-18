@@ -24,6 +24,7 @@ import QrLoginModal from '@/components/qr-login-modal'
 import PolicyConsent from '@/components/policy-consent'
 import { BUILD_META } from '@/build-meta'
 import { BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
+import { hideLoadingSafe } from '@/lib/loading'
 
 /** 未选年级提示的关闭状态（本机记住，关掉后不再出现；P-005 决策 8） */
 const GRADE_NOTICE_KEY = 'gk_grade_notice_off_v1'
@@ -566,7 +567,7 @@ export default function IndexPage() {
         const keys = item.content?.question_images || []
         const nextKeys = keys.map((k, i) => (i === index ? up.key : k))
         await updateQuestion(item.id, { question_images: nextKeys })
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '图片已更新', icon: 'success' })
       } else if (editorAction === 'enhance' || editorAction === 'auto') {
         // 智能高清 / 自动调正的结果另存为新图片，原图不覆盖。
@@ -574,16 +575,16 @@ export default function IndexPage() {
         // 处理可能把图改得不适合阅读，覆盖后用户就再也回不到原图。
         const up = await uploadImage(tempFilePath, { purpose: 'save' })
         await saveQuestionAsImage(item.subject_id || '', up.key, up.url, up.timeline_id)
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '已另存新图片，原图保留', icon: 'success' })
       } else {
         await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '已更新该资料', icon: 'success' })
       }
       load(subjectFilter, { silent: true })
     } catch (e) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('保存编辑结果失败', e)
       const msg = e instanceof Error && e.message ? e.message : '保存失败，请重试'
       Taro.showToast({ title: msg, icon: 'none' })

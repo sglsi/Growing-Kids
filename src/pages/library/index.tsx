@@ -26,6 +26,7 @@ import { getSubjectColor, formatTime } from '@/types'
 import { INK, BRAND_FOREGROUND } from '@/lib/theme'
 import { guardPrivacy, reportChooseFail } from '@/utils/privacy'
 import { guardPolicy } from '@/services/policy-gate'
+import { hideLoadingSafe } from '@/lib/loading'
 
 /** 按 mime 推断资料类型标签（思傅 2026-10-24：图片入库后需要区分） */
 function getTypeLabel(mime: string | null, name: string): string {
@@ -491,7 +492,7 @@ export default function LibraryPage() {
       const up = await uploadFile(filePath, {
         purpose: 'save', archiveTo: 'library', fileName, folderId: folderQuery(),
       })
-      Taro.hideLoading()
+      hideLoadingSafe()
       if (up?.duplicated) {
         Taro.showToast({ title: up.restored ? '已存过，已为你恢复' : '这份已存过，无需重复归档', icon: 'none' })
       } else {
@@ -499,7 +500,7 @@ export default function LibraryPage() {
       }
       load({ silent: true })
     } catch (e) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('上传失败', e)
       Taro.showToast({ title: '上传失败，请重试', icon: 'none' })
     }
@@ -745,7 +746,7 @@ export default function LibraryPage() {
       Taro.showLoading({ title: '正在合成…', mask: true })
       // D-068：合成成品归入当前文件夹（keys 顺序仍严格等于 PDF 页序，不因目录改动而重排）
       const doc = await combineLibraryImages(keys, composeName.trim() || genCombineName(), folderQuery())
-      Taro.hideLoading()
+      hideLoadingSafe()
       setComposeVisible(false)
       setComposeItems([])
       setRemovedItems([])
@@ -754,7 +755,7 @@ export default function LibraryPage() {
       Taro.showToast({ title: `已合成 ${doc.images} 张图片`, icon: 'success' })
       load({ silent: true })
     } catch (e) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('[library] 多图合成失败', e)
       Taro.showToast({ title: `合成失败：${e instanceof Error ? e.message.slice(0, 20) : '请重试'}`, icon: 'none' })
     } finally {
@@ -867,9 +868,10 @@ export default function LibraryPage() {
       setComposeImage(idx, out)
     } catch (e) {
       console.error('[compose] 旋转失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: '旋转失败，请重试', icon: 'none' })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setPreviewBusy(false)
     }
   }

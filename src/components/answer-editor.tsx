@@ -23,6 +23,7 @@ import type { AnswerSearchResult, InlineFigure } from '@/services/api'
 // P-015 / D-018：事先声明文案的前端镜像（服务端缺字段时兜底，绝不出现「有内容、无声明」）
 import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference-disclaimer'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
+import { hideLoadingSafe } from '@/lib/loading'
 
 /**
  * 资料库搜题：D-055 思傅拍板「确要按 B」——保留入口 + 收敛口径 + 常驻声明。
@@ -373,6 +374,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         source: 'manual',
         created_at: new Date().toISOString(),
       })
+      // D-086：先关 loading 再弹 toast。反过来的话 showToast 会顶掉 loading 实例，
+      // 随后的 hideLoading 找不到目标 ⇒ 真机报 `hideLoading:fail:toast can't be found`。
+      hideLoadingSafe()
       Taro.showToast({ title: '已加入答案', icon: 'success' })
       /**
        * D-085：从 PDF 页列表进来的裁剪，裁完**自动回到页列表**继续选下一页。
@@ -380,15 +384,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
        */
       const back = cropFromPdfRef.current
       if (back) {
-        Taro.hideLoading()
         setAddedFromPdf((n) => n + 1)
         setPdfPages(back)
       }
     } catch (e) {
       console.error('答案图片上传失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: '上传失败', icon: 'none' })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
     }
   }
 
@@ -417,7 +421,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     try {
       const r = await fetchDocPages(url, 10)
       if (!r.pages.length) throw new Error('没有渲染出页图')
-      pages = r.pages.map((p, i) => ({ index: p.index || i + 1, url: p.url }))
+      // D-086：页码已在 fetchDocPages 里统一成 1 基，这里不再用 `|| i + 1`
+      // 兜底——0 是假值，旧写法会把第 1、2 页都显示成「第 1 页」。
+      pages = r.pages.map((p) => ({ index: p.index, url: p.url }))
     } catch (e) {
       console.error('答案 PDF 页图生成失败', e)
       Taro.showToast({
@@ -427,7 +433,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       return
     } finally {
       // 先关 mask loading 再开面板（真机上 loading 与浮层叠加会吞掉点击）
-      Taro.hideLoading()
+      hideLoadingSafe()
     }
     /**
      * ⭐ 思傅 2026-11-18（D-085）：不再用 showActionSheet 列页码。
@@ -548,7 +554,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           const up = await uploadFile(f.path, { purpose: 'temp' })
           fileUrl = up.url
         } finally {
-          Taro.hideLoading()
+          hideLoadingSafe()
         }
         await openCroppableSource(fileUrl, 'pdf', f.name || '本地 PDF')
         return
@@ -564,13 +570,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         source: 'manual',
         created_at: new Date().toISOString(),
       })
+      // D-086：先关 loading，再弹 toast（顺序反过来会触发 hideLoading:fail）
+      hideLoadingSafe()
       Taro.showToast({ title: '已加入答案', icon: 'success' })
     } catch (e) {
       // 选择阶段就失败（含隐私未声明）与上传失败共用这个 catch：
       // 取消 → 静默；隐私未声明 → 明确提示；其余 → 按上传失败提示
       reportChooseFail(e, '选择文件', '上传失败，请重试')
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
     }
   }
 
@@ -642,7 +650,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       const msg = e instanceof Error ? e.message : ''
       pendingToast = msg.slice(0, 30) || `${searchLabel}失败，请稍后重试`
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setSearching(null)
       if (pendingToast) Taro.showToast({ title: pendingToast, icon: 'none', duration: 2500 })
     }
@@ -1151,6 +1159,8 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       <MaterialPicker
         visible={pickerOpen}
         title={pickerCrop ? '从资料库选图/PDF 裁剪为答案' : '从资料库选为答案'}
+        // D-086：只列本题所属科目的资料（资料库已按科目归类），可切「全部资料」
+        subjectId={item?.subject_id || null}
         onClose={() => { setPickerOpen(false); setPickerCrop(false) }}
         onSelect={(d) => {
           if (pickerCrop) void handlePickLibraryForCrop(d)

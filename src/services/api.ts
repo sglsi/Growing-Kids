@@ -1301,7 +1301,10 @@ export async function exportRecognizedDocx(
  * Word/TXT 没有页概念（零 LO 提取），后端直接 400 并提示改用 PDF 或图片。
  */
 export async function fetchDocPages(fileUrl: string, maxPages = 10) {
-  return unwrap<{ page_count: number; pages: { index: number; url: string; width: number; height: number }[] }>(
+  const res = await unwrap<{
+    page_count: number
+    pages: { index: number; url: string; width: number; height: number }[]
+  }>(
     Network.request({
       url: '/api/ocr/doc-pages',
       method: 'POST',
@@ -1309,6 +1312,20 @@ export async function fetchDocPages(fileUrl: string, maxPages = 10) {
       header: authHeaders(),
     }),
   )
+  /**
+   * 🔴 页码基准收口（思傅 2026-11-18，D-086）：后端 `ocr-engine/pdf_tool.py:84`
+   *   返回的 `index` 是 **0 基**（`{"index": i}`，i 从 0 起），而界面一律按
+   *   「第 1 页」给人看。之前各调用点自己写 `p.index || i + 1`——0 是假值 ⇒
+   *   第 1 页被兜成 1、第 2 页（index=1）原样取 1，于是列表里出现**两个「第 1 页」**，
+   *   后面整体错位一位。不是微信 showActionSheet 的问题，是我们混了两个基准。
+   *
+   * 唯一真相：这里 +1 一次，前端所有 `index` 都当 1 基页码用（含 locate 命中表的 key）。
+   * 页面被跳过（无图页 `continue`）时页码仍取自源文件，不会因为数组下标而错位。
+   */
+  return {
+    ...res,
+    pages: (res.pages || []).map((p) => ({ ...p, index: Number(p.index) + 1 })),
+  }
 }
 
 export async function ocrPage(

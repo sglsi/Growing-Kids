@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { View, Text, ScrollView } from '@tarojs/components'
 import { FileText } from 'lucide-react-taro'
-import { fetchLibrary, fetchLibraryFolders, type LibraryDoc, type LibraryFolder } from '@/services/api'
+import { fetchLibrary, fetchLibraryFolders, fetchSubjects, type LibraryDoc, type LibraryFolder } from '@/services/api'
 import { formatTime } from '@/lib/use-selection'
 import { INK, BRAND, BRAND_FOREGROUND, BRAND_TEXT } from '@/lib/theme'
 
@@ -10,6 +10,12 @@ interface Props {
   onClose: () => void
   onSelect: (doc: LibraryDoc) => void
   title?: string
+  /**
+   * 当前题目所属科目（思傅 2026-11-18，D-086）：资料库已按科目归类，
+   * 答案裁剪/选资料时默认只列本科目，避免在一堆别的科目文件里翻。
+   * 传 null/undefined（题目未归类）⇒ 不过滤，也不显示筛选条。
+   */
+  subjectId?: string | null
 }
 
 /**
@@ -48,7 +54,7 @@ function folderPathOf(folders: LibraryFolder[], folderId: string | null | undefi
   return names.join(' / ')
 }
 
-export default function MaterialPicker({ visible, onClose, onSelect, title }: Props) {
+export default function MaterialPicker({ visible, onClose, onSelect, title, subjectId }: Props) {
   const [docs, setDocs] = useState<LibraryDoc[]>([])
   /** 思傅 2026-11-17：资料选择要能看到文件夹，否则同名文件分不清 */
   const [folders, setFolders] = useState<LibraryFolder[]>([])
@@ -56,17 +62,46 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
   const [error, setError] = useState<string | null>(null)
   /** 重试计数器：变一次就重跑一次加载 effect（visible 不变也能刷新） */
   const [reloadKey, setReloadKey] = useState(0)
+  /** D-086：只看本科目 / 看全部。题目未归类时恒为 all（无筛选条） */
+  const [scope, setScope] = useState<'subject' | 'all'>(subjectId ? 'subject' : 'all')
+  const [subjectName, setSubjectName] = useState('')
+  const prevVisibleRef = useRef(false)
+
+  // 每次重新打开都回到「本科目」——上一次为了找别的科目文件切到「全部」，
+  // 不该延续到下一道题（那等于把筛选悄悄失效）。
+  useEffect(() => {
+    if (visible && !prevVisibleRef.current) {
+      setScope(subjectId ? 'subject' : 'all')
+    }
+    prevVisibleRef.current = visible
+  }, [visible, subjectId])
+
+  useEffect(() => {
+    if (!visible) return
+    if (!subjectId) return
+    let cancelled = false
+    // 科目名只为筛选条文案；取不到就退回「本科目」，不挡列表
+    fetchSubjects()
+      .then((list) => {
+        if (cancelled) return
+        const hit = list.find((s) => s.id === subjectId)
+        if (hit?.name) setSubjectName(hit.name)
+      })
+      .catch(() => { /* 文案降级，不提示 */ })
+    return () => { cancelled = true }
+  }, [visible, subjectId])
 
   useEffect(() => {
     if (!visible) return
     let cancelled = false
     setLoading(true)
     setError(null)
+    const onlySubject = !!subjectId && scope === 'subject'
     ;(async () => {
       try {
         // 文件夹信息是辅助展示：拉取失败不能挡住选文件（老库可能没有该表）
         const [res, folderList] = await Promise.all([
-          fetchLibrary({ pageSize: 100 }),
+          fetchLibrary({ pageSize: 100, subjectId: onlySubject ? (subjectId as string) : undefined }),
           fetchLibraryFolders().catch((e) => {
             console.warn('资料库文件夹加载失败（不影响选文件）', e)
             return [] as LibraryFolder[]
@@ -84,7 +119,7 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
       }
     })()
     return () => { cancelled = true }
-  }, [visible, reloadKey])
+  }, [visible, reloadKey, scope, subjectId])
 
   if (!visible) return null
 
@@ -106,6 +141,35 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
           <Text className="block text-sm font-semibold text-foreground">{title || '从资料库选择'}</Text>
           <View className="block text-sm text-muted-foreground" onClick={onClose}>关闭</View>
         </View>
+
+        {/* D-086：科目筛选。只有题目已归类时才出现；默认就停在本科目 */}
+        {subjectId ? (
+          <View className="flex flex-row items-center gap-2 px-4 py-2 border-b border-border">
+            <View
+              className="rounded-full px-3 py-1"
+              style={{
+                backgroundColor: scope === 'subject' ? BRAND : '#F4F1EA',
+              }}
+              onClick={() => setScope('subject')}
+            >
+              <Text className="block text-xs" style={{ color: scope === 'subject' ? BRAND_FOREGROUND : INK }}>
+                仅{subjectName || '本科目'}
+              </Text>
+            </View>
+            <View
+              className="rounded-full px-3 py-1"
+              style={{ backgroundColor: scope === 'all' ? BRAND : '#F4F1EA' }}
+              onClick={() => setScope('all')}
+            >
+              <Text className="block text-xs" style={{ color: scope === 'all' ? BRAND_FOREGROUND : INK }}>
+                全部资料
+              </Text>
+            </View>
+            <Text className="block text-[11px] ml-1" style={{ color: '#8A7F72' }}>
+              按科目归类显示
+            </Text>
+          </View>
+        ) : null}
 
         <ScrollView scrollY style={{ maxHeight: '55vh' }}>
           {loading ? (
@@ -131,7 +195,9 @@ export default function MaterialPicker({ visible, onClose, onSelect, title }: Pr
           ) : docs.length === 0 ? (
             <View className="py-10 px-6 flex items-center justify-center">
               <Text className="block text-sm text-muted-foreground text-center">
-                资料库暂无内容{'\n'}先导入 PDF / Word / TXT，系统会自动归档到这里
+                {subjectId && scope === 'subject'
+                  ? `${subjectName || '本科目'}下还没有资料\n可以点上方「全部资料」，或先到资料库给文件归属科目`
+                  : '资料库暂无内容\n先导入 PDF / Word / TXT，系统会自动归档到这里'}
               </Text>
             </View>
           ) : (

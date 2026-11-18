@@ -45,6 +45,7 @@ import {
   type FigureSeg,
   type SectionedRef,
 } from '@/lib/question-locate'
+import { hideLoadingSafe } from '@/lib/loading'
 
 type Mode = 'paper' | 'split' | 'doc'
 
@@ -531,16 +532,20 @@ export default function RecognizePage() {
         },
       })
       setDrafts(result.map((r) => ({ ...r, subject_id: sid })))
+      // D-086：先关 loading 再提示，否则 toast 顶掉 loading 实例，
+      // 紧接着的 hideLoading 会报 `toast can't be found`，提示也会被抢关。
+      hideLoadingSafe()
       Taro.showToast({ title: `识别到 ${result.length} 道题`, icon: 'none' })
     } catch (e) {
       if (isJobAborted(e) || unmountedRef.current) return
       console.error('文档识别失败', e)
+      hideLoadingSafe()
       Taro.showToast({
         title: e instanceof Error ? e.message : '文档识别失败，请确认内容为文字',
         icon: 'none',
       })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setLoading(false)
     }
   }
@@ -858,11 +863,12 @@ export default function RecognizePage() {
       }
     } catch (e) {
       console.error('页面图上传失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: '图片上传失败，请重试', icon: 'none' })
       setBoardBusy(false)
       return
     } finally {
-      if (files.length > 1) Taro.hideLoading()
+      if (files.length > 1) hideLoadingSafe()
     }
     const firstNew = boardPages.length
     setBoardPages((prev) => [...prev, ...added])
@@ -917,12 +923,16 @@ export default function RecognizePage() {
       const firstNew = boardPages.length
       setBoardPages((prev) => [...prev, ...added])
       setActivePage(firstNew)
+      // D-086：先关 loading 再 toast（否则 toast 顶掉 loading，finally 里的
+      // hideLoading 会报 `hideLoading:fail:toast can't be found` 并把提示抢关）
+      hideLoadingSafe()
       Taro.showToast({ title: `已加入 ${added.length} 页，请先识别再按题号定位`, icon: 'none' })
     } catch (e) {
       console.error('PDF 页图生成失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: e instanceof Error ? e.message : '生成页图失败，请改用图片', icon: 'none' })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setBoardBusy(false)
     }
   }
@@ -1013,6 +1023,8 @@ export default function RecognizePage() {
             : x,
         ),
       )
+      // D-086：precise 有 mask loading，先关再提示（否则提示被抢关且报 toast can't be found）
+      if (precise) hideLoadingSafe()
       if (r.orient_suspect) {
         Taro.showToast({ title: '本页可能侧躺，识别结果仅供参考', icon: 'none' })
       } else if (!r.page_text.length) {
@@ -1029,7 +1041,7 @@ export default function RecognizePage() {
       setBoardPages((prev) => prev.map((x) => (x.id === p.id ? { ...x, ocr: 'error' as const, err: msg, lastMode: ocrMode } : x)))
       return null
     } finally {
-      if (precise) Taro.hideLoading()
+      if (precise) hideLoadingSafe()
     }
   }
 
@@ -1203,6 +1215,7 @@ export default function RecognizePage() {
             : x,
         ),
       )
+      if (precise) hideLoadingSafe()
       if (!r.page_text.length) {
         Taro.showToast({ title: '本图未识别到文字，可手动输入', icon: 'none' })
       } else {
@@ -1213,9 +1226,10 @@ export default function RecognizePage() {
       const msg = err instanceof Error ? err.message : '识别失败，请重试'
       console.error('题目图 OCR 失败', err)
       setBoard((prev) => prev.map((x, i) => (i === entryIdx ? { ...x, ocr: 'error', err: msg, lastMode: ocrMode } : x)))
+      if (precise) hideLoadingSafe()
       Taro.showToast({ title: msg.slice(0, 30), icon: 'none', duration: 2500 })
     } finally {
-      if (precise) Taro.hideLoading()
+      if (precise) hideLoadingSafe()
     }
   }
 
@@ -1794,7 +1808,7 @@ export default function RecognizePage() {
         ph = r?.h || ph
         if (r?.figures?.length) figs = r.figures.map((f) => ({ box: f.box, label: f.label }))
       } finally {
-        Taro.hideLoading()
+        hideLoadingSafe()
         setSeqBusy(false)
       }
       if (!segs.length) {
@@ -1867,6 +1881,8 @@ export default function RecognizePage() {
       })
       const figs: FigureSeg[] = (r.page_figures || []).map((f) => ({ box: f.box, label: f.label }))
       setBoardPages((prev) => prev.map((x) => (x.id === page.id ? { ...x, figures: r.page_figures || [] } : x)))
+      // D-086：mask loading 未关就弹 toast ⇒ 提示被 finally 的 hideLoading 抢关
+      hideLoadingSafe()
       if (!figs.length) {
         Taro.showToast({ title: '本页没检测到图形，按文字框即可', icon: 'none', duration: 2500 })
         return
@@ -1899,9 +1915,10 @@ export default function RecognizePage() {
     } catch (e) {
       if (isJobAborted(e)) return
       console.error('补全图形失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: '图形检测失败，可用手工框', icon: 'none', duration: 2500 })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setFigBusy(false)
     }
   }

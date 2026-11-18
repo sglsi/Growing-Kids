@@ -4,6 +4,7 @@
 // ============================================================
 import Taro from '@tarojs/taro'
 import { Network } from '@/network'
+import { hideLoadingSafe } from '@/lib/loading'
 
 export const USER_ID_KEY = 'gk_user_id'
 export const DEVICE_ID_KEY = 'gk_device_id'
@@ -122,7 +123,7 @@ export function openStorageFile(url: string, isPdf = false, fileKey?: string) {
     header: buildHeaders(),
     timeout: 30000,
     success: (d) => {
-      Taro.hideLoading()
+      hideLoadingSafe()
       Taro.openDocument({
         filePath: d.tempFilePath,
         fileType: isPdf ? 'pdf' : 'docx',
@@ -134,7 +135,7 @@ export function openStorageFile(url: string, isPdf = false, fileKey?: string) {
       })
     },
     fail: (e) => {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.warn('[openStorageFile] 下载失败', { url: dlUrl, err: e?.errMsg || e })
       Taro.setClipboardData({ data: url })
       Taro.showToast({ title: '加载失败，地址已复制', icon: 'none' })

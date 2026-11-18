@@ -8,6 +8,7 @@ import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders } from '@/services/net'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
+import { hideLoadingSafe } from '@/lib/loading'
 
 interface ImageEditorProps {
   visible: boolean
@@ -1033,10 +1034,10 @@ export default function ImageEditor({
       setQuad(DEFAULT_QUAD)
       setCornerMode('rect')
       setFraming(false)  // 不再显示裁剪框（干净预览）
-      Taro.hideLoading()
+      hideLoadingSafe()
       Taro.showToast({ title: '已裁剪，点「使用此图」返回', icon: 'none' })
     } catch (err) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('裁剪失败', err)
       Taro.showToast({ title: (err as any)?.message || '裁剪失败，请重试', icon: 'none' })
     } finally {
@@ -1105,13 +1106,13 @@ export default function ImageEditor({
     const suggest = (e.data as any)?.suggest as { scale?: SRScale; mode?: SRMode } | undefined
 
     if (isRate) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       Taro.showToast({ title: e.message || '高清处理太频繁，请稍后再试', icon: 'none', duration: 2500 })
       return true
     }
 
     // 503：排队超时/队列满 → 询问并自动降级到 x2 快速模式（用户已确认「排队超时后降级」）
-    Taro.hideLoading()
+    hideLoadingSafe()
     const res = await Taro.showModal({
       title: '高清处理排队较多',
       content: '是否改用「x2 快速模式」立即处理？',
@@ -1189,7 +1190,7 @@ export default function ImageEditor({
       // 后端自动检测未命中且未提供四角 → 不静默返回原图，提示用户手动拉四角（方案 §2.3）
       const needManual = (data as any)?.debug?.needManual === true
       if (needManual) {
-        Taro.hideLoading()
+        hideLoadingSafe()
         const res = await Taro.showModal({
           title: '未能自动识别试卷边缘',
           content: '是否手动拉出试卷的四个角，再试一次纠偏？',
@@ -1214,7 +1215,7 @@ export default function ImageEditor({
           }
         }
         setAiBusy(false)
-        Taro.hideLoading()
+        hideLoadingSafe()
         return
       }
 
@@ -1266,6 +1267,9 @@ export default function ImageEditor({
       const notice = (data as any)?.debug?.notice as
         | { level: 'info' | 'warn'; title: string; message: string }
         | undefined
+      // D-086：先收 mask loading 再弹提示/弹窗（否则 hideLoading 报 toast can't be found，
+      // 且 mask 遮罩会盖住弹窗内容）
+      hideLoadingSafe()
       if (notice?.title) {
         Taro.showModal({
           title: notice.title,
@@ -1282,7 +1286,7 @@ export default function ImageEditor({
       if (!degradedRetry && (await handleSrRateLimit(e, label))) {
         setCurrentSrc(lastGoodSrc)
         setAiBusy(false)
-        Taro.hideLoading()
+        hideLoadingSafe()
         return
       }
       setCurrentSrc(lastGoodSrc)
@@ -1298,7 +1302,7 @@ export default function ImageEditor({
     // 说明：降级重试通过 void handleAi(...) 异步派发，本函数随即返回；
     // 收尾（清 busy / 收 loading）统一放在 return 之前，避免与重试的 loading 交叉。
     setAiBusy(false)
-    Taro.hideLoading()
+    hideLoadingSafe()
   }
 
   /**
@@ -1350,10 +1354,10 @@ export default function ImageEditor({
       const up = await uploadImage(imgSrc, { purpose: 'save' })
       const saved = !!(up && (up.timeline_id || up.key))
       if (!saved) throw new Error('保存未生效，请重试')
-      Taro.hideLoading()
+      hideLoadingSafe()
       Taro.showToast({ title: '已保存到最近题目', icon: 'success' })
     } catch (err: any) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('保存图片失败', err)
       Taro.showToast({ title: err?.message ? err.message : '保存失败，请重试', icon: 'none' })
     } finally {
@@ -1398,7 +1402,7 @@ export default function ImageEditor({
    */
   const handleForceExit = () => {
     try {
-      Taro.hideLoading()
+      hideLoadingSafe()
     } catch {
       /* ignore */
     }
@@ -1479,10 +1483,11 @@ export default function ImageEditor({
       setCurrentSrc(out)
     } catch (e) {
       console.warn('[image-editor] 本地预览失败', e)
+      hideLoadingSafe()
       Taro.showToast({ title: '预览生成失败，请重试', icon: 'none' })
     } finally {
       setAiBusy(false)
-      Taro.hideLoading()
+      hideLoadingSafe()
     }
   }
 

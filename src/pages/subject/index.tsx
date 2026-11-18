@@ -26,6 +26,7 @@ import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
 import { openStorageFile, isPdfFile } from '@/services/net'
 import { DANGER, INK, BRAND, BRAND_TEXT, BRAND_FOREGROUND } from '@/lib/theme'
 import { formatDate, formatTime } from '@/types'
+import { hideLoadingSafe } from '@/lib/loading'
 
 const PAGE_SIZE = 20
 
@@ -442,24 +443,24 @@ export default function SubjectPage() {
         const keys = item.content?.question_images || []
         const nextKeys = keys.map((k, i) => (i === index ? up.key : k))
         await updateQuestion(item.id, { question_images: nextKeys })
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '图片已更新', icon: 'success' })
       } else if (editorAction === 'enhance' || editorAction === 'auto') {
         // 智能高清 / 自动调正：结果另存为新图片，原图保留（见首页同款说明）
         const up = await uploadImage(tempFilePath, { purpose: 'save' })
         await saveQuestionAsImage(item.subject_id || '', up.key, up.url, up.timeline_id)
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '已另存新图片，原图保留', icon: 'success' })
       } else {
         // replaceTimelineImage 内部会同步换 thumb_key（否则列表仍显示旧缩略图）
         await replaceTimelineImage({ id: item.id, subject_id: item.subject_id }, tempFilePath)
-        Taro.hideLoading()
+        hideLoadingSafe()
         Taro.showToast({ title: '已更新该资料', icon: 'success' })
       }
       const since = getSinceFromRange(range, latestTimestamp)
       await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
-      Taro.hideLoading()
+      hideLoadingSafe()
       console.error('保存编辑结果失败', e)
       const msg = e instanceof Error && e.message ? e.message : '保存失败，请重试'
       Taro.showToast({ title: msg, icon: 'none' })
@@ -549,10 +550,10 @@ export default function SubjectPage() {
         Taro.showLoading({ title: '合成中…' })
         try {
           const res = await combineToPdf(ids, format, withAnswers)
-          Taro.hideLoading()
+          hideLoadingSafe()
           openStorageFile(res.url, format === 'pdf', res.key)
         } catch (e) {
-          Taro.hideLoading()
+          hideLoadingSafe()
           console.error('合成失败', format, e)
           Taro.showToast({ title: '合成失败，请确认所选包含图片', icon: 'none' })
         } finally {

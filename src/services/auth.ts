@@ -26,6 +26,7 @@ import {
   type LoginResult,
   type UpdateProfilePayload,
 } from '@/types/auth'
+import { hideLoadingSafe } from '@/lib/loading'
 
 export type { AuthState, AuthUser, LoginResult, UpdateProfilePayload }
 export { getUserId }
@@ -220,7 +221,7 @@ export async function promptLogin(): Promise<boolean> {
   try {
     Taro.showLoading({ title: '登录中…' })
     const res = await login()
-    Taro.hideLoading()
+    hideLoadingSafe()
     const m = res.migrated
     const moved = m.subjects + m.timeline_items + m.library_docs + m.documents
     Taro.showToast({
@@ -229,7 +230,7 @@ export async function promptLogin(): Promise<boolean> {
     })
     return true
   } catch (e) {
-    Taro.hideLoading()
+    hideLoadingSafe()
     const msg = e instanceof Error ? e.message : '登录失败'
     // 关键修复：登录报错常含「未配置 WX_APPID」等较长说明，showToast 会被截断成
     // 「……」导致看不到根因。改用 showModal 完整展示，便于直接定位部署配置问题。

@@ -20,6 +20,7 @@ import { Network } from '@/network'
 import { INK, BRAND, BRAND_FOREGROUND } from '@/lib/theme'
 import { APP_NAME, ICP_FILING_NO } from '@/constants/app-info'
 import { GRADE_PICKER_LABELS, gradeLabel, toGrade, toGradeIndex } from '@/constants/grades'
+import { hideLoadingSafe } from '@/lib/loading'
 
 /**
  * 头像本机持久化副本（`chooseAvatar` 给的是临时文件，重启即失效）。
@@ -341,12 +342,15 @@ export default function ProfilePage() {
       setState((prev) =>
         prev ? { ...prev, avatarUrl: up.key } : { userId: '', nickname: '', avatarUrl: up.key, isAnonymous: false },
       )
+      // D-086：先关 loading 再 toast，别让 finally 的 hideLoading 抢关提示
+      hideLoadingSafe()
       Taro.showToast({ title: '头像已更新', icon: 'success' })
     } catch (err) {
       console.error('[profile] 头像保存失败', err)
+      hideLoadingSafe()
       Taro.showToast({ title: '头像保存失败，请重试', icon: 'none' })
     } finally {
-      Taro.hideLoading()
+      hideLoadingSafe()
       setBusy(false)
     }
   }
