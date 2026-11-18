@@ -51,7 +51,7 @@ m.test('A2 PDF 合成：无顶部页头、题号缩半、插入按题型留白',
   c.ok(/`__space:\$\{g\}`/.test(pdf) && /kind: 'space'/.test(pdf), '须插入无图的做题空白行')
   c.ok(/u\.role === 'question'\)\?\.spacePt/.test(pdf) && /practiceSpacePoints\(label, stemForType\)/.test(pdf),
     '留白高度须来自题型判定，不是一刀切')
-  c.ok(/layout: 'question-blocks-v2'/.test(pdf), '版式版本须 bump 到 v2 便于回溯')
+  c.ok(/layout: 'question-blocks-v[23]'/.test(pdf), '版式版本须为 v2 或更高（D-089 为 v3）便于回溯')
   c.ok(!/复习资料 · \$\{day\}/.test(pdf), '页眉文案不许再出现')
 })
 

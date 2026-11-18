@@ -3375,3 +3375,36 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - 覆盖点名 3 件：`dist/pdf/pdf.service.js`、`dist/pdf/question-block-layout.js`、`dist/pdf/question-space.js`；全部 `chown gk:gk` + `chmod 644`，本地与生产 sha256 逐件零差异后 `systemctl restart gk-api`。健康：`gk-api=active`、`:3000/api/health=200`、`:8080/api/health=200`。
 - 实跑：用原 11 个 `source_ids` 调 `/api/pdf/combine` 返回 200；新文件 `review-pack-1794975938346.pdf`（doc_id `61f69592…`）**6 页 / 14 图 / 填充率 39.7%**（D-087 v1 为 44.8%，留白增加）。渲染页图核对：顶部「复习资料」页头消失；「第 1 题 / 第 2 题」等题号明显变小；题面与下一题之间可见做题空白，题面与解答仍同区不撕裂；荧光高亮来自原始裁剪素材。
 - 🔴 为验证在正式用户 `cc6d7b10…` 文档页新增 1 份 `复习资料-2026/11/18.pdf`（v2 6 页），旧的两份保留。仍未真机验收、未提审未发版、未 push（AHEAD=71）。
+
+## D-089（2026-11-18 13:3x）：复习资料「含答案」版符号 / 标签 / 间隙 / 跨页 / 漏答案五修
+
+### 一、问题（思傅看生产「复习资料（含答案）-2026/11/18」提出）
+1. 数学符号显示成**存储的代码**（`\frac` / `\sqrt`），不是 √、分数等可读符号；
+2. 要去掉「解答（思路与过程）」标签；
+3. 「正确答案」改成「答案」；
+4. 答案与题干间隙太大，缩成正常一个换行；
+5. 长解答（如第 5 题）要能占两页，内容少的 2/3/4 页要能合并一页；
+6. 部分题没显示答案，问原因。
+
+### 二、根因（均定位到代码，不靠猜）
+- **符号变代码**：`answer-editor.tsx` 注释实锤——库里唯一真相是 LaTeX，前端 view 态用 `latexToReadable` 转可读显示；PDF 的 `renderTextPng` 直接把 LaTeX 原文画进 SVG ⇒ 代码外泄。
+- **每题独占一页 / 答案离题面远**：D-088 给答案卷也留了应用题 96pt 做题空间，每题高度逼近整页 ⇒ 一页塞不下两题；且版式引擎 `allowSplit=false` 一题超高就整块压缩、绝不跨页。
+- **漏答案**：`fetchImages` 只读 `answer_image_urls`（来自 `content.answer_images`），但 D-082 起答案还能走**文件/图片附件** `answer_attachments`（image 类型 + url），这条路径从没进合成 ⇒ 附件形式的图片答案整片漏掉。
+
+### 三、改动（真相源 + 判据）
+- 服务端零依赖移植前端转换器：`src/utils/latex.ts` → `server/src/pdf/latex.ts`（1022 行，零 import，逐字同源）；`renderTextPng` 在折行前对每行 `latexToReadable`，与前端 view 态一致；三种输入全覆盖（`$…$` / 裸 `\frac` / 纯文字原样），解析失败原样保留、幂等。
+- 去标签：不再 `specs.push([...':answer', '解答（思路与过程）'])`；heading `'正确答案：'` → `'答案：'`。
+- 间隙：含答案卷 `spacePt = min(rawSpacePt, 20)`（一个换行），练习卷保持 96/24pt 做题空间不变。
+- 跨页：`layoutQuestionBlocks` 加 `allowSplit?: boolean`；true 走流式分行（短题合并同页、长题按行拆两页，题号只在题首出现一次，绝不重排/不压缩题图），false 保留旧「一题一区块不跨页」；`combineIntoPdf` 传 `{ allowSplit: includeAnswers }`。
+- 漏答案：`includeAnswers` 分支把 `answer_attachments` 中 `type==='image' && url` 的附件也 push 为 answer 单元（doc/text 附件不进图像流）。
+- `meta.layout` bump v2 → **v3**（改版式结构必 bump）。
+
+### 四、边界 / 不宣称
+- LaTeX 转换只覆盖中小学常见子集（同前端）；不支持的语法原样保留，不显示错误数学式。
+- 老 PDF 不会自动重排；要看到新样式必须重新生成。前端包未改、无需重传开发版。
+- 漏答案修复只覆盖**图片类附件**；若某题答案是纯文本但存进了非标准字段，仍需看真实数据确认（本轮拿不到生产 DB：专属 SSH 密钥 `gk_l3` 已不在本机、agent 失效、公网 API 需 token）。
+- 未真机验收、未提审未发版；后端生产未部署（待思傅授权）。
+
+### 五、验证
+- M68 新增 4/4（LaTeX 转换 / 静态契约 / 跨页纯函数 / 旧模式不变）；M67 3/3（v2 断言放宽到 v2+）、M65 4/4、M66 4/4、`verify:gate` 38/38、`nest build` RC=0；门禁组合 45/45。
+- `dynamic-tests/run-d089-preview.mjs`：真编译服务端 latex + 版式引擎，出 `.tmp/d089-preview.pdf`；抽样 `$\frac{1}{2}+\sqrt{3}$` → `1/2+√3` 正确。
