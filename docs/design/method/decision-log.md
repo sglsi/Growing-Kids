@@ -3408,3 +3408,30 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 ### 五、验证
 - M68 新增 4/4（LaTeX 转换 / 静态契约 / 跨页纯函数 / 旧模式不变）；M67 3/3（v2 断言放宽到 v2+）、M65 4/4、M66 4/4、`verify:gate` 38/38、`nest build` RC=0；门禁组合 45/45。
 - `dynamic-tests/run-d089-preview.mjs`：真编译服务端 latex + 版式引擎，出 `.tmp/d089-preview.pdf`；抽样 `$\frac{1}{2}+\sqrt{3}$` → `1/2+√3` 正确。
+
+## D-090（2026-11-18 14:1x）：前端展示态 LaTeX 源码外泄修复 + D-089 生产实跑核对
+
+### 一、问题（思傅看生产复习资料后追问）
+「项目中一些地方显示的是 LaTeX 源码而不是数学符号，如答案；存储按代码存储没问题，但显示要显示正确符号方便阅读。」
+
+### 二、真实数据实锤（本轮终于用默认密钥连上生产，纠正前轮「密钥失效」误判）
+- 🔴 **前轮误判纠正**：生产 SSH 用户名是 `ubuntu`（不是 root/ubu），`ssh ubuntu@42.192.36.120 -i ~/.ssh/id_ed25519` 实测连通。本机 `~/.ssh/config` 无、`gk_l3` 无；生产 `authorized_keys` 2 行（腾讯云预置 rsa + detective ed25519），`PasswordAuthentication no`。已给思傅独立密钥生成+追加步骤（未执行，暂用原密钥）。
+- `timeline_items` 答案字段形态（生产 656 行）：**含 `\` LaTeX 命令 3 行**（`$\dfrac{15\sqrt{3}}{4}$`、`\sqrt{13}`、`\frac{-3±\sqrt{5}}{2}`）、纯文本 484、空 169。→ 库存 LaTeX 属实。
+- D-089「漏答案」根因**数据实锤**：11 题里 `5e368b4e`/`b900f33d` 两题答案为 `answer_attachments`（各 2 附件，**answer 文本与 answer_images 全空**）⇒ 旧 dist 只读 answer_images 必漏；D-089 补的附件路径正是解药。另有 `34048b88` 三种答案源全空（真空题，非 bug）。
+
+### 三、前端修复（存储仍 LaTeX，只动展示态）
+- `review-item-card.tsx`：题干摘要抽 `stemText = latexToReadable(c.question)`，带图/纯文本两分支共用；答案摘要 `truncate(latexToReadable(c.answer), 60)`。首页/科目页/汇总页题目卡全复用此组件 ⇒ 一处覆盖三页。
+- `detail/index.tsx`：题干预览 `questionRichHtml(latexToReadable(qContent))`、相似题题干 `latexToReadable(s.question)`。
+- 编辑态 textarea 保留 LaTeX 源码是正确设计（与库同源，便于继续编辑），不在改动范围。
+- `latexToReadable` 对 `[图N]` 标记与纯文本幂等（真编译验证），不破坏插图定位。
+
+### 四、D-089 生产部署（思傅明确授权后执行）
+- 精准换 dist：`nest build` → 9 文件打包 scp → 备份 `/opt/gk/backups/D-089-20261118_140834/`（20 文件）→ 只覆盖 `dist/pdf/{pdf.service,latex,question-block-layout}.{js,d.ts,js.map}` + chown gk:gk + chmod 644 → sha256 三核心文件 `OK` → `systemctl restart gk-api` active → 真健康 `:3000/api/health` 200、公网 200、新特征串 `question-blocks-v3`/`latexToReadable` 各命中 1。
+- 线上实跑：11 题 `POST /api/pdf/combine {include_answers:true}` → **200**，新 `review-pack-1794982302923.pdf`（12 页 / 27 图 / 填充率 48.7%），对比旧版 6 页 —— 长解答跨页 + 附件答案纳入使页数合理增加。下载本地 `.tmp/d089-prod/` 供目视核对。
+- 本地新增 M69 3/3（前端展示态静态契约 + latex 幂等真编译）；M66 A4 的 v2→v3 断言同步（D-089 bump v3 时漏同步，本轮补）；门禁组合 M12/13/16/18/65/66/67/68/69 **56/56** 全绿；`pnpm tsc`/`pnpm lint:build` RC=0；`nest build` RC=0。
+
+### 五、边界 / 不宣称
+- LaTeX 转换只覆盖中小学常见子集（同前端 latex.ts），不支持语法原样保留。
+- PDF 文字是位图渲染，「√」vs「\sqrt」机器测不出，须思傅目视核对新 PDF。
+- 前端包未重编译/未上传开发版（本轮只改源码 + 后端部署）⇒ 小程序端新显示需下次上传开发版才可见。
+- 未真机验收、未提审未发版、未 push。
