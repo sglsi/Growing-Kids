@@ -153,6 +153,34 @@ export interface RecropWrongDto {
   answer_image_keys?: string[]
 }
 
+/**
+ * P-032：后端高分直裁请求体：POST /api/image/crop-box
+ *
+ * 前端只传「来源图 URL + 归一化框」，后端从原始高分图（不经微信 Canvas 1365 墙）
+ * 用 sharp 按框裁 → ingest 入库 → 回 key/url。归一化框与 scale 无关，同一框
+ * 前端按 1365 裁、后端可按页图原生分辨率（A4@3 ≈1786px）裁，绕开墙提清晰度。
+ */
+export interface CropBoxDto {
+  /** 来源图公网 URL（docPages 渲染的页图 URL；自家 storage 会读 original） */
+  image_url: string
+  /** 归一化裁剪框（相对整图宽高，0~1；与 image-editor 的 crop 同口径） */
+  box: { x: number; y: number; w: number; h: number }
+  /** 顺时针旋转角度（0/90/180/270）；源图若已烘焙旋转则为 0 */
+  rotation?: number
+}
+
+/** `POST /api/image/crop-box` 的响应体 */
+export interface CropBoxResult {
+  /** 入库后的展示图 key（uploadImage 返回结构兼容） */
+  key: string
+  url: string
+  thumb_key?: string
+  thumb_url?: string
+  /** 裁块实际像素尺寸（验证「>1365」用） */
+  width: number
+  height: number
+}
+
 /** 用户框 vs 系统框的差集度量（P2 反馈） */
 export interface BoxFeedback {
   /** 交并比 [0,1]；1 = 完全重合 */

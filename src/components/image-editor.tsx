@@ -7,7 +7,7 @@ import { RotateCw, RotateCcw, Crop, Undo2, X, Wand, Sparkles, Database, Maximize
 import { isRemoteImageUrl } from '@/utils/url'
 import { buildHeaders } from '@/services/net'
 import { BRAND, BRAND_FOREGROUND } from '@/lib/theme'
-import { processImage, uploadImage, fetchImageCapabilities, ApiError, type ImageAction } from '@/services/api'
+import { processImage, uploadImage, fetchImageCapabilities, cropBoxHighRes, ApiError, type ImageAction, type CropUploaded } from '@/services/api'
 import { hideLoadingSafe } from '@/lib/loading'
 
 interface ImageEditorProps {
@@ -15,6 +15,17 @@ interface ImageEditorProps {
   src: string
   onCancel: () => void
   onConfirm: (tempFilePath: string) => void
+  /**
+   * P-032：后端高分直裁的结果出口。开启 `highResCrop` 时，`cropOnly + rect` 确认后
+   * 走后端 sharp 裁（绕开 Canvas 1365 墙），已入库的 {key,url} 从这里回传，
+   * 调用方直接当 uploadImage 结果用、不再二次上传。不传则保持老路径（onConfirm 本地路径）。
+   */
+  onConfirmUploaded?: (result: CropUploaded) => void
+  /**
+   * P-032：是否启用后端高分直裁。只对「来源是可云端取回的图（docPages 页图/资料库图）」
+   * 的裁剪场景开启；本地临时拍照图不开（后端取不到本地路径）。
+   */
+  highResCrop?: boolean
   /** 打开编辑器后自动执行的 AI 处理 */
   autoAction?: ImageAction | null
   /**
@@ -195,7 +206,7 @@ const SR_MODES: { value: SRMode; label: string; hint: string }[] = [
 ]
 
 export default function ImageEditor({
-  visible, src, onCancel, onConfirm, autoAction = null, enableSaveToInbox = true,
+  visible, src, onCancel, onConfirm, onConfirmUploaded, highResCrop = false, autoAction = null, enableSaveToInbox = true,
   cropOnly = false, confirmText, cropTargetLabel, initialCrop, cropKey,
 }: ImageEditorProps) {
   const [currentSrc, setCurrentSrc] = useState(src)
@@ -1369,6 +1380,26 @@ export default function ImageEditor({
     if (busy || aiBusy) return
     setBusy(true)
     try {
+      // P-032：后端高分直裁。cropOnly + 矩形框 + 开启开关 + 调用方提供回传出口时，
+      // 只把「来源图 URL + 归一化框」送后端用 sharp 从原始高分图裁（绕开 Canvas 1365 墙），
+      // 后端已入库，结果直接从 onConfirmUploaded 回传（不再走本地 Canvas 导出/二次上传）。
+      // 任一条件不满足（含后端失败）→ 回退老路径，保证功能不缺出口。
+      if (highResCrop && cropOnly && cornerMode === 'rect' && onConfirmUploaded) {
+        const sourceUrl = isRemoteImageUrl(currentSrc) ? currentSrc : (isRemoteImageUrl(src) ? src : '')
+        if (sourceUrl) {
+          try {
+            const up = await cropBoxHighRes({
+              image_url: sourceUrl,
+              box: { x: crop.x, y: crop.y, w: crop.w, h: crop.h },
+              rotation: 0,
+            })
+            onConfirmUploaded({ key: up.key, url: up.url, thumb_key: up.thumb_key, thumb_url: up.thumb_url })
+            return
+          } catch (e) {
+            console.warn('[P-032] 后端高分直裁失败，回退前端 Canvas 裁剪', e)
+          }
+        }
+      }
       // 统一规则（思傅 2026-10-19 定）：「未点确定裁剪 = 不裁剪」。
       // 除 cropOnly（#150 页内裁剪入图：整页即为裁剪服务，矩形模式下底部主按钮
       // 就是「确认裁剪并返回」的出口，保留按框导出）外，其余模式一律直接回传

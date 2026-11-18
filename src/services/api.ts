@@ -1202,6 +1202,35 @@ export async function recropWrongBlock(params: {
   }
 }
 
+/** P-032：后端高分直裁已入库的结果（与 uploadImage 返回兼容，调用方直接用、不再二次上传） */
+export interface CropUploaded {
+  key: string
+  url: string
+  thumb_key?: string
+  thumb_url?: string
+}
+
+/**
+ * P-032：后端高分直裁。只传来源图 URL + 归一化框，后端从原始高分图用 sharp 裁，
+ * 绕开微信 Canvas 2D 的 1365px 硬墙。返回与 uploadImage 兼容的 {key,url,thumb_*}，
+ * 调用方可直接当「已上传」结果用（无需再 uploadImage 二次上传）。
+ */
+export async function cropBoxHighRes(params: {
+  image_url: string
+  box: { x: number; y: number; w: number; h: number }
+  rotation?: number
+}): Promise<CropUploaded & { width: number; height: number }> {
+  const data = await unwrapResponse<CropUploaded & { width: number; height: number }>(
+    Network.request({
+      url: '/api/image/crop-box',
+      method: 'POST',
+      data: params,
+      header: authHeaders(),
+    }),
+  )
+  return data
+}
+
 // 文档导入识别
 /**
  * 文档（多页 PDF / Word / TXT）识别。

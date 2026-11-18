@@ -11,7 +11,7 @@ import { StorageService } from '../storage/storage.service'
 import { IngestService } from '../storage/ingest.service'
 import { assertSafeHttpUrl } from '../shared/ssrf-guard'
 import { TimelineService } from '../timeline/timeline.service'
-import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource, RecropWrongDto, RecropWrongResult, BoxFeedback, PageBox, PageTextSegment, OcrPageDto, OcrPageResult } from './image.types'
+import type { ImageAction, ProcessImageDto, ImageProcessResult, ExtractWrongDto, ExtractWrongResult, WrongqBlockSource, RecropWrongDto, RecropWrongResult, BoxFeedback, PageBox, PageTextSegment, OcrPageDto, OcrPageResult, CropBoxDto, CropBoxResult } from './image.types'
 import {
   fitSizeToRatio,
   isSizeValid,
@@ -1240,6 +1240,72 @@ export class ImageService {
       stem,
       ...(vlFullText ? { vl_full_text: vlFullText } : {}),
     } as RecognizedItem
+  }
+
+  /**
+   * P-032：后端高分直裁：POST /api/image/crop-box
+   *
+   * 前端只传来源图 URL + 归一化框，后端从**原始高分图**用 sharp 按框裁 → ingest。
+   * 与前端 Canvas 2D 裁剪的本质差别：不受微信 `MAX_CANVAS_SIDE=1365` 硬墙限制，
+   * 页图是 docPages 按 GK_PDF_RENDER_SCALE（默认 3，A4≈1786px）渲染的 PNG，
+   * 裁块可保留原生分辨率（合成链路 D-091 的 downloadOriginalPreferred 会读 original）。
+   *
+   * 归一化框与 scale 无关 ⇒ 前端展示/拖拽仍可用低分辨率预览，裁剪精度不丢。
+   * 旋转在后端用 sharp 烘焙（前端 cropOnly 模式 rotation 恒 0，此分支是通用兜底）。
+   */
+  async cropByBox(
+    userId: string,
+    dto: CropBoxDto,
+    forwardHeaders: Record<string, string>,
+  ): Promise<CropBoxResult> {
+    if (!dto?.image_url) throw new BadRequestException('image_url 不能为空')
+    if (!dto.box) throw new BadRequestException('box 不能为空')
+    const fwd = HeaderUtils.extractForwardHeaders(forwardHeaders)
+    const srcBuffer = await this.fetchImage(dto.image_url, fwd)
+
+    // 旋转烘焙（通用兜底）：先把整图按 rotation 转好，再在其上按框裁。
+    // 注意：前端 cropOnly 的框是相对「已烘焙旋转的当前图」，故 rotation 传 0；
+    // 这里只在调用方显式给非 0 时才转，避免二次旋转。
+    const rot = ((Number(dto.rotation ?? 0) % 360) + 360) % 360
+    const oriented = rot === 0
+      ? srcBuffer
+      : await sharp(srcBuffer).rotate(rot).png().toBuffer()
+    const meta = await sharp(oriented).metadata()
+    const W = meta.width || 0
+    const H = meta.height || 0
+    if (!W || !H) throw new BadRequestException('来源图尺寸无效')
+
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)))
+    // 归一化框 → 像素框；夹紧到整图范围并保证至少 1px（防越界/退化框打翻 sharp）
+    const left = clamp(dto.box.x * W, 0, W - 1)
+    const top = clamp(dto.box.y * H, 0, H - 1)
+    const right = clamp((dto.box.x + dto.box.w) * W, 0, W - 1)
+    const bottom = clamp((dto.box.y + dto.box.h) * H, 0, H - 1)
+    const width = Math.max(1, right - left + 1)
+    const height = Math.max(1, bottom - top + 1)
+    if (width < 2 || height < 2) throw new BadRequestException('框选范围过小，请重新框选')
+
+    // 无压缩直出 PNG（保原生分辨率）；ingest 会存 originalKey 原图 + display 1600px，
+    // 合成端读 original ⇒ 清晰度不被 ingest 的 display 档吃掉。
+    const cropBuf = await sharp(oriented)
+      .extract({ left, top, width, height })
+      .png()
+      .toBuffer()
+    const ing = await this.ingestService.ingest(cropBuf, 'image/png')
+    const url = await this.storageService.getPublicUrl(ing.key)
+    const thumbUrl = ing.thumbKey ? await this.storageService.getPublicUrl(ing.thumbKey) : undefined
+    console.log(
+      `[crop-box] uid=${userId} src=${W}x${H} box=(${left},${top},${width},${height}) ` +
+        `n=${width}x${height} key=${ing.key}${width > 1365 ? ' (越过Canvas墙)' : ''}`,
+    )
+    return {
+      key: ing.key,
+      url,
+      thumb_key: ing.thumbKey,
+      thumb_url: thumbUrl,
+      width,
+      height,
+    }
   }
 
   /**

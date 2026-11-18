@@ -24,7 +24,7 @@ import {
   recognizeDocumentByUrl, uploadFile, uploadImage, saveQuestionAsImage, exportRecognizedDocx, createTimelineBatch,
   recropWrongBlock, ocrPage, exportBoardDocx, diagnoseOcr, fetchDocPages,
   warmupOcr, warmupQuiet,
-  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload, type PageFigure,
+  type Subject, type RecognizeResult, type LibraryDoc, type ImageAction, type WrongBlockSummary, type PageTextSegment, type BoardExportItem, type CreateTimelinePayload, type PageFigure, type CropUploaded,
 } from '@/services/api'
 import { openStorageFile } from '@/services/net'
 import { isJobAborted } from '@/services/jobs'
@@ -1354,7 +1354,19 @@ export default function RecognizePage() {
    * 裁剪确认：上传裁剪图 → 新建一题或追加到指定题的题干图 / 解答图。
    * ⚠️ 新题在**确认之后**才建（不是打开编辑器时就建）：中途退出不会留下空题。
    */
-  const handleCropConfirm = async (path: string) => {
+  /**
+   * P-032：裁剪结果归一。老路径传本地 path（要 uploadImage），
+   * 后端高分直裁传已入库的 CropUploaded（直接用，不二次上传）。
+   */
+  const resolveCropResult = async (
+    input: string | CropUploaded,
+  ): Promise<{ key: string; url: string; thumb_key?: string; thumb_url?: string }> => {
+    if (typeof input !== 'string') return input
+    const up = await uploadImage(input, { purpose: 'attach' })
+    return { key: up.key, url: up.url, thumb_key: up.thumb_key, thumb_url: up.thumb_url }
+  }
+
+  const handleCropConfirm = async (path: string | CropUploaded) => {
     const task = cropEditor
     setCropEditor(null)
     if (!task || !path) return
@@ -1369,7 +1381,7 @@ export default function RecognizePage() {
       //    （引用计数 +1，永久保留，不会被 24h 孤儿 GC 回收），且不建任何条目，
       //    只返回 key/url，由本题保存时写进 content.question_images。
       //    对照：handleSaveImageDirect（整卷图直存）确需 'save'，那是要单独成条目的。
-      const up = await uploadImage(path, { purpose: 'attach' })
+      const up = await resolveCropResult(path)
       const img = { url: up.url, key: up.key }
       if (task.entryIdx < 0) {
         // 一次裁剪任务 = 一道新题；空题在退出时不会建，只有确认成图才落进清单
@@ -1924,13 +1936,13 @@ export default function RecognizePage() {
   }
 
   /** 编辑器确认：先把裁好的图传成附件（不建条目，避免首页多出重复行），再回填该行 */
-  const handleSeqCropConfirm = async (tempPath: string) => {
+  const handleSeqCropConfirm = async (tempPath: string | CropUploaded) => {
     const task = seqCropping
     setSeqCropping(null)
     if (!task) return
     setSeqBusy(true)
     try {
-      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      const up = await resolveCropResult(tempPath)
       setSeqRows((prev) =>
         prev.map((r, i) => {
           if (i !== task.idx) return r
@@ -2964,8 +2976,10 @@ export default function RecognizePage() {
           confirmText="用这张图"
           cropTargetLabel={`第 ${seqCropRow.label} 题 · ${seqCropping.kind === 'stem' ? '题目区' : seqCropping.kind === 'extra' ? '补充块（跨栏/跨页）' : '解答区'}`}
           enableSaveToInbox={false}
-          onCancel={() => setSeqCropping(null)}
+          highResCrop
           onConfirm={(p) => void handleSeqCropConfirm(p)}
+          onConfirmUploaded={(r) => void handleSeqCropConfirm(r)}
+          onCancel={() => setSeqCropping(null)}
         />
       ) : null}
 
@@ -2982,8 +2996,10 @@ export default function RecognizePage() {
               ? `解答图将存入：第 ${cropEditor.entryIdx + 1} 题`
               : `题目图将补进：第 ${cropEditor.entryIdx + 1} 题`}
           enableSaveToInbox={false}
-          onCancel={() => setCropEditor(null)}
+          highResCrop
           onConfirm={(p) => void handleCropConfirm(p)}
+          onConfirmUploaded={(r) => void handleCropConfirm(r)}
+          onCancel={() => setCropEditor(null)}
         />
       ) : null}
 

@@ -2,7 +2,7 @@ import { Controller, Post, Get, Body, HttpCode, HttpException, Req } from '@nest
 import { ImageService } from './image.service'
 import { OcrService } from '../ocr/ocr.service'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
-import type { ProcessImageDto, ExtractWrongDto, RecropWrongDto, OcrPageDto } from './image.types'
+import type { ProcessImageDto, ExtractWrongDto, RecropWrongDto, OcrPageDto, CropBoxDto } from './image.types'
 
 /** 后端图像能力版本号：前端据此判断线上服务是否包含本地处理管线 */
 const IMAGE_CAPABILITIES_VERSION = 3
@@ -152,6 +152,22 @@ export class ImageController {
     const userId = requireUserId(req)
     const headers = (req.headers || {}) as Record<string, string>
     const data = await this.imageService.recropWrongBlock(userId, dto, headers)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /**
+   * P-032：后端高分直裁。POST /api/image/crop-box
+   *
+   * 前端只传来源图 URL + 归一化框，后端从原始高分图用 sharp 按框裁 → ingest 入库，
+   * 回 {key,url,width,height}（与 uploadImage 返回兼容）。绕开微信 Canvas 1365 墙，
+   * 页图按 GK_PDF_RENDER_SCALE=3 渲染时裁块可保留原生分辨率。
+   */
+  @Post('crop-box')
+  @HttpCode(200)
+  async cropBox(@Body() dto: CropBoxDto, @Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    const headers = (req.headers || {}) as Record<string, string>
+    const data = await this.imageService.cropByBox(userId, dto, headers)
     return { code: 200, msg: 'success', data }
   }
 

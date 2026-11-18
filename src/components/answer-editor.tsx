@@ -19,7 +19,7 @@ import { locateQuestions, type Rect01 } from '@/lib/question-locate'
 import { isJobAborted } from '@/services/jobs'
 import { AI_DISABLED_HINT, ensureAiSetting } from '@/services/ai-settings'
 import type { AnswerAttachment, TimelineItem } from '@/types'
-import type { AnswerSearchResult, InlineFigure } from '@/services/api'
+import type { AnswerSearchResult, InlineFigure, CropUploaded } from '@/services/api'
 // P-015 / D-018：事先声明文案的前端镜像（服务端缺字段时兜底，绝不出现「有内容、无声明」）
 import { REFERENCE_DISCLAIMER, REFERENCE_ITEM_HINT } from '@/constants/reference-disclaimer'
 import { BRAND, BRAND_TEXT, BRAND_FOREGROUND, DANGER, INK } from '@/lib/theme'
@@ -360,11 +360,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
   }
 
-  const handleCropConfirm = async (tempPath: string) => {
+  const handleCropConfirm = async (tempPath: string | CropUploaded) => {
     setCropSrc('')
     Taro.showLoading({ title: '上传中' })
     try {
-      const up = await uploadImage(tempPath, { purpose: 'attach' })
+      // P-032：后端高分直裁已入库 ⇒ 直接用；老路径本地图 ⇒ uploadImage。
+      const up = typeof tempPath === 'string'
+        ? await uploadImage(tempPath, { purpose: 'attach' })
+        : tempPath
       await addAttachment({
         id: newId(),
         type: 'image',
@@ -1162,6 +1165,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         initialCrop={cropRect || undefined}
         cropOnly
         enableSaveToInbox={false}
+        highResCrop
         confirmText="用作答案图"
         cropTargetLabel={`答案将存入：${label}`}
         onCancel={() => {
@@ -1171,6 +1175,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
           if (back) setPdfPages(back)
         }}
         onConfirm={(p) => void handleCropConfirm(p)}
+        onConfirmUploaded={(r) => void handleCropConfirm(r)}
       />
 
       {/* D-085：PDF 页缩略图选择器（替代文字页码 ActionSheet） */}
