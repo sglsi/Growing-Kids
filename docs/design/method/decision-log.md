@@ -3518,3 +3518,32 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - 存量 11 题不重裁、不变清晰。本地拍照图裁剪不开 highResCrop（后端取不到本地临时路径，自动回退 Canvas）。
 - 后端失败自动回退前端 Canvas 裁剪，功能不缺出口。
 - **未部署生产、未上传小程序、未提审、未发版、未 push、零生产写入**；「已实现」≠「已面客」。放行前实证项见 P-032 §4。
+
+---
+
+## D-094 · P-032/D-092 后端换 dist 上生产 + 前端上传开发版 + 端到端实测（2026-11-18 20:5x）
+
+### 一、触发与范围
+- 思傅指示「换后端 dist 重启 → 上传开发版 → 真机裁一题出样张 PDF 实测 DPI」。
+- D-089 部署点（commit 45d0fb6）之后，D-091/092/093 三批后端改动均未上生产，且 P-032 的 `cropByBox` 依赖 D-091 的存储读原图改动 ⇒ 必须一起换才自洽。
+
+### 二、换 dist（精准替换，备份先行）
+- 本地 `pnpm build`（nest build RC=0）；6 候选里 `image.types.js` 生产/本地 sha256 相同（纯类型擦除，2 行）无需换，实换 **5 文件**：`image.service.js`/`image.controller.js`/`pdf.service.js`/`storage/service.js`/`ocr.service.js`。编译产物无 `@/` 别名残留。
+- 生产旧文件备份 `/opt/gk/backups/D-093-20261118_205109`（5 文件，sha256 逐一核对与生产原文件一致）。
+- scp tar → 解包校验 → `sudo cp` 覆盖 → `chown gk:gk` + `chmod 644` → 复比生产 sha256 **5/5 与本地零差异** → 才 `sudo systemctl restart gk-api`。
+- 验证：gk-api active since 20:51:28；真健康 `:3000/api/health` 与公网 health 均 200；新特征串 `crop-box`/`cropByBox`/`GK_PDF_RENDER_SCALE` 各命中 1。
+- 环境核对陷阱：`.env.bak-pubbase-20261108-225205` 里有旧 `STORAGE_PUBLIC_BASE_URL=http://42.192.36.120`，**非生效配置**；生效 `.env` 是 `https://deep-root.cn`（正确）。
+
+### 三、端到端实跑（生产服务端复刻真机裁剪链路，非真机 UI 操作）
+- token：真实 uid `cc6d7b10-…`（管理员）经 `/tmp/gen-token.cjs` + `.env.secrets` 签；`1794982302923` 是样张号非用户 id ⇒ 401，已纠正。
+- ① `POST /api/ocr/doc-pages`（`file_url` = 生产扫描 PDF `2026年陕西省英语中考真题.pdf`，max_pages=1）：返回页图 **1785×2526**（A4@216dpi，D-092 scale=3 生效实锤）。
+- ② `POST /api/image/crop-box`（该页图 + 归一化框 `{x:.03,y:.15,w:.93,h:.18}`）：HTTP 200，裁块 **1661×456px**，日志 `[crop-box] src=1785x2526 box=(54,379,1661,456) … (越过Canvas墙)`。前端同框 Canvas 只能到 1365px。
+- ③ 下载裁块 `original.png` 实测原生 **1661×456px / 227 DPI**（527pt 打印宽）——与 P-032 模拟预测 1662px/227dpi 一致。
+- ④ `POST /api/pdf/combine`（5 个存量题 id，无答案版）：200，3 页/5 图；下载样张 `.tmp/d093-prod/no-answer-d093.pdf` 实测：题图 117~155 DPI（5 张），**11/13 <150、13/13 <200**；72DPI 的是「第N题」标签图（120×24/144×32）非正文。⇒ **存量题未变清晰**，与 D-093「不动存量」一致。
+- 前端触发条件核对：`handleConfirm` 中 `highResCrop && cropOnly && rect && onConfirmUploaded` 时取远程 `currentSrc`（docPages URL）走 `cropBoxHighRes`；三处调用方（recognize 两处、answer-editor 一处）均传 `highResCrop` ⇒ 真机 PDF 页图裁剪会走新端点，失败回退 Canvas。
+- 前端重新 `pnpm build:weapp`（13.51s，dist 含 highResCrop）+ `release:check --dev`（11 通过/2 警告/0 阻断，角标 19dd32e=HEAD）+ CLI 上传开发版 **2026.11.18.7**（937.3KB/959831Byte，exit0，端口 46737）+ `cli open` 重载清假 ENOENT。
+
+### 四、诚实边界
+- 真机 UI 操作（手机上手裁一题）由思傅执行，本轮为**生产服务端复刻链路**实测，非真机截图佐证；真机端请以开发版 2026.11.18.7 复现确认。
+- **新裁题 227dpi、存量题仍 ~150dpi**——要老题清晰须手动重裁/重识别（D-093 已约定不动存量）。不宣称 300dpi/印刷级。
+- **未提审、未发版、未 push**；后端已上生产 + 前端已上开发版。
