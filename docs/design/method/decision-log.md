@@ -3491,3 +3491,30 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 ### 五、验证
 - M71 新增 4/4（docPages 不再写死 2 / --scale 链证明 python 默认死代码 / 1365 墙保留 / 倍率解析真跑）。
 - M70 4/4；门禁 M12/13/16/18 **38/38**；`nest build` RC=0。M60 A4、M62 A4 为既有断言脱节失败（本轮未碰其前端文件）。
+
+---
+
+## D-093 · P-032 裁剪改后端高分直裁，绕开 Canvas 1365 墙（2026-11-18）
+
+### 一、触发与决策
+- 思傅 2026-11-18 提出「前端只传裁剪框坐标、后端从高分原图直接裁」，作为 D-092「186dpi 天花板＝前端 Canvas 1365 墙」的治本。
+- 逐题确认（不代做取舍）：**Q1 档位**→选「页图维持 3 倍 + 后端裁」（不提到 4）；**Q2 存量**→选「不动存量」（存量 11 题没存框坐标/源 PDF 引用，无法自动重裁，只惠及今后新裁的题）。
+- 提案 `proposals/P-032-裁剪改后端高分直裁绕开Canvas墙.md`，工程类降维（不新增学习行为、不碰判定层/排程/激励）。
+
+### 二、根因与方案
+- 根因：裁剪底图 D-092 已提到 scale=3（A4≈1786px），但前端 `image-editor.tsx` `MAX_CANVAS_SIDE=1365` 是微信 Canvas 2D 硬上限（超了安卓 crash），`drawAndExport()` 把 >1365px 裁块压回 1365px——scale 再高也被这最后一刀吃掉。
+- 方案：裁剪框是归一化 `crop.x/y/w/h`（与 scale 无关），前端只传「来源图 URL + 框」，后端从原始高分图用 sharp 按框裁 → ingest 入库，绕开墙。
+  - 后端：`image.types.ts` 加 `CropBoxDto/CropBoxResult`；`image.service.ts` 加 `cropByBox()`（fetchImage 取原图→sharp.rotate 可选→归一化框换算像素框（夹紧 + 最小 2px）→sharp.extract→ingest→回 {key,url,thumb}）；`image.controller.ts` 加 `POST /api/image/crop-box`（requireUserId）。
+  - 前端：`api.ts` 加 `cropBoxHighRes()`；`ImageEditor` 加 `highResCrop?` + `onConfirmUploaded?`，`cropOnly+rect` 且开启时走后端裁，失败回退老 Canvas 路径；三处调用方（recognize 的 `handleCropConfirm`/`handleSeqCropConfirm`、answer-editor 的 `handleCropConfirm`）接受 `string | CropUploaded`，新增 `resolveCropResult()` 归一（已入库结果不二次上传）。
+- 关键正确性：ingest 的 display 是 1600px q80，但 `originalKey` 存原图、合成端 `downloadOriginalPreferred` 读 original ⇒ 裁块原生分辨率不被入库降质吃掉（D-091 链路）。
+
+### 三、验证
+- **核心实证**：模拟 scale=3 A4 页图 1786×2526，归一化框 `{x:.03,y:.18,w:.93,h:.22}` → 后端 sharp 裁块 **1662×556px（越过 1365 墙 YES）**，打印估算 **227dpi**（527pt 宽）；前端同框会被压到 1365px。证明绕墙收益约 +22%。
+- M72 新增 6/6（端点三件齐全 / sharp 裁非 canvas / original 不降质 / 前端 prop+回退 / 三处接入 / 边界不动）；M71 4/4；门禁 M12/13/16/18 **38/38**（含提案六栏门 H1 + 前端 lint）；`nest build` RC=0；前端 `tsc --noEmit` RC=0。
+- M72 调试记录：A2 初版正则被注释里的「Canvas」字样误伤，收紧为只查 canvas API 调用；A6 初版 `question-match.ts` 路径写错（实际在 `server/src/shared/`），已修正。
+
+### 四、诚实边界
+- 实际收益理论 186→227dpi（+22%），**不宣称 300dpi/印刷级**；真实清晰度以新裁题生成的复习资料 PDF 实测为准（本轮只做了换算实跑，未真机/未出样张 PDF）。
+- 存量 11 题不重裁、不变清晰。本地拍照图裁剪不开 highResCrop（后端取不到本地临时路径，自动回退 Canvas）。
+- 后端失败自动回退前端 Canvas 裁剪，功能不缺出口。
+- **未部署生产、未上传小程序、未提审、未发版、未 push、零生产写入**；「已实现」≠「已面客」。放行前实证项见 P-032 §4。
