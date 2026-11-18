@@ -31,6 +31,13 @@ export interface AnswerAttachment {
   type: AnswerAttachmentType
   file_key?: string
   thumb_key?: string
+  /**
+   * 服务端只在「详情列表」给附件补签名 URL（timeline.service.enrich）。
+   * 新加的附件在**当前会话**必须自带这两个值，否则附件列表只显示「资料」
+   * 且点不开（D-084）；刷新后由详情接口回补。
+   */
+  url?: string
+  thumb_url?: string
   name?: string
   mime?: string
   size?: number

@@ -186,6 +186,15 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   const [expandedRefs, setExpandedRefs] = useState<Record<number, boolean>>({})
   // 裁剪：进入编辑器前先记住目标，确认后写回**同一条** item
   const [cropSrc, setCropSrc] = useState('')
+  /**
+   * D-084：连续裁同一张资料库图时 setCropSrc 会被 React 合并成「值没变」，
+   * 裁剪器不走重置 effect，残留上一次的框。每次打开都换 key 强制重建会话态。
+   */
+  const cropSeqRef = useRef(0)
+  const openCrop = (src: string) => {
+    cropSeqRef.current += 1
+    setCropSrc(src)
+  }
   const [pickerOpen, setPickerOpen] = useState(false)
   /** D-082：资料库选择器这次是「整份加入答案」还是「选页/选图裁剪成答案图」 */
   const [pickerCrop, setPickerCrop] = useState(false)
@@ -302,7 +311,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     try {
       const res = await Taro.chooseMedia({ count: 1, mediaType: ['image'], sourceType: ['camera', 'album'] })
       const p = res.tempFiles?.[0]?.tempFilePath
-      if (p) setCropSrc(p)
+      if (p) openCrop(p)
     } catch (e) {
       reportChooseFail(e, '选择图片')
     }
@@ -318,6 +327,10 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         type: 'image',
         file_key: up.key,
         thumb_key: up.thumb_key,
+        // ⭐ D-084：后端只在详情列表补签名 URL，update 返回不带。少了这两个值，
+        // 当前会话里新附件会退化成「资料」占位且点不开（预览依赖 src）。
+        url: up.url,
+        thumb_url: up.thumb_url,
         source: 'manual',
         created_at: new Date().toISOString(),
       })
@@ -343,7 +356,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       return
     }
     if (kind === 'image') {
-      setCropSrc(url)
+      openCrop(url)
       return
     }
     if (kind !== 'pdf') {
@@ -369,7 +382,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       Taro.hideLoading()
     }
     if (pages.length === 1) {
-      setCropSrc(pages[0].url)
+      openCrop(pages[0].url)
       return
     }
     /**
@@ -393,7 +406,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
             return
           }
           const p = slice[i]
-          if (p) setCropSrc(p.url)
+          if (p) openCrop(p.url)
         },
         fail: () => undefined,
       })
@@ -470,12 +483,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
   }
 
   // ---------- 资料库 ----------
-  const handlePickLibrary = async (doc: { id: string; name: string; file_key: string; mime_type?: string | null; size_bytes?: number | null }) => {
+  const handlePickLibrary = async (doc: { id: string; name: string; file_key: string; url?: string; mime_type?: string | null; size_bytes?: number | null }) => {
     setPickerOpen(false)
     await addAttachment({
       id: newId(),
       type: (doc.mime_type || '').startsWith('image/') ? 'image' : 'doc',
       file_key: doc.file_key,
+      // 图片类附件当前会话也要能直接看（D-084），文档仍显示文件名占位
+      url: (doc.mime_type || '').startsWith('image/') ? doc.url : undefined,
       name: doc.name,
       size: doc.size_bytes ?? undefined,
       source: 'library',
@@ -1005,6 +1020,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       <ImageEditor
         visible={!!cropSrc}
         src={cropSrc}
+        cropKey={String(cropSeqRef.current)}
         cropOnly
         enableSaveToInbox={false}
         confirmText="用作答案图"

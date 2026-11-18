@@ -335,11 +335,31 @@ export default function ImageEditor({
     setNaturalH(h)
     const sys = Taro.getSystemInfoSync()
     const availW = sys.windowWidth - 32
-    const availH = sys.windowHeight - 260
-    const scale = Math.min(availW / w, availH / h, 1)
-    setImgW(w * scale)
-    setImgH(h * scale)
-    measureBox()
+    /**
+     * ⭐ 思傅 2026-11-18（D-084）：旧值 `windowHeight - 260` 是拍脑袋估的。
+     * 资料库 PDF 出的页图是竖长图，真机底部工具栏比估算更高时，按这个高度
+     * contain 出来的 imgH 会**超出预览区**，裁剪框的上边/下边（连角手柄）
+     * 落到顶栏或工具栏下面，手指抓不到 ⇒ 表现成「只能左右调整、不能上下调整」。
+     * 现在先量真实的预览容器高度再定尺寸；同步给一个保守值避免首帧溢出。
+     */
+    const apply = (availH: number) => {
+      const scale = Math.min(availW / w, availH / h, 1)
+      setImgW(w * scale)
+      setImgH(h * scale)
+      // 图片尺寸变了 ⇒ 触摸层位置也跟着变，旧缓存必须作废并重测，
+      // 否则 onTouchStart 拿的是「下载完成前」的矩形，换算出来的 ry 整体偏移。
+      layerMeasuredRef.current = false
+      // 布局刷新后再量；同步量会拿到上一张图的 left/top（居中布局下位置随尺寸变）
+      setTimeout(() => { measureLayer(); measureBox() }, 60)
+    }
+    apply(sys.windowHeight - 340)
+    Taro.createSelectorQuery()
+      .select('#imgEditorPreview')
+      .boundingClientRect((rect) => {
+        const r = Array.isArray(rect) ? rect[0] : rect
+        if (r && r.height > 120) apply(r.height - 8)
+      })
+      .exec()
   }
 
   /** 远程图先下载到本地，确保后续裁剪/AI 全程基于本地文件（与识别页一致、稳定） */
@@ -452,21 +472,29 @@ export default function ImageEditor({
     const top = crop.y * imgH
     const right = (crop.x + crop.w) * imgW
     const bottom = (crop.y + crop.h) * imgH
-    const near = (v: number, edge: number) => Math.abs(v - edge) <= HANDLE_HIT
-
-    // 角点优先（两轴都靠近）
-    if (near(touchX, left) && near(touchY, top)) return 'tl'
-    if (near(touchX, right) && near(touchY, top)) return 'tr'
-    if (near(touchX, left) && near(touchY, bottom)) return 'bl'
-    if (near(touchX, right) && near(touchY, bottom)) return 'br'
-    // 边中点
-    if (near(touchX, left)) return 'l'
-    if (near(touchX, right)) return 'r'
-    if (near(touchY, top)) return 't'
-    if (near(touchY, bottom)) return 'b'
+    /**
+     * ⭐ 思傅 2026-11-18（D-084）：固定 32px 命中半径在窄/矮图上会把上、下边
+     * 同时算成「靠近」，旧 if-else 顺序里先判到的那个永远抢走手势，表现为
+     * 「只能左右拖，上下拖不动」。改为半径随短边收缩 + 按距离选最近手柄。
+     */
+    const hit = Math.max(10, Math.min(HANDLE_HIT, imgW / 6, imgH / 6))
+    const dist = (v: number, edge: number) => Math.abs(v - edge)
+    const cand: { key: DragTarget; d: number }[] = [
+      { key: 'tl', d: Math.hypot(dist(touchX, left), dist(touchY, top)) },
+      { key: 'tr', d: Math.hypot(dist(touchX, right), dist(touchY, top)) },
+      { key: 'bl', d: Math.hypot(dist(touchX, left), dist(touchY, bottom)) },
+      { key: 'br', d: Math.hypot(dist(touchX, right), dist(touchY, bottom)) },
+      { key: 'l', d: dist(touchX, left) },
+      { key: 'r', d: dist(touchX, right) },
+      { key: 't', d: dist(touchY, top) },
+      { key: 'b', d: dist(touchY, bottom) },
+    ]
+    cand.sort((a, b) => a.d - b.d)
+    const best = cand[0]
+    if (best && best.d <= hit) return best.key
     // 框内平移
-    if (touchX > left + HANDLE_HIT && touchX < right - HANDLE_HIT &&
-        touchY > top + HANDLE_HIT && touchY < bottom - HANDLE_HIT) return 'move'
+    if (touchX > left + hit && touchX < right - hit &&
+        touchY > top + hit && touchY < bottom - hit) return 'move'
     return null
   }
 
@@ -1615,7 +1643,7 @@ export default function ImageEditor({
       </View>
 
       {/* 预览区：直接用 <TaroImage> 显示，稳定不黑屏；Canvas 仅离屏用于导出 */}
-      <View className="flex-1 flex items-center justify-center px-4">
+      <View id="imgEditorPreview" className="flex-1 flex items-center justify-center px-4">
         <View
           id="imgEditorBox"
           onClick={() => {
