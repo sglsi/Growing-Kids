@@ -110,6 +110,29 @@ export class PdfService {
     })
   }
 
+  /**
+   * D-091：自家 storage 派生图 URL → 优先读 original 原图，读不到回退原 URL 下载。
+   * 只处理 `http(s)://…/api/storage/files/blobs/<2>/<hash>/display|thumb.<ext>`；
+   * 外链（网盘/签名 URL）原样下载，避免多一次无用的本地探测。
+   */
+  private async downloadOriginalPreferred(url: string): Promise<Buffer> {
+    let key: string | null = null
+    try {
+      const u = new URL(url)
+      if (['127.0.0.1', 'localhost', '::1'].includes(u.hostname.toLowerCase())) {
+        const m = u.pathname.match(/^\/api\/storage\/files\/(blobs\/[^/]+\/[^/]+\/(?:display|thumb)\.[a-z0-9]+)$/i)
+        key = m ? decodeURIComponent(m[1]) : null
+      }
+    } catch {
+      key = null
+    }
+    if (key) {
+      const original = await this.storageService.readOriginalFor(key)
+      if (original) return original.buffer
+    }
+    return this.download(url)
+  }
+
   /** 素材 id → 已下载的图片（含二进制、格式与像素尺寸）；带答案模式追加文本块单元 */
   private async fetchImages(userId: string, ids: string[], includeAnswers = false): Promise<SourceUnit[]> {
     if (!ids || !ids.length) throw new BadRequestException('请选择要合成的素材')
@@ -215,7 +238,10 @@ export class PdfService {
       const url = u.url
       let buffer: Buffer
       try {
-        buffer = await this.download(url)
+        // D-091（思傅 2026-11-18，打印清晰度治本）：自家 storage 的 display 图
+        // 优先反查同 hash 目录的 original 原图——display 是 1600px + WebP q80 有损，
+        // 原图能去掉压缩模糊（存量题立刻受益）。读不到原图回退正常下载，绝不阻断。
+        buffer = await this.downloadOriginalPreferred(url)
       } catch (e) {
         console.error('[combine] 素材下载失败，跳过', u.id, e)
         continue

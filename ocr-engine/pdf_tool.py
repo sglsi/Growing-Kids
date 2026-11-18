@@ -27,8 +27,13 @@ import zipfile
 
 RESULT_MARKER = "<<<OCR_RESULT>>>"
 
-# 扫描页渲染的默认倍率：2.0 ≈ 144dpi，PP-StructureV3 对 150dpi 左右的页面最稳
-DEFAULT_SCALE = 2.0
+# 扫描页渲染的默认倍率（D-091，思傅 2026-11-18 打印清晰度治本）：
+#   - 2.0 ≈ 144dpi（旧值），3.0 ≈ 216dpi：切出来的题图像素更多、打印更清晰；
+#   - ⚠️ 仅对「无文字层」PDF 扫描页生效（有文字层的 PDF 不渲染、截图上传题不经过这里）；
+#   - 侧车限 1.6G，3.0 的图面积是 2.0 的 2.25 倍；内存吃紧时用环境变量回退：
+#       GK_PDF_RENDER_SCALE=2.0
+#   - 单页渲染仍有 MAX_RENDER_EDGE 钳制，A4@3.0=1836×2376 远小于 4200，安全。
+DEFAULT_SCALE = float(os.environ.get('GK_PDF_RENDER_SCALE', '3.0'))
 # 单页文字少于该字符数视为「无文字层」（扫描页），转渲染 + OCR
 DEFAULT_MIN_TEXT = 20
 # 单页渲染像素上限（宽或高超过则降倍率）：防超大页（如 A0 图纸）OOM

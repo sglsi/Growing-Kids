@@ -426,6 +426,11 @@ export class ImageService {
   ): Promise<Buffer> {
     const key = ImageService.localFileKey(url)
     if (key) {
+      // D-091（思傅 2026-11-18，打印清晰度治本）：裁剪取图优先读同 hash 目录的
+      // original 原图（display 是 1600px + WebP q80 有损，切出来的块再合成会糊）。
+      // 读不到原图回退 display 本身，绝不阻断裁剪/识别。
+      const original = await this.storageService.readOriginalFor(key)
+      if (original) return original.buffer
       const buf = await this.storageService.readLocalObject(key)
       if (buf) return buf
     }

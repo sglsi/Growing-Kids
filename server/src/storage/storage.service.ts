@@ -198,6 +198,31 @@ export class StorageService {
   }
 
   /**
+   * D-091（思傅 2026-11-18，打印清晰度治本）：给定派生图 key（display/thumb），
+   * 反查**同一内容哈希目录**下的 original 原图并读回。
+   *
+   * 背景：题目图入库时存的是 display.webp（长边 ≤1600 + WebP q80 有损），
+   * original 原图一直保留在 `blobs/<前2位>/<hash>/original.<ext>`，但整个
+   * 裁剪→合成链路都没用它 ⇒ 打印只有 ~117~155 DPI 且带压缩模糊。
+   * 内容寻址保证 display 与 original 同 hash 目录，反查零风险。
+   *
+   * 只处理 `blobs/<2>/<hash>/<variant>.<ext>` 形态；读不到（老数据/非图片管线产物/
+   * supabase 未上传 original）静默返回 null，调用方回退原 key，绝不阻断合成。
+   */
+  async readOriginalFor(key: string): Promise<{ buffer: Buffer; key: string } | null> {
+    if (!key) return null
+    const m = key.match(/^(blobs\/[^/]+\/([^/]+)\/)(?:display|thumb)\.[a-z0-9]+$/i)
+    if (!m) return null
+    const dir = m[1]
+    for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+      const ok = `${dir}original.${ext}`
+      const buf = await this.readObject(ok)
+      if (buf && buf.length > 12) return { buffer: buf, key: ok }
+    }
+    return null
+  }
+
+  /**
    * 删除对象（用于匿名清理 / 软删回收 / GC）；失败不抛，返回是否成功。
    */
   async deleteObject(key: string): Promise<boolean> {
