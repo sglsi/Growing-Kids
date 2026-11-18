@@ -49,6 +49,13 @@ m.test('A3 按题号定位：题号来源 + 纯函数定位 + 命中页预置框
     '命中页须打徽标（让用户知道在哪页）')
   c.ok(/initialCrop=\{cropRect \|\| undefined\}/.test(a), '命中后进裁剪须预置框住该题')
   c.ok(/if \(!hit \|\| !hit\.located\) continue/.test(a), '未定位的页不得给假框（fail-closed）')
+
+  // 题号要在录入时真的存下来，否则详情页根本没有号可用
+  const rec = read('src/pages/recognize/index.tsx')
+  c.ok(/questionLabel: r\.section \? `\$\{r\.section\}\$\{r\.label\}` : String\(r\.label\)/.test(rec),
+    '按题号提取入库须把用户输入的题号带进题目')
+  c.ok(/\.\.\.\(e\.questionLabel \? \{ question_label: e\.questionLabel \} : \{\}\)/.test(rec),
+    '题号须写进 content.question_label（详情页定位的唯一来源）')
 })
 
 m.test('A4 定位要预热、可中止、单页失败不终止', (c) => {

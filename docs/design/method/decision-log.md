@@ -3228,6 +3228,7 @@ M63 4/4；M60+M61+M62 11/11；`verify:gate` 38/38；`tsc` / `lint:build` / `buil
 ### 二、方案（两条都做：缩略图是兜底，题号定位是加速）
 1. **页缩略图面板** `src/components/pdf-page-picker.tsx`（新组件）：3 列网格，每格真实缩略图 + 页码徽标；「看大图」是独立热区（`stopPropagation`，不会误进裁剪）；点缩略图直接进裁剪。**替代 `showActionSheet` 文字页码**，顺带彻底避开 6 项上限。
 2. **跨页连续裁剪**：选页时用 `cropFromPdfRef` 记住本次 PDF 会话，裁剪**确认或取消后都自动回到页列表**，并显示「已加入 N 张，可继续选页」——不再重复「添加文件 → 选页」。
+0. **先把题号存下来**（前提）：`appendSeqRowsToBoard` 原来只存图、不存号，按题号提取入库的题**没有 `question_label`** ⇒ 详情页定位无号可用。现在 `BoardEntry.questionLabel` 带上用户输入的号（分节存「一6」，纯数字存「3」），保存时落 `content.question_label`；空值不写，老行为不变。
 3. **按题号定位**：
    - `pickQuestionNo()` 优先从 `content.question_label`（文档导入/切题时写入的印刷题号，如「预习案·Ⅱ 18」）取数字；没有则用题干「第N题」、行首「3.」兜底；取不到就**不显示按钮**（不猜）。
    - 点击后逐页 `ocrPage(url,'fast',{rectify:false})`（先 `warmupQuiet()` 烘侧车），用 P-031 的 `locateQuestions()` 找题号。
