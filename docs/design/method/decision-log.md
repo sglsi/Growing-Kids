@@ -3547,3 +3547,47 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - 真机 UI 操作（手机上手裁一题）由思傅执行，本轮为**生产服务端复刻链路**实测，非真机截图佐证；真机端请以开发版 2026.11.18.7 复现确认。
 - **新裁题 227dpi、存量题仍 ~150dpi**——要老题清晰须手动重裁/重识别（D-093 已约定不动存量）。不宣称 300dpi/印刷级。
 - **未提审、未发版、未 push**；后端已上生产 + 前端已上开发版。
+
+---
+
+## D-095 · P-033 复习闭环三处断点接合与队列化（2026-11-18 23:5x）
+
+### 一、触发与关键澄清
+- 思傅两轮提问：①「先把科学学习方法的流程打通——录入 → 隔段时间复习 → 再复习 → 标记掌握 → 移出 → 未移出的与新加入继续复习，录入/标记/移出本身就是流程的反馈，即方法论与便捷性结合，而不是机械执行流程，这可行吗？有没有更好的方法」；②拍板**掌握语义＝系统判定自动出本**、**范围＝A+B+C+D 全做**。
+- 本轮的实质不是提新方向，而是**把已有链条上三处断点接上**。此前 GK-SRS-24 给的是「家长按六步流程执行」，本轮把方法从「要求执行」改为「默认路径」。
+
+### 二、七环实测（代码级，非推测）
+| 环 | 实况 | 判定 |
+|---|---|---|
+| ① 录入 | `in_review_book default false`（`0010_review_book.sql:16`）；`recognize` 页无「加入复习本」字样 | **断**：漏加入＝静默失败（题永不到期、`review_events` 永无该题行） |
+| ② 到期复习 | `review.ts` 五档 1/3/7/14/28 + 入本即排首档 | 通 |
+| ③ 再复习 | 做对推进、做错 `review_count` 归零 | 通 |
+| ④ 标记掌握 | `mastered` 只写两列，语义是「汇总导出默认不纳入」 | **语义错位**：与复习本零联动 |
+| ⑤ 移出 | `removeFromReviewBook` 是另一处独立点击 | **断**：标掌握不触发出本 |
+| ⑥ 继续 | 复习列表只按 `in_review_book=true` 过滤，不看 `mastered` | **断**：标了「已掌握」仍占待办位 |
+| ⑦ 反馈 | `review()` 内 `insert review_events`（失败只记日志不阻断） | 通，正是思傅所说「流程即反馈」 |
+
+- **决定性事实**：`advanceReview` 的 wrong 分支返回 `review_count: 0` ⇒「五档走完」**严格等价于连续 5 次成功提取**，即 20a M15「毕业：连续 5 次做对」。机制早已存在，但毕业只停排程、`in_review_book` 仍 true，旧文案甚至明写「仍留在复习本」⇒ **结果没有界面后果**。
+
+### 三、四项改造（已落地，未发布）
+| 编号 | 改动 | 关键文件 |
+|---|---|---|
+| A 录入即入本 | `buildPayload` 显式 `in_review_book=true` + `added_to_review_at` + `next_review_at=firstReviewAt()`；`createBatch` 按 `i % REVIEW_ENTRY_STAGGER_DAYS(7)` 错峰，防「一页卷子全部明天到期」的待办雪崩 | `server/src/timeline/timeline.service.ts` |
+| B mastered 降级 | 详情页「已掌握」→「不进入导出」+ 边界说明（是否掌握由五档判定）；存量「已标不进导出但仍在复习本」给一句提示。**不删列、不改导出默认** | `src/pages/detail/index.tsx` |
+| C 毕业自动出本 | `review()` 中 `graduated = adv.review_count >= REVIEW_STAGES` ⇒ `in_review_book=false`、`added_to_review_at=null`，**保留** `review_count/review_lapses`；存量迁移 `0034_review_graduate_out.sql` | 同上 + `migrations/0034_*` |
+| D 复习队列 | 复习本横幅「开始复习（N 题）」→ 覆盖层一次一题、卡上直接对/错、自动下一题、完成页给「今天完成 N 题」；走既有 `markReviewed`；**卡上刻意不渲染答案/解析/错面图**（L2 无提示的物理保证）；列表模式始终保留为兜底 | `src/components/review-queue.tsx`（新）、`src/pages/subject/index.tsx` |
+
+### 四、两个连带修掉的隐性 bug（不修则改动等于没做）
+1. **`buildReviewPlan` 的死代码**：原判定 `if (!inBook) status='out'` 在 `if (completed) status='graduated'` 之前，且 `completed = inBook && …`。C 让毕业题出本后，status 恒返回 `out`、`completed` 恒 false ⇒ detail 里所有 `status === 'graduated'` 分支全部成**不可达死码**，家长只看到「不在复习本」而看不到「已掌握」。已把 `graduated = count >= REVIEW_STAGES && !nextDate` 提到最前（与 inBook 无关：走完是既成事实，出本是后果）。
+2. **`reviewSummary` 的 `graduated` 恒 0**：该查询按 `in_review_book=true` 取，出本后统计不到 ⇒「已掌握多少题」这个由系统给出、非用户自评的正反馈（F-2 层）会永久消失。已补独立 head 查询统计「已出本的毕业题」，失败降级为 0 并记日志（观测不牺牲功能）。
+3. 顺带修正 **20a M7 现状栏**：原记「B：掌握判定是一次做对（A5）」——该判断依据的是旧的单级 `mastered`，未核 `review.ts` 的归零分支，实际自 10-28 C4 落地起就是「连续 5 次成功」。已改为 A 并注明依据。**这是文档过时，不是新增准则**。
+
+### 五、验证（全部本地，未上生产）
+- `M73` 新增 8 条断言全过：A1 入本+错峰 / A2 出本且保留计数 / A3 毕业判定优先于 out（防死代码回归）/ A4 汇总补出本统计 / A5 前端语义与文案 / A6 队列走 `markReviewed` 且卡上无答案字段 / A7 边界（五档数值、做错归零、判定层均未动）/ A8 迁移幂等（无 delete）。
+- `pnpm verify:ci` **27/27**（M12 13 + M13 10 + M16 4）；`pnpm method:check` H1/H2/H3 三绿；`pnpm lint` 0 error 0 warning；`server pnpm build` RC=0；`pnpm build:weapp` 8.63s 成功（dist 含 review-queue）。
+
+### 六、诚实边界与待办
+- **队列交互未经真机验证**（本地仅构建通过）；`0034` 迁移**未执行**（放行前须先跑 `select count(*) … review_count >= 5` 看影响面，迁移后核对「复习本总数」与「今天该复习」是否自洽）。
+- **不宣称**提高学习效果/记忆保持；移出率、掌握数属 F-1/F-2 采纳度层，**永不得升格为 F-3 效果证据**（家长自评的「我觉得学会了」不是提取成功，M3：78% 自我判断错误）。移出动作的价值是「降低界面熵」，不是「证明有效」——正因如此才让它**自动发生**，避免被当成证据。
+- 明确不做：自适应算法（Latimier 2021 g=.034 n.s.）、订阅推送（项目零能力 + M11 边界）、连续天数/成长值（M3 挤出）、AI 推掌握或生成同类题（个人主体 K1）。
+- **未提审、未发版、未 push**。
