@@ -51,8 +51,8 @@
 - 🔴 下载打自家 `/api` 必须 `header: buildHeaders()`；service 自己 `unwrap`，出现 `.data?.data` 即契约断。
 - 🔴 D-074/075（P-034图文混排，已发未面客）：textarea塞不了img⇒`[图N]`占位+RichText按slot插图；`question_inline_figures`(jsonb免迁移)+`question_inline_figure_urls`；无URL显`[图N]`不拿邻图顶；列表卡按slot带图，`inline-figure-runs.ts`切段A文档/B pdf原位插图、C不接。
 - 🔴 D-076~086（查台账）：删除补偿/裁剪下限0.03/分节定位(判定层未动)/批量移动/页顶输入+题号回显/删题回退/资料夹/一次裁剪一题/换页先收编/裁答案；裁剪框量预览区高+最近手柄/附件带url+cropKey；答案页缩略图选页+连续裁+题号OCR预置框；页码后端0基⇒唯一+1(禁`index||i+1`)；选择器按`subjectId`默认本科目；`hideLoadingSafe()`45处。
-- 🔴 D-087：图片答案认附件/图+saveAnswer翻status；页图start_page增量10页/批(生产已上)；批量态全选/全部取消(selectAll赋值)；复习资料逐题版式(保序/题答同块不跨页/题号+解答标签/弃BSSF页数变多，生产已上)。开发版2026.11.18.5。
-- 🔴 D-088：复习资料去页头/题号30→15/题型留白(应用96pt、填空选择24pt、纯图默认应用；`question-space.ts` v2)；后端未部署/未真机未提审未push。
+- 🔴 D-087：图片答案认附件/图+saveAnswer翻status；页图start_page增量10页/批(生产已上)；批量全选/取消(赋值)；复习资料逐题版式(保序/题答同块不跨页/题号+解答标签/弃BSSF页数变多，生产已上)。开发版2026.11.18.5。
+- 🔴 D-088：复习资料去页头/题号30→15/题型留白(应用96pt、填空选择24pt、纯图默认应用；`question-space.ts` v2)；后端已上生产/未真机未提审未push。
 - 🔴 D-079：冷启16s算进识别⇒顶60s失败，`ocr-warmup`+`warmupQuiet()`；`start()`探活重建；跨栏`extra`入库；裁剪卡死⇒同步起手+节流+`handleForceExit`。
 - 令牌 X-Auth-Token 唯一被采信(`v1.<uid>.<exp>.<HMAC前40>`)；裸X-User-Id 401；免登录端点同步`PUBLIC_ROUTES`；必关ETag；`navigateBack`不重mount⇒`useDidShow`+`firstShowRef`+`silent:true`
 - ⚠️ 音视频禁原生小写标签；`<Image>`/`<Video poster>`不发头⇒服务端直给`*_url`；🔴头像`avatarUrl`存对象key不能直接当src(实测401/本地500)⇒先`downloadFile`落`gk_avatar_local.path`；`profile`页`toImageSrc()`、D-066首页`homeAvatarSrc()`。🚨>60s请求走`POST /api/jobs`+轮询。

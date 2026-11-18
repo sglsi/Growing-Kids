@@ -3369,3 +3369,9 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 ### 四、验证
 - M67 新增 3/3（题型判定 / 静态契约 / 版式纯函数空白占位）；M66 4/4（A4 断言同步 v2 与去页头）；M65 4/4；`verify:gate` 38/38；`nest build` RC=0。
 - `dynamic-tests/run-question-blocks.mjs` 9/9：真编译版式 → 真造中文题图 → 真出 A4 PDF，断言每题空白存在、应用题空白 > 填空、空白在题面与答案之间、无重叠越界；样张 `.tmp/qblock-preview.pdf` 渲染 3 页人工核对：顶部页头已消失、题号明显变小、题图与解答之间的空白清楚。
+
+### D-088 §五、后端生产部署回写（2026-11-18 12:3x，思傅明确授权）
+- 备份旧件 2 份至 `/opt/gk/backups/D-088-20261118_122503/`（路径见 `/tmp/gk-d088-backup-path`）；新增的 `question-space.js` 无旧件。
+- 覆盖点名 3 件：`dist/pdf/pdf.service.js`、`dist/pdf/question-block-layout.js`、`dist/pdf/question-space.js`；全部 `chown gk:gk` + `chmod 644`，本地与生产 sha256 逐件零差异后 `systemctl restart gk-api`。健康：`gk-api=active`、`:3000/api/health=200`、`:8080/api/health=200`。
+- 实跑：用原 11 个 `source_ids` 调 `/api/pdf/combine` 返回 200；新文件 `review-pack-1794975938346.pdf`（doc_id `61f69592…`）**6 页 / 14 图 / 填充率 39.7%**（D-087 v1 为 44.8%，留白增加）。渲染页图核对：顶部「复习资料」页头消失；「第 1 题 / 第 2 题」等题号明显变小；题面与下一题之间可见做题空白，题面与解答仍同区不撕裂；荧光高亮来自原始裁剪素材。
+- 🔴 为验证在正式用户 `cc6d7b10…` 文档页新增 1 份 `复习资料-2026/11/18.pdf`（v2 6 页），旧的两份保留。仍未真机验收、未提审未发版、未 push（AHEAD=71）。
