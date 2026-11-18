@@ -546,14 +546,17 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
   async docPages(
     fileUrl: string,
     maxPagesRaw?: number,
+    startPageRaw?: number,
   ): Promise<{ page_count: number; pages: { index: number; url: string; width: number; height: number }[] }> {
     const url = String(fileUrl ?? '').trim()
     if (!url) throw new BadRequestException('缺少 file_url')
     if (/\.docx?(\?|$)/i.test(url) || /\.txt(\?|$)/i.test(url)) {
       throw new BadRequestException('Word / TXT 没有页图，请另存为 PDF 或直接传图片')
     }
-    // 页数上限与前端 MAX_BOARD_PAGES（9）同量级：再多既超小程序渲染能力，也拖垮上传
+    // D-087：每批最多 10 页（一次渲染太多页会拖垮内存/超时），总量不在此限制；
+    // 想看第 11 页以后用 start_page 分页拉，不要一次把整本书渲成 PNG。
     const maxPages = Math.min(Math.max(Number(maxPagesRaw ?? 10) || 10, 1), 10)
+    const startPage = Math.max(0, Math.floor(Number(startPageRaw ?? 0) || 0))
     const extracted = await extractDocContent({
       kind: 'pdf',
       url,
@@ -561,6 +564,7 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
       minText: 999999999,
       scale: 2,
       maxPages,
+      startPage,
       timeoutMs: 180000,
     })
     if (!extracted.ok || !extracted.data) {

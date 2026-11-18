@@ -130,6 +130,8 @@ export interface PdfToolOpts {
   textOnly?: boolean
   /** 最多处理前 N 页（0=全部）；整本书抽正文时兜住极端大文件 */
   maxPages?: number
+  /** 0 基起始页：答案裁剪「加载后续页」只渲染增量，不重复渲染前 N 页 */
+  startPage?: number
   /** 硬超时（毫秒），默认 120s：pypdfium2 纯 CPU，百页 PDF 一般 <10s */
   timeoutMs?: number
 }
@@ -197,6 +199,7 @@ export function extractDocContent(opts: PdfToolOpts): Promise<PdfToolOutcome> {
         ]
         if (opts.textOnly) args.push('--text-only')
         if (opts.maxPages && opts.maxPages > 0) args.push('--max-pages', String(opts.maxPages))
+        if (opts.startPage && opts.startPage > 0) args.push('--start-page', String(Math.floor(opts.startPage)))
         child = spawn(toGuiPython(python), args, {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,

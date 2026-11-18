@@ -52,8 +52,8 @@ def _render_scale(page, want_scale):
     return want_scale
 
 
-def extract_pdf(path, min_text, scale, text_only=False, max_pages=0):
-    """抽 PDF。
+def extract_pdf(path, min_text, scale, text_only=False, max_pages=0, start_page=0):
+    """抽 PDF。start_page 是 0 基起始页，供「加载后续页」只渲染增量页。
 
     text_only=True 时**只取文字层**，不渲染扫描页（image_base64 恒 None）：
     网盘资料库检索只需要正文做关键词匹配，渲染成 base64 图会把一本书撑到几百 MB，
@@ -67,8 +67,9 @@ def extract_pdf(path, min_text, scale, text_only=False, max_pages=0):
     try:
         pages = []
         total = len(pdf)
-        limit = total if max_pages <= 0 else min(total, max_pages)
-        for i in range(limit):
+        start = max(0, min(total, int(start_page)))
+        limit = total - start if max_pages <= 0 else min(total - start, max_pages)
+        for i in range(start, start + limit):
             page = pdf[i]
             try:
                 text = ""
@@ -154,6 +155,8 @@ def main():
                     help="只抽文字层，不渲染扫描页（网盘资料库检索用，省内存）")
     ap.add_argument("--max-pages", type=int, default=0,
                     help="最多处理前 N 页（0=全部）；整本书抽正文时用来兜住极端大文件")
+    ap.add_argument("--start-page", type=int, default=0,
+                    help="0 基起始页；答案裁剪只渲染增量页时用，避免重复渲染前 N 页")
     args = ap.parse_args()
 
     if not os.path.isfile(args.file):
@@ -161,7 +164,7 @@ def main():
         sys.exit(2)
     try:
         if args.kind == "pdf":
-            out = extract_pdf(args.file, args.min_text, args.scale, args.text_only, args.max_pages)
+            out = extract_pdf(args.file, args.min_text, args.scale, args.text_only, args.max_pages, args.start_page)
         else:
             out = extract_docx(args.file)
         _emit(out)

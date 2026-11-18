@@ -60,8 +60,8 @@ export class OcrController {
    */
   @Post('doc-pages')
   @HttpCode(200)
-  async docPages(@Body() dto: { file_url?: string; max_pages?: number }) {
-    const data = await this.ocrService.docPages(dto.file_url ?? '', dto.max_pages)
+  async docPages(@Body() dto: { file_url?: string; max_pages?: number; start_page?: number }) {
+    const data = await this.ocrService.docPages(dto.file_url ?? '', dto.max_pages, dto.start_page)
     return { code: 200, msg: 'success', data }
   }
 

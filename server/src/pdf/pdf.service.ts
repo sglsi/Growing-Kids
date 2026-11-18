@@ -10,7 +10,7 @@ import * as https from 'https'
 import { StorageService } from '../storage/storage.service'
 import { TimelineService } from '../timeline/timeline.service'
 import { DocumentsService } from '../documents/documents.service'
-import { packPages, type PackInput } from './pdf-layout'
+import { layoutQuestionBlocks, type BlockInput, type RowInput } from './question-block-layout'
 // D-063：A4 / 页边距提到共用模块（一图一页与智能拼页同一套版面常量）
 import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
 import { normalizeImageSource } from './image-normalize'
@@ -36,7 +36,14 @@ export interface TextBlock {
   lines: string[]
 }
 
-interface ImageSource {
+/** D-087：每个合成单元都带题目归属，版式才能「一题一区块」而不是把图打散重排 */
+interface SourceMeta {
+  groupKey: string
+  role: 'question' | 'answer'
+  label: string
+}
+
+interface ImageSource extends SourceMeta {
   id: string
   buffer: Buffer
   isPng: boolean
@@ -44,7 +51,7 @@ interface ImageSource {
   height: number
 }
 
-interface TextSource {
+interface TextSource extends SourceMeta {
   id: string
   text: TextBlock
 }
@@ -115,15 +122,19 @@ export class PdfService {
     //     缺哪块跳哪块——合成里默认只有题面图（不带答案），带答案由用户显式选择。
     // 复习本里「批量选题 → 合成」是主用法：旧逻辑 kind!=='image' 全跳过，
     // 前端误报「请选择图片资料」、后端就算收到也只会抛「没有可合成的图片」。
-    const units: { id: string; url?: string; text?: TextBlock }[] = []
+    const units: ({ id: string; url?: string; text?: TextBlock } & SourceMeta)[] = []
     for (const it of items) {
+      // D-087：题号标签来自用户录入时的 question_label；没有就用选中序号兜底，
+      // 但绝不把「第 N 题」写进存量数据——只用于本次合成的可读标题。
+      const groupKey = it.id
+      const label = ((it.content as { question_label?: string } | undefined)?.question_label || '').trim()
       if (it.kind === 'image' && it.url) {
-        units.push({ id: it.id, url: it.url })
+        units.push({ id: it.id, url: it.url, groupKey, role: 'question', label })
       } else if (it.kind === 'question') {
         const qImages = (it.question_image_urls || []).filter(Boolean)
         if (qImages.length) {
           // 题面图里含题干中的几何图/图表/示意图，是「孩子能作答」的关键素材
-          qImages.forEach((u, i) => units.push({ id: `${it.id}#q${i}`, url: u }))
+          qImages.forEach((u, i) => units.push({ id: `${it.id}#q${i}`, url: u, groupKey, role: 'question', label }))
         } else {
           // 纯 OCR 文字题（用户只存了识别文字、没有题块照片）：
           // 旧逻辑会一路走到「所选素材中没有可合成的图片」直接 400，练习卷出不来。
@@ -146,13 +157,13 @@ export class PdfService {
               // 无对应 URL 的标记由 splitQuestionRuns 原样留成文字（fail-closed，不拿邻图顶）。
               splitQuestionRuns(stem, (slot) => keyBySlot.get(slot)).forEach((run, i) => {
                 if (run.kind === 'text') {
-                  if (run.text.trim()) units.push({ id: `${it.id}#t-stem-${i}`, text: { lines: run.text.split('\n') } })
+                  if (run.text.trim()) units.push({ id: `${it.id}#t-stem-${i}`, text: { lines: run.text.split('\n') }, groupKey, role: 'question', label })
                 } else {
-                  units.push({ id: `${it.id}#inline-${run.slot}`, url: run.ref })
+                  units.push({ id: `${it.id}#inline-${run.slot}`, url: run.ref, groupKey, role: 'question', label })
                 }
               })
             } else {
-              units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') } })
+              units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') }, groupKey, role: 'question', label })
             }
           }
         }
@@ -160,15 +171,15 @@ export class PdfService {
           const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }
           // 答案图同样只在「答疑解惑」卷出现，练习卷不带
           const aImages = (it.answer_image_urls || []).filter(Boolean)
-          aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u }))
+          aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u, groupKey, role: 'answer', label }))
           if ((c.wrong_answer || '').trim()) {
-            units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') } })
+            units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') }, groupKey, role: 'answer', label })
           }
           if ((c.answer || '').trim()) {
-            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') } })
+            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') }, groupKey, role: 'answer', label })
           }
           if ((c.solution || '').trim()) {
-            units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') } })
+            units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') }, groupKey, role: 'answer', label })
           }
         }
       }
@@ -179,7 +190,7 @@ export class PdfService {
     for (const u of units) {
       // 文本块单元：不下载，直接作为 SourceUnit 交给下游（docx 原生段落 / PDF 位图渲染）
       if (u.text) {
-        out.push({ id: u.id, text: u.text })
+        out.push({ id: u.id, text: u.text, groupKey: u.groupKey, role: u.role, label: u.label })
         continue
       }
       if (!u.url) continue
@@ -202,7 +213,7 @@ export class PdfService {
         console.error('[combine] 无法解析图片，跳过', u.id)
         continue
       }
-      out.push({ id: u.id, ...norm })
+      out.push({ id: u.id, groupKey: u.groupKey, role: u.role, label: u.label, ...norm })
     }
     return out
   }
@@ -270,14 +281,38 @@ export class PdfService {
   }
 
   /**
+   * D-087：题号 /「解答」/ 页眉页脚的小型文字标签。
+   * 中文仍走 sharp 的 SVG 位图（pdf-lib 标准字体没有 CJK 字形）；
+   * 左侧一条 4px 同色细线是唯一的强调元素，其余靠留白与字阶建立层级。
+   */
+  private async renderLabelPng(
+    text: string,
+    color: string,
+    fontSize = 28,
+  ): Promise<{ buffer: Buffer; width: number; height: number } | null> {
+    const W = Math.min(500, Math.max(120, [...text].length * fontSize + 44))
+    const H = Math.round(fontSize * 1.6)
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="100%" height="100%" fill="white"/><rect x="0" y="2" width="4" height="${H - 4}" fill="${color}" opacity="0.7"/><text x="16" y="${Math.round(H * 0.72)}" font-family="Microsoft YaHei, SimHei, sans-serif" font-size="${fontSize}" font-weight="bold" fill="${color}" xml:space="preserve">${esc(text)}</text></svg>`
+    try {
+      const buffer = await sharp(Buffer.from(svg)).png().toBuffer()
+      return { buffer, width: W, height: H }
+    } catch (e) {
+      console.warn('[combine] 标签渲染失败，跳过:', (e as Error)?.message)
+      return null
+    }
+  }
+
+  /**
    * 把选中的素材合成标准 A4 PDF。
    * 素材 = 图片条目自身主图 + 题目条目的题面图（#119 起，见 fetchImages 展开逻辑）。
    *
-   * 排版策略（Guillotine-BSSF 智能拼页，替代原「每图一页」）：
-   *  1. 逐张下载并解码，拿到各自宽高比例；
-   *  2. 用 packPages 把「等比缩放后的矩形」装箱到 A4 可用区，得到「每页放哪些图、各在哪」；
-   *  3. 按页绘制：小图与别的图共享一页，大图自然独占一页，尽量减少留白。
+   * 排版策略（D-087 逐题清晰版式，替代原 Guillotine-BSSF 按图高重排）：
+   *  1. 按题目分组，题面图 → 答案图 → 解析保持选中顺序；
+   *  2. 每题一区块，带题号标题 /「解答」标签，区块不跨页；
+   *  3. 页内纵向流、统一左对齐，行距 10pt / 题距 22pt，页眉页脚标日期与页码。
    *
+   * BSSF 虽省纸，但会打乱题图顺序，导致「题和图不知道哪个是哪个」——已弃用。
    * 结果转存 TOS 并归档进 documents（文档页）。
    */
   async combineIntoPdf(userId: string, ids: string[], includeAnswers = false): Promise<CombineResult> {
@@ -285,89 +320,132 @@ export class PdfService {
     if (!fetched.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const pdf = await PDFDocument.create()
+    const day = new Date().toLocaleDateString('zh-CN')
 
-    // 1) 解码，收集「可排版」的图片及其原始尺寸；文本块先渲染成白底 PNG（按序参与拼页）
-    const decoded: { key: string; image: any; width: number; height: number }[] = []
+    // D-087：按题目分组（Map 保插入顺序 = 用户选题顺序），不再按图高重排。
+    // 题面图 → 答案图 → 解析严格相邻；一道题就是一个不可拆的区块。
+    const groups = new Map<string, SourceUnit[]>()
+    for (const u of fetched) {
+      if (!groups.has(u.groupKey)) groups.set(u.groupKey, [])
+      groups.get(u.groupKey)!.push(u)
+    }
+
+    // 题号 /「解答」标签。中文走 sharp 位图（pdf-lib 标准字体无 CJK 字形）。
+    // 字阶：题号 30 > 解答 26 > 页眉 22 > 页码 20，靠尺寸而非颜色建立层级。
+    type Embedded = { image: any; width: number; height: number }
+    const labels = new Map<string, Embedded>()
+    let ordinal = 0
+    for (const [g, arr] of groups) {
+      ordinal += 1
+      const title = arr.find((u) => u.label)?.label || `第 ${ordinal} 题`
+      const specs: Array<[string, string, string, number]> = [[`${g}:title`, title, '#1F2937', 30]]
+      if (arr.some((u) => u.role === 'answer')) {
+        specs.push([`${g}:answer`, '解答（思路与过程）', '#2E6F4E', 26])
+      }
+      for (const [key, text, color, size] of specs) {
+        const png = await this.renderLabelPng(text, color, size)
+        if (!png) continue
+        labels.set(key, { image: await pdf.embedPng(png.buffer), width: png.width, height: png.height })
+      }
+    }
+    const headerPng = await this.renderLabelPng(`复习资料 · ${day}`, '#8A7F72', 22)
+    const headerImage: Embedded | null = headerPng
+      ? { image: await pdf.embedPng(headerPng.buffer), width: headerPng.width, height: headerPng.height }
+      : null
+
+    // 内容解码：文本块渲染成白底 PNG；图片格式双向兜底（与旧版一致）
+    const decoded: Array<{ key: string; image: any; width: number; height: number; groupKey: string; role: 'question' | 'answer' }> = []
     for (const unit of fetched) {
       let s: ImageSource
       if (isTextUnit(unit)) {
         const png = await this.renderTextPng(unit.text)
         if (!png) continue
-        s = { id: unit.id, buffer: png.buffer, isPng: true, width: png.width, height: png.height }
-      } else {
-        s = unit
-      }
+        s = { id: unit.id, buffer: png.buffer, isPng: true, width: png.width, height: png.height, groupKey: unit.groupKey, role: unit.role, label: unit.label }
+      } else s = unit
       let image: any
       try {
-        try {
-          image = s.isPng ? await pdf.embedPng(s.buffer) : await pdf.embedJpg(s.buffer)
-        } catch {
-          image = s.isPng ? await pdf.embedJpg(s.buffer) : await pdf.embedPng(s.buffer)
-        }
+        try { image = s.isPng ? await pdf.embedPng(s.buffer) : await pdf.embedJpg(s.buffer) }
+        catch { image = s.isPng ? await pdf.embedJpg(s.buffer) : await pdf.embedPng(s.buffer) }
       } catch (e) {
         console.error('[pdf] 图片解码失败，跳过', s.id, e)
         continue
       }
-      decoded.push({ key: s.id, image, width: image.width || s.width, height: image.height || s.height })
+      decoded.push({ key: s.id, image, width: image.width || s.width, height: image.height || s.height, groupKey: s.groupKey, role: s.role })
+    }
+    const byUnit = new Map(decoded.map((d) => [d.key, d]))
+    if (!byUnit.size) throw new BadRequestException('所选素材中没有可合成的图片')
+
+    // 一题一区块：题号 → 题面 → 解答标签 → 答案/解析，组间留白 22pt、组内 10pt
+    const blocks: BlockInput[] = []
+    for (const [g, arr] of groups) {
+      const rows: RowInput[] = []
+      const title = labels.get(`${g}:title`)
+      if (title) rows.push({ key: `__label:${g}:title`, width: title.width, height: title.height, kind: 'label' })
+      let answerMarked = false
+      for (const u of arr) {
+        if (u.role === 'answer' && !answerMarked) {
+          answerMarked = true
+          const am = labels.get(`${g}:answer`)
+          if (am) rows.push({ key: `__label:${g}:answer`, width: am.width, height: am.height, kind: 'label' })
+        }
+        const d = byUnit.get(u.id)
+        if (d) rows.push({ key: d.key, width: d.width, height: d.height, kind: u.role })
+      }
+      if (rows.length) blocks.push({ key: g, label: arr.find((u) => u.label)?.label || '', rows })
     }
 
-    if (!decoded.length) throw new BadRequestException('所选素材中没有可合成的图片')
-
-    // 2) 装箱：页面可用净区域（扣页边距）。packPages 会以「图高」为基准归一化，
-    //    使同页各图字大接近；再用 Guillotine-BSSF 拼页，尽量少页、少留白。
+    const HEADER_H = 34
+    const FOOTER_H = 26
     const bin = {
       width: A4_PT.width - PAGE_MARGIN * 2,
-      height: A4_PT.height - PAGE_MARGIN * 2,
+      height: A4_PT.height - PAGE_MARGIN * 2 - HEADER_H - FOOTER_H,
     }
-    const inputs: PackInput[] = decoded.map((d) => ({ key: d.key, width: d.width, height: d.height }))
-    const packed = packPages(inputs, bin, { allowRotate: false })
+    const contentTop = A4_PT.height - PAGE_MARGIN - HEADER_H
+    const packed = layoutQuestionBlocks(blocks, bin)
+    if (!packed.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
-    const imageByKey = new Map(decoded.map((d) => [d.key, d.image]))
-
-    // 3) 按页绘制。packPages 坐标为「y 向下」，pdf-lib 为「y 向上」，需翻转；
-    //    每张图按 IMAGE_GAP/2 内缩形成间距；并把**整页内容居中**：
-    //      · 横向：用内容实际宽度居中，消除右侧大片留白；
-    //      · 纵向：用内容实际高度居中，消除"全堆在页顶、页脚空一大片"的观感。
-    //    注意：挪动的是整块内容的原点，不改变图与图的相对位置，因此不会引入重叠。
+    // y 向下 → pdf-lib y 向上翻转；同一题的题与答永远相邻、不跨页
     let areaSum = 0
-    let areaTotal = 0
-    for (const pg of packed) {
+    for (let pi = 0; pi < packed.length; pi += 1) {
       const page = pdf.addPage([A4_PT.width, A4_PT.height])
-      let minX = Infinity
-      let maxX = -Infinity
-      let minY = Infinity
-      let maxY = -Infinity
-      for (const pl of pg.placements) {
-        minX = Math.min(minX, pl.x)
-        maxX = Math.max(maxX, pl.x + pl.width)
-        minY = Math.min(minY, pl.y)
-        maxY = Math.max(maxY, pl.y + pl.height)
+      if (headerImage) {
+        page.drawImage(headerImage.image, {
+          x: PAGE_MARGIN,
+          y: A4_PT.height - PAGE_MARGIN - HEADER_H + (HEADER_H - headerImage.height) / 2,
+          width: headerImage.width,
+          height: headerImage.height,
+        })
       }
-      const hasContent = isFinite(minX) && isFinite(minY)
-      const contentW = hasContent && maxX > minX ? maxX - minX : 0
-      const contentH = hasContent && maxY > minY ? maxY - minY : 0
-      const centerShiftX = (bin.width - contentW) / 2 - (hasContent ? minX : 0)
-      const centerShiftY = (bin.height - contentH) / 2 - (hasContent ? minY : 0)
-
-      for (const pl of pg.placements) {
-        const img = imageByKey.get(pl.key)
-        if (!img) continue
-        const inset = IMAGE_GAP / 2
-        const drawW = Math.max(1, pl.width - IMAGE_GAP)
-        const drawH = Math.max(1, pl.height - IMAGE_GAP)
-        const drawX = PAGE_MARGIN + pl.x + centerShiftX + inset
-        const drawY = A4_PT.height - PAGE_MARGIN - (pl.y + centerShiftY + pl.height) + inset
-        page.drawImage(img, { x: drawX, y: drawY, width: drawW, height: drawH })
-        areaSum += drawW * drawH
+      for (const b of packed[pi].blocks) {
+        for (const r of b.rows) {
+          const img = r.key.startsWith('__label:')
+            ? labels.get(r.key.slice(8))?.image
+            : byUnit.get(r.key)?.image
+          if (!img) continue
+          page.drawImage(img, {
+            x: PAGE_MARGIN + r.x,
+            y: contentTop - (r.y + r.height),
+            width: r.width,
+            height: r.height,
+          })
+          areaSum += r.width * r.height
+        }
       }
-      areaTotal += bin.width * bin.height
+      const foot = await this.renderLabelPng(`${pi + 1} / ${packed.length}`, '#8A7F72', 20)
+      if (foot) {
+        page.drawImage(await pdf.embedPng(foot.buffer), {
+          x: A4_PT.width - PAGE_MARGIN - foot.width,
+          y: PAGE_MARGIN / 2,
+          width: foot.width,
+          height: foot.height,
+        })
+      }
     }
 
     const pages = pdf.getPageCount()
     if (!pages) throw new BadRequestException('所选素材中没有可合成的图片')
 
     const pdfBuffer = Buffer.from(await pdf.save())
-    const day = new Date().toLocaleDateString('zh-CN')
     const title = includeAnswers ? `复习资料（含答案）-${day}.pdf` : `复习资料-${day}.pdf`
     // ⚠️ 对象存储的 key 只接受 ASCII（Supabase 会拒「Invalid key」），中文只能出现在
     //    documents.title（展示名）里——此前用中文 key 上传，切到 supabase 驱动后必然失败。
@@ -379,13 +457,14 @@ export class PdfService {
       file_key: key,
       mime_type: 'application/pdf',
       size_bytes: pdfBuffer.length,
-      meta: { source_ids: ids, include_answers: includeAnswers },
+      meta: { source_ids: ids, include_answers: includeAnswers, layout: 'question-blocks-v1' },
     })
 
-    const fillRatio = areaTotal > 0 ? areaSum / areaTotal : 0
-    console.log(`[pdf] 合成完成：${decoded.length} 张图 → ${pages} 页，平均填充率 ${(fillRatio * 100).toFixed(1)}%`)
-    return { url, key, doc_id: docId, pages, fillRatio, images: decoded.length }
+    const fillRatio = areaSum > 0 ? Math.min(1, areaSum / (pages * bin.width * bin.height)) : 0
+    console.log(`[pdf] 逐题版式合成完成：${groups.size} 题 / ${byUnit.size} 张图 → ${pages} 页，填充率 ${(fillRatio * 100).toFixed(1)}%`)
+    return { url, key, doc_id: docId, pages, fillRatio, images: byUnit.size }
   }
+
 
   /**
    * 把选中的图片合成 Word（.docx），供家长二次编辑、加批注后再打印。
