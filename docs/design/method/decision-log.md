@@ -3243,4 +3243,11 @@ M63 4/4；M60+M61+M62 11/11；`verify:gate` 38/38；`tsc` / `lint:build` / `buil
 - 纯前端；后端 dist 不动；未提审未发版；未 push。
 
 ### 四、验证
-M64 4/4（新模块：缩略图面板/跨页回列表/题号定位/可中止与预热）；M60~M63 15/15；`verify:gate` 38/38；`tsc` / `lint:build` / `build:weapp` RC=0。
+M64 4/4（新模块：缩略图面板/跨页回列表/题号定位/题号入库/可中止与预热）；M57 + M60~M63 20/20；`verify:gate` 38/38；`tsc` / `lint:build` / `build:weapp` RC=0。
+
+### D-085 §五、发货回写（2026-11-18 10:3x，思傅确认「上传开发版」）
+- 重新 `build:weapp`，角标 `e57fbae` = HEAD；`release:check --dev` 11 通过 / 2 警告 / 0 阻断。
+- CLI（`islogin:true`、`--port 46737`、AppID `wx48bf5ba9bae0bf39`）上传开发版 **2026.11.18.3**，TOTAL **932.5 KB / 954871 Byte**，`√ upload` exit 0。
+- 上传后 CLI `open --project` 重载 IDE，清掉编译期假 ENOENT 缓存。
+- 🔴 边界：只到开发版，未提审未发版 ⇒ D-074~D-085 仍未面客；**未真机验收**（缩略图清晰度、跨页连续裁、题号定位命中率都需思傅手机实测）；未 push（AHEAD=60）。后端 dist 未动（仍是 D-079 版本）。
+- ⚠️ **存量题没有 `question_label`**：本轮只是让**新录入**的「按题号提取」题带上题号；此前入库的题仍需走缩略图路径（重录或不做定位都可）。
