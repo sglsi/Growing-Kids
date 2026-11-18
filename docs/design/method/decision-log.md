@@ -3440,3 +3440,29 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - `release:check --dev` 11 通过/2 警告/**0 阻断**（发布态两阻断 urlCheck/隐私校验属提审项，开发态放行）。
 - CLI 上传开发版 **2026.11.18.6**（936.6 KB / 959054 Byte，`√ upload`，exit 0），描述「D-089/090：题干/答案摘要LaTeX转可读符号；复习资料含答案版式修复」；上传后 `cli open` 重载 IDE 清假 ENOENT（exit 0）。脚本 `.tmp/upload-d090.mjs`。
 - 至此 D-089（后端已上生产）+ D-090（前端已上开发版）双端改动到位；仍未真机验收、未提审未发版、未 push。
+
+## D-091（2026-11-18 17:5x）：复习资料打印清晰度治本 · 原图优先 + 识别倍率
+
+### 一、问题（思傅打印「复习资料（无答案）-2026/11/18」后反馈不清晰）
+先量化再动手：下载生产 `review-pack-1794979005688.pdf`，用 pdf-lib 解析 content stream 逐张量真实 DPI —— **31 张图全部 <200 DPI，29 张 <150 DPI**（题图 117~155、题号标签 72）。打印清晰需 300 DPI ⇒ 确认为源图分辨率/压缩问题，非版式。
+
+### 二、根因（实测，非推测）
+- 题目图入库存 `display.webp`（长边 ≤1600 + WebP q80 有损），**original 原图一直在同 hash 目录**（生产验证 95KB vs display 32KB），但裁剪→合成全链路都没用它。
+- `image-pipeline.ts` displayMaxEdge=1600、displayQuality=80 是有损上限。
+- `pdf_tool.py` 扫描页渲染 `DEFAULT_SCALE=2.0`（≈144dpi）：仅对「无文字层 PDF 扫描页」生效，截图上传题不经过。
+
+### 三、改动（思傅选②治本 + 补充「裁剪从原始文件切」）
+- ① `StorageService.readOriginalFor(key)`：display/thumb key → 按内容哈希反查同目录 `original.{jpg,jpeg,png,webp}` 并读回；读不到静默 null 回退，绝阻断。local/supabase 通用（走 readObject）。
+- ② `PdfService.fetchImages` → 新增 `downloadOriginalPreferred(url)`：自家 storage 派生图 URL 优先 original，外链不受影响，回退原 URL 下载。**存量题立刻受益**（去 WebP 有损模糊）。
+- ③ `ImageService.fetchImage`：裁剪取图优先 original，读不到回退 display ⇒ 新裁剪的题目块保留原图质量。
+- ④ `pdf_tool.py` `DEFAULT_SCALE` 2.0→**3.0**（≈216dpi），并支持 `GK_PDF_RENDER_SCALE` 环境变量回退（侧车限 1.6G，面积 ×2.25，内存吃紧可设回 2.0）；`MAX_RENDER_EDGE=4200` 钳制保留（A4@3.0=1836×2376 安全）。
+
+### 四、诚实边界 / 不宣称
+- **原图与 display 像素相同**（实测两张 1115×469 / 1136×67），original 只是 JPEG 压损更小（体积 3×）⇒ ①③是「去压缩模糊」的改善，**不是分辨率翻倍**。
+- ④ 只对**新识别的无文字层 PDF 扫描页**有效；存量题与截图上传题不受益，要享受需重新识别原 PDF。
+- 真正的 300 DPI 需要：源头高分辨率截图 + 重新识别；本轮不宣称达到 300 DPI 或彻底解决。
+- 未部署生产、未上传前端（本轮纯后端 python + TS）、未真机、未提审发版、未 push。
+
+### 五、验证
+- M70 新增 4/4（原图反查规则真编译 / PDF 原图优先 / 裁剪原图优先 / 渲染倍率 3.0+env 回退）。
+- 门禁 M12/13/16/18/70 **42/42**（含前后端 tsc）、版式 M65-69 **18/18**；`nest build` RC=0；`pdf_tool.py` 语法 OK + env 回退实测（默认 3.0 / 设 2.0 得 2.0）。
