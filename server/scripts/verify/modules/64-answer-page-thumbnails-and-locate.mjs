@@ -22,8 +22,8 @@ m.test('A1 页选择改为缩略图网格，不再用文字页码 ActionSheet', 
   c.ok(/e\.stopPropagation\(\)[\s\S]{0,80}onPreview\(p\.url\)/.test(p), '「看大图」须独立热区且不触发裁剪')
   const a = read(ANS)
   c.ok(!/Taro\.showActionSheet\(/.test(a), '不许再用 ActionSheet 列页码（6 项上限且看不到内容）')
-  c.ok(/pages = r\.pages\.map\(\(p, i\) => \(\{ index: p\.index \|\| i \+ 1, url: p\.url \}\)\)/.test(a),
-    '页图须转成带页码的项再交给面板')
+  c.ok(/pages = r\.pages\.map\(\(p\) => \(\{ index: p\.index, url: p\.url \}\)\)/.test(a),
+    '页图须转成带页码的项再交给面板（页码在 fetchDocPages 统一成 1 基，见 M65/D-086）')
   c.ok(/setPdfPages\(session\)/.test(a), '多页 PDF 须打开缩略图面板')
 })
 

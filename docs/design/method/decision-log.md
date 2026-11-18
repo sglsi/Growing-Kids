@@ -3251,3 +3251,45 @@ M64 4/4（新模块：缩略图面板/跨页回列表/题号定位/题号入库/
 - 上传后 CLI `open --project` 重载 IDE，清掉编译期假 ENOENT 缓存。
 - 🔴 边界：只到开发版，未提审未发版 ⇒ D-074~D-085 仍未面客；**未真机验收**（缩略图清晰度、跨页连续裁、题号定位命中率都需思傅手机实测）；未 push（AHEAD=60）。后端 dist 未动（仍是 D-079 版本）。
 - ⚠️ **存量题没有 `question_label`**：本轮只是让**新录入**的「按题号提取」题带上题号；此前入库的题仍需走缩略图路径（重录或不做定位都可）。
+
+## D-086（2026-11-18 10:2x）：答案裁剪按科目过滤 / 页码重号定案 / hideLoading 报错收口
+
+### 一、诉求（思傅原话要点）
+1. 资料已按科目分类，**答案裁剪选资料时只显示该科目**的文件。
+2. `showActionSheet` 展示页面信息时出现**两个「第 1 页」**——虽然现在是缩略图，但这是系统 BUG 还是我们的？要指出来。
+3. 真机调试报错：`WAServiceMainContext.js:1 (in promise) MiniProgramError {"errMsg":"hideLoading:fail:toast can't be found"}`，**影响项目不**。
+
+### 二、「两个第 1 页」定案：我们的 bug，不是微信系统 bug
+证据链（可复查）：
+- 后端 `ocr-engine/pdf_tool.py:84` 返回 `{"index": i}`，**`i` 从 0 起** ⇒ `/api/ocr/doc-pages` 的 `index` 是 **0 基**。
+- 旧前端（D-084 及以前）写 `pages.map((p, i) => \`第 ${p.index || i + 1} 页\`)`：`0` 是**假值** ⇒ 第 1 页（index=0）被兜成 1；第 2 页（index=1）truthy 原样取 1 ⇒ **两个「第 1 页」**，其后页码整体错位一位。
+- D-085 改成缩略图面板后，同一个 `index: p.index || i + 1` 仍被沿用，所以**缩略图上的页码徽标也会重号**（用户看到的正是这个）。
+⇒ 结论：这是前端把「0 基索引」与「1 基页码」混用，`||` 兜底又把 0 吃掉的经典错误。微信 `showActionSheet` 本身没有重复渲染。
+
+### 三、修复
+1. **页码只转一次**（`src/services/api.ts` `fetchDocPages`）：拿到后端 `pages` 后统一 `index: Number(p.index) + 1`，并在注释里写清依据（`pdf_tool.py:84`）。前端所有 `index` 一律当 1 基页码用（含「按题号定位」命中表的 key）。去掉调用点 `p.index || i + 1`。
+2. **答案选资料按科目过滤**（`src/components/material-picker.tsx`）：新增 `subjectId` 入参。
+   - 题目已归类 ⇒ 面板顶部出现 `[仅 数学] [全部资料]` 两个 chip，**默认停在本科目**，走服务端 `GET /api/library?subject_id=…` 过滤（不是前端截断，资料多时不会漏）。
+   - 每次重新打开都回到本科目（上一次为找别的科目切到「全部」，不该延续到下一道题）。
+   - 本科目为空时给可操作文案：「可以点上方『全部资料』，或先到资料库给文件归属科目」。
+   - `answer-editor` 传 `subjectId={item?.subject_id || null}`；题目未归类（`subject_id` 为 null）⇒ 不显示筛选条、不过滤，老行为不变。
+3. **`hideLoading:fail:toast can't be found` 收口**（新文件 `src/lib/loading.ts`）：
+   - 根因：微信里 `showToast` 与 `showLoading` **共用同一个提示实例**——弹过 toast，原来的 loading 就被顶掉；此后 `hideLoading()` 找不到实例即 reject，裸调用没 `.catch()` ⇒ unhandled rejection 打到调试器。**功能不受影响**（不是渲染/数据错），但会盖住真错误，且随后的 `hideLoading` 会把提示抢关（P-016/D-019 同款教训）。
+   - 全仓 45 处 `Taro.hideLoading()` 统一换成 `hideLoadingSafe()`：只 catch 掉「已经没 loading 了」这一种失败，**不吞** showLoading / 业务异常。
+   - 同时把 8 处「loading 未关就弹 toast/modal」调整为**先关再弹**（`answer-editor` 裁剪加入答案、`recognize` 文档识别/页图生成/两处 OCR/图形补全、`image-editor` AI 处理与本地预览、`profile` 头像、`library` 旋转）。
+
+### 四、边界 / 不宣称
+- 科目过滤只看 `library_docs.subject_id`；**未归科目的文件在「仅本科目」里不出现**。这是按科目分类的直接后果，不是丢失；「全部资料」永远能看到。
+- 题目的 `subject_id` 才是过滤依据。存量题若没归科目，就不显示筛选条（不猜科目）。
+- `hideLoadingSafe` 只消除控制台报错与提示被抢关，**不代表链路没问题**：真机若还报别的错（如 `uploadFile:fail`），必须按原文继续查。
+- 纯前端改动；后端 dist 不动；未提审未发版；未 push。
+
+### 五、验证
+M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 + 传参 / 无裸 hideLoading / 提示前先关 loading）；M62~M64 12/12；M59 5/5；更新 M38 A6、M59、M62、M64 的旧断言（`Taro.hideLoading()` → `hideLoadingSafe()`、去 `|| i + 1`）。M38 A1/A7 属既有失败（`question-match.ts` 基线 + `CACHE_VERSION v14` 旧断言，历轮记录在案，非本轮引入）。
+
+### D-086 §六、发货回写（2026-11-18 10:4x）
+- 提交 `62f0cbb`（功能）；`build:weapp` 角标 `62f0cbb` = HEAD；`release:check --dev` 11 通过 / 2 警告 / 0 阻断。
+- CLI（`islogin:true`、`--port 46737`、AppID `wx48bf5ba9bae0bf39`）上传开发版 **2026.11.18.4**，TOTAL **934.0 KB / 956398 Byte**，`√ upload` exit 0。
+- 上传后 CLI `open --project` 重载 IDE，清掉编译期假 ENOENT 缓存（本轮在 IDE 开着时跑过 build）。
+- 🔴 边界：只到开发版，未提审未发版 ⇒ D-074~D-086 仍未面客；**未真机验收**（筛选条默认停在本科目、页码不再重号、控制台是否还报 `hideLoading:fail` 都需思傅手机实测）；未 push（AHEAD=62）。后端 dist 未动（仍是 D-079 版本）。
+- ⚠️ 科目过滤的实际效果取决于**题目是否已归科目**：`item.subject_id` 为空的存量题不显示筛选条（走老的全量列表）。

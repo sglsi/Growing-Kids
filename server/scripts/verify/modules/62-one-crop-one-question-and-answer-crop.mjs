@@ -62,7 +62,7 @@ m.test('A4 已存题目：答案可从本地图片/文件/PDF/资料库裁剪', 
   c.ok(/setPdfPages\(session\)/.test(s), '页图须交给缩略图面板（不再用文字页码）')
   c.ok(!/const askPage = \(offset: number\)/.test(s), '文字页码分批已废弃，别回来')
   c.ok(
-    /Taro\.showLoading\(\{ title: '正在生成页图…'[\s\S]*finally \{[\s\S]*Taro\.hideLoading\(\)/.test(s),
+    /Taro\.showLoading\(\{ title: '正在生成页图…'[\s\S]*finally \{[\s\S]*hideLoadingSafe\(\)/.test(s),
     '必须先关 mask loading 再开面板（loading 与浮层叠加会吞点击）',
   )
   c.ok(/if \(pages\.length === 1\) \{[\s\S]{0,240}openCrop\(pages\[0\]\.url\)/.test(s), '单页 PDF 直接进裁剪')

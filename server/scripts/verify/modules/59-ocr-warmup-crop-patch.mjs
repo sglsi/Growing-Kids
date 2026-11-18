@@ -110,7 +110,7 @@ m.test('A5 裁剪卡死：手势同步起手 + 帧节流 + 强制退出通道', 
   c.ok(/layerMeasuredRef/.test(s), '触摸层矩形须缓存，避免每次 touchstart 都发 SelectorQuery')
   c.ok(/lastMoveTsRef/.test(s), '拖动帧须节流，防高频 setState 压死渲染层')
   c.ok(
-    /const handleForceExit = \(\) => \{[\s\S]{0,500}Taro\.hideLoading\(\)[\s\S]{0,500}onCancel\(\)/.test(s),
+    /const handleForceExit = \(\) => \{[\s\S]{0,500}hideLoadingSafe\(\)[\s\S]{0,500}onCancel\(\)/.test(s),
     '须有强制退出通道：先收 loading 与忙态再关闭（busy 卡住时也能出来）',
   )
   c.ok(/onClick=\{handleForceExit\}/.test(s), '顶部「退出」须绑定强制退出')

@@ -105,7 +105,7 @@ m.test('🔴 A6 前端 source=none 常驻渲染 + toast 与 hideLoading 时序',
   c.ok(/candidate\.source === 'none'\s*\?\s*'这次没有可用结果'/.test(ed), '缺「这次没有可用结果」标题')
   c.ok(/candidate\.note \? \(/.test(ed), 'note 没有常驻渲染')
   c.ok(/let pendingToast = ''/.test(ed), 'toast 没有收进延迟变量')
-  c.ok(ed.indexOf('Taro.hideLoading()') < ed.indexOf('if (pendingToast) Taro.showToast'),
+  c.ok(ed.indexOf('hideLoadingSafe()') > 0 && ed.indexOf('hideLoadingSafe()') < ed.indexOf('if (pendingToast) Taro.showToast'),
     'showToast 仍在 hideLoading 之前（微信下会被抢关）')
   c.ok(/\.\.\.result|&& !hasRefs/.test(ed) && /match_level !== 'topic'/.test(ed),
     'canAdopt 闸门被动过，参考例题可能被采纳成本题答案')
