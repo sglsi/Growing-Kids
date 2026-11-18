@@ -562,7 +562,13 @@ export class OcrService implements OnApplicationBootstrap, OnApplicationShutdown
       url,
       // 单页文字永远达不到此值 ⇒ 每页都按「扫描页」渲染 PNG
       minText: 999999999,
-      scale: 2,
+      // D-092（复查 D-091）：这张页图就是前端裁剪的**底图**，它的分辨率直接决定
+      // 裁出来题图的清晰度上限。旧值写死 2（A4≈144dpi）⇒ 11 道扫描题裁出来只有
+      // 117~155dpi、打印发糊，即便扫描 PDF 内嵌的是高清原图也无济于事。
+      // 提到 3（A4≈216dpi）；侧车 1.6G 内存吃紧时用 GK_PDF_RENDER_SCALE 回退到 2。
+      // ⚠️ 前端 Canvas 2D 硬上限 1365px（image-editor MAX_CANVAS_SIDE）仍是最终天花板，
+      //    scale 继续调高不会无限变清晰——那道墙要绕开得改裁剪架构，另立提案。
+      scale: Math.max(0.5, Number(process.env.GK_PDF_RENDER_SCALE ?? 3) || 3),
       maxPages,
       startPage,
       timeoutMs: 180000,
