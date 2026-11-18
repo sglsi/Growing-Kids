@@ -56,13 +56,16 @@ m.test('A4 已存题目：答案可从本地图片/文件/PDF/资料库裁剪', 
   const s = read(ANS)
   c.ok(/openCroppableSource = async/.test(s), '须有统一的「选源→裁剪」入口')
   c.ok(/fetchDocPages\(url, 10\)/.test(s), 'PDF 须出页图后才可裁剪')
-  c.ok(/const askPage = \(offset: number\)/.test(s), '多页 PDF 须让用户选页')
-  c.ok(/PAGE_CHOICES = 5/.test(s), 'showActionSheet 真机硬上限 6 项，每批最多 5 页 + 更多页')
-  c.ok(/if \(hasMore\) itemList\.push\('更多页…'\)/.test(s), '超过 5 页须能翻到下一批')
+  // D-085 起页码选择改为页缩略图面板：这里只锁「多页必须让用户选」这个能力，
+  // 具体交互细节由 M64 断言。
+  c.ok(/const session = \{ docName: name \|\| 'PDF 资料', pages \}/.test(s), '多页 PDF 须开页缩略图面板')
+  c.ok(/setPdfPages\(session\)/.test(s), '页图须交给缩略图面板（不再用文字页码）')
+  c.ok(!/const askPage = \(offset: number\)/.test(s), '文字页码分批已废弃，别回来')
   c.ok(
-    /Taro\.showLoading\(\{ title: '正在生成页图…'[\s\S]*finally \{[\s\S]*Taro\.hideLoading\(\)[\s\S]*askPage\(0\)/.test(s),
-    '必须先关 mask loading 再弹 ActionSheet（真机冲突）',
+    /Taro\.showLoading\(\{ title: '正在生成页图…'[\s\S]*finally \{[\s\S]*Taro\.hideLoading\(\)/.test(s),
+    '必须先关 mask loading 再开面板（loading 与浮层叠加会吞点击）',
   )
+  c.ok(/if \(pages\.length === 1\) \{[\s\S]{0,240}openCrop\(pages\[0\]\.url\)/.test(s), '单页 PDF 直接进裁剪')
   c.ok(/setCropSrc\(f\.path\)/.test(s), '本地图片须直接进裁剪器')
   c.ok(/uploadFile\(f\.path, \{ purpose: 'temp' \}\)/.test(s), '本地 PDF 须先临时上传拿 URL 再出页图')
   c.ok(/handlePickLibraryForCrop/.test(s), '资料库选择须分「整份加入 / 裁剪」两种意图')
