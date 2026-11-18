@@ -8,6 +8,7 @@ import { CheckDot } from '@/components/selection-bar'
 import { getSubjectColor, itemStatus, truncate, formatDate } from '@/types'
 import type { TimelineItem, ErrorAnalysis } from '@/types'
 import { BRAND_TEXT } from '@/lib/theme'
+import { latexToReadable } from '@/utils/latex'
 
 /**
  * 错因类型 → 角标配色（与详情页红橙色系呼应，但按错因语义分色，便于列表一眼分拣）
@@ -177,9 +178,12 @@ export default function ReviewItemCard({
   // 由 questionRichHtml 降级成 [图N] 文字（fail-closed，不拿邻图顶替）。
   const inlineFigs = Array.isArray(c.question_inline_figures) ? c.question_inline_figures : []
   const inlineUrls = item.question_inline_figure_urls || []
+  // D-090：库存 LaTeX（答案/题干的唯一真相），列表摘要必须先转可读符号再截断；
+  // latexToReadable 对 [图N] 标记与纯文本幂等，不会破坏插图定位。
+  const stemText = latexToReadable(c.question || '')
   const stemNodes = inlineFigs.length
     ? questionRichHtml(
-        truncate(c.question || '', 80),
+        truncate(stemText, 80),
         inlineFigs.map((f, i) => ({ slot: f.slot, url: inlineUrls[i] })),
       )
     : ''
@@ -257,7 +261,7 @@ export default function ReviewItemCard({
             </View>
           ) : (
             <Text className="block text-sm text-foreground leading-relaxed mb-2">
-              {truncate(c.question || '', 80) || '（图片题目）'}
+              {truncate(stemText, 80) || '（图片题目）'}
             </Text>
           )}
 
@@ -265,7 +269,7 @@ export default function ReviewItemCard({
             <View className="flex flex-row items-start gap-2 bg-muted bg-opacity-60 rounded-lg p-2">
               <Text className="block text-xs font-medium shrink-0 pt-1 text-brand-text">正确答案</Text>
               <Text className="block flex-1 text-xs leading-relaxed text-brand-text">
-                {truncate(c.answer, 60)}
+                {truncate(latexToReadable(c.answer), 60)}
               </Text>
               {onAnswer && !selecting ? (
                 <View

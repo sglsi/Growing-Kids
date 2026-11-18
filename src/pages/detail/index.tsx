@@ -631,7 +631,7 @@ export default function DetailPage() {
       {inlineFigures.length > 0 ? (
         <View className="rounded-2xl border border-border p-3 mb-3" style={{ backgroundColor: '#FCFBF8' }}>
           <Text className="block text-xs text-muted-foreground mb-2">题干预览（图形已嵌入文字对应位置）</Text>
-          <RichText nodes={questionRichHtml(qContent, inlineFigures.map((f) => ({ slot: f.slot, url: f._url })))} />
+          <RichText nodes={questionRichHtml(latexToReadable(qContent), inlineFigures.map((f) => ({ slot: f.slot, url: f._url })))} />
         </View>
       ) : null}
       <View className="flex flex-row items-center justify-between mb-2">
@@ -1163,7 +1163,7 @@ export default function DetailPage() {
               <View className="flex flex-col gap-2">
                 {similar.map((s) => (
                   <View key={s.id} className="rounded-xl border border-border p-3">
-                    <Text className="block text-xs text-foreground mb-1">{truncate(s.question || '（无题面文本）', 80)}</Text>
+                    <Text className="block text-xs text-foreground mb-1">{truncate(latexToReadable(s.question || '（无题面文本）'), 80)}</Text>
                     <View className="flex flex-row items-center justify-between">
                       <View className="flex flex-row gap-1 flex-wrap">
                         {s.shared_tags.map((t) => (
