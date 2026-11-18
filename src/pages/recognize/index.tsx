@@ -80,6 +80,12 @@ interface BoardEntry {
    * 可选：既有构造点不必全部改，读取侧一律 `?? []`。
    */
   answerImages?: { url: string; key: string }[]
+  /**
+   * 印刷题号（D-085）：按题号提取时用户输入的号，入库写 `content.question_label`。
+   * 没有它，详情页「答案添加」的按题号定位找不到号，只能靠缩略图手工找页。
+   * 分节模式存「一6」这样的组合，与文档导入的题号口径一致。
+   */
+  questionLabel?: string
   /** 本题（首图）OCR 出的段落 */
   segments: PageTextSegment[]
   /** idle=未识别 | busy=识别中 | done=已识别 | error=识别失败 */
@@ -1469,6 +1475,8 @@ export default function RecognizePage() {
           solution: '',
           wrong_answer: '',
           status: 'pending' as const,
+          // D-085：题号入库（详情页按题号定位解答页的来源之一；空串不写，保持老行为）
+          ...(e.questionLabel ? { question_label: e.questionLabel } : {}),
           question_images: e.images.map((i) => i.key),
           // P-031：解答区裁剪图单独落 answer_images（Q2=A 只存图片，不解文本）
           ...((e.answerImages?.length ?? 0) > 0 ? { answer_images: e.answerImages!.map((i) => i.key) } : {}),
@@ -1946,6 +1954,8 @@ export default function RecognizePage() {
         id: ++boardIdRef.current,
         // Q2=A：只存图片，题干文本留空（后端已放宽为「有题面图即可」）
         text: '',
+        // D-085：把用户输入的题号带到题库里，详情页「按题号定位解答页」才找得到
+        questionLabel: r.section ? `${r.section}${r.label}` : String(r.label),
         // 跨栏/跨页补的图跟在主裁图之后，顺序即用户的裁剪顺序
         images: r.stem ? [r.stem, ...(r.extra || [])] : [...(r.extra || [])],
         answerImages: r.answer ? [r.answer] : [],
