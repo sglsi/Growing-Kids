@@ -16,6 +16,9 @@ import { practiceSpacePoints } from './question-space'
 import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
 import { normalizeImageSource } from './image-normalize'
 import { splitQuestionRuns, hasInlineFigure } from '../shared/inline-figure-runs'
+// D-089：库存的是 LaTeX 源码（前端 view 态转可读显示），PDF 文本块也必须先转可读，
+// 否则 \sqrt{3}/\frac{1}{2} 会被原样画成「代码符号」。复用前端同一份零依赖转换器。
+import { latexToReadable } from './latex'
 
 // 图与图之间保留 12pt 空隙，便于剪裁/批注（智能拼页专用）。
 const IMAGE_GAP = 12
@@ -182,11 +185,16 @@ export class PdfService {
           // 答案图同样只在「答疑解惑」卷出现，练习卷不带
           const aImages = (it.answer_image_urls || []).filter(Boolean)
           aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u, groupKey, role: 'answer', label, spacePt }))
+          // D-089：D-082 起「加答案」还能走文件/图片附件（answer_attachments），
+          // 这类图片答案不在 answer_images 里，旧合成只读 answer_image_urls ⇒ 漏答案。
+          // 这里把 image 类型且有签名 URL 的附件也纳入（doc/text 附件不进图像流，跳过）。
+          const aAtt = (it.answer_attachments || []).filter((a: any) => a?.type === 'image' && a?.url)
+          aAtt.forEach((a: any, i: number) => units.push({ id: `${it.id}#att${i}`, url: a.url, groupKey, role: 'answer', label, spacePt }))
           if ((c.wrong_answer || '').trim()) {
             units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
           }
           if ((c.answer || '').trim()) {
-            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
+            units.push({ id: `${it.id}#t-answer`, text: { heading: '答案：', lines: (c.answer || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
           }
           if ((c.solution || '').trim()) {
             units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
@@ -270,8 +278,15 @@ export class PdfService {
       return rows.length ? rows : [' ']
     }
     const visual: { text: string; bold: boolean; color: string }[] = []
-    if (block.heading) visual.push({ text: block.heading, bold: true, color: '#2E6F4E' })
-    for (const l of block.lines) wrap(l).forEach((t) => visual.push({ text: t, bold: false, color: '#1a1a1a' }))
+    // D-089：LaTeX → 可读符号（√、分数、上下标、希腊字母…），与前端 view 态一致。
+    // 必须在折行前转——latexToReadable 会把 $...$ 转成含 \n 的行间公式。
+    const readable = (s: string) => latexToReadable(s)
+    if (block.heading) visual.push({ text: readable(block.heading), bold: true, color: '#2E6F4E' })
+    for (const l of block.lines) {
+      readable(l)
+        .split('\n')
+        .forEach((seg) => wrap(seg).forEach((t) => visual.push({ text: t, bold: false, color: '#1a1a1a' })))
+    }
     const H = PAD * 2 + visual.length * LH
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     const body = visual
@@ -352,9 +367,7 @@ export class PdfService {
       ordinal += 1
       const title = arr.find((u) => u.label)?.label || `第 ${ordinal} 题`
       const specs: Array<[string, string, string, number]> = [[`${g}:title`, title, '#1F2937', 15]]
-      if (arr.some((u) => u.role === 'answer')) {
-        specs.push([`${g}:answer`, '解答（思路与过程）', '#2E6F4E', 26])
-      }
+      // D-089：去掉「解答（思路与过程）」标签——答案紧跟题面，一个换行即可，不再加大标题。
       for (const [key, text, color, size] of specs) {
         const png = await this.renderLabelPng(text, color, size)
         if (!png) continue
@@ -402,9 +415,11 @@ export class PdfService {
         const d = byUnit.get(u.id)
         if (d) rows.push({ key: d.key, width: d.width, height: d.height, kind: u.role })
       }
-      // D-088：在「题面 → 答案」之间插入做题空白；选择/填空 24pt，应用题 96pt。
-      // 空白行没有图片，绘制阶段跳过，只占纵向空间；纯图片题按应用题留白。
-      const spacePt = arr.find((u) => u.role === 'question')?.spacePt ?? 0
+      // D-088：练习卷在「题面 → 答案」之间留做题空白（选择 24pt / 应用 96pt）。
+      // D-089：含答案解析的复习资料不放做题空间——答案紧跟题面，只留一个换行（20pt），
+      //        否则每题高度接近整页、一页放不下两题，且答案与题面被空白拉开。
+      const rawSpacePt = arr.find((u) => u.role === 'question')?.spacePt ?? 0
+      const spacePt = includeAnswers ? Math.min(rawSpacePt, 20) : rawSpacePt
       if (spacePt > 0) {
         const at = rows.findIndex((r) => r.key.startsWith('__label:') && r.key.endsWith(':answer'))
         const spaceRow: RowInput = { key: `__space:${g}`, width: 1, height: spacePt, kind: 'space' }
@@ -421,7 +436,9 @@ export class PdfService {
       height: A4_PT.height - PAGE_MARGIN * 2 - HEADER_H - FOOTER_H,
     }
     const contentTop = A4_PT.height - PAGE_MARGIN - HEADER_H
-    const packed = layoutQuestionBlocks(blocks, bin)
+    // D-089：长解答允许跨两页、短题可合并同页——不再「一题超高就整块压缩到一页」。
+    // 练习卷（无答案）仍走旧规则保持每题独立可作答。
+    const packed = layoutQuestionBlocks(blocks, bin, { allowSplit: includeAnswers })
     if (!packed.length) throw new BadRequestException('所选素材中没有可合成的图片')
 
     // y 向下 → pdf-lib y 向上翻转；同一题的题与答永远相邻、不跨页
@@ -469,7 +486,8 @@ export class PdfService {
       file_key: key,
       mime_type: 'application/pdf',
       size_bytes: pdfBuffer.length,
-      meta: { source_ids: ids, include_answers: includeAnswers, layout: 'question-blocks-v2' },
+      // D-089：去解答标签/换行间隙/长题跨页/LaTeX 可读化/附件答案 ⇒ v3
+      meta: { source_ids: ids, include_answers: includeAnswers, layout: 'question-blocks-v3' },
     })
 
     const fillRatio = areaSum > 0 ? Math.min(1, areaSum / (pages * bin.width * bin.height)) : 0
