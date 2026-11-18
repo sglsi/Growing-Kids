@@ -1021,7 +1021,11 @@ export default function LibraryPage() {
         {/* 本页已是 tabBar 页（导航栏标题「资料」），页内不再重复写标题 */}
         <View className="flex flex-row items-center justify-end mb-2">
           <View className="flex flex-row items-center gap-3">
-            <SelectionBar selection={sel} enterLabel="批量选择" />
+            <SelectionBar
+              selection={sel}
+              enterLabel="批量选择"
+              onSelectAll={() => sel.selectAll(docs.map((d) => d.id))}
+            />
             {!sel.selecting && (
               <View
                 className="flex flex-row items-center gap-1 rounded-xl bg-brand px-3 h-8"

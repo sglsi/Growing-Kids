@@ -223,9 +223,12 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
    * D-085：资料库 PDF 的「页缩略图会话」。非空即面板打开。
    * 裁完一页后自动回到这里，用户接着选下一页 —— 不再重复「添加文件 → 选第几页」。
    */
-  const [pdfPages, setPdfPages] = useState<{ docName: string; pages: PdfPageItem[] } | null>(null)
+  /** D-087：记住源文件 URL 与总页数，才能按 start_page 增量加载第 11 页以后 */
+  interface PdfSession { docName: string; url: string; total: number; pages: PdfPageItem[] }
+  const [pdfPages, setPdfPages] = useState<PdfSession | null>(null)
   /** 会话缓存：裁剪器关闭后要能回到同一个 PDF 的页列表 */
-  const cropFromPdfRef = useRef<{ docName: string; pages: PdfPageItem[] } | null>(null)
+  const cropFromPdfRef = useRef<PdfSession | null>(null)
+  const [loadingMorePages, setLoadingMorePages] = useState(false)
   const [pageHits, setPageHits] = useState<Record<number, PdfPageHit>>({})
   const [locating, setLocating] = useState(false)
   const [locateHint, setLocateHint] = useState('')
@@ -418,12 +421,14 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
     }
     Taro.showLoading({ title: '正在生成页图…', mask: true })
     let pages: PdfPageItem[] = []
+    let totalPages = 0
     try {
-      const r = await fetchDocPages(url, 10)
+      const r = await fetchDocPages(url, 10, 0)
       if (!r.pages.length) throw new Error('没有渲染出页图')
       // D-086：页码已在 fetchDocPages 里统一成 1 基，这里不再用 `|| i + 1`
       // 兜底——0 是假值，旧写法会把第 1、2 页都显示成「第 1 页」。
       pages = r.pages.map((p) => ({ index: p.index, url: p.url }))
+      totalPages = Math.max(r.page_count || pages.length, pages.length)
     } catch (e) {
       console.error('答案 PDF 页图生成失败', e)
       Taro.showToast({
@@ -440,7 +445,7 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
      * 答案常跨 2~3 页，纯文字页码只能靠猜；一屏缩略图能直接看到内容在哪页，
      * 且裁完自动回到本列表继续选 —— 不必重复「添加文件 → 选页」。
      */
-    const session = { docName: name || 'PDF 资料', pages }
+    const session: PdfSession = { docName: name || 'PDF 资料', url, total: totalPages, pages }
     setPageHits({})
     setAddedFromPdf(0)
     if (pages.length === 1) {
@@ -450,6 +455,38 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
       return
     }
     setPdfPages(session)
+  }
+
+  /**
+   * D-087：加载第 11 页及以后。后端按 start_page 只渲染增量页，不重复前 10 页；
+   * 已加载的缩略图、命中徽标与「已加入 N 张」全部保留，只在尾部追加。
+   */
+  const loadMorePdfPages = async () => {
+    const s = pdfPages
+    if (!s || loadingMorePages || s.pages.length >= s.total) return
+    // 页码在 fetchDocPages 已归一成 1 基：最大已载页码 = 下一批的 0 基起点
+    const start = s.pages.reduce((m, p) => Math.max(m, p.index), 0)
+    setLoadingMorePages(true)
+    try {
+      const r = await fetchDocPages(s.url, 10, start)
+      const seen = new Set(s.pages.map((p) => p.index))
+      const added = r.pages
+        .filter((p) => !seen.has(p.index))
+        .map((p) => ({ index: p.index, url: p.url }))
+      const merged: PdfSession = {
+        ...s,
+        total: Math.max(s.total, r.page_count),
+        pages: [...s.pages, ...added],
+      }
+      setPdfPages(merged)
+      cropFromPdfRef.current = merged
+      if (!added.length) Taro.showToast({ title: '没有更多页了', icon: 'none' })
+    } catch (e) {
+      console.error('加载后续页失败', e)
+      Taro.showToast({ title: '后续页加载失败，请重试', icon: 'none' })
+    } finally {
+      setLoadingMorePages(false)
+    }
   }
 
   /** D-085：点缩略图 → 记住会话、关面板、带命中框进裁剪 */
@@ -1142,6 +1179,9 @@ export default function AnswerEditor({ item, onSaved, hideTextBox, onAdopt }: Pr
         docName={pdfPages?.docName}
         pages={pdfPages?.pages || []}
         addedCount={addedFromPdf}
+        totalPages={pdfPages?.total}
+        loadingMore={loadingMorePages}
+        onLoadMore={pdfPages && pdfPages.pages.length < pdfPages.total ? () => void loadMorePdfPages() : undefined}
         questionLabel={questionNo}
         locating={locating}
         locateHint={locateHint}

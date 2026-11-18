@@ -681,7 +681,12 @@ export default function SubjectPage() {
                     <Text className="block text-sm" style={{ color: BRAND_TEXT }}>汇总生成</Text>
                   </View>
                 )}
-                <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
+                <SelectionBar
+                  selection={sel}
+                  enterLabel="批量选择"
+                  countPrefix="已选"
+                  onSelectAll={() => sel.selectAll(items.map((x) => x.id))}
+                />
               </View>
             )}
           >
@@ -694,7 +699,11 @@ export default function SubjectPage() {
           <View style={{ padding: '0 16px 8px' }}>
             <View className="flex flex-row items-center justify-between">
               <Text className="block text-sm text-muted-foreground">共 {filteredDocs.length} 份资料</Text>
-              <SelectionBar selection={selDocs} enterLabel="批量选择" />
+              <SelectionBar
+                selection={selDocs}
+                enterLabel="批量选择"
+                onSelectAll={() => selDocs.selectAll(filteredDocs.map((d) => d.id))}
+              />
             </View>
             <View className="mt-2">
               <SegmentedTabs<'all' | 'docx' | 'pdf'>

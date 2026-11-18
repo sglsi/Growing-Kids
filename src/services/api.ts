@@ -1300,7 +1300,7 @@ export async function exportRecognizedDocx(
  * 供「错题提取 · 按题号裁剪」——只有拿到页图，才能在该页跑 OCR 拿段落框、再按框裁图。
  * Word/TXT 没有页概念（零 LO 提取），后端直接 400 并提示改用 PDF 或图片。
  */
-export async function fetchDocPages(fileUrl: string, maxPages = 10) {
+export async function fetchDocPages(fileUrl: string, maxPages = 10, startPage = 0) {
   const res = await unwrap<{
     page_count: number
     pages: { index: number; url: string; width: number; height: number }[]
@@ -1308,7 +1308,8 @@ export async function fetchDocPages(fileUrl: string, maxPages = 10) {
     Network.request({
       url: '/api/ocr/doc-pages',
       method: 'POST',
-      data: { file_url: fileUrl, max_pages: maxPages },
+      // startPage 是 0 基源文件页号；后端据此只渲染增量页（D-087）
+      data: { file_url: fileUrl, max_pages: maxPages, start_page: startPage },
       header: authHeaders(),
     }),
   )
@@ -1652,9 +1653,12 @@ export function saveAnswer(
   return updateQuestion(itemId, {
     answer_content: payload.answer,
     solution: payload.solution,
-    // ⚠️ 只在确实传了文本答案时才改 status：否则「仅添加附件」会把已有答案的
-    //    条目误标成 pending（列表角标「待找答案」就冒出来了）。
-    status: payload.answer !== undefined ? (payload.answer ? 'answered' : 'pending') : undefined,
+    // ⚠️ 只在确实传了文本答案时才按文本改 status；若这次只加图片附件，
+    //    也要把 pending 翻成 answered——否则列表一直挂「待找答案」（D-087）。
+    //    附件被清空且不传文本时保持原 status 不动（不动存量文本的已答状态）。
+    status: payload.answer !== undefined
+      ? (payload.answer ? 'answered' : 'pending')
+      : (payload.attachments || []).some((a) => !!(a?.file_key || a?.url)) ? 'answered' : undefined,
     answer_attachments: payload.attachments,
     answer_source: payload.source,
     answer_refs: payload.refs,

@@ -365,7 +365,17 @@ export function itemAnswered(item: TimelineItem): boolean {
 
 export function itemStatus(item: TimelineItem): 'answered' | 'pending' {
   if (item.kind !== 'question') return 'answered'
-  return item.content?.status || (item.content?.answer ? 'answered' : 'pending')
+  const c = item.content || {}
+  /**
+   * D-087：图片答案已经写进 answer_images / answer_attachments，但 status 还停在
+   * pending（saveAnswer 只传附件时不碰 status）⇒ 列表误挂「待找答案」。
+   * 已有答案内容优先于过期的 status：只有确实没有任何答案载体时才认 pending。
+   * 不在这里写库，只修正展示——老数据无需迁移也能正确显示。
+   */
+  const hasImageAnswer = (c.answer_images || []).length > 0 || (item.answer_image_urls || []).some(Boolean)
+  const hasFileAnswer = (c.answer_attachments || []).some((a) => !!(a?.file_key || a?.url))
+  if (hasImageAnswer || hasFileAnswer) return 'answered'
+  return c.status || (c.answer ? 'answered' : 'pending')
 }
 
 /** 跨端时间格式化 YYYY-MM-DD HH:mm */

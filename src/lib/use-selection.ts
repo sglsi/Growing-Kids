@@ -14,6 +14,8 @@ export interface Selection {
   enter: () => void
   exit: () => void
   clear: () => void
+  /** 一键选中当前列表的全部 id（重置既有勾选，不做 toggle 翻转） */
+  selectAll: (ids: string[]) => void
   toggle: (id: string) => void
   /** 长按进入选择模式并选中该项 */
   longPress: (id: string) => void
@@ -31,6 +33,9 @@ export function useSelection(): Selection {
   }, [])
 
   const clear = useCallback(() => setSelected(new Set()), [])
+
+  /** D-087：全选是「赋值」而不是逐项 toggle——后者会把已选的又取消掉 */
+  const selectAll = useCallback((ids: string[]) => setSelected(new Set(ids)), [])
 
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {
@@ -62,10 +67,11 @@ export function useSelection(): Selection {
       enter,
       exit,
       clear,
+      selectAll,
       toggle,
       longPress,
     }),
-    [selecting, selected, enter, exit, clear, toggle, longPress],
+    [selecting, selected, enter, exit, clear, selectAll, toggle, longPress],
   )
 }
 

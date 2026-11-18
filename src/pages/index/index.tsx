@@ -910,7 +910,12 @@ export default function IndexPage() {
                   <Text className="block text-base font-semibold text-foreground">最近题目</Text>
                   <Text className="block text-xs text-muted-foreground mt-1">共 {inboxTotal} 条 · 点学科标签可改分类，点「…」可再编辑</Text>
                 </View>
-                <SelectionBar selection={sel} enterLabel="批量选择" countPrefix="已选" />
+                <SelectionBar
+                  selection={sel}
+                  enterLabel="批量选择"
+                  countPrefix="已选"
+                  onSelectAll={() => sel.selectAll(inbox.map((x) => x.id))}
+                />
               </View>
               {/* 年级提示条（P-005）：
                   · 有年级 → 说明「优先显示哪个年级」；扩散了就写明扩到哪些年级

@@ -280,7 +280,7 @@ export default function MemoryHomePage() {
           <SelectionBar
             selection={sel}
             enterLabel="批量选择"
-            onSelectAll={() => list.forEach((m) => sel.toggle(m.id))}
+            onSelectAll={() => sel.selectAll(list.map((m) => m.id))}
           />
         </View>
       )}

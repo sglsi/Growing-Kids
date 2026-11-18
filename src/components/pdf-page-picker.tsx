@@ -1,6 +1,6 @@
 import { View, Text, ScrollView, Image as TaroImage } from '@tarojs/components'
 import { Crop, X } from 'lucide-react-taro'
-import { INK, BRAND, BRAND_FOREGROUND } from '@/lib/theme'
+import { INK, BRAND, BRAND_FOREGROUND, BRAND_TEXT } from '@/lib/theme'
 
 /**
  * 资料库 PDF 页缩略图选择器（D-085）。
@@ -33,6 +33,12 @@ interface Props {
   pages: PdfPageItem[]
   /** 本次会话已经加入答案的页数（提示用户还能继续选） */
   addedCount?: number
+  /** 源文件总页数（可能大于已加载的缩略图数） */
+  totalPages?: number
+  /** 正在加载后续页 */
+  loadingMore?: boolean
+  /** 加载下一批页（有更多页时才传） */
+  onLoadMore?: () => void
   /** 题号（有值才显示「按题号定位」） */
   questionLabel?: string
   locating?: boolean
@@ -51,6 +57,7 @@ interface Props {
 
 export default function PdfPagePicker({
   visible, docName, pages, addedCount = 0, questionLabel,
+  totalPages, loadingMore = false, onLoadMore,
   locating = false, locateHint = '', hits = {},
   onClose, onPreview, onPick, onLocate,
 }: Props) {
@@ -79,7 +86,7 @@ export default function PdfPagePicker({
               选择要裁剪的页面
             </Text>
             <Text className="block text-xs mt-1" style={{ color: '#8A7F72' }}>
-              {docName ? `${docName.slice(0, 18)} · ` : ''}共 {pages.length} 页
+              {docName ? `${docName.slice(0, 18)} · ` : ''}共 {totalPages || pages.length} 页 · 已加载 {pages.length} 页
               {addedCount > 0 ? ` · 已加入 ${addedCount} 张，可继续选页` : ''}
             </Text>
           </View>
@@ -186,6 +193,22 @@ export default function PdfPagePicker({
             })}
           </View>
         </ScrollView>
+
+        {/* D-087：一屏只渲染 10 页，后面还有就给「加载后续页」——每次增量 10 页，
+            已加载的缩略图和命中框不动，不用退出重新选文件 */}
+        {onLoadMore ? (
+          <View className="px-4" style={{ paddingTop: 10 }}>
+            <View
+              className="w-full h-10 rounded-xl flex flex-row items-center justify-center"
+              style={{ backgroundColor: loadingMore ? '#F4F1EA' : '#F0F7F3' }}
+              onClick={() => { if (!loadingMore) onLoadMore() }}
+            >
+              <Text className="block text-xs" style={{ color: loadingMore ? '#8A7F72' : BRAND_TEXT }}>
+                {loadingMore ? '正在加载后续页…' : `加载后续页（还有 ${(totalPages || pages.length) - pages.length} 页）`}
+              </Text>
+            </View>
+          </View>
+        ) : null}
 
         <View
           className="w-full flex items-center justify-center"

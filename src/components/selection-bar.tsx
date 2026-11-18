@@ -28,10 +28,12 @@ interface SelectionBarProps {
   enterLabel?: string
   /** 选择态时文案前缀，默认「已选」 */
   countPrefix?: string
-  /** 选择态时「清空」按钮文案，默认「清空」 */
+  /** 选择态时「清空」按钮文案，默认「全部取消」 */
   clearLabel?: string
   /** 选择态时是否显示「全选」按钮（可选用，使用方提供 handler） */
   onSelectAll?: () => void
+  /** 自定义清空 handler，缺省用 selection.clear */
+  onClearAll?: () => void
   /** 「全选」按钮文案，默认「全选」 */
   selectAllLabel?: string
 }
@@ -41,8 +43,8 @@ interface SelectionBarProps {
  * 在 document / library / subject / index 顶部右侧共用。
  */
 export default function SelectionBar({
-  selection, enterLabel = '批量选择', countPrefix = '已选', clearLabel = '清空',
-  onSelectAll, selectAllLabel = '全选',
+  selection, enterLabel = '批量选择', countPrefix = '已选', clearLabel = '全部取消',
+  onSelectAll, onClearAll, selectAllLabel = '全选',
 }: SelectionBarProps) {
   if (!selection.selecting) {
     return (
@@ -55,9 +57,14 @@ export default function SelectionBar({
       {onSelectAll ? (
         <View className="block text-sm text-muted-foreground" onClick={onSelectAll}>{selectAllLabel}</View>
       ) : null}
-      {selection.count > 0 ? (
-        <View className="block text-sm text-muted-foreground" onClick={selection.clear}>{clearLabel}</View>
-      ) : null}
+      {/* D-087：进入批量态就常驻「全部取消」，0 选时淡显但可点，避免按钮忽隐忽现 */}
+      <View
+        className="block text-sm text-muted-foreground"
+        style={{ opacity: selection.count > 0 ? 1 : 0.5 }}
+        onClick={onClearAll || selection.clear}
+      >
+        {clearLabel}
+      </View>
       <View className="block text-sm text-primary rounded-lg border border-border px-2 py-1" onClick={selection.exit}>取消</View>
     </View>
   )
