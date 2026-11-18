@@ -164,11 +164,24 @@ export function buildReviewPlan(state: ReviewState, now: Date = new Date()): Rev
   const count = clampCount(state.review_count)
   const lapses = Math.max(0, Math.floor(Number(state.review_lapses) || 0))
   const nextDate = parse(state.next_review_at)
-  const completed = inBook && count >= REVIEW_STAGES && !nextDate
+  /**
+   * P-033（C）：毕业判定必须**优先于** inBook。
+   *
+   * 此前写的是 `completed = inBook && count >= REVIEW_STAGES && !nextDate`，
+   * 且 status 先判 `!inBook ⇒ 'out'`。P-033 让毕业时自动出本（in_review_book=false）后，
+   * 这两个条件叠加的结果是：毕业题的 status 永远返回 'out'，`completed` 永远 false，
+   * 前端 detail 里所有 `status === 'graduated'` 的分支全部变成**不可达死代码**——
+   * 家长看到的是「不在复习本」，而不是「已掌握」。
+   *
+   * 「走完五档」是**已经发生的事实**（count=5 且无下次到期），与「当前是否在本里」无关；
+   * 出本只是它的后果。故把它提到最前，语义与 M15「毕业＝连续 5 次做对」一致。
+   */
+  const graduated = count >= REVIEW_STAGES && !nextDate
+  const completed = graduated
 
   let status: ReviewDueStatus
-  if (!inBook) status = 'out'
-  else if (completed) status = 'graduated'
+  if (graduated) status = 'graduated'
+  else if (!inBook) status = 'out'
   else if (!nextDate) status = 'unscheduled'
   else status = isDue(state.next_review_at, now) ? 'due' : 'upcoming'
 

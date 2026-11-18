@@ -928,13 +928,24 @@ export default function DetailPage() {
           </View>
         )}
 
-        <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-4">
+        {/* P-033（B）：这个开关**不是**掌握判定，只是导出口径。
+            思傅 2026-11-18 拍板「掌握由系统判定、自动出本」，故此处改名并讲清边界——
+            旧文案「已掌握」会让家长以为点了就等于学会了，而系统另有一套五档判定，
+            两套权威并存必然互相打脸（M7：做成的次数 > 夸出来的信心感）。 */}
+        <View className="flex flex-row items-center justify-between bg-muted rounded-xl px-4 py-3 mb-2">
           <View className="flex-1">
-            <Text className="block text-sm font-medium text-foreground">已掌握</Text>
-            <Text className="block text-xs text-muted-foreground">标记后默认不进入汇总，可在复习本「汇总导出」里开启开关重新纳入</Text>
+            <Text className="block text-sm font-medium text-foreground">不进入导出</Text>
+            <Text className="block text-xs text-muted-foreground">只影响「汇总导出」是否纳入这题，不影响复习。是否算掌握由系统按 1/3/7/14/28 天五档判定，走完自动移出复习本</Text>
           </View>
           <Switch checked={mastered} onCheckedChange={(v) => setMastered(v)} />
         </View>
+        {/* 存量照顾：早前用这个开关当「已掌握」的题，仍在复习本里正常到期，
+            这里明说一句，免得家长以为标过就不会再提醒了 */}
+        {mastered && item?.in_review_book && (
+          <Text className="block text-xs text-muted-foreground mb-4">
+            这题已标为不进导出，但仍在复习本中、会照常提醒。若不想再复习它，点上方「★ 已加入复习本」暂停。
+          </Text>
+        )}
 
         <View className="flex flex-row items-center justify-between mb-2">
           <Text className="block text-sm font-semibold text-foreground">题目</Text>
@@ -1088,8 +1099,10 @@ export default function DetailPage() {
 
         {/* C4 复习排程（分散练习 d = 0.85；plan 由后端现算下发）
             ⚠️ 只在「已在复习本」时显示：不在本里的题还没有排程，
-            显示「第 1/5 档 + 做对了」会让人以为排程已经开始工作。 */}
-        {item && plan && plan.in_review_book && (
+            显示「第 1/5 档 + 做对了」会让人以为排程已经开始工作。
+            P-033（C）：毕业题已自动出本，但**必须照样显示**这块——
+            否则家长只看到「不在复习本」，无法区分「我暂停了它」和「系统判定我掌握了」。 */}
+        {item && plan && (plan.in_review_book || plan.status === 'graduated') && (
           <Card className="rounded-2xl border-border p-4 mb-4">
             <View className="flex flex-row items-center justify-between mb-1">
               <Text className="block text-sm font-semibold text-foreground">复习排程</Text>
@@ -1101,7 +1114,7 @@ export default function DetailPage() {
             </View>
             <Text className="block text-xs text-muted-foreground mb-2">
               {plan.status === 'graduated'
-                ? `五档都做对了，这题已经稳了（仍留在复习本）${plan.review_lapses > 0 ? ` · 曾做错 ${plan.review_lapses} 次` : ''}`
+                ? `五档都做对了，系统判定已掌握，已自动移出复习本${plan.review_lapses > 0 ? ` · 曾做错 ${plan.review_lapses} 次` : ''}`
                 : plan.status === 'due'
                   ? (plan.overdue_days > 0 ? `已逾期 ${plan.overdue_days} 天，今天补上` : '今天就该复习')
                   : plan.status === 'unscheduled'

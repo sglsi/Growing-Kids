@@ -19,6 +19,15 @@ import type {
 const TABLE = 'timeline_items'
 
 /**
+ * P-033（A）：批量录入时的首档错峰窗口（天）。
+ *
+ * 一页卷子几十题若全部「明天到期」，待办一次雪崩——这是把「漏加入导致机制不发生」
+ * 换成「一次涌入导致机制被放弃」，同样失效。故同批内按序号分摊到 1~7 天。
+ * ⚠️ 只影响**入本后第一次到期是哪天**，不改 `review.ts` 的 1/3/7/14/28 档位表（M8 不动）。
+ */
+const REVIEW_ENTRY_STAGGER_DAYS = 7
+
+/**
  * 从对象 key 取出内容哈希段：`blobs/ab/<hash>/display.webp` → `<hash>`。
  * 非 blobs/ 内容寻址路径（如历史 `tmp/...`）返回 ''。
  */
@@ -639,6 +648,8 @@ export class TimelineService {
     ownedSubjects?: Map<string, string>,
     seqCache?: Map<string, number>,
     userGrade?: number | null,
+    /** P-033（A）：批量录入时的首档错峰天数（0 = 不错峰，单条录入即 0） */
+    reviewOffsetDays = 0,
   ): Promise<Record<string, unknown>> {
     // 年级合法性前置校验：显式传了非法值就 400，别静默存成 null
     // （静默降级会让客户端 bug 一直不暴露：用户以为标了三年级，其实什么都没标）
@@ -671,6 +682,27 @@ export class TimelineService {
       title: dto.title ?? (await this.nextTitle(userId, subject.id, subject.name, seqCache)),
       source: dto.source ?? '',
       tags: dto.tags ?? [],
+      /**
+       * P-033（A）录入即入本 —— 见 `props/P-033` §2。
+       *
+       * 为什么默认入本：录入错题/要掌握的知识这个动作**本身**就是「我要记住它」的声明，
+       * 再问一次「要不要加入复习本」等于把用户的意图丢掉又捡回来。而漏加入是**静默失败**
+       * （题目永不到期 ⇒ `review_events` 永无该题的行 ⇒ 机制完全不发生），
+       * 误加入只是**可见噪音**（多一条能一键移出的待办）。两者代价不对称，故默认为入本。
+       *
+       * 首档排程与 `addToReviewBook()` 完全一致（+1 天）：入本却不排程会停在
+       * `unscheduled` 状态，既不进待办也不推进，等于半个入本。
+       *
+       * `reviewOffsetDays` 只用于**批量录入错峰**：一页卷子 30 题若全部明天到期，
+       * 待办立即雪崩，家长第一周就会放弃（0019 迁移对历史条目做过同样的分摊）。
+       * 单条录入 offset=0，首档仍是第二天，与 M8 的 1/3/7/14/28 档位表不冲突
+       * ——错峰只改「入本后第一次见面是哪天」，不改任何档位间隔。
+       */
+      in_review_book: true,
+      added_to_review_at: new Date().toISOString(),
+      next_review_at: firstReviewAt(
+        reviewOffsetDays > 0 ? new Date(Date.now() + reviewOffsetDays * 24 * 60 * 60 * 1000) : undefined,
+      ),
     }
     if (dto.kind === 'image') {
       // tmp/ 临时对象兜底固化（详见 promoteTempFileKey 注释）
@@ -733,7 +765,8 @@ export class TimelineService {
     // 全批都显式给了 grade 时连这一次都不必查。
     const userGrade = dtos.some((d) => d.grade === undefined) ? await this.ownerGrade(userId) : undefined
     const payloads: Record<string, unknown>[] = []
-    for (const dto of dtos) {
+    for (let i = 0; i < dtos.length; i++) {
+      const dto = dtos[i]
       if (dto.kind !== 'image' && dto.kind !== 'question') {
         throw new BadRequestException('kind 仅支持 image / question')
       }
@@ -751,7 +784,10 @@ export class TimelineService {
           || !!((c2.images || []).length)
         if (!hasAny) throw new BadRequestException('题目条目缺少 content.question 或题面图')
       }
-      payloads.push(await this.buildPayload(userId, dto, ownedSubjects, seqCache, userGrade))
+      // P-033（A）：同批错峰——第 i 题首档顺延 i%7 天，避免一页卷子全部明天到期
+      payloads.push(await this.buildPayload(
+        userId, dto, ownedSubjects, seqCache, userGrade, i % REVIEW_ENTRY_STAGGER_DAYS,
+      ))
     }
     // D-059：整批合并成一次检测调用，避免逐题往返把保存链路拖过前端 60s 超时。
     await this.ugc.assertAllowed(
@@ -1032,6 +1068,21 @@ export class TimelineService {
     const client = getSupabaseClient()
     const now = new Date().toISOString()
 
+    /**
+     * P-033（C）五档走完即自动移出复习本 —— 思傅 2026-11-18 拍板「系统判定自动出本」。
+     *
+     * 为什么这里可以自动出本：`advanceReview()` 的 wrong 分支把 `review_count` 归零，
+     * 故「走完五档」严格等价于**连续 5 次成功提取**——这正是 20a M15「毕业：连续 5 次做对」
+     * 与 M7「做成的次数 > 夸奖」的落地形态。机制早就存在，此前只是把 `next_review_at`
+     * 置空、题**仍留在复习本**（旧的 detail 文案甚至明写「仍留在复习本」），
+     * 于是「已掌握」在界面上不存在，家长只能自己拿笔记着哪题该移出。
+     *
+     * 为什么不在毕业时清 `review_count`：`removeFromReviewBook` 的既有约定是
+     * 「移出保留计数，再次加入从原档位继续，不白费之前的复习」。毕业同理，
+     * 家长若把题重新加回本，它仍是「已连续成功 5 次」的状态，不该从头再来。
+     */
+    const graduated = adv.review_count >= REVIEW_STAGES
+
     const { data, error } = await client
       .from(TABLE)
       .update({
@@ -1039,9 +1090,10 @@ export class TimelineService {
         review_lapses: adv.review_lapses,
         last_reviewed_at: adv.last_reviewed_at,
         next_review_at: adv.next_review_at,
-        // 未入本的题被直接复习时自动入本（否则排程无处生根：不在本里就不参与待办）
-        in_review_book: true,
-        added_to_review_at: item.added_to_review_at || now,
+        // 未入本的题被直接复习时自动入本（否则排程无处生根：不在本里就不参与待办）；
+        // 毕业则反向：自动出本，`added_to_review_at` 一并清空（出本的定义就是「不占待办」）
+        in_review_book: !graduated,
+        added_to_review_at: graduated ? null : (item.added_to_review_at || now),
         updated_at: now,
       })
       .eq('user_id', userId)   // 隔离红线：不带上就是越权改别人数据
@@ -1079,7 +1131,14 @@ export class TimelineService {
     }
 
     await invalidateUserTimeline(userId)
-    const merged = { ...item, ...adv, in_review_book: true, added_to_review_at: item.added_to_review_at || now }
+    // 回给前端的 plan 必须与落库结果一致：毕业时 in_review_book=false，
+    // 否则详情页会显示「第 5/5 档」却又「已加入复习本」，自相矛盾
+    const merged = {
+      ...item,
+      ...adv,
+      in_review_book: !graduated,
+      added_to_review_at: graduated ? null : (item.added_to_review_at || now),
+    }
     return {
       review_count: adv.review_count,
       review_lapses: adv.review_lapses,
@@ -1120,6 +1179,27 @@ export class TimelineService {
     if (error) throw new Error(error.message)
 
     const rows = (data || []) as { next_review_at: string | null; review_count: number | null }[]
+
+    /**
+     * P-033（C）：已毕业且已出本的题数。判据与 `buildReviewPlan` 同源
+     * （连续成功到顶 + 无下次到期），只是这批行不在 `in_review_book=true` 的集合里。
+     * 独立一次 head 查询，只要 count；失败降级为 0 并记日志——它是展示统计，
+     * 不该让整个汇总接口陪着挂掉（同埋点原则：观测不能牺牲功能）。
+     */
+    let graduatedOut = 0
+    try {
+      const { count } = await client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .is('deleted_at', null)
+        .eq('in_review_book', false)
+        .gte('review_count', REVIEW_STAGES)
+        .is('next_review_at', null)
+      graduatedOut = count || 0
+    } catch (e) {
+      console.error('[timeline] 已掌握题数统计失败（不影响汇总）:', (e as Error)?.message || e)
+    }
     const now = new Date()
     // 与 buildReviewPlan 的判定同源（本地日界）：跨端比较一律走时间戳，
     // 不要拿 ISO 字符串比较 —— Postgres 回的是 "+00:00"，JS 生成的是 "Z"。
@@ -1153,7 +1233,14 @@ export class TimelineService {
       in_book: rows.length,
       due_today: dueToday,
       unscheduled,
-      graduated,
+      /**
+       * P-033（C）：毕业题**已自动出本**，而上面这批行是按 `in_review_book=true`
+       * 取的，故本批里 `graduated` 只会命中「存量未跑 0034 迁移」的题。
+       * 若不补下面这一次统计，`graduated` 会恒为 0（新库上线后立刻就是 0），
+       * 家长就看不到「系统判定我已掌握多少题」——这是 F-2 层唯一由系统给出、
+       * 而非用户自评的正反馈，丢了它等于把掌握改成不可见（M7 的抓手消失）。
+       */
+      graduated: graduated + graduatedOut,
       next_due_at: nextDueAt,
     }
     await cacheSet(cacheKey, result)

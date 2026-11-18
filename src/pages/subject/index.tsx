@@ -5,6 +5,7 @@ import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, S
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import ReviewItemCard from '@/components/review-item-card'
+import ReviewQueue from '@/components/review-queue'
 import ImageEditor from '@/components/image-editor'
 import AnswerSheet from '@/components/answer-sheet'
 import FilterHeader, {
@@ -29,6 +30,13 @@ import { formatDate, formatTime } from '@/types'
 import { hideLoadingSafe } from '@/lib/loading'
 
 const PAGE_SIZE = 20
+
+/**
+ * P-033（D）单次复习队列上限。
+ * GK-SRS-24 §4.2 建议一次 5–8 题；上限设 50 只为防止「攒了两个月」时
+ * 一次拉太多卡住首帧，超出的题下次点「开始复习」再来（不丢，仍在本里到期）。
+ */
+const QUEUE_MAX = 50
 
 /** 「更多操作」里可对图片执行的 AI 动作（与首页同一套，思傅 2026-10-23 对齐） */
 const IMAGE_ACTIONS: { action: ImageAction | 'crop'; label: string; icon: any }[] = [
@@ -55,6 +63,15 @@ export default function SubjectPage() {
   const [sum, setSum] = useState<ReviewSummary | null>(null)
   /** 只看今天该复习（含逾期） */
   const [dueOnly, setDueOnly] = useState(false)
+  /**
+   * P-033（D）复习队列。null = 不在队列里（显示普通列表）；
+   * 非 null = 队列快照，覆盖层一次一题作答。
+   *
+   * 为什么存快照而不是边答边拉：队列是「今天这一批」的概念，中途拉取会让
+   * 已答对的题（推进档位后不再到期）从列表里消失、序号错乱。快照期间的写入
+   * 已逐条落库，退出时统一刷新（`exitQueue`）。
+   */
+  const [queueItems, setQueueItems] = useState<TimelineItem[] | null>(null)
   const sel = useSelection()
 
   /**
@@ -306,6 +323,40 @@ export default function SubjectPage() {
     }
     sel.exit()
     load({ ...next, page: 1, since, due: nextDue })
+  }
+
+  /**
+   * P-033（D）开始今日复习 —— 拉一批到期题进队列，一次一题作答。
+   *
+   * 为什么要快照：每答一题就写库，实时的「到期列表」会当场变化
+   * （做对的推进档位后不再到期、毕业的出本），边答边拉会让序号错乱、
+   * 甚至把刚答过的题又排到队首。故开工时取一张快照，答完统一刷新。
+   */
+  const startQueue = async () => {
+    if (busy || queueItems) return
+    setBusy(true)
+    try {
+      const res = await fetchTimeline({ scope: 'review', due: true, page: 1, pageSize: QUEUE_MAX })
+      if (!res.list.length) {
+        Taro.showToast({ title: '今天没有到期的题', icon: 'none' })
+        return
+      }
+      setQueueItems(res.list)
+    } catch (e) {
+      console.error('加载今日待复习失败', e)
+      Taro.showToast({ title: '加载失败，请重试', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 退出队列：作答已逐条落库，这里只把列表与「今天该复习」数字重新对齐 */
+  const exitQueue = () => {
+    setQueueItems(null)
+    load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, silent: true, due: dueOnly })
+    fetchReviewSummary()
+      .then(setSum)
+      .catch((e) => console.error('刷新复习汇总失败', e))
   }
 
   /**
@@ -764,9 +815,21 @@ export default function SubjectPage() {
                 </View>
                 <Text className="block text-xs text-muted-foreground mt-1">
                   复习本共 {sum.in_book} 题
-                  {sum.graduated > 0 ? ` · 已走完五档 ${sum.graduated}` : ''}
+                  {sum.graduated > 0 ? ` · 已掌握 ${sum.graduated}` : ''}
                   {sum.next_due_at ? ` · 下次 ${formatDate(sum.next_due_at)}` : ''}
                 </Text>
+                {/**
+                  * P-033（D）「开始复习」：把「今天该复习 N 题」这个数字变成一次点击。
+                  * 此前只有数字、没有入口，家长要自己在列表里挑题、点进详情、
+                  * 滚到复习区再点按钮——一次复习 5 步，这是执行率的结构性杀手。
+                  */}
+                {sum.due_today > 0 && (
+                  <Button className="h-9 rounded-lg mt-2" onClick={startQueue} disabled={busy}>
+                    <Text className="block text-xs" style={{ color: BRAND_FOREGROUND }}>
+                      开始复习（{Math.min(sum.due_today, QUEUE_MAX)} 题）
+                    </Text>
+                  </Button>
+                )}
               </View>
             )}
             {loading ? (
@@ -810,6 +873,25 @@ export default function SubjectPage() {
             )}
           </View>
         </ScrollView>
+      )}
+
+      {/**
+        * P-033（D）复习队列覆盖层。
+        * 用 fixed 覆盖而不是替换列表内容：列表、筛选、选择态、滚动位置全部原样留着，
+        * 退出队列即刻回到原处（不然中途退出会丢掉用户的筛选条件，比不进队列更烦）。
+        * 列表模式**始终保留为兜底**——队列只是快路径，不是唯一路径。
+        */}
+      {queueItems && (
+        <View
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 200, backgroundColor: '#FFFFFF',
+          }}
+        >
+          <ScrollView scrollY style={{ height: '100vh', paddingTop: headerH }}>
+            <ReviewQueue items={queueItems} onExit={exitQueue} />
+          </ScrollView>
+        </View>
       )}
 
       {view === 'docs' && (
