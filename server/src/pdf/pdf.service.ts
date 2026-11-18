@@ -11,6 +11,7 @@ import { StorageService } from '../storage/storage.service'
 import { TimelineService } from '../timeline/timeline.service'
 import { DocumentsService } from '../documents/documents.service'
 import { layoutQuestionBlocks, type BlockInput, type RowInput } from './question-block-layout'
+import { practiceSpacePoints } from './question-space'
 // D-063：A4 / 页边距提到共用模块（一图一页与智能拼页同一套版面常量）
 import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
 import { normalizeImageSource } from './image-normalize'
@@ -41,6 +42,8 @@ interface SourceMeta {
   groupKey: string
   role: 'question' | 'answer'
   label: string
+  /** D-088：本题要留的做题空白高度（pt），应用题多、填空选择少 */
+  spacePt: number
 }
 
 interface ImageSource extends SourceMeta {
@@ -128,13 +131,20 @@ export class PdfService {
       // 但绝不把「第 N 题」写进存量数据——只用于本次合成的可读标题。
       const groupKey = it.id
       const label = ((it.content as { question_label?: string } | undefined)?.question_label || '').trim()
+      // D-088：题型从题号标签/题干判定；纯图片题（无题干文字）默认按应用题留白。
+      // 家长若知道题型，在题号里写「选择 3」「填空 7」即可自动少留。
+      const stemForType = (() => {
+        const c = (it.content || {}) as { question?: string; stem?: string }
+        return [c.question, c.stem].filter(Boolean).join(' ') || it.title || ''
+      })()
+      const spacePt = practiceSpacePoints(label, stemForType)
       if (it.kind === 'image' && it.url) {
-        units.push({ id: it.id, url: it.url, groupKey, role: 'question', label })
+        units.push({ id: it.id, url: it.url, groupKey, role: 'question', label, spacePt })
       } else if (it.kind === 'question') {
         const qImages = (it.question_image_urls || []).filter(Boolean)
         if (qImages.length) {
           // 题面图里含题干中的几何图/图表/示意图，是「孩子能作答」的关键素材
-          qImages.forEach((u, i) => units.push({ id: `${it.id}#q${i}`, url: u, groupKey, role: 'question', label }))
+          qImages.forEach((u, i) => units.push({ id: `${it.id}#q${i}`, url: u, groupKey, role: 'question', label, spacePt }))
         } else {
           // 纯 OCR 文字题（用户只存了识别文字、没有题块照片）：
           // 旧逻辑会一路走到「所选素材中没有可合成的图片」直接 400，练习卷出不来。
@@ -157,13 +167,13 @@ export class PdfService {
               // 无对应 URL 的标记由 splitQuestionRuns 原样留成文字（fail-closed，不拿邻图顶）。
               splitQuestionRuns(stem, (slot) => keyBySlot.get(slot)).forEach((run, i) => {
                 if (run.kind === 'text') {
-                  if (run.text.trim()) units.push({ id: `${it.id}#t-stem-${i}`, text: { lines: run.text.split('\n') }, groupKey, role: 'question', label })
+                  if (run.text.trim()) units.push({ id: `${it.id}#t-stem-${i}`, text: { lines: run.text.split('\n') }, groupKey, role: 'question', label, spacePt })
                 } else {
-                  units.push({ id: `${it.id}#inline-${run.slot}`, url: run.ref, groupKey, role: 'question', label })
+                  units.push({ id: `${it.id}#inline-${run.slot}`, url: run.ref, groupKey, role: 'question', label, spacePt })
                 }
               })
             } else {
-              units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') }, groupKey, role: 'question', label })
+              units.push({ id: `${it.id}#t-stem`, text: { lines: stem.split('\n') }, groupKey, role: 'question', label, spacePt })
             }
           }
         }
@@ -171,15 +181,15 @@ export class PdfService {
           const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }
           // 答案图同样只在「答疑解惑」卷出现，练习卷不带
           const aImages = (it.answer_image_urls || []).filter(Boolean)
-          aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u, groupKey, role: 'answer', label }))
+          aImages.forEach((u, i) => units.push({ id: `${it.id}#a${i}`, url: u, groupKey, role: 'answer', label, spacePt }))
           if ((c.wrong_answer || '').trim()) {
-            units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') }, groupKey, role: 'answer', label })
+            units.push({ id: `${it.id}#t-wrong`, text: { heading: '我的错误作答：', lines: (c.wrong_answer || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
           }
           if ((c.answer || '').trim()) {
-            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') }, groupKey, role: 'answer', label })
+            units.push({ id: `${it.id}#t-answer`, text: { heading: '正确答案：', lines: (c.answer || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
           }
           if ((c.solution || '').trim()) {
-            units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') }, groupKey, role: 'answer', label })
+            units.push({ id: `${it.id}#t-solution`, text: { heading: '解析：', lines: (c.solution || '').split('\n') }, groupKey, role: 'answer', label, spacePt })
           }
         }
       }
@@ -190,7 +200,7 @@ export class PdfService {
     for (const u of units) {
       // 文本块单元：不下载，直接作为 SourceUnit 交给下游（docx 原生段落 / PDF 位图渲染）
       if (u.text) {
-        out.push({ id: u.id, text: u.text, groupKey: u.groupKey, role: u.role, label: u.label })
+        out.push({ id: u.id, text: u.text, groupKey: u.groupKey, role: u.role, label: u.label, spacePt: u.spacePt })
         continue
       }
       if (!u.url) continue
@@ -213,7 +223,7 @@ export class PdfService {
         console.error('[combine] 无法解析图片，跳过', u.id)
         continue
       }
-      out.push({ id: u.id, groupKey: u.groupKey, role: u.role, label: u.label, ...norm })
+      out.push({ id: u.id, groupKey: u.groupKey, role: u.role, label: u.label, spacePt: u.spacePt, ...norm })
     }
     return out
   }
@@ -310,7 +320,9 @@ export class PdfService {
    * 排版策略（D-087 逐题清晰版式，替代原 Guillotine-BSSF 按图高重排）：
    *  1. 按题目分组，题面图 → 答案图 → 解析保持选中顺序；
    *  2. 每题一区块，带题号标题 /「解答」标签，区块不跨页；
-   *  3. 页内纵向流、统一左对齐，行距 10pt / 题距 22pt，页眉页脚标日期与页码。
+   *  3. 页内纵向流、统一左对齐，行距 10pt / 题距 22pt，页脚标页码；
+   *  4. D-088：不画顶部页头，题号缩到 15px，并在题面与答案之间留做题空间
+   *     （应用题 96pt / 填空选择 24pt，判据见 question-space.ts）。
    *
    * BSSF 虽省纸，但会打乱题图顺序，导致「题和图不知道哪个是哪个」——已弃用。
    * 结果转存 TOS 并归档进 documents（文档页）。
@@ -331,14 +343,15 @@ export class PdfService {
     }
 
     // 题号 /「解答」标签。中文走 sharp 位图（pdf-lib 标准字体无 CJK 字形）。
-    // 字阶：题号 30 > 解答 26 > 页眉 22 > 页码 20，靠尺寸而非颜色建立层级。
+    // D-088：题号由 30 缩到 15（用户要求小一半），不再做「顶 header」；
+    // 字号：题号 15 / 解答 26 / 页码 20，靠留白与位置而非大标题建立层级。
     type Embedded = { image: any; width: number; height: number }
     const labels = new Map<string, Embedded>()
     let ordinal = 0
     for (const [g, arr] of groups) {
       ordinal += 1
       const title = arr.find((u) => u.label)?.label || `第 ${ordinal} 题`
-      const specs: Array<[string, string, string, number]> = [[`${g}:title`, title, '#1F2937', 30]]
+      const specs: Array<[string, string, string, number]> = [[`${g}:title`, title, '#1F2937', 15]]
       if (arr.some((u) => u.role === 'answer')) {
         specs.push([`${g}:answer`, '解答（思路与过程）', '#2E6F4E', 26])
       }
@@ -348,10 +361,8 @@ export class PdfService {
         labels.set(key, { image: await pdf.embedPng(png.buffer), width: png.width, height: png.height })
       }
     }
-    const headerPng = await this.renderLabelPng(`复习资料 · ${day}`, '#8A7F72', 22)
-    const headerImage: Embedded | null = headerPng
-      ? { image: await pdf.embedPng(headerPng.buffer), width: headerPng.width, height: headerPng.height }
-      : null
+    // D-088：用户不要顶部「复习资料」页头——整页从第一道题开始，省下的空间留给做题。
+    // 页脚页码保留；文档标题仍在 documents.title 里，不靠页眉也能辨认。
 
     // 内容解码：文本块渲染成白底 PNG；图片格式双向兜底（与旧版一致）
     const decoded: Array<{ key: string; image: any; width: number; height: number; groupKey: string; role: 'question' | 'answer' }> = []
@@ -360,7 +371,7 @@ export class PdfService {
       if (isTextUnit(unit)) {
         const png = await this.renderTextPng(unit.text)
         if (!png) continue
-        s = { id: unit.id, buffer: png.buffer, isPng: true, width: png.width, height: png.height, groupKey: unit.groupKey, role: unit.role, label: unit.label }
+        s = { id: unit.id, buffer: png.buffer, isPng: true, width: png.width, height: png.height, groupKey: unit.groupKey, role: unit.role, label: unit.label, spacePt: unit.spacePt }
       } else s = unit
       let image: any
       try {
@@ -391,10 +402,19 @@ export class PdfService {
         const d = byUnit.get(u.id)
         if (d) rows.push({ key: d.key, width: d.width, height: d.height, kind: u.role })
       }
+      // D-088：在「题面 → 答案」之间插入做题空白；选择/填空 24pt，应用题 96pt。
+      // 空白行没有图片，绘制阶段跳过，只占纵向空间；纯图片题按应用题留白。
+      const spacePt = arr.find((u) => u.role === 'question')?.spacePt ?? 0
+      if (spacePt > 0) {
+        const at = rows.findIndex((r) => r.key.startsWith('__label:') && r.key.endsWith(':answer'))
+        const spaceRow: RowInput = { key: `__space:${g}`, width: 1, height: spacePt, kind: 'space' }
+        if (at >= 0) rows.splice(at, 0, spaceRow)
+        else rows.push(spaceRow)
+      }
       if (rows.length) blocks.push({ key: g, label: arr.find((u) => u.label)?.label || '', rows })
     }
 
-    const HEADER_H = 34
+    const HEADER_H = 0 // D-088：去掉顶部页头
     const FOOTER_H = 26
     const bin = {
       width: A4_PT.width - PAGE_MARGIN * 2,
@@ -408,14 +428,6 @@ export class PdfService {
     let areaSum = 0
     for (let pi = 0; pi < packed.length; pi += 1) {
       const page = pdf.addPage([A4_PT.width, A4_PT.height])
-      if (headerImage) {
-        page.drawImage(headerImage.image, {
-          x: PAGE_MARGIN,
-          y: A4_PT.height - PAGE_MARGIN - HEADER_H + (HEADER_H - headerImage.height) / 2,
-          width: headerImage.width,
-          height: headerImage.height,
-        })
-      }
       for (const b of packed[pi].blocks) {
         for (const r of b.rows) {
           const img = r.key.startsWith('__label:')
@@ -457,7 +469,7 @@ export class PdfService {
       file_key: key,
       mime_type: 'application/pdf',
       size_bytes: pdfBuffer.length,
-      meta: { source_ids: ids, include_answers: includeAnswers, layout: 'question-blocks-v1' },
+      meta: { source_ids: ids, include_answers: includeAnswers, layout: 'question-blocks-v2' },
     })
 
     const fillRatio = areaSum > 0 ? Math.min(1, areaSum / (pages * bin.width * bin.height)) : 0

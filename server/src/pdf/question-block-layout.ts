@@ -19,8 +19,8 @@ export interface RowInput {
   key: string
   width: number
   height: number
-  /** label 是题号/「解答」标签，按生成尺寸放，不参与「放大到页宽」 */
-  kind?: 'label' | 'question' | 'answer'
+  /** label 是题号/「解答」标签；space 是做题空白（无图，只占位） */
+  kind?: 'label' | 'question' | 'answer' | 'space'
 }
 
 export interface BlockInput {
@@ -37,7 +37,7 @@ export interface PlacedRow {
   y: number
   width: number
   height: number
-  kind: 'label' | 'question' | 'answer'
+  kind: 'label' | 'question' | 'answer' | 'space'
 }
 
 export interface PlacedBlock {
@@ -63,7 +63,10 @@ export interface LayoutOptions {
 const EPS = 1e-6
 
 function fitRow(row: RowInput, bin: Bin, maxH: number): { width: number; height: number } {
-  if (row.kind === 'label') return { width: Math.min(row.width, bin.width), height: row.height }
+  // 标签与做题空白都按原尺寸放：标签不能被放大到页宽，空白不能被左右拉伸
+  if (row.kind === 'label' || row.kind === 'space') {
+    return { width: Math.min(row.width, bin.width), height: row.height }
+  }
   let scale = 1
   if (row.width > bin.width) scale = bin.width / row.width
   if (row.height * scale > maxH) scale = maxH / row.height
