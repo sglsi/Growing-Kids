@@ -8,6 +8,7 @@ import { getSupabaseClient } from '../storage/database/supabase-client'
 import { StorageService } from '../storage/storage.service'
 import { cleanStr, cleanDate } from '../shared/query-param'
 import { splitQuestionRuns, hasInlineFigure } from '../shared/inline-figure-runs'
+import { reviewHintFor } from '../shared/review-hint'
 
 /** 单题最多嵌入的图片数：防止一份汇总卷被几十张原图撑到打不开 */
 const MAX_IMAGES_PER_QUESTION = 6
@@ -287,6 +288,17 @@ export class DocumentService {
       }),
     )
 
+    // P-034 §3.9：打印卷页眉——只陈述做法，不承诺效果（M11 边界）；答疑卷不需要。
+    if (params.include_answers !== true) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 240 },
+          children: [new TextRun({ text: '先独立做，做完再对答案', size: 20, color: '6B655D', font: '宋体' })],
+        }),
+      )
+    }
+
     let questionNo = 0
     for (const group of groupMap.values()) {
       children.push(
@@ -321,6 +333,23 @@ export class DocumentService {
         // 答案区块（2026-10-28 语义统一）：只有显式 include_answers === true 才输出，
         // 不传 = 打印练习卷。与 pdf/combine 保持一致，避免同一产品两种默认。
         const withAnswers = params.include_answers === true
+
+        // B2 / P-034 §3.5：练习卷按复习档位附辅助（0 纯题 / 1–2 提示 / ≥3 错因详解）。
+        // 真相源是列 review_count；content 里的同名字段只作迁移前兜底。
+        // 只在练习卷分支调用——答疑卷恒为完整详解，绝不做成四档。
+        const reviewCount =
+          typeof row.review_count === 'number' ? row.review_count : (typeof c.review_count === 'number' ? c.review_count : 0)
+        const hint = withAnswers ? null : reviewHintFor(reviewCount, c.error_analysis)
+        if (hint) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 40, after: 20 },
+              children: [new TextRun({ text: hint.heading, bold: true, size: 20, color: '2E6F4E', font: '宋体' })],
+            }),
+          )
+          children.push(...this.textParagraphs(hint.lines.join('\n'), { size: 20 }))
+        }
+
         if (withAnswers && c.wrong_answer) {
           children.push(
             new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: '我的错误作答：', size: 20, color: '9A948A', font: '宋体' })] }),
@@ -363,8 +392,6 @@ export class DocumentService {
         }
 
         // P2-18 复习进度（C4 后档位在列上；只有打印练习卷才写）
-        const reviewCount =
-          typeof row.review_count === 'number' ? row.review_count : (typeof c.review_count === 'number' ? c.review_count : 0)
         if (reviewCount > 0) {
           children.push(
             new Paragraph({

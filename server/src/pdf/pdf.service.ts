@@ -16,6 +16,7 @@ import { practiceSpacePoints } from './question-space'
 import { A4_PT, PAGE_MARGIN } from './one-image-per-page'
 import { normalizeImageSource } from './image-normalize'
 import { splitQuestionRuns, hasInlineFigure } from '../shared/inline-figure-runs'
+import { reviewHintFor } from '../shared/review-hint'
 // D-089：库存的是 LaTeX 源码（前端 view 态转可读显示），PDF 文本块也必须先转可读，
 // 否则 \sqrt{3}/\frac{1}{2} 会被原样画成「代码符号」。复用前端同一份零依赖转换器。
 import { latexToReadable } from './latex'
@@ -203,6 +204,27 @@ export class PdfService {
             }
           }
         }
+
+        // B2 / P-034 §3.5：练习卷按复习档位附辅助（0 纯题 / 1–2 提示 / ≥3 错因详解）。
+        // 只在练习卷分支加文本块；答疑卷恒为现有详解，避免做成四档。
+        // 文本块 role=question 且紧跟题面图 ⇒ 排在做题留白之前，孩子做完才对答案。
+        if (!includeAnswers) {
+          const c = (it.content || {}) as {
+            review_count?: number
+            error_analysis?: { label?: string; reason?: string; suggestion?: string } | null
+          }
+          // 真相源是列 review_count（0019 迁移后），content 同名字段仅兼容遗留数据。
+          const rawCount = typeof it.review_count === 'number' ? it.review_count : c.review_count
+          const hint = reviewHintFor(rawCount, c.error_analysis)
+          if (hint) {
+            units.push({
+              id: `${it.id}#t-hint`,
+              text: { heading: hint.heading, lines: hint.lines },
+              groupKey, role: 'question', label, spacePt,
+            })
+          }
+        }
+
         if (includeAnswers) {
           const c = (it.content || {}) as { wrong_answer?: string; answer?: string; solution?: string }
           // 答案图同样只在「答疑解惑」卷出现，练习卷不带
