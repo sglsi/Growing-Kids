@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Put, Delete, Body, Param, Query, Req, HttpCode, BadRequestException,
 } from '@nestjs/common'
 import { TimelineService } from './timeline.service'
-import { buildReviewPlan, type ReviewResult } from './review'
+import { type ReviewResult } from './review'
 import { requireUserId, type RequestWithUser } from '../shared/user-context'
 import type {
   CreateTimelineDto, UpdateTimelineDto, TimelineScope,
@@ -110,6 +110,52 @@ export class TimelineController {
     return { code: 200, msg: 'success', data }
   }
 
+  /**
+   * P-034 §3.1：暂停 = 家长主动临时移出（保留排程、可恢复），与系统毕业/移出分开。
+   * ⚠️ 声明在 `@Get(':id')` 之前，否则 'paused' 会被当成题目 id。
+   */
+  @Get('review/paused')
+  @HttpCode(200)
+  async listPaused(@Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    const data = await this.timelineService.listPaused(userId)
+    return { code: 200, msg: 'success', data }
+  }
+
+  @Post('review/paused')
+  @HttpCode(200)
+  async pauseFromReview(@Req() req: RequestWithUser, @Body() body: IdsBody) {
+    const userId = requireUserId(req)
+    const ids = this.parseIds(body)
+    const data = await this.timelineService.pauseFromReviewBook(userId, ids)
+    return { code: 200, msg: 'success', data }
+  }
+
+  @Delete('review/paused')
+  @HttpCode(200)
+  async restorePaused(@Req() req: RequestWithUser, @Body() body: IdsBody) {
+    const userId = requireUserId(req)
+    const ids = this.parseIds(body)
+    const data = await this.timelineService.restorePaused(userId, ids)
+    return { code: 200, msg: 'success', data }
+  }
+
+  /** P-034 §3.2：读/写毕业档数（2 快节奏 / 5 标准） */
+  @Get('review/stages')
+  @HttpCode(200)
+  async getGraduateStages(@Req() req: RequestWithUser) {
+    const userId = requireUserId(req)
+    return { code: 200, msg: 'success', data: { stages: await this.timelineService.getGraduateStages(userId) } }
+  }
+
+  @Put('review/stages')
+  @HttpCode(200)
+  async setGraduateStages(@Req() req: RequestWithUser, @Body() body: { stages?: unknown }) {
+    const userId = requireUserId(req)
+    const stages = await this.timelineService.setGraduateStages(userId, body?.stages)
+    return { code: 200, msg: 'success', data: { stages } }
+  }
+
   /** P2-17 相似题/变式题推荐：基于用户自建错题历史（文本+标签相似） */
   @Post(':id/similar')
   @HttpCode(200)
@@ -162,7 +208,9 @@ export class TimelineController {
     //    全缺失，前端按 url 渲染的图片统统不显示（列表走 list/overview 有补，所以首页能看）。
     const [withUrl] = await this.timelineService.withUrls([data])
     // 复习计划由排程状态现算后附带（前端不再自己算一遍，避免两端规则漂移）
-    return { code: 200, msg: 'success', data: { ...withUrl, review_plan: buildReviewPlan(withUrl) } }
+    // P-034 §3.2：经 service 构造，带上用户档数（快节奏 2 / 标准 5），口径与列表/review 回包一致
+    const reviewPlan = await this.timelineService.reviewPlanFor(userId, withUrl)
+    return { code: 200, msg: 'success', data: { ...withUrl, review_plan: reviewPlan } }
   }
 
   @Put(':id')

@@ -18,7 +18,7 @@ import { invalidateDomain } from '@/services/cache'
 import { runJob } from '@/services/jobs'
 import type {
   ApiEnvelope, Paged, TimelineItem, Subject, LibraryDoc, DocItem, Overview, GradeScope,
-  SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource,
+  SimilarItem, ReviewPlan, ReviewSummary, AnswerAttachment, AnswerSource, ErrorAnalysis,
 } from '@/types'
 // P-028 / D-045：知识点讲解标签只读字典（Q1② 独立端点，主 result 零改动）
 import type { CurriculumTopicsPayload, CurriculumTopicRow } from '@/lib/curriculum-tags'
@@ -484,6 +484,10 @@ export interface TimelineContentPayload {
   stem?: string
   /** P3：规范题号标签（如 "预习案·Ⅱ.汉译英 18"），错题库唯一指认题目 */
   question_label?: string
+  /** P-034 §3.4：家长/孩子在「做错了」后选的错因（写入由 recordMistakeReason 负责） */
+  error_analysis?: ErrorAnalysis
+  /** P-034 §3.4：当时有多确信（可选，高信心错误优先纠正 M4） */
+  confidence?: 'high' | 'low'
 }
 
 export interface CreateTimelinePayload {
@@ -771,6 +775,50 @@ export function removeFromReviewBook(ids: string[]) {
   )
 }
 
+/** P-034 §3.1：暂停（临时移出复习本，保留排程、可恢复） */
+export function pauseFromReviewBook(ids: string[]) {
+  return invalidateAfter(
+    unwrap<{ updated: number }>(
+      Network.request({ url: '/api/timeline/review/paused', method: 'POST', data: { ids }, header: authHeaders() }),
+    ),
+    'tl',
+  )
+}
+
+/** P-034 §3.1：恢复暂停的题（原排程继续） */
+export function restorePaused(ids: string[]) {
+  return invalidateAfter(
+    unwrap<{ updated: number; rescheduled: number }>(
+      Network.request({ url: '/api/timeline/review/paused', method: 'DELETE', data: { ids }, header: authHeaders() }),
+    ),
+    'tl',
+  )
+}
+
+/** P-034 §3.1：列出暂停的题 */
+export function fetchPaused() {
+  return unwrap<TimelineItem[]>(
+    Network.request({ url: '/api/timeline/review/paused', method: 'GET', header: authHeaders() }),
+  )
+}
+
+/** P-034 §3.2：读毕业档数（2 快节奏 / 5 标准） */
+export function fetchGraduateStages() {
+  return unwrap<{ stages: 2 | 5 }>(
+    Network.request({ url: '/api/timeline/review/stages', method: 'GET', header: authHeaders() }),
+  )
+}
+
+/** P-034 §3.2：设毕业档数 */
+export function setGraduateStages(stages: 2 | 5) {
+  return invalidateAfter(
+    unwrap<{ stages: 2 | 5 }>(
+      Network.request({ url: '/api/timeline/review/stages', method: 'PUT', data: { stages }, header: authHeaders() }),
+    ),
+    'tl',
+  )
+}
+
 /** P2-17 相似题推荐：基于用户自建错题历史（文本+标签相似） */
 export function fetchSimilar(id: string, limit = 5) {
   return unwrap<SimilarItem[]>(
@@ -804,6 +852,38 @@ export function markReviewed(id: string, result: 'correct' | 'wrong' = 'correct'
     ),
     'tl',
   )
+}
+
+/**
+ * P-034 §3.4：记录错因 + 信心（点「做错了」后、只对错题问一次）。
+ *
+ * 纪律：① 走既有 updateTimeline content patch，不另开写入路径（避免埋点/校验分叉）；
+ * ② 错因是用户自己选的，不是系统推断——文案不得说"系统识别"；
+ * ③ 可跳过（调用方在没选时不调本函数），跳过也能记对错，不阻塞作答。
+ */
+export function recordMistakeReason(
+  id: string,
+  reason: { type: ErrorAnalysis['type']; confidence?: 'high' | 'low' },
+) {
+  const error_analysis: ErrorAnalysis = {
+    type: reason.type,
+    label: MISTAKE_LABELS[reason.type] ?? '错因待判定',
+    reason: '',       // 家长选的是分类，不是自由文本；留空由展示层只显示 label
+    suggestion: '',   // 不生成建议（K1：个人主体无 AI；建议字段留给已有规则引擎产物）
+  }
+  return updateTimeline(id, {
+    content: { error_analysis, ...(reason.confidence ? { confidence: reason.confidence } : {}) },
+  })
+}
+
+/** 错因四选一 + 两个兜底项的展示名（与 server/src/ocr/ocr-error.ts TYPE_META 对齐） */
+export const MISTAKE_LABELS: Partial<Record<ErrorAnalysis['type'], string>> = {
+  'concept-mix': '概念没弄清',
+  'method-step': '方法/步骤不会',
+  'careless-calc': '计算或抄写出错',
+  misread: '看错题/漏条件',
+  'careless-sign': '符号写反',
+  'no-answer': '当时没做出来',
 }
 
 // ============================================================

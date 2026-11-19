@@ -1,7 +1,7 @@
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro, { useDidShow } from '@tarojs/taro'
 import { useEffect, useState, useRef } from 'react'
-import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Tag, Ellipsis } from 'lucide-react-taro'
+import { FileSearch, FileText, Trash2, FolderMinus, BookmarkMinus, Crop, Wand, Sparkles, Tag, Ellipsis, CirclePause } from 'lucide-react-taro'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import ReviewItemCard from '@/components/review-item-card'
@@ -21,6 +21,7 @@ import {
   fetchSubjects, fetchTimeline, batchDeleteTimeline, removeFromReviewBook, combineToPdf,
   updateTimeline, updateQuestion, uploadImage, replaceTimelineImage, fetchReviewSummary, saveQuestionAsImage,
   fetchDocuments, batchDeleteDocuments, deleteDocument, renameDocument,
+  fetchPaused, restorePaused, fetchGraduateStages, setGraduateStages, pauseFromReviewBook,
   type Subject, type TimelineItem, type Paged, type ImageAction, type ReviewSummary, type DocItem,
 } from '@/services/api'
 import { cacheGet, cacheSet, cacheListKey } from '@/services/cache'
@@ -72,6 +73,12 @@ export default function SubjectPage() {
    * 已逐条落库，退出时统一刷新（`exitQueue`）。
    */
   const [queueItems, setQueueItems] = useState<TimelineItem[] | null>(null)
+  /** P-034 §3.6：队列里每题的「上次错因」label（点错后才显示，作答同屏不持有） */
+  const [previousReasonLabels, setPreviousReasonLabels] = useState<Record<string, string>>({})
+  /** P-034 §3.1 已暂停列表入口 */
+  const [pausedItems, setPausedItems] = useState<TimelineItem[] | null>(null)
+  /** P-034 §3.2 毕业档数（2 快节奏 / 5 标准） */
+  const [graduateStages, setGraduateStagesState] = useState<2 | 5>(5)
   const sel = useSelection()
 
   /**
@@ -231,8 +238,12 @@ export default function SubjectPage() {
     const sumTask = fetchReviewSummary()
       .then(setSum)
       .catch((e) => console.error('加载复习排程失败', e))
+    // P-034 §3.2：读毕业档数设置（失败按标准 5 兜底，不打扰）
+    const stagesTask = fetchGraduateStages()
+      .then((r) => setGraduateStagesState(r.stages))
+      .catch((e) => console.error('加载复习档数失败', e))
     const listTask = load({ subjectId: preset, keyword: '', tag: '', page: 1 })
-    await Promise.all([subsTask, sumTask, listTask])
+    await Promise.all([subsTask, sumTask, stagesTask, listTask])
   }
 
   // ---------- 导出资料（2026-11-04 从 /pages/summary 的第二个 tab 迁入）----------
@@ -341,6 +352,14 @@ export default function SubjectPage() {
         Taro.showToast({ title: '今天没有到期的题', icon: 'none' })
         return
       }
+      // P-034 §3.6：投影每题「上次错因」的展示名——队列作答卡不持有提示数据，
+      // 只在点「做错了」之后由错因选择器显示（M73 A6 的物理隔离）
+      const labels: Record<string, string> = {}
+      for (const it of res.list) {
+        const ea = (it.content as any)?.error_analysis
+        if (ea?.label) labels[it.id] = String(ea.label)
+      }
+      setPreviousReasonLabels(labels)
       setQueueItems(res.list)
     } catch (e) {
       console.error('加载今日待复习失败', e)
@@ -351,6 +370,54 @@ export default function SubjectPage() {
   }
 
   /** 退出队列：作答已逐条落库，这里只把列表与「今天该复习」数字重新对齐 */
+  /** P-034 §3.2：切换毕业档数（只陈述"标准/快节奏"事实，不承诺效果） */
+  const changeStages = async (v: 2 | 5) => {
+    if (busy || v === graduateStages) return
+    setBusy(true)
+    try {
+      const r = await setGraduateStages(v)
+      setGraduateStagesState(r.stages)
+      fetchReviewSummary().then(setSum).catch((e) => console.error('刷新复习汇总失败', e))
+    } catch (e) {
+      console.error('设置复习档数失败', e)
+      Taro.showToast({ title: '没设上，再试一次', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** P-034 §3.1：打开「已暂停」列表 */
+  const openPaused = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      setPausedItems(await fetchPaused())
+    } catch (e) {
+      console.error('加载暂停题目失败', e)
+      Taro.showToast({ title: '加载失败', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** P-034 §3.1：恢复暂停的题 */
+  const restore = async (ids: string[]) => {
+    if (busy || !ids.length) return
+    setBusy(true)
+    try {
+      const r = await restorePaused(ids)
+      Taro.showToast({ title: `已恢复 ${r.updated} 题`, icon: 'none' })
+      setPausedItems(null)
+      fetchReviewSummary().then(setSum).catch((e) => console.error('刷新复习汇总失败', e))
+      load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, silent: true, due: dueOnly })
+    } catch (e) {
+      console.error('恢复失败', e)
+      Taro.showToast({ title: '没恢复，再试一次', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const exitQueue = () => {
     setQueueItems(null)
     load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, silent: true, due: dueOnly })
@@ -441,6 +508,26 @@ export default function SubjectPage() {
     try {
       await removeFromReviewBook([item.id])
       Taro.showToast({ title: '已移出复习本', icon: 'success' })
+      const since = getSinceFromRange(range, latestTimestamp)
+      await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
+    } catch (e) {
+      console.error(e)
+      Taro.showToast({ title: '操作失败', icon: 'none' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** P-034 §3.1：暂停这题（保留排程、可恢复，区别于"移出"） */
+  const handleMorePause = async () => {
+    const item = moreItem
+    closeMore()
+    if (!item) return
+    setBusy(true)
+    try {
+      await pauseFromReviewBook([item.id])
+      Taro.showToast({ title: '已暂停，排程保留', icon: 'none' })
+      fetchReviewSummary().then(setSum).catch((e) => console.error('刷新复习汇总失败', e))
       const since = getSinceFromRange(range, latestTimestamp)
       await load({ subjectId: activeSubject, keyword, tag: activeTag, page: 1, since, silent: true })
     } catch (e) {
@@ -815,9 +902,43 @@ export default function SubjectPage() {
                 </View>
                 <Text className="block text-xs text-muted-foreground mt-1">
                   复习本共 {sum.in_book} 题
-                  {sum.graduated > 0 ? ` · 已掌握 ${sum.graduated}` : ''}
+                  {sum.graduated > 0 ? ` · 走完档数 ${sum.graduated}` : ''}
                   {sum.next_due_at ? ` · 下次 ${formatDate(sum.next_due_at)}` : ''}
                 </Text>
+                {/**
+                  * P-034 §3.3/§3.1：挂起与暂停都是采纳层信号，只陈述事实、不施压（M11）。
+                  * 两者都不参与任何"效果"判断——挂起只提醒补记，暂停可一键恢复。
+                  */}
+                {sum.stale > 0 ? (
+                  <Text className="block text-xs text-muted-foreground mt-1">
+                    有 {sum.stale} 题到期超过 7 天还没记结果，方便时补一下或先暂停。
+                  </Text>
+                ) : null}
+                {sum.paused > 0 ? (
+                  <View className="mt-1" onClick={openPaused}>
+                    <Text className="block text-xs" style={{ color: BRAND_TEXT }}>
+                      已暂停 {sum.paused} 题 · 查看/恢复
+                    </Text>
+                  </View>
+                ) : null}
+                {/* P-034 §3.2：毕业档数——家长可选，默认标准 5；不承诺效果 */}
+                <View className="flex flex-row items-center gap-2 mt-2">
+                  <Text className="block text-xs text-muted-foreground">毕业档数</Text>
+                  {([5, 2] as const).map((v) => (
+                    <View
+                      key={v}
+                      className="px-2 py-1 rounded"
+                      style={graduateStages === v
+                        ? { backgroundColor: BRAND }
+                        : { border: `1px solid ${BRAND}` }}
+                      onClick={() => changeStages(v)}
+                    >
+                      <Text className="block text-xs" style={{ color: graduateStages === v ? BRAND_FOREGROUND : BRAND_TEXT }}>
+                        {v === 5 ? '标准 5 次' : '快节奏 2 次'}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
                 {/**
                   * P-033（D）「开始复习」：把「今天该复习 N 题」这个数字变成一次点击。
                   * 此前只有数字、没有入口，家长要自己在列表里挑题、点进详情、
@@ -889,7 +1010,61 @@ export default function SubjectPage() {
           }}
         >
           <ScrollView scrollY style={{ height: '100vh', paddingTop: headerH }}>
-            <ReviewQueue items={queueItems} onExit={exitQueue} />
+            <ReviewQueue
+              items={queueItems}
+              onExit={exitQueue}
+              previousReasonLabels={previousReasonLabels}
+            />
+          </ScrollView>
+        </View>
+      )}
+
+      {/**
+        * P-034 §3.1 已暂停面板：与队列同款 fixed 覆盖，列出暂停的题。
+        * 恢复是显式的批量确认（二次点击），避免误点把暂停的题又放回待办。
+        */}
+      {pausedItems && (
+        <View
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 210, backgroundColor: '#FFFFFF',
+          }}
+        >
+          <ScrollView scrollY style={{ height: '100vh', paddingTop: headerH }}>
+            <View className="px-4 pt-2 pb-28">
+              <View className="flex flex-row items-center justify-between mb-3">
+                <Text className="block text-base font-semibold text-foreground">
+                  已暂停（{pausedItems.length} 题）
+                </Text>
+                <View onClick={() => setPausedItems(null)}>
+                  <Text className="block text-xs" style={{ color: BRAND_TEXT }}>关闭</Text>
+                </View>
+              </View>
+              <Text className="block text-xs text-muted-foreground mb-3">
+                暂停的题不占今日待办、排程保留；恢复后从原档位继续，不白费之前的复习。
+              </Text>
+              {pausedItems.length ? (
+                <>
+                  {pausedItems.map((it) => (
+                    <View key={it.id} className="rounded-xl border border-border p-3 mb-2">
+                      <Text className="block text-sm text-foreground">
+                        {String((it.content as any)?.question || '').slice(0, 60) || it.title || '图片题'}
+                      </Text>
+                      <Button
+                        variant="outline"
+                        className="h-8 rounded-lg mt-2"
+                        disabled={busy}
+                        onClick={() => restore([it.id])}
+                      >
+                        <Text className="block text-xs" style={{ color: BRAND_TEXT }}>恢复这题</Text>
+                      </Button>
+                    </View>
+                  ))}
+                </>
+              ) : (
+                <Text className="block text-xs text-muted-foreground">没有暂停的题。</Text>
+              )}
+            </View>
           </ScrollView>
         </View>
       )}
@@ -1056,6 +1231,11 @@ export default function SubjectPage() {
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreSubject}>
               <Tag size={18} color={INK} />
               <Text className="block text-sm text-foreground">修改分类</Text>
+            </View>
+            {/* P-034 §3.1：暂停（排程保留、可恢复）与移出（清排程）是两件事，分开呈现 */}
+            <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMorePause}>
+              <CirclePause size={18} color={INK} />
+              <Text className="block text-sm text-foreground">暂停这题（保留排程）</Text>
             </View>
             <View className="flex flex-row items-center gap-3 rounded-xl border border-border px-3 py-3 mb-2" onClick={handleMoreRemoveReview}>
               <BookmarkMinus size={18} color={INK} />

@@ -23,7 +23,8 @@ import { useState } from 'react'
 import { View, Text, ScrollView } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { Button } from '@/components/ui/button'
-import { markReviewed, type TimelineItem } from '@/services/api'
+import { markReviewed, recordMistakeReason, type TimelineItem } from '@/services/api'
+import ReviewMistakePicker, { type MistakeChoice } from '@/components/review-mistake-picker'
 import { DANGER, BRAND_FOREGROUND, BRAND_TEXT } from '@/lib/theme'
 import { hideLoadingSafe } from '@/lib/loading'
 
@@ -32,6 +33,12 @@ interface Props {
   items: TimelineItem[]
   /** 退出队列（含正常做完与中途退出），回传本次实际作答数，供调用方刷新列表 */
   onExit: (answered: number) => void
+  /**
+   * P-034 §3.6：按题目 id 预取的「上次错因」label（当场反馈用）。
+   * 只传展示文本、不传整段错因对象——作答卡始终不持有提示数据（M73 A6）。
+   * 调用方从题目的错因字段投影出 label 后传进来。
+   */
+  previousReasonLabels?: Record<string, string>
 }
 
 /** 从条目里取一句能辨认「是哪一题」的话——只用于辨认，不是答案 */
@@ -48,26 +55,41 @@ function labelOf(it: TimelineItem): string {
   return String((it.content as any)?.question_label || '')
 }
 
-export default function ReviewQueue({ items, onExit }: Props) {
+export default function ReviewQueue({ items, onExit, previousReasonLabels }: Props) {
   const [idx, setIdx] = useState(0)
   const [busy, setBusy] = useState(false)
   /** 本次作答记录：对/错各几道（完成页只陈述事实，不做评价） */
   const [tally, setTally] = useState({ correct: 0, wrong: 0 })
+  /**
+   * P-034 §3.4：点「做错了」后先进入选错因步骤，null = 正常作答卡。
+   * 做对不弹、可跳过——跳过也照常记对错，不阻塞。
+   */
+  const [pickingFor, setPickingFor] = useState<string | null>(null)
 
   const total = items.length
   const cur = items[idx]
   const answered = tally.correct + tally.wrong
 
-  const answer = async (result: 'correct' | 'wrong') => {
-    if (busy || !cur) return
+  /** 真正落库：先记对错（唯一指标来源），再记错因（可选，失败不影响对错） */
+  const commitAnswer = async (result: 'correct' | 'wrong', choice: MistakeChoice | null) => {
+    if (!cur) return
     setBusy(true)
     try {
       await markReviewed(cur.id, result)
+      if (result === 'wrong' && choice) {
+        try {
+          await recordMistakeReason(cur.id, choice)
+        } catch (me) {
+          // 错因没存上不影响这次作答已记——但不静默，家长能补
+          console.error('错因记录失败（对错已记）', me)
+        }
+      }
       const nextTally = {
         correct: tally.correct + (result === 'correct' ? 1 : 0),
         wrong: tally.wrong + (result === 'wrong' ? 1 : 0),
       }
       setTally(nextTally)
+      setPickingFor(null)
       const next = idx + 1
       if (next >= total) {
         setIdx(total)   // 走到完成页
@@ -84,6 +106,16 @@ export default function ReviewQueue({ items, onExit }: Props) {
       setBusy(false)
       hideLoadingSafe()
     }
+  }
+
+  const answer = (result: 'correct' | 'wrong') => {
+    if (busy || !cur) return
+    if (result === 'wrong') {
+      // 只对做错的题问一次；已有错因作为「上次记的」当场反馈，不是本次提示
+      setPickingFor(cur.id)
+      return
+    }
+    void commitAnswer('correct', null)
   }
 
   // ---------- 完成页 ----------
@@ -115,9 +147,9 @@ export default function ReviewQueue({ items, onExit }: Props) {
       {/* 进度：只给位置，不给分数/评级 */}
       <View className="flex flex-row items-center justify-between mb-3">
         <Text className="block text-xs text-muted-foreground">第 {idx + 1} / {total} 题</Text>
-        <Text className="block text-xs" style={{ color: BRAND_TEXT }} onClick={() => onExit(answered)}>
-          先退出
-        </Text>
+        <View onClick={() => onExit(answered)}>
+          <Text className="block text-xs" style={{ color: BRAND_TEXT }}>先退出</Text>
+        </View>
       </View>
 
       <View className="rounded-2xl border border-border p-4 mb-4">
@@ -134,27 +166,37 @@ export default function ReviewQueue({ items, onExit }: Props) {
           要看题面/答案就点退出、进详情——那一步的代价换来的是「这次真的没提示」。
         */}
         <Text className="block text-xs text-muted-foreground mt-3">
-          读完题干先在纸上作答，再回来点结果。这题在纸上做，答案不在这里。
+          {/* P-034 §3.6 双模式：纸质优先（减孩子屏幕时间），手机口答兜底 */}
+          建议在纸上做这题、再回来点结果（少看手机）；来不及就看着题干口答，由家长点结果。答案不在这里。
         </Text>
       </View>
 
-      <View className="flex flex-row items-center gap-2">
-        <Button
-          variant="outline"
-          className="h-11 rounded-xl flex-1"
-          onClick={() => answer('wrong')}
-          disabled={busy}
-        >
-          <Text className="block text-sm" style={{ color: DANGER }}>{busy ? '记录中…' : '做错了'}</Text>
-        </Button>
-        <Button
-          className="h-11 rounded-xl flex-1"
-          onClick={() => answer('correct')}
-          disabled={busy}
-        >
-          <Text className="block text-sm" style={{ color: BRAND_FOREGROUND }}>{busy ? '记录中…' : '做对了'}</Text>
-        </Button>
-      </View>
+      {/* P-034 §3.4：点「做错了」后才出现的错因选择——作答同屏始终看不到这些 */}
+      {pickingFor === cur.id ? (
+        <ReviewMistakePicker
+          existingLabel={previousReasonLabels?.[cur.id]}
+          busy={busy}
+          onPick={(choice) => void commitAnswer('wrong', choice)}
+        />
+      ) : (
+        <View className="flex flex-row items-center gap-2">
+          <Button
+            variant="outline"
+            className="h-11 rounded-xl flex-1"
+            onClick={() => answer('wrong')}
+            disabled={busy}
+          >
+            <Text className="block text-sm" style={{ color: DANGER }}>{busy ? '记录中…' : '做错了'}</Text>
+          </Button>
+          <Button
+            className="h-11 rounded-xl flex-1"
+            onClick={() => answer('correct')}
+            disabled={busy}
+          >
+            <Text className="block text-sm" style={{ color: BRAND_FOREGROUND }}>{busy ? '记录中…' : '做对了'}</Text>
+          </Button>
+        </View>
+      )}
 
       <Text className="block text-xs text-muted-foreground mt-3">
         做对推进一档（1→3→7→14→28 天），做错回到第 1 档、明天再来。

@@ -40,8 +40,21 @@
 /** 间隔档位（天）—— 见文件头表格 */
 export const REVIEW_INTERVALS = [1, 3, 7, 14, 28] as const
 
-/** 总档数（走完即毕业） */
+/** 默认总档数（走完即毕业）= 标准档。M8/M15 的口径基准，不得改数值 */
 export const REVIEW_STAGES = REVIEW_INTERVALS.length
+
+/**
+ * P-034 §3.2（L2 升格，待补 OPS-22 评审）：家长可选的毕业档数。
+ * 2 = 快节奏（走完前 2 档、约 1/3 天就毕业，适合应付近期考试）；
+ * 5 = 标准（默认，覆盖学期记忆）。间隔表 REVIEW_INTERVALS 不变，
+ * 改的只是「走几档算毕业」——这是目标选择，不是算法变更（M8 仍不实现自适应）。
+ */
+export type GraduateStages = 2 | 5
+
+/** 非法值一律回退标准档（防御性：库里可能有手工脏数据） */
+export function normalizeGraduateStages(n: unknown): GraduateStages {
+  return n === 2 ? 2 : 5
+}
 
 /** 首次进入复习本后的第一次复习延迟（天）= 第一档 */
 export const FIRST_REVIEW_DAYS = REVIEW_INTERVALS[0]
@@ -52,6 +65,8 @@ export type ReviewResult = 'correct' | 'wrong'
 /** 排程只依赖这几列，便于单测构造 */
 export interface ReviewState {
   in_review_book?: boolean | null
+  /** P-034 §3.1 暂停态：家长主动临时移出，与系统毕业区分 */
+  review_paused?: boolean | null
   added_to_review_at?: string | null
   last_reviewed_at?: string | null
   next_review_at?: string | null
@@ -63,13 +78,15 @@ export interface ReviewState {
 export type ReviewDueStatus =
   /** 不在复习本 */
   | 'out'
+  /** P-034 §3.1 家长主动暂停（临时移出，可恢复；与毕业区分） */
+  | 'paused'
   /** 在复习本但没排程（历史数据 / 手动清空） */
   | 'unscheduled'
   /** 今天或更早到期 */
   | 'due'
   /** 已排程，未来某天 */
   | 'upcoming'
-  /** 五档走完，不再排程 */
+  /** 走完所选档数，不再排程（系统判定） */
   | 'graduated'
 
 export interface ReviewStage {
@@ -85,8 +102,11 @@ export interface ReviewStage {
 
 export interface ReviewPlan {
   in_review_book: boolean
+  /** P-034 §3.1 是否处于家长暂停态 */
+  paused: boolean
   review_count: number
   review_lapses: number
+  /** 家长设定的毕业档数（2 快节奏 / 5 标准） */
   total_stages: number
   completed: boolean
   status: ReviewDueStatus
@@ -159,8 +179,14 @@ export function isDue(next: string | null | undefined, now: Date = new Date()): 
  * 刻意**不存整张计划表**：档位只由 review_count 决定，到期只由 next_review_at 决定，
  * 两者已经是全部真相。再存一份 schedule 就是第二份可编辑副本，必然漂移。
  */
-export function buildReviewPlan(state: ReviewState, now: Date = new Date()): ReviewPlan {
+export function buildReviewPlan(
+  state: ReviewState,
+  now: Date = new Date(),
+  graduateStages: GraduateStages = REVIEW_STAGES,
+): ReviewPlan {
   const inBook = !!state.in_review_book
+  const paused = !!state.review_paused
+  const stages = normalizeGraduateStages(graduateStages)
   const count = clampCount(state.review_count)
   const lapses = Math.max(0, Math.floor(Number(state.review_lapses) || 0))
   const nextDate = parse(state.next_review_at)
@@ -176,11 +202,14 @@ export function buildReviewPlan(state: ReviewState, now: Date = new Date()): Rev
    * 「走完五档」是**已经发生的事实**（count=5 且无下次到期），与「当前是否在本里」无关；
    * 出本只是它的后果。故把它提到最前，语义与 M15「毕业＝连续 5 次做对」一致。
    */
-  const graduated = count >= REVIEW_STAGES && !nextDate
+  const graduated = count >= stages && !nextDate
   const completed = graduated
 
   let status: ReviewDueStatus
   if (graduated) status = 'graduated'
+  // P-034 §3.1：暂停态判在 out 之前——两者都 in_review_book=false，
+  // 但暂停保留排程、可一键恢复；毕业是既成事实。前端据此给不同入口。
+  else if (paused && !graduated) status = 'paused'
   else if (!inBook) status = 'out'
   else if (!nextDate) status = 'unscheduled'
   else status = isDue(state.next_review_at, now) ? 'due' : 'upcoming'
@@ -195,14 +224,15 @@ export function buildReviewPlan(state: ReviewState, now: Date = new Date()): Rev
     stage: i + 1,
     interval_days: interval,
     done: i < count,
-    current: inBook && i === count && count < REVIEW_STAGES,
+    current: inBook && !paused && i === count && count < stages,
   }))
 
   return {
     in_review_book: inBook,
+    paused,
     review_count: count,
     review_lapses: lapses,
-    total_stages: REVIEW_STAGES,
+    total_stages: stages,
     completed,
     status,
     next_review_at: nextDate ? nextDate.toISOString() : null,
@@ -238,11 +268,18 @@ export interface ReviewAdvance {
  *   - review_lapses 只记账不参与计算：反复错的题是 C2/C3（自评信心 / 错因）的输入，
  *     在还没有那两个维度前，不应凭它编造更复杂的算法（准则 M8）。
  */
-export function advanceReview(state: ReviewState, result: ReviewResult, now: Date = new Date()): ReviewAdvance {
+export function advanceReview(
+  state: ReviewState,
+  result: ReviewResult,
+  now: Date = new Date(),
+  graduateStages: GraduateStages = REVIEW_STAGES,
+): ReviewAdvance {
   const count = clampCount(state.review_count)
   const lapses = Math.max(0, Math.floor(Number(state.review_lapses) || 0))
+  const stages = normalizeGraduateStages(graduateStages)
   const stamp = now.toISOString()
 
+  // P-034 §3.2：做错归零不变——「走完档数＝连续成功」的等价关系靠这一行守住（M15）
   if (result === 'wrong') {
     return {
       review_count: 0,
@@ -253,7 +290,8 @@ export function advanceReview(state: ReviewState, result: ReviewResult, now: Dat
   }
 
   const nextCount = Math.min(REVIEW_STAGES, count + 1)
-  if (nextCount >= REVIEW_STAGES) {
+  // 毕业阈值按家长设定：快节奏 2 档即毕业（间隔表不变，仍走 1/3 天）
+  if (nextCount >= stages) {
     return { review_count: nextCount, review_lapses: lapses, last_reviewed_at: stamp, next_review_at: null }
   }
 

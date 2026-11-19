@@ -155,6 +155,10 @@ export interface ReviewSummary {
   due_today: number
   unscheduled: number
   graduated: number
+  /** P-034 §3.1 家长暂停的题数 */
+  paused: number
+  /** P-034 §3.3 挂起超过 7 天未记结果的题数（采纳层信号） */
+  stale: number
   next_due_at: string | null
 }
 

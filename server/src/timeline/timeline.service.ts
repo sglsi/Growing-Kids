@@ -2,7 +2,7 @@ import { Injectable, BadRequestException, NotFoundException, Logger } from '@nes
 import { getSupabaseClient } from '../storage/database/supabase-client'
 import { mirrorInsert, mirrorUpdate } from '../storage/database/dual-write'
 import { findSimilarQuestions } from '../ocr/ocr-similar'
-import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, localDayKey, REVIEW_STAGES, type ReviewResult } from './review'
+import { buildReviewPlan, advanceReview, firstReviewAt, endOfLocalDay, localDayKey, REVIEW_STAGES, normalizeGraduateStages, type GraduateStages, type ReviewState, type ReviewResult } from './review'
 import { gradeSpread, normalizeGrade } from '../shared/grade'
 import { StorageService } from '../storage/storage.service'
 import { BlobService } from '../storage/blob.service'
@@ -114,11 +114,18 @@ export interface ReviewSummary {
   due_today: number
   /** 在复习本但没排程（异常信号：多为历史数据） */
   unscheduled: number
-  /** 五档走完 */
+  /** 走完所选档数 */
   graduated: number
+  /** P-034 §3.1 家长暂停的题数 */
+  paused: number
+  /** P-034 §3.3 到期后挂起超过 N 天仍未记结果的题数（采纳层信号，不进效果结论） */
+  stale: number
   /** 最近的未来到期时间（没有则为 null） */
   next_due_at: string | null
 }
+
+/** P-034 §3.3：到期后多少天仍未记结果算「挂起」 */
+const REVIEW_STALE_DAYS = 7
 
 /**
  * 统一收件箱服务（最近题目 / 复习本）
@@ -541,6 +548,56 @@ export class TimelineService {
     } catch {
       /* 取不到按未标注处理（见方法注释） */
       return null
+    }
+  }
+
+  /**
+   * P-034 §3.2：读/写用户的毕业档数设置。
+   * 写只接受 2 或 5，非法值 BadRequest——不是静默回退，因为这是用户主动选择，
+   * 不明不白存成 5 会让「我选了快节奏却没生效」变成又一个静默失败。
+   */
+  async getGraduateStages(userId: string): Promise<GraduateStages> {
+    return this.graduateStages(userId)
+  }
+
+  async setGraduateStages(userId: string, value: unknown): Promise<GraduateStages> {
+    if (value !== 2 && value !== 5) {
+      throw new BadRequestException('毕业档数只能是 2（快节奏）或 5（标准）')
+    }
+    const { error } = await getSupabaseClient()
+      .from('users')
+      .update({ review_graduate_stages: value })
+      .eq('id', userId)
+    if (error) throw new Error(error.message)
+    await invalidateUserTimeline(userId)
+    return value
+  }
+
+  /**
+   * P-034 §3.2：为单题构造复习计划（带用户档数）。
+   * controller 的 GET :id 走这里，避免它自己读库取档数、也保证列表/详情/review 回包
+   * 三处的 total_stages 口径一致（快节奏用户不能详情页显示 5 档）。
+   */
+  async reviewPlanFor(userId: string, item: ReviewState): Promise<ReturnType<typeof buildReviewPlan>> {
+    const stages = await this.graduateStages(userId)
+    return buildReviewPlan(item, new Date(), stages)
+  }
+
+  /**
+   * P-034 §3.2：读用户的毕业档数设置（2 快节奏 / 5 标准）。
+   * 与 ownerGrade 同款降级：列未迁移（0035 未执行）/ 查询失败一律回退标准档，
+   * 不打扰用户，也不让一个展示性设置把整条复习链路拖挂。
+   */
+  private async graduateStages(userId: string): Promise<GraduateStages> {
+    try {
+      const { data } = await getSupabaseClient()
+        .from('users')
+        .select('review_graduate_stages')
+        .eq('id', userId)
+        .maybeSingle()
+      return normalizeGraduateStages((data as { review_graduate_stages?: number | null } | null)?.review_graduate_stages)
+    } catch {
+      return 5
     }
   }
 
@@ -1046,6 +1103,88 @@ export class TimelineService {
     return { updated: (data || []).length }
   }
 
+  /**
+   * P-034 §3.1：暂停 = 家长主动临时移出，与系统毕业彻底分开。
+   *
+   * 与 removeFromReviewBook 的关键区别：暂停**保留 next_review_at 排程**，
+   * 恢复后从原档位继续（「不白费之前的复习」）。移出则清排程、重置基准。
+   * 暂停态用 review_paused 标记，in_review_book 仍置 false（不占今日待办）。
+   * 埋点：暂停/恢复都不写 review_events——它不是作答，不进任何正确率分母（红线）。
+   */
+  async pauseFromReviewBook(userId: string, ids: string[]): Promise<{ updated: number }> {
+    if (!ids.length) return { updated: 0 }
+    const { data, error } = await getSupabaseClient()
+      .from(TABLE)
+      .update({
+        in_review_book: false,
+        review_paused: true,
+        review_paused_at: new Date().toISOString(),
+        // 刻意不动 next_review_at / review_count / added_to_review_at：
+        // 恢复时按原排程继续，这是「暂停 ≠ 移出」的全部意义
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId)   // 隔离红线
+      .in('id', ids)
+      .eq('review_paused', false)  // 幂等：已暂停的不重复打时间戳
+      .select('id')
+    if (error) throw new Error(error.message)
+    await invalidateUserTimeline(userId)
+    return { updated: (data || []).length }
+  }
+
+  /** P-034 §3.1：恢复暂停的题——清标记、回到复习本，原排程继续 */
+  async restorePaused(userId: string, ids: string[]): Promise<{ updated: number; rescheduled: number }> {
+    if (!ids.length) return { updated: 0, rescheduled: 0 }
+    const client = getSupabaseClient()
+    const now = new Date().toISOString()
+    const { data, error } = await client
+      .from(TABLE)
+      .update({
+        in_review_book: true,
+        review_paused: false,
+        review_paused_at: null,
+        added_to_review_at: now,
+        updated_at: now,
+      })
+      .eq('user_id', userId)
+      .in('id', ids)
+      .eq('review_paused', true)  // 只恢复暂停态，不碰正常在本的题
+      .select('id, next_review_at')
+    if (error) throw new Error(error.message)
+    // 边界：暂停期间可能跨过了原到期日。若 next_review_at 已过期，重排到今天+1天，
+    // 否则一恢复就是一堆逾期题（与入本错峰同理：滞留太久要重新给一个可执行的起点）。
+    const restored = (data || []) as { id: string; next_review_at: string | null }[]
+    const nowMs = Date.now()
+    const stale = restored.filter((r) => {
+      if (!r.next_review_at) return false
+      const t = new Date(r.next_review_at).getTime()
+      return !Number.isNaN(t) && t < nowMs
+    }).map((r) => r.id)
+    if (stale.length) {
+      await client
+        .from(TABLE)
+        .update({ next_review_at: firstReviewAt(), updated_at: now })
+        .eq('user_id', userId)
+        .in('id', stale)
+    }
+    await invalidateUserTimeline(userId)
+    return { updated: restored.length, rescheduled: stale.length }
+  }
+
+  /** P-034 §3.1：列出当前用户暂停的题（供「查看已暂停（N）」入口） */
+  async listPaused(userId: string): Promise<TimelineItem[]> {
+    const { data, error } = await getSupabaseClient()
+      .from(TABLE)
+      .select('*')
+      .eq('user_id', userId)   // 隔离红线
+      .eq('review_paused', true)
+      .is('deleted_at', null)
+      .order('review_paused_at', { ascending: false })
+      .limit(200)
+    if (error) throw new Error(error.message)
+    return this.withUrls((data || []) as TimelineItem[])
+  }
+
   // ---------- P2-17 相似题推荐（基于用户自建错题历史） ----------
   async findSimilar(userId: string, id: string, limit = 5) {
     return findSimilarQuestions(userId, id, limit)
@@ -1064,7 +1203,9 @@ export class TimelineService {
    */
   async review(userId: string, id: string, result: ReviewResult = 'correct') {
     const item = await this.findOne(userId, id)
-    const adv = advanceReview(item, result)
+    // P-034 §3.2：毕业阈值按用户设定（2 快节奏 / 5 标准）；默认 5 与 M15 一致
+    const stages = await this.graduateStages(userId)
+    const adv = advanceReview(item, result, new Date(), stages)
     const client = getSupabaseClient()
     const now = new Date().toISOString()
 
@@ -1081,8 +1222,9 @@ export class TimelineService {
      * 「移出保留计数，再次加入从原档位继续，不白费之前的复习」。毕业同理，
      * 家长若把题重新加回本，它仍是「已连续成功 5 次」的状态，不该从头再来。
      */
-    const graduated = adv.review_count >= REVIEW_STAGES
+    const graduated = adv.review_count >= stages
 
+    // check-isolation-ignore: user_id 隔离在本链末尾 .eq（update 对象字段多，超出 12 行窗口）
     const { data, error } = await client
       .from(TABLE)
       .update({
@@ -1094,6 +1236,9 @@ export class TimelineService {
         // 毕业则反向：自动出本，`added_to_review_at` 一并清空（出本的定义就是「不占待办」）
         in_review_book: !graduated,
         added_to_review_at: graduated ? null : (item.added_to_review_at || now),
+        // P-034 §3.1：真正做了复习即自动解除暂停（暂停态的题被复习说明家长又捡回来了）
+        review_paused: false,
+        review_paused_at: null,
         updated_at: now,
       })
       .eq('user_id', userId)   // 隔离红线：不带上就是越权改别人数据
@@ -1138,13 +1283,14 @@ export class TimelineService {
       ...adv,
       in_review_book: !graduated,
       added_to_review_at: graduated ? null : (item.added_to_review_at || now),
+      review_paused: false,
     }
     return {
       review_count: adv.review_count,
       review_lapses: adv.review_lapses,
       last_reviewed_at: adv.last_reviewed_at,
       next_review_at: adv.next_review_at,
-      plan: buildReviewPlan(merged),
+      plan: buildReviewPlan(merged, new Date(), stages),
     }
   }
 
@@ -1169,6 +1315,9 @@ export class TimelineService {
     if (cached) return cached
 
     const client = getSupabaseClient()
+    // P-034 §3.2：毕业判据按用户档数；快节奏用户 2 档毕业的题 review_count=2，
+    // 若仍按 REVIEW_STAGES(5) 统计就永远显示「已掌握 0」——口径必须跟着设置走。
+    const stages = await this.graduateStages(userId)
     const { data, error } = await client
       .from(TABLE)
       .select('next_review_at, review_count')
@@ -1194,11 +1343,43 @@ export class TimelineService {
         .eq('user_id', userId)
         .is('deleted_at', null)
         .eq('in_review_book', false)
-        .gte('review_count', REVIEW_STAGES)
+        .gte('review_count', stages)   // P-034 §3.2：按用户档数（不再写死 REVIEW_STAGES）
         .is('next_review_at', null)
       graduatedOut = count || 0
     } catch (e) {
       console.error('[timeline] 已掌握题数统计失败（不影响汇总）:', (e as Error)?.message || e)
+    }
+
+    /**
+     * P-034 §3.1/§3.3：暂停数 + 挂起数（都是采纳层信号，不进效果结论）。
+     * 两次独立 head 查询，失败各降级为 0 并记日志——与 graduatedOut 同口径：
+     * 展示统计不能让整个汇总接口陪着挂掉。
+     */
+    let pausedCount = 0
+    try {
+      const { count } = await client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .is('deleted_at', null)
+        .eq('review_paused', true)
+      pausedCount = count || 0
+    } catch (e) {
+      console.error('[timeline] 暂停题数统计失败（不影响汇总）:', (e as Error)?.message || e)
+    }
+    let staleCount = 0
+    try {
+      const staleBefore = new Date(Date.now() - REVIEW_STALE_DAYS * 86400_000).toISOString()
+      const { count } = await client
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .is('deleted_at', null)
+        .eq('in_review_book', true)
+        .lt('next_review_at', staleBefore)
+      staleCount = count || 0
+    } catch (e) {
+      console.error('[timeline] 挂起题数统计失败（不影响汇总）:', (e as Error)?.message || e)
     }
     const now = new Date()
     // 与 buildReviewPlan 的判定同源（本地日界）：跨端比较一律走时间戳，
@@ -1215,7 +1396,7 @@ export class TimelineService {
       const nra = row.next_review_at
       const count = Number(row.review_count) || 0
       if (!nra) {
-        if (count >= REVIEW_STAGES) graduated++
+        if (count >= stages) graduated++   // P-034 §3.2：按用户档数
         else unscheduled++
         continue
       }
@@ -1241,6 +1422,8 @@ export class TimelineService {
        * 而非用户自评的正反馈，丢了它等于把掌握改成不可见（M7 的抓手消失）。
        */
       graduated: graduated + graduatedOut,
+      paused: pausedCount,
+      stale: staleCount,
       next_due_at: nextDueAt,
     }
     await cacheSet(cacheKey, result)
