@@ -44,10 +44,13 @@ export const REVIEW_INTERVALS = [1, 3, 7, 14, 28] as const
 export const REVIEW_STAGES = REVIEW_INTERVALS.length
 
 /**
- * P-034 §3.2（L2 升格，待补 OPS-22 评审）：家长可选的毕业档数。
+ * P-034 §3.2（L2，OPS-22 评审已补：D-101 追认通过）：家长可选的毕业档数。
  * 2 = 快节奏（走完前 2 档、约 1/3 天就毕业，适合应付近期考试）；
  * 5 = 标准（默认，覆盖学期记忆）。间隔表 REVIEW_INTERVALS 不变，
  * 改的只是「走几档算毕业」——这是目标选择，不是算法变更（M8 仍不实现自适应）。
+ * 🔴 D 降维的宣称边界（D-101）：不叫自适应/精准难度，不承诺 2 档记得更好。
+ *    Latimier 2021 的 g=.034 (p=.59) 是精确零 ⇒ 无「科学最优档数」。
+ *    falsifier：档数 2 的「到期首次作答正确率」若显著低于 5 且 >0.2 SD ⇒ 撤下快节奏档。
  */
 export type GraduateStages = 2 | 5
 
