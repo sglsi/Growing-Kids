@@ -156,14 +156,18 @@ async function main() {
     const tables = tbl.rows.map((r) => r.table_name)
     if (!tables.length) throw new Error('public schema 里没有任何表，疑似连错库')
 
-    // 🔴 派生表不进备份（2026-11-07，P1 全量铺量后实测踩到）：
-    //    question_objects 是 netdisk_files / library_docs.text_content 的确定性函数，
-    //    生产 326,680 行 / 275MB 文本会让「整表 lines[] + join」吃满 Node 默认 2GB 堆
-    //    ⇒ FATAL: JavaScript heap out of memory，每日 03:17 的备份会失败且不产出文件。
-    //    它可由 0026 迁移 + question-objects-build.mjs --apply 100% 重建
-    //    （实测：全量指纹复算 0 偏差、幂等重跑 0 写入），故只备份源表。
-    //    ⚠️ 恢复后必须按 manifest.rebuild 跑一次重建，见 QA-16 §6.1.2。
-    const DERIVED_TABLES = ['question_objects']
+    // 🔴 派生表不进备份（2026-11-07 踩 question_objects；2026-11-19 再踩另两张）：
+    //    三张都是源表的确定性产物，可由迁移 + 构建脚本 100% 重建：
+    //      question_objects          ← 0026 + question-objects-build.mjs --apply
+    //      question_figures          ← 0028
+    //      question_inline_figures   ← 0029
+    //    2026-11-19 实测：生产 question_objects 已 1250MB、question_inline_figures
+    //    273,037 行 / 178MB。此前只排除 question_objects，另两张仍进 lines[]：
+    //    NDJSON 936MB → gzip 232MB 写出成功，但**读回自检阶段被 OOM killer 杀掉**
+    //    （RC=137，没有「读回自检通过」日志 ⇒ 该备份不可作为恢复依据）。
+    //    🔴 判据：备份成功 = 脚本 RC 0 且日志出现「读回自检通过」，只看「已写入」不算。
+    //    ⚠️ 恢复后必须按 manifest.rebuild 重建三张派生表，见 QA-16 §6.1.2。
+    const DERIVED_TABLES = ['question_objects', 'question_figures', 'question_inline_figures']
     const excludedTables = tables.filter((t) => DERIVED_TABLES.includes(t))
     const backupTables = tables.filter((t) => !DERIVED_TABLES.includes(t))
     if (excludedTables.length) log(`[backup] 派生表跳过（可重建）：${excludedTables.join('、')}`)
