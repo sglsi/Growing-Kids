@@ -3610,3 +3610,30 @@ M65 4/4（新模块：页码只转一次 + 全仓无假值兜底 / 科目过滤 
 - P-034（L1/L2 混合，状态待批准）六栏齐备；`pnpm method:check` H1/H2/H3 三绿；`pnpm verify:ci` 27/27。
 - GK-SRS-24 升 v1.3（B2 现状澄清 / B5 改当场反馈 / 4.2 建议非强制 / 4.3 话术落点）。
 - **代码零改动**；P-034 §3 全部未实施；0034 迁移未执行；未真机验证、未发布、未 push。
+
+---
+
+## D-096b · P-034 实施落地（2026-11-19，接 D-096 方案）
+
+### 一、实施范围（思傅「开始实施」+「连 L2 一起做」）
+七项 L1 落地 + 一项 L2 越权先行；**§3.5 导出三档未做**（独立 L1，导出管线改动大，保持现状两档）。详见 P-034 §6 实施记录表。
+
+### 二、代码改动清单
+- 迁移 `0035_pause_and_graduate_stages.sql`：timeline_items 加 `review_paused`/`review_paused_at`（+索引）；users 加 `review_graduate_stages int default 5`（+CHECK 2/5）。幂等、不删行。
+- `review.ts`：`GraduateStages=2|5` + `normalizeGraduateStages`（非法回退 5）；`buildReviewPlan`/`advanceReview` 加档数参数；ReviewState 加 `review_paused`、ReviewDueStatus 加 `'paused'`、ReviewPlan 加 `paused`；**间隔表与做错归零未动**。
+- `timeline.service.ts`：`pauseFromReviewBook`（保留排程）/ `restorePaused`（滞留过期重排）/ `listPaused`（带 user 隔离）/ `get|setGraduateStages` / `reviewPlanFor`；`review()` 按用户档数判定毕业并清暂停态；`reviewSummary` 按档数统计 + 新增 `paused`/`stale`（均独立 head 查询、失败降级记日志）。
+- `timeline.controller.ts`：5 个新端点（GET/POST/DELETE `review/paused`、GET/PUT `review/stages`），声明在 `@Get(':id')` 之前。
+- 前端：新组件 `review-mistake-picker.tsx`；`review-queue.tsx` 加 pickingFor 状态（做对直提、做错才弹、可跳过）+ 双模式提示；`subject/index.tsx` 加暂停入口/恢复面板/档数切换/挂起提示；`api.ts` 加 6 个方法；`types/index.ts` 加字段。
+
+### 三、两处被断言逼出来的取舍（都按红线解决，没绕门禁）
+1. **M73 A2/A3/A4 原写死 `REVIEW_STAGES`**：档数参数化后红。按"L2 一起做"同步放宽为 `(REVIEW_STAGES|stages)`，并注明默认值仍 5、M8/M15 口径未变——不是放宽红线，是让断言覆盖"可配置档数"这一新合法路径；A7（间隔表/归零）仍绿证明边界守住。
+2. **check-isolation 假阳性**：`review()` 的 update 对象因新增两行把 `.eq('user_id')` 推出 12 行窗口。用门禁支持的 `check-isolation-ignore` 源码豁免注明理由，不删隔离。
+
+### 四、验证
+M74 新断言 7/7；M73 8/8；`verify:ci` 27/27；`verify:fe` 11/11；`method:check` H1/H2/H3 三绿（检查点 32/146/2）；`pnpm lint` 0 error 0 warning；后端 `nest build` RC=0；`build:weapp` 13.88s 成功。`verify:core`（M01–M08/M15）因需本地 API 服务在 3001、当前未起 → fetch failed，属环境未就绪非代码失败，**未据此宣称通过**。
+
+### 五、诚实边界与待办
+- §3.5 导出三档未实施——当前仍"练习卷（无答案）/答疑解惑（含答案）"两档，B2 三档仍是待办。
+- **L2 档数升格未经 OPS-22 评审**（思傅明确要"连 L2 一起做"，故越权先行）：台账标红，回退路径＝档数设置只读、毕业判定固定回 REVIEW_STAGES（见 20a v2.1）。
+- 迁移 0035/0034 **未执行**；真机 UI 未验证；未提审、未发版、未 push。
+- 效果口径不变：唯一够格指标仍是"到期首次作答正确率"；暂停数/挂起数/档数选择都是采纳层信号，**不得升格为效果证据**。
