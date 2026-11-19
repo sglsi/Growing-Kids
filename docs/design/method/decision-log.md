@@ -3847,3 +3847,25 @@ B2样张A → 正确答案：19 / 解析：个位相加 2+7=9… / 错因分析�
 - 生产 dist **仍未部署** P-033/034 代码，手机端（体验版/开发版）目前看到的仍是旧包；本样张来自本地新代码，**不能当作线上现状**。
 - 测试在开发库产生 1 个匿名测试号（`a1aaba58…`）、3 道样张题与 2 条导出文档记录；开发库非现网，未污染 L3。
 - 未提审、未发版、未 push。
+
+## D-103：P-033/034 后端 dist 精准换生产 + 前端上传开发版 2026.11.19.1（2026-11-19 19:1x，思傅授权发货）
+> 授权：思傅「把 P-033/034 后端 dist 精准换上去重启，前端重新上传」 ｜ 性质：**发布动作**（精准换 dist + 重启 + 上传开发版），**未提审、未发正式版、未 push**
+> 前置：D-100 已执行 0034/0035 生产迁移（先迁移再换 dist 的硬顺序已守）
+
+### 一、后端 dist 精准换（6 点名文件，全量 198/198 零差异）
+- **差异圈定**：本地 `build:server` 198 文件 vs 生产 197 文件逐 sha256 比对 ⇒ 仅本地新增 `shared/review-hint.js`（B2 档位映射纯函数）；5 文件 sha 不同：`document/document.service.js`、`pdf/pdf.service.js`（B2 导出三档）、`timeline/review.js`、`timeline/timeline.controller.js`、`timeline/timeline.service.js`（P-033/034 暂停/档数/队列/出本）。**无「仅生产」文件 ⇒ 零误伤**。
+- **备份**：`/opt/gk/backups/P033034-dist-20261119191111/`（5 旧文件，cp -p 保时间戳，sha 与比对时生产值逐字一致；新增文件无旧版）。
+- **覆盖**：scp 6 文件到 `/tmp/gk-dist-P033034/` → `sudo install -m 644 -o gk -g gk` 逐个落位（scp 平铺到 tmp 根，按目标路径分别 install）；6/6 sha 与本地一致、属主 `gk:gk` 权限 `644`。
+- **复比零差异**：覆盖后生产全量 198/198 与本地**仅本地 0 / 仅生产 0 / sha 不同 0**，满足 §6.1.3「才重启」前提。
+- **重启验证**：`sudo systemctl restart gk-api` RC=0 → active、NRestarts=0、ActiveEnterTimestamp 19:11:36 → `:3000/api/health` **200** `{"status":"success",...}`、公网 `https://deep-root.cn/api/health` **200**、journal ERROR 0、`Nest application successfully started +1448ms`。
+- **新端点确认**：启动日志 5 条新路由映射（`review/paused` GET/POST/DELETE、`review/stages` GET/PUT），dist 三文件含 `pauseFromReviewBook|review_graduate_stages|graduateStages`；裸请求 `/api/timeline/review/paused`、`/stages` 均 **401**（路由存在非 404）。
+
+### 二、前端上传开发版
+- `build:weapp` 13.19s 成功；新特征串「开始复习/暂停这题/做错了/建议纸上做」在 subject/detail/guide 命中；`release-check --dev` **11 通过 / 2 警告 / 0 阻断**（隐私开关关闭、备份时效警告均开发态可接受），版本角标 `be7bd4d` = HEAD。
+- 微信 CLI（清代理 + `NO_PROXY=127.0.0.1,localhost` + `--port 46737` 直连 GUI IDE，`islogin` 先校验 `{"login":true}`）：上传开发版 **2026.11.19.1**，TOTAL **950.7 KB / 973,499 Byte**，AppID `wx48bf5ba9bae0bf39`，`√ upload` RC=0，描述「P-033/034复习闭环:开始复习队列/暂停这题/错因五选一/毕业档数可选/B2三档练习卷」。
+- 未提审、未发正式版、未设体验版；mp 后台需手动「设为体验版」手机才可见。
+
+### 三、边界
+- **未真机验证**：开发版已上但手机仍需思傅设体验版后复现；本轮证据是「生产 health + 新路由 401 + 前端 √ upload」，不宣称真机通过。
+- F-3 唯一够格指标仍是「到期首次作答正确率」；暂停/挂起/档数选择属采纳层，不得升格为效果证据。
+- 未 push（按约定等思傅指示）。
