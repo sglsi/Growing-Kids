@@ -52,6 +52,15 @@ m.test('F2 公安备案号在，且带 mps 官方查询超链接', async (c) => 
     'code 只取号码数字部分 ' + GA_CODE + '（带「陕公网安备」「号」会查不到）',
   )
   c.ok(!/陕公网安备\s+61/.test(live), '号码文本不得插入空格（须与平台原文逐字一致）')
+
+  // 与平台「复制备案编号 HTML 代码」给的原文逐字对齐（2026-11-19 思傅回传）：
+  // <a href="https://beian.mps.gov.cn/#/query/webSearch?code=61019702000794" rel="noreferrer" target="_blank">陕公网安备61019702000794号</a>
+  // 本项目 rel 用 noopener noreferrer（noreferrer 已隐含 noopener，是官方的超集），故只锁 href + target + rel 含 noreferrer。
+  const gaTag =
+    (live.match(/<a href="https:\/\/beian\.mps\.gov\.cn\/#\/query\/webSearch\?code=61019702000794"[^>]*>/) || [])[0] || ''
+  c.ok(!!gaTag, 'a 标签的 href 须与官方原文逐字一致（含 code=' + GA_CODE + '）')
+  c.ok(/target="_blank"/.test(gaTag), '官方原文要求 target="_blank"')
+  c.ok(/rel="[^"]*noreferrer/.test(gaTag), '官方原文要求 rel 含 noreferrer')
 })
 
 m.test('F3 警徽图标在位且未被压扁', async (c) => {
