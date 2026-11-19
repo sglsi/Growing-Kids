@@ -56,7 +56,9 @@ m.test('A2 五档毕业自动出本，且保留历史计数', async (c) => {
   const at = svc.indexOf('async review(userId: string, id: string')
   c.ok(at >= 0, 'review() 须存在')
   const body = svc.slice(at, at + 3200)
-  c.ok(/const graduated\s*=\s*adv\.review_count\s*>=\s*REVIEW_STAGES/.test(body), '须有 graduated 判定（走完五档）')
+  // P-034 §3.2（L2 升格）：毕业阈值可由家长设为 2/5，故接受 >= stages；
+  // 同时保留 >= REVIEW_STAGES 的旧写法以兼容未升级路径。两者都不是写死在业务里的裸数字。
+  c.ok(/const graduated\s*=\s*adv\.review_count\s*>=\s*(REVIEW_STAGES|stages)/.test(body), '须有 graduated 判定（走完所选档数）')
   c.ok(/in_review_book:\s*!graduated/.test(body), '毕业时须置 in_review_book = false（自动出本）')
   c.ok(/added_to_review_at:\s*graduated\s*\?\s*null/.test(body), '毕业须清 added_to_review_at（出本的定义是不占待办）')
   // ⚠️ 反向断言：不得因出本而抹掉计数（removeFromReviewBook 的既有约定：再次加入从原档位继续）
@@ -76,17 +78,20 @@ m.test('A3 buildReviewPlan 毕业判定优先于 inBook（防死代码回归）'
   c.ok(gradIdx >= 0, '须有 graduated 分支')
   c.ok(outIdx >= 0, '须有 out 分支')
   c.ok(gradIdx < outIdx, 'graduated 必须判在 out 之前——出本后若先判 !inBook 就返回 out，前端所有毕业提示全成死码')
-  c.ok(/const graduated\s*=\s*count\s*>=\s*REVIEW_STAGES\s*&&\s*!nextDate/.test(body), '毕业判据＝连续成功到顶且无下次到期（与 M15 同义）')
+  // P-034 §3.2：档数按用户设置（stages），默认仍 5＝M15 口径
+  c.ok(/const graduated\s*=\s*count\s*>=\s*(REVIEW_STAGES|stages)\s*&&\s*!nextDate/.test(body), '毕业判据＝连续成功到顶且无下次到期（与 M15 同义，档数可用户选）')
 })
 
 m.test('A4 汇总统计含「已毕业已出本」的已掌握数', async (c) => {
   const svc = read(SVC)
   const at = svc.indexOf('async reviewSummary(')
   c.ok(at >= 0, 'reviewSummary 须存在')
-  const body = svc.slice(at, at + 3000)
+  // P-034 §3.1/3.2：新增档数读取 + 暂停/挂起统计，result 对象被推后，窗口放宽到 6000
+  const body = svc.slice(at, at + 6000)
   c.ok(/graduatedOut/.test(body), '须单独统计已出本的毕业题（否则 graduated 恒为 0，掌握永远不可见）')
   c.ok(/\.eq\('in_review_book',\s*false\)/.test(body), '出本集合按 in_review_book=false 取')
-  c.ok(/\.gte\('review_count',\s*REVIEW_STAGES\)/.test(body), '毕业判据按 review_count >= REVIEW_STAGES')
+  // P-034 §3.2：统计口径跟用户档数走（快节奏 2 档毕业的题 review_count=2 也要算已掌握）
+  c.ok(/\.gte\('review_count',\s*(REVIEW_STAGES|stages)\)/.test(body), '毕业判据按 review_count >= 档数（可用户选）')
   c.ok(/graduated:\s*graduated\s*\+\s*graduatedOut/.test(body), '汇总须把两部分相加')
   // 失败不得阻断汇总（观测不能牺牲功能）
   c.ok(!/catch\s*\{\s*\}/.test(body), '统计失败不得用空 catch 静默吞掉')
